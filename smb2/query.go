@@ -5,9 +5,9 @@ import (
 	"encoding/binary"
 	"time"
 
-	"github.com/mike76-dev/siasmb/client"
-	"github.com/mike76-dev/siasmb/ntlm"
-	"github.com/mike76-dev/siasmb/utils"
+	"github.com/mike76-dev/sombrero/client"
+	"github.com/mike76-dev/sombrero/ntlm"
+	"github.com/mike76-dev/sombrero/utils"
 	"github.com/oiweiwei/go-msrpc/msrpc/dtyp"
 	"github.com/oiweiwei/go-msrpc/ndr"
 	"golang.org/x/crypto/blake2b"

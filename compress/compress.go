@@ -5,9 +5,9 @@ import (
 	"compress/flate"
 	"io"
 
-	"github.com/mike76-dev/siasmb/compress/lz77"
-	"github.com/mike76-dev/siasmb/compress/lznt1"
-	"github.com/mike76-dev/siasmb/smb2"
+	"github.com/mike76-dev/sombrero/compress/lz77"
+	"github.com/mike76-dev/sombrero/compress/lznt1"
+	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/pierrec/lz4/v4"
 )
 

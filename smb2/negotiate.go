@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/mike76-dev/siasmb/ntlm"
-	"github.com/mike76-dev/siasmb/utils"
+	"github.com/mike76-dev/sombrero/ntlm"
+	"github.com/mike76-dev/sombrero/utils"
 )
 
 const (

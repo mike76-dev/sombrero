@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mike76-dev/siasmb/rpc"
-	"github.com/mike76-dev/siasmb/smb2"
-	"github.com/mike76-dev/siasmb/stores"
+	"github.com/mike76-dev/sombrero/rpc"
+	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 )
 
 // serverStats keeps track of the server statistics.

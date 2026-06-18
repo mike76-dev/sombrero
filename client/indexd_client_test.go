@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mike76-dev/siasmb/stores"
+	"github.com/mike76-dev/sombrero/stores"
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/api/app"

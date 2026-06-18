@@ -15,10 +15,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mike76-dev/siasmb/api"
-	"github.com/mike76-dev/siasmb/ntlm"
-	"github.com/mike76-dev/siasmb/smb2"
-	"github.com/mike76-dev/siasmb/stores"
+	"github.com/mike76-dev/sombrero/api"
+	"github.com/mike76-dev/sombrero/ntlm"
+	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 	sdk "go.sia.tech/siastorage"
 )
 

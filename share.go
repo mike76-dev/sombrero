@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mike76-dev/siasmb/client"
-	"github.com/mike76-dev/siasmb/smb2"
-	"github.com/mike76-dev/siasmb/stores"
+	"github.com/mike76-dev/sombrero/client"
+	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
 	sdk "go.sia.tech/siastorage"

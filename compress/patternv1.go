@@ -1,6 +1,6 @@
 package compress
 
-import "github.com/mike76-dev/siasmb/smb2"
+import "github.com/mike76-dev/sombrero/smb2"
 
 // ScanForDataPatternsV1 scans the buffer for consecutive series
 // of equal bytes.

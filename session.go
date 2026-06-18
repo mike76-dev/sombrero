@@ -15,12 +15,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mike76-dev/siasmb/internal/ccm"
-	"github.com/mike76-dev/siasmb/internal/cmac"
-	"github.com/mike76-dev/siasmb/internal/gmac"
-	"github.com/mike76-dev/siasmb/kdf"
-	"github.com/mike76-dev/siasmb/ntlm"
-	"github.com/mike76-dev/siasmb/smb2"
+	"github.com/mike76-dev/sombrero/internal/ccm"
+	"github.com/mike76-dev/sombrero/internal/cmac"
+	"github.com/mike76-dev/sombrero/internal/gmac"
+	"github.com/mike76-dev/sombrero/kdf"
+	"github.com/mike76-dev/sombrero/ntlm"
+	"github.com/mike76-dev/sombrero/smb2"
 )
 
 const (

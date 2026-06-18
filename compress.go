@@ -6,8 +6,8 @@ import (
 	"log"
 	"slices"
 
-	"github.com/mike76-dev/siasmb/compress"
-	"github.com/mike76-dev/siasmb/smb2"
+	"github.com/mike76-dev/sombrero/compress"
+	"github.com/mike76-dev/sombrero/smb2"
 )
 
 var errDecompressionError = errors.New("decompression failed")
