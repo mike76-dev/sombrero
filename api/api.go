@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/julienschmidt/httprouter"
-	"github.com/mike76-dev/siasmb/stores"
+	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
 	sdk "go.sia.tech/siastorage"
 )

@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/mike76-dev/siasmb/utils"
+	"github.com/mike76-dev/sombrero/utils"
 	"golang.org/x/crypto/md4"
 )
 

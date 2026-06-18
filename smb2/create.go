@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/mike76-dev/siasmb/utils"
+	"github.com/mike76-dev/sombrero/utils"
 )
 
 var (

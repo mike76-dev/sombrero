@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mike76-dev/siasmb/spnego"
-	"github.com/mike76-dev/siasmb/stores"
-	"github.com/mike76-dev/siasmb/utils"
+	"github.com/mike76-dev/sombrero/spnego"
+	"github.com/mike76-dev/sombrero/stores"
+	"github.com/mike76-dev/sombrero/utils"
 )
 
 // Server is an NTLMv2 authentication server.

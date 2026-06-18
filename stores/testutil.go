@@ -26,7 +26,7 @@ func NewTestStore(t *testing.T, ctx context.Context) *Database {
 		Port:     envOrInt(t, "TEST_DB_PORT", 5432),
 		User:     envOr(t, "TEST_DB_USER", "postgres"),
 		Password: os.Getenv("TEST_DB_PASSWORD"),
-		Database: envOr(t, "TEST_DB_NAME", "siasmb_test"),
+		Database: envOr(t, "TEST_DB_NAME", "sombrero_test"),
 		SSLMode:  envOr(t, "TEST_DB_SSLMODE", "disable"),
 	}
 

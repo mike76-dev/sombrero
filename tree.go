@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mike76-dev/siasmb/smb2"
+	"github.com/mike76-dev/sombrero/smb2"
 )
 
 var (

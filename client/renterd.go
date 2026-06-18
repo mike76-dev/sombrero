@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mike76-dev/siasmb/stores"
+	"github.com/mike76-dev/sombrero/stores"
 	rhpv4 "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/v2/api"

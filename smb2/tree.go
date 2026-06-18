@@ -3,7 +3,7 @@ package smb2
 import (
 	"encoding/binary"
 
-	"github.com/mike76-dev/siasmb/utils"
+	"github.com/mike76-dev/sombrero/utils"
 )
 
 const (

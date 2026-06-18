@@ -1,0 +1,18 @@
+debug: false
+maxConnections: 30
+api:
+  port: 9999
+  password: ''
+database:
+  host: 127.0.0.1
+  port: 5432
+  user: postgres
+  password: ''
+  database: sombrero
+  sslMode: verify-full
+indexd:
+  appName: Sombrero
+  description: Sombrero SMB server
+  logoURL: https://github.com/mike76-dev/sombrero/logo.png
+  serviceURL: https://github.com/mike76-dev/sombrero
+  seedPhrase: ''

@@ -5,8 +5,8 @@ import (
 	"encoding/binary"
 	"io"
 
-	"github.com/mike76-dev/siasmb/ntlm"
-	"github.com/mike76-dev/siasmb/utils"
+	"github.com/mike76-dev/sombrero/ntlm"
+	"github.com/mike76-dev/sombrero/utils"
 	"github.com/oiweiwei/go-msrpc/msrpc/lsat/lsarpc/v0"
 	"github.com/oiweiwei/go-msrpc/ndr"
 )

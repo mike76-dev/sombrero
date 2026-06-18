@@ -7,7 +7,7 @@ import (
 	"io"
 	"log"
 
-	"github.com/mike76-dev/siasmb/ntlm"
+	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/oiweiwei/go-msrpc/dcerpc"
 	"github.com/oiweiwei/go-msrpc/msrpc/dtyp"
 	"github.com/oiweiwei/go-msrpc/msrpc/lsat/lsarpc/v0"
