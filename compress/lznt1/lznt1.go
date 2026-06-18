@@ -25,7 +25,6 @@ const (
 	headerCompressed = uint16(0xb000) // Header flag for compressed chunks
 	headerRaw        = uint16(0x3000) // Header flag for uncompressed chunks
 
-	headerSizeMask       = uint16(0x0fff) // Bitmask to extract the chunk size (lower 12 bits) from the header
 	headerCompressedFlag = uint16(0x8000) // Bit flag indicating if the chunk is compressed (0xBxxx) or raw (0x3xxx)
 	tagGroupSize         = 8              // Number of items (literals or tuples) in a single tag group
 	initialSplit         = 12             // Initial bit width for the length component of a match tuple
