@@ -49,7 +49,7 @@ type Config struct {
 
 // ReadConfig tries to read the config from the specified directory.
 func ReadConfig(dir string) (cfg Config, err error) {
-	path := filepath.Join(dir, "siasmb.yml")
+	path := filepath.Join(dir, "sombrero.yml")
 	f, err := os.Open(path)
 	if err != nil {
 		return
@@ -65,7 +65,7 @@ func ReadConfig(dir string) (cfg Config, err error) {
 
 // SaveConfig saves the config to the specified directory.
 func SaveConfig(cfg Config, dir string) error {
-	path := filepath.Join(dir, "siasmb.yml")
+	path := filepath.Join(dir, "sombrero.yml")
 	f, err := os.Create(path)
 	if err != nil {
 		return err

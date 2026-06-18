@@ -8,11 +8,11 @@ database:
   port: 5432
   user: postgres
   password: ''
-  database: siasmb
+  database: sombrero
   sslMode: verify-full
 indexd:
-  appName: SiaSMB
-  description: SiaSMB server
+  appName: Sombrero
+  description: Sombrero SMB server
   logoURL: https://example.com/logo.png
   serviceURL: https://example.com/service
   seedPhrase: ''
