@@ -1,3 +1,5 @@
+<img src="logo.png" width="128">
+
 # Sombrero
 This is an SMB server integrated into the Sia decentralized cloud storage. Users can connect to it from their PCs and access the Sia storage like they would normally do with a regular remote drive.
 
