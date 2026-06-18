@@ -73,7 +73,7 @@ Inside the `psql` prompt:
 ```
 
 ## Running the Server
-A config file, `siasmb.yml`, needs to be created in the directory where the server will be running. It should contain the following lines:
+A config file, `sombrero.yml`, needs to be created in the directory where the server will be running. It should contain the following lines:
 ```YAML
 debug: false               # indicates whether to display the session ID and key for tools like Wireshark to decrypt the encrypted data
 maxConnections: 30         # the maximum number of connections accepted from the same IP within 10 minutes
@@ -89,14 +89,14 @@ database:
   sslMode: disable         # the SSL mode of the PostgreSQL server
 indexd:
   appName: Sombrero                       # the name of the app, unique to the `indexd` node being connected to
-  description: Sombrero server            # description of the app
+  description: Sombrero SMB server        # description of the app
   logoURL: https://example.com/logo.png   # URL of the app logo, can be left as it is
-  serviceURL: https://example.com/service # URL of the app itself, can be left as it is (SiaSMB has no service page)
+  serviceURL: https://example.com/service # URL of the app itself, can be left as it is (Sombrero has no service page)
   seedPhrase: ''                          # if omitted, the server will generate a new seed phrase and put it here
 ```
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash
-sudo siasmb --dir=<PATH_TO_SIASMB.YML>
+sudo sombrero --dir=<PATH_TO_SOMBRERO.YML>
 ```
 The superuser access is required because of the port 445 that the server is listening on.
 
@@ -180,19 +180,19 @@ sudo umount /mnt/sia
 sudo -u postgres psql
 ```
 ```SQL
-CREATE DATABASE siasmb_test;
-CREATE USER siasmb_test_user WITH PASSWORD 'siasmb';
-ALTER DATABASE siasmb_test OWNER TO siasmb_test_user;
-GRANT ALL PRIVILEGES ON DATABASE siasmb_test TO siasmb_test_user;
+CREATE DATABASE sombrero_test;
+CREATE USER sombrero_test_user WITH PASSWORD 'sombrero';
+ALTER DATABASE sombrero_test OWNER TO sombrero_test_user;
+GRANT ALL PRIVILEGES ON DATABASE sombrero_test TO sombrero_test_user;
 \q
 ```
 2. Set environment variables
 ```Bash
 export TEST_DB_HOST=127.0.0.1
 export TEST_DB_PORT=5432
-export TEST_DB_USER=siasmb_test_user
-export TEST_DB_PASSWORD=siasmb
-export TEST_DB_NAME=siasmb_test
+export TEST_DB_USER=sombrero_test_user
+export TEST_DB_PASSWORD=sombrero
+export TEST_DB_NAME=sombrero_test
 export TEST_DB_SSLMODE=disable
 export TEST_INIT_SQL=../init.sql
 ```
