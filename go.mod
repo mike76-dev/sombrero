@@ -1,4 +1,4 @@
-module github.com/mike76-dev/siasmb
+module github.com/mike76-dev/sombrero
 
 go 1.26.0
 
