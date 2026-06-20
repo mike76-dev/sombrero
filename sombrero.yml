@@ -13,6 +13,6 @@ database:
 indexd:
   appName: Sombrero
   description: Sombrero SMB server
-  logoURL: https://github.com/mike76-dev/sombrero/logo.png
+  logoURL: https://raw.githubusercontent.com/mike76-dev/sombrero/master/logo.png
   serviceURL: https://github.com/mike76-dev/sombrero
   seedPhrase: ''
