@@ -418,13 +418,9 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 			return
 		}
 		fmt.Println("Please approve the app connection by visiting the following URL:", respURL)
-		approved, err := builder.WaitForApproval(api.ctx)
+		err = builder.WaitForApproval(api.ctx)
 		if err != nil {
 			log.Printf("failed to wait for app approval: %v", err)
-			writeError(w, "internal error", http.StatusInternalServerError)
-			return
-		} else if !approved {
-			log.Print("app connection was declined")
 			writeError(w, "internal error", http.StatusInternalServerError)
 			return
 		}

@@ -73,7 +73,30 @@ func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, le
 		return err
 	}
 
-	return b.sdk.Download(ctx, w, obj, sdk.WithDownloadRange(offset, length))
+	rc, err := b.sdk.Download(obj, sdk.WithDownloadRange(offset, length))
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	buf := make([]byte, 32*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, readErr := rc.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 // DeleteObject calls sdk.DeleteObject.
@@ -88,14 +111,14 @@ func (b *sdkBackend) PruneSlabs(ctx context.Context) error {
 
 // ListObjectKeys returns a slice of object keys instead of objects.
 func (b *sdkBackend) ListObjectKeys(ctx context.Context, cursor slabs.Cursor, limit int) ([]types.Hash256, error) {
-	objs, err := b.sdk.ListObjects(ctx, cursor, limit)
+	objs, err := b.sdk.ObjectEvents(ctx, cursor, limit)
 	if err != nil {
 		return nil, err
 	}
 
 	keys := make([]types.Hash256, 0, len(objs))
 	for _, obj := range objs {
-		keys = append(keys, obj.ID())
+		keys = append(keys, obj.Object.ID())
 	}
 
 	return keys, nil
