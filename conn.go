@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
@@ -23,6 +22,7 @@ import (
 	"github.com/mike76-dev/sombrero/utils"
 	"github.com/oiweiwei/go-msrpc/msrpc/lsat/lsarpc/v0"
 	"github.com/oiweiwei/go-msrpc/ndr"
+	"lukechampine.com/frand"
 )
 
 const (
@@ -114,7 +114,7 @@ func (c *connection) acceptRequest(msg []byte) error {
 
 	// Assign a random cancel ID.
 	cid := make([]byte, 8)
-	rand.Read(cid)
+	frand.Read(cid)
 
 	// Check for encryption.
 	var tsid uint64
@@ -410,7 +410,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 			var blobs [][]byte
 			var salt [32]byte
-			rand.Read(salt[:])
+			frand.Read(salt[:])
 			blobs = append(blobs, smb2.PreauthIntegrityCapabilities(salt[:]))
 
 			if ciphers != nil {
@@ -1248,7 +1248,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// to drop the connection. We send an interim response and process the request asynchronously
 		// to prevent that.
 		aid := make([]byte, 8)
-		rand.Read(aid)
+		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
 		c.mu.Lock()
 		c.asyncCommandList[asyncID] = req
@@ -1388,7 +1388,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// to drop the connection. We send an interim response and process the request asynchronously
 		// to prevent that.
 		aid := make([]byte, 8)
-		rand.Read(aid)
+		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
 		c.mu.Lock()
 		c.asyncCommandList[asyncID] = req
@@ -1965,7 +1965,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		// Put the request in the async command list.
 		aid := make([]byte, 8)
-		rand.Read(aid)
+		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
 		req.Header().SetAsyncID(asyncID)
 		req.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)

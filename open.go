@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"log"
@@ -22,6 +21,7 @@ import (
 	"github.com/oiweiwei/go-msrpc/msrpc/lsat/lsarpc/v0"
 	"go.sia.tech/renterd/v2/api"
 	"golang.org/x/crypto/blake2b"
+	"lukechampine.com/frand"
 )
 
 var (
@@ -164,7 +164,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 	}
 
 	fid := make([]byte, 16)
-	rand.Read(fid)
+	frand.Read(fid)
 	op := &open{
 		handle:         binary.LittleEndian.Uint64(id[:8]),
 		fileID:         binary.LittleEndian.Uint64(fid[:8]),
@@ -439,7 +439,7 @@ func (op *open) newLSAFrame(ctx ntlm.SecurityContext) *rpc.Frame {
 	defer op.mu.Unlock()
 
 	id := make([]byte, 16)
-	rand.Read(id)
+	frand.Read(id)
 	guid, _ := dtyp.GUIDFromBytes(id)
 	frame := &rpc.Frame{
 		Handle: lsarpc.Handle{

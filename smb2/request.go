@@ -1,11 +1,11 @@
 package smb2
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 
 	"github.com/mike76-dev/sombrero/utils"
+	"lukechampine.com/frand"
 )
 
 var (
@@ -125,7 +125,7 @@ func GetRequests(data []byte, cid uint64, tsid uint64, compressed bool) (reqs []
 	// Assign a group ID to all related requests.
 	if related {
 		gid := make([]byte, 8)
-		rand.Read(gid)
+		frand.Read(gid)
 		groupID := binary.LittleEndian.Uint64(gid)
 		for _, req := range reqs {
 			req.groupID = groupID

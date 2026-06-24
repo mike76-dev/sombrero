@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
 	sdk "go.sia.tech/siastorage"
+	"lukechampine.com/frand"
 )
 
 const (
@@ -131,7 +131,7 @@ func (s *server) RegisterShare(ss stores.Share) error {
 	sh.mu.Unlock()
 
 	vid := make([]byte, 8)
-	rand.Read(vid[:])
+	frand.Read(vid[:])
 	sh.bucket = info.Bucket
 	sh.createdAt = time.Time(info.CreatedAt)
 	sh.volumeID = binary.LittleEndian.Uint64(vid)

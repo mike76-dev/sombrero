@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/md5"
-	"crypto/rand"
+
 	"crypto/rc4"
 	"encoding/asn1"
 	"encoding/binary"
@@ -16,6 +16,7 @@ import (
 	"github.com/mike76-dev/sombrero/spnego"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/utils"
+	"lukechampine.com/frand"
 )
 
 // Server is an NTLMv2 authentication server.
@@ -167,10 +168,7 @@ func (s *Server) Challenge(nmsg []byte) (cmsg []byte, err error) {
 		binary.LittleEndian.PutUint32(cmsg[44:48], uint32(off))
 	}
 
-	_, err = rand.Read(cmsg[24:32])
-	if err != nil {
-		return nil, err
-	}
+	frand.Read(cmsg[24:32])
 
 	if flags&NTLMSSP_NEGOTIATE_VERSION != 0 {
 		copy(cmsg[48:56], version)

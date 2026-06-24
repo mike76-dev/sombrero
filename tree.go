@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -9,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mike76-dev/sombrero/smb2"
+	"lukechampine.com/frand"
 )
 
 var (
@@ -123,7 +123,7 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 	}
 
 	var id [4]byte
-	rand.Read(id[:])
+	frand.Read(id[:])
 
 	tc := &treeConnect{
 		treeID:         binary.LittleEndian.Uint32(id[:]),

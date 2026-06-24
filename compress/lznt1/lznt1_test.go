@@ -2,17 +2,16 @@ package lznt1
 
 import (
 	"bytes"
-	"crypto/rand"
-	"math/big"
 	"testing"
+
+	"lukechampine.com/frand"
 )
 
 var buf []byte
 var out []byte
 
 func TestCompress(t *testing.T) {
-	sb, _ := rand.Int(rand.Reader, big.NewInt(2<<30))
-	size := int(sb.Int64()) + 1
+	size := frand.Intn(2<<30) + 1
 	buf = make([]byte, size)
 	i := 0
 	for i < size {
@@ -20,9 +19,8 @@ func TestCompress(t *testing.T) {
 		if i+m > size {
 			m = size - i
 		}
-		cb, _ := rand.Int(rand.Reader, big.NewInt(int64(m)))
-		c := int(cb.Int64() + 1)
-		rand.Read(buf[i : i+c])
+		c := frand.Intn(m) + 1
+		frand.Read(buf[i : i+c])
 		i += c
 
 		m = 10000
@@ -32,8 +30,7 @@ func TestCompress(t *testing.T) {
 		if m == 0 {
 			break
 		}
-		cb, _ = rand.Int(rand.Reader, big.NewInt(int64(m)))
-		c = int(cb.Int64() + 1)
+		c = frand.Intn(m) + 1
 		for j := 0; j < c; j++ {
 			buf[i+j] = 0xff
 		}

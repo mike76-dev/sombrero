@@ -1,7 +1,6 @@
 package smb2
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	"github.com/oiweiwei/go-msrpc/msrpc/dtyp"
 	"github.com/oiweiwei/go-msrpc/ndr"
 	"golang.org/x/crypto/blake2b"
+	"lukechampine.com/frand"
 )
 
 const (
@@ -634,7 +634,7 @@ func QueryDirectoryBuffer(class uint8, entries []client.ObjectInfo, bufSize uint
 		hash := blake2b.Sum256([]byte(entry.Key))
 		di.FileID64 = binary.LittleEndian.Uint64(hash[:8])
 		di.FileID128 = make([]byte, 16)
-		rand.Read(di.FileID128)
+		frand.Read(di.FileID128)
 
 		info = append(info, di)
 		num++
