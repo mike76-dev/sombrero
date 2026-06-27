@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/binary"
 	"errors"
+	"log"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/smb2"
 	"lukechampine.com/frand"
 )
@@ -26,6 +29,12 @@ type treeConnect struct {
 	openCount     uint64
 	creationTime  time.Time
 	maximalAccess uint32
+
+	// Resolved at connect time from the share; for indexd these are per-workgroup.
+	client        client.Client
+	maxUploadSize uint64
+	createdAt     time.Time
+	volumeID      uint64
 
 	// When a request to create a file comes in, the client assumes that the file exists from then on.
 	// However, it's not possible to upload empty files to the Sia network, so we have to work around that.
@@ -113,6 +122,27 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			return nil, errTooManyUses
 		}
 		sh.mu.Unlock()
+
+		// For indexd, lazily restore a connection from the DB if not yet initialized.
+		if sh.backend == "indexd" {
+			sh.mu.Lock()
+			_, hasConn := sh.indexdConns[ss.workgroup]
+			sh.mu.Unlock()
+			if !hasConn {
+				if u, err := uuid.Parse(ss.workgroup); err == nil {
+					if wg, err := c.server.store.FindWorkgroup(u); err == nil && wg.ID != 0 {
+						if fullShare, err := c.server.store.GetShare(name); err == nil {
+							if connected, appKey, err := c.server.store.IsConnected(wg, fullShare); err == nil && connected {
+								if err := c.server.AddConnection(wg, fullShare, appKey); err != nil {
+									log.Printf("lazy indexd init %q/%q: %v", name, ss.workgroup, err)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		access, exists = sh.fileSecurity[ss.workgroup+"/"+ss.userName]
 		if !exists {
 			return nil, errAccessDenied
@@ -120,6 +150,36 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 		sh.mu.Lock()
 		sh.currentUses++
 		sh.mu.Unlock()
+	}
+
+	// Resolve the per-workgroup connection info for this tree connect.
+	var (
+		cl            client.Client
+		maxUploadSize uint64
+		createdAt     time.Time
+		volumeID      uint64
+	)
+	if sh.backend == "indexd" {
+		sh.mu.Lock()
+		conn, ok := sh.indexdConns[ss.workgroup]
+		if ok {
+			cl = conn.client
+			maxUploadSize = conn.maxUploadSize
+			createdAt = conn.createdAt
+			volumeID = conn.volumeID
+		}
+		sh.mu.Unlock()
+		if cl == nil {
+			sh.mu.Lock()
+			sh.currentUses--
+			sh.mu.Unlock()
+			return nil, errShareUnavailable
+		}
+	} else {
+		cl = sh.client
+		maxUploadSize = sh.maxUploadSize
+		createdAt = sh.createdAt
+		volumeID = sh.volumeID
 	}
 
 	var id [4]byte
@@ -131,6 +191,10 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 		share:          sh,
 		creationTime:   time.Now(),
 		maximalAccess:  access,
+		client:         cl,
+		maxUploadSize:  maxUploadSize,
+		createdAt:      createdAt,
+		volumeID:       volumeID,
 		persistedOpens: make(map[string]*open),
 	}
 

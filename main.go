@@ -146,7 +146,12 @@ func main() {
 		}
 
 		for _, share := range shares {
-			share.client.Close()
+			if share.client != nil { // renterd share
+				share.client.Close()
+			}
+			for _, conn := range share.indexdConns { // indexd share
+				conn.client.Close()
+			}
 		}
 
 		apiSrv.Close()
