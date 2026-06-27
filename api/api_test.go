@@ -789,29 +789,20 @@ func TestWorkgroups(t *testing.T) {
 	t.Run("POST creates workgroup", func(t *testing.T) {
 		var got stores.Workgroup
 		ms := &mockStore{addWorkgroup: func(wg stores.Workgroup) error { got = wg; return nil }}
-		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", map[string]string{"uuid": testUUID.String()})
-		checkStatus(t, w, http.StatusNoContent)
-		if got.UUID != testUUID {
-			t.Errorf("uuid: want %v, got %v", testUUID, got.UUID)
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", nil)
+		checkStatus(t, w, http.StatusOK)
+		resp := decodeJSON[WorkgroupResponse](t, w)
+		if resp.UUID == (uuid.UUID{}) {
+			t.Error("expected non-zero UUID in response")
 		}
-	})
-
-	t.Run("POST invalid UUID returns 400", func(t *testing.T) {
-		w := doRequest(newTestAPI(&mockStore{}), http.MethodPost, "/workgroup", map[string]string{"uuid": "not-a-uuid"})
-		checkStatus(t, w, http.StatusBadRequest)
-	})
-
-	t.Run("POST invalid JSON returns 400", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/workgroup", bytes.NewBufferString("{bad}"))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-		newTestAPI(&mockStore{}).ServeHTTP(w, req)
-		checkStatus(t, w, http.StatusBadRequest)
+		if got.UUID != resp.UUID {
+			t.Errorf("stored UUID %v does not match response UUID %v", got.UUID, resp.UUID)
+		}
 	})
 
 	t.Run("POST store error", func(t *testing.T) {
 		ms := &mockStore{addWorkgroup: func(stores.Workgroup) error { return errStore }}
-		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", map[string]string{"uuid": testUUID.String()})
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 

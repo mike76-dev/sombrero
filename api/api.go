@@ -55,6 +55,11 @@ type IsBannedResponse struct {
 	Reason string `json:"reason"`
 }
 
+// WorkgroupResponse is the response type for POST /workgroup request.
+type WorkgroupResponse struct {
+	UUID uuid.UUID `json:"uuid"`
+}
+
 // API represents the API call handler.
 type API struct {
 	router httprouter.Router
@@ -736,27 +741,15 @@ func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _
 		return
 	}
 
-	var body struct {
-		UUID string `json:"uuid"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		writeError(w, "invalid body", http.StatusBadRequest)
-		return
-	}
-
-	u, err := uuid.Parse(body.UUID)
-	if err != nil {
-		writeError(w, "invalid UUID", http.StatusBadRequest)
-		return
-	}
-
+	u := uuid.New()
 	if err := api.store.AddWorkgroup(stores.Workgroup{UUID: u}); err != nil {
 		log.Printf("failed to add workgroup: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	writeSuccess(w)
+	log.Printf("created new workgroup: %s", u)
+	writeJSON(w, WorkgroupResponse{UUID: u})
 }
 
 // workgroupHandlerGET handles the GET /workgroup/:uuid calls.
