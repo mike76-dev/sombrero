@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/stores"
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
@@ -144,7 +145,7 @@ func TestIndexdClient_FileLifecycle(t *testing.T) {
 	db := stores.NewTestStore(t, ctx)
 	t.Cleanup(db.Close)
 
-	acc := newTestAccount(t, db, "alice", "secret123", "wrg")
+	acc := newTestAccount(t, db, "alice", "secret123")
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
@@ -265,25 +266,30 @@ func waitForRead(t *testing.T, ctx context.Context, c Client, acc stores.Account
 	t.Fatalf("timed out waiting for %s to become readable", path)
 }
 
-func newTestAccount(t *testing.T, db *stores.Database, username, password, workgroup string) stores.Account {
+func newTestAccount(t *testing.T, db *stores.Database, username, password string) stores.Account {
 	t.Helper()
+
+	u := uuid.New()
+	if err := db.AddWorkgroup(stores.Workgroup{UUID: u}); err != nil {
+		t.Fatalf("AddWorkgroup: %v", err)
+	}
 
 	acc := stores.Account{
 		Username:  username,
 		Password:  password,
-		Workgroup: workgroup,
+		Workgroup: u.String(),
 	}
 
 	if err := db.AddAccount(acc); err != nil {
 		t.Fatalf("AddAccount: %v", err)
 	}
 
-	got, err := db.FindAccount(username, workgroup)
+	got, err := db.FindAccount(username, u.String())
 	if err != nil {
 		t.Fatalf("FindAccount: %v", err)
 	}
 	if got.ID == 0 {
-		t.Fatalf("FindAccount returned empty account for %s/%s", username, workgroup)
+		t.Fatalf("FindAccount returned empty account for %s/%s", username, u.String())
 	}
 
 	return got
@@ -426,7 +432,7 @@ func TestIndexdClient_RenameDuringMixedUpload(t *testing.T) {
 	db := stores.NewTestStore(t, ctx)
 	t.Cleanup(db.Close)
 
-	acc := newTestAccount(t, db, "alice", "secret123", "wrg")
+	acc := newTestAccount(t, db, "alice", "secret123")
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
@@ -481,7 +487,7 @@ func TestIndexdClient_DeleteDuringMixedUpload(t *testing.T) {
 	db := stores.NewTestStore(t, ctx)
 	t.Cleanup(db.Close)
 
-	acc := newTestAccount(t, db, "alice", "secret123", "wrg")
+	acc := newTestAccount(t, db, "alice", "secret123")
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
@@ -536,7 +542,7 @@ func TestIndexdClient_RenameDirectoryDuringMixedUpload(t *testing.T) {
 	db := stores.NewTestStore(t, ctx)
 	t.Cleanup(db.Close)
 
-	acc := newTestAccount(t, db, "alice", "secret123", "wrg")
+	acc := newTestAccount(t, db, "alice", "secret123")
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
@@ -602,7 +608,7 @@ func TestIndexdClient_OverwriteFileDuringMixedUpload(t *testing.T) {
 	db := stores.NewTestStore(t, ctx)
 	t.Cleanup(db.Close)
 
-	acc := newTestAccount(t, db, "alice", "secret123", "wrg")
+	acc := newTestAccount(t, db, "alice", "secret123")
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
