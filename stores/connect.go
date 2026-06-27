@@ -22,6 +22,9 @@ func (db *Database) AddConnection(wg Workgroup, share Share, appKey types.Privat
 		if err != nil {
 			return fmt.Errorf("failed to add connection: %w", err)
 		}
+		if err := db.shares.AddConnection(wg, share, appKey); err != nil {
+			return fmt.Errorf("failed to connect share: %w", err)
+		}
 		return nil
 	})
 }
@@ -37,6 +40,9 @@ func (db *Database) RemoveConnection(wg Workgroup, share Share) error {
 		_, err := tx.Exec(ctx, query, wg.ID, share.Name)
 		if err != nil {
 			return fmt.Errorf("failed to remove connection: %w", err)
+		}
+		if err := db.shares.RemoveConnection(wg, share); err != nil {
+			return fmt.Errorf("failed to disconnect share: %w", err)
 		}
 		return nil
 	})

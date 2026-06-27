@@ -53,6 +53,10 @@ func (db *Database) GetAccessRights(share Share, acc Account) (ar AccessRights, 
 
 // SetAccessRights stores the access policy in the database.
 func (db *Database) SetAccessRights(ar AccessRights) error {
+	sh, err := db.GetShare(ar.ShareName)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve share: %w", err)
+	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
 			INSERT INTO policies (share_name, account, read_access, write_access, delete_access, execute_access)
@@ -66,15 +70,11 @@ func (db *Database) SetAccessRights(ar AccessRights) error {
 		_, err := tx.Exec(ctx, query, ar.ShareName, ar.AccountID, ar.ReadAccess, ar.WriteAccess, ar.DeleteAccess, ar.ExecuteAccess)
 		if err != nil {
 			return fmt.Errorf("failed to update policy: %w", err)
-		} else {
-			sh, err := db.GetShare(ar.ShareName)
-			if err != nil {
-				return fmt.Errorf("failed to retrieve share: %w", err)
-			} else if err := db.shares.UpdateAccessRights(sh, ar); err != nil {
-				return fmt.Errorf("failed to update access rights: %w", err)
-			}
-			return nil
 		}
+		if err := db.shares.UpdateAccessRights(sh, ar); err != nil {
+			return fmt.Errorf("failed to update access rights: %w", err)
+		}
+		return nil
 	})
 }
 

@@ -92,6 +92,7 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 					full_path,
 					size,
 					account,
+					workgroup,
 					temporary
 				)
 				SELECT
@@ -100,10 +101,12 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 					$5,
 					$4,
 					0,
-					$3,
+					c.id,
+					c.workgroup,
 					TRUE
 				FROM parent p
 				JOIN no_existing_upload n ON TRUE
+				CROSS JOIN caller c
 				RETURNING id
 			)
 			INSERT INTO uploads (upload_id, object_id)
