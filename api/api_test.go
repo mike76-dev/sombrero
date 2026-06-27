@@ -868,6 +868,57 @@ func TestWorkgroups(t *testing.T) {
 	})
 }
 
+// TestConnectRequest tests POST /connect/:workgroup/:share.
+// The happy path (which calls the real indexd SDK) requires a live indexd server
+// and is therefore not covered here; only the validation paths are tested.
+func TestConnectRequest(t *testing.T) {
+	requestPath := "/connect/" + testUUID.String() + "/myshare"
+
+	t.Run("POST invalid workgroup UUID returns 400", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodPost, "/connect/bad-uuid/myshare", nil)
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("POST workgroup not found returns 404", func(t *testing.T) {
+		ms := &mockStore{findWorkgroup: func(uuid.UUID) (stores.Workgroup, error) { return stores.Workgroup{}, nil }}
+		w := doRequest(newTestAPI(ms), http.MethodPost, requestPath, nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("POST workgroup store error returns 500", func(t *testing.T) {
+		ms := &mockStore{findWorkgroup: func(uuid.UUID) (stores.Workgroup, error) { return stores.Workgroup{}, errStore }}
+		w := doRequest(newTestAPI(ms), http.MethodPost, requestPath, nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("POST share not found returns 404", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      func(string) (stores.Share, error) { return stores.Share{}, nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPost, requestPath, nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("POST share store error returns 500", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      func(string) (stores.Share, error) { return stores.Share{}, errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPost, requestPath, nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("POST renterd share returns 400", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "renterd"),
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPost, requestPath, nil)
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+}
+
 func TestConnect(t *testing.T) {
 	path := "/connect/" + testUUID.String() + "/myshare"
 
@@ -888,7 +939,7 @@ func TestConnect(t *testing.T) {
 		}
 	})
 
-	t.Run("PUT connects workgroup to indexd share with app key", func(t *testing.T) {
+	t.Run("PUT reconnects to indexd share with existing app key", func(t *testing.T) {
 		appKey := make([]byte, 64)
 		for i := range appKey {
 			appKey[i] = byte(i)
@@ -904,9 +955,13 @@ func TestConnect(t *testing.T) {
 		}
 		body := map[string]string{"appKey": hex.EncodeToString(appKey)}
 		w := doRequest(newTestAPI(ms), http.MethodPut, path, body)
-		checkStatus(t, w, http.StatusNoContent)
+		checkStatus(t, w, http.StatusOK)
+		resp := decodeJSON[ConnectResponse](t, w)
+		if resp.AppKey != hex.EncodeToString(appKey) {
+			t.Errorf("appKey in response: want %q, got %q", hex.EncodeToString(appKey), resp.AppKey)
+		}
 		if len(gotKey) != 64 {
-			t.Errorf("app key length: want 64, got %d", len(gotKey))
+			t.Errorf("app key length stored: want 64, got %d", len(gotKey))
 		}
 		if gotKey[1] != 1 {
 			t.Errorf("app key[1]: want 1, got %d", gotKey[1])
@@ -951,6 +1006,15 @@ func TestConnect(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		newTestAPI(ms).ServeHTTP(w, req)
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("PUT indexd share without pending builder returns 400", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, path, nil)
 		checkStatus(t, w, http.StatusBadRequest)
 	})
 

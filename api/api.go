@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/julienschmidt/httprouter"
 	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
+	sdk "go.sia.tech/siastorage"
 )
 
 // Store implements the database store.
@@ -60,13 +63,26 @@ type WorkgroupResponse struct {
 	UUID uuid.UUID `json:"uuid"`
 }
 
+// ConnectRequestResponse is the response type for POST /connect/request/:workgroup/:share.
+type ConnectRequestResponse struct {
+	URL string `json:"url"`
+}
+
+// ConnectResponse is the response type for PUT /connect/:workgroup/:share when
+// completing a first-time registration. AppKey is the derived key the caller
+// should persist for future reconnections.
+type ConnectResponse struct {
+	AppKey string `json:"appKey"`
+}
+
 // API represents the API call handler.
 type API struct {
-	router httprouter.Router
-	store  Store
-	cfg    stores.IndexdConfig
-	ctx    context.Context
-	rl     *ratelimiter
+	router          httprouter.Router
+	store           Store
+	cfg             stores.IndexdConfig
+	ctx             context.Context
+	rl              *ratelimiter
+	pendingBuilders sync.Map // key: "workgroupUUID/shareName" → *sdk.Builder
 }
 
 // NewAPI returns an initialized API object.
@@ -185,6 +201,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.DELETE("/workgroup/:uuid", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.workgroupHandlerDELETE(w, req, ps)
+	})
+
+	router.POST("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.connectHandlerPOST(w, req, ps)
 	})
 
 	router.PUT("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -812,7 +832,80 @@ func (api *API) workgroupHandlerDELETE(w http.ResponseWriter, req *http.Request,
 	writeSuccess(w)
 }
 
+// connectHandlerPOST handles the POST /connect/:workgroup/:share calls.
+// It initiates an indexd connection-approval flow by sending a registration request
+// to the indexer and returning the URL the admin must visit to approve it.
+func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	u, err := uuid.Parse(ps.ByName("workgroup"))
+	if err != nil {
+		writeError(w, "invalid workgroup UUID", http.StatusBadRequest)
+		return
+	}
+
+	wg, err := api.store.FindWorkgroup(u)
+	if err != nil {
+		log.Printf("failed to find workgroup: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if wg.ID == 0 {
+		writeError(w, "workgroup not found", http.StatusNotFound)
+		return
+	}
+
+	share, err := api.store.GetShare(strings.ToLower(ps.ByName("share")))
+	if err != nil {
+		log.Printf("failed to find share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if share.Name == "" {
+		writeError(w, "share not found", http.StatusNotFound)
+		return
+	}
+	if share.Type != "indexd" {
+		writeError(w, "connection requests are only supported for indexd shares", http.StatusBadRequest)
+		return
+	}
+
+	builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
+		ID:          types.HashBytes(append([]byte(api.cfg.Name), []byte(api.cfg.Description)...)),
+		Name:        api.cfg.Name,
+		Description: api.cfg.Description,
+		LogoURL:     api.cfg.LogoURL,
+		ServiceURL:  api.cfg.ServiceURL,
+	})
+
+	approvalURL, err := builder.RequestConnection(req.Context())
+	if err != nil {
+		log.Printf("failed to request connection: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	pendingKey := u.String() + "/" + share.Name
+	api.pendingBuilders.Store(pendingKey, builder)
+	go func() {
+		select {
+		case <-time.After(10 * time.Minute):
+			api.pendingBuilders.Delete(pendingKey)
+		case <-api.ctx.Done():
+		}
+	}()
+	writeJSON(w, ConnectRequestResponse{URL: approvalURL})
+}
+
 // connectHandlerPUT handles the PUT /connect/:workgroup/:share calls.
+// Three paths:
+//  1. Body with appKey (hex) — reconnect using an existing key.
+//  2. No body, indexd share, pending builder present — complete the approval flow
+//     started by POST /connect/request, derive the app key, and return it.
+//  3. No body, renterd share — no key required.
 func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
@@ -858,14 +951,50 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 	}
 
 	var appKey types.PrivateKey
+
 	if body.AppKey != "" {
+		// Path 1: reconnect with a known app key.
 		keyBytes, err := hex.DecodeString(body.AppKey)
 		if err != nil {
 			writeError(w, "invalid app key encoding", http.StatusBadRequest)
 			return
 		}
 		appKey = types.PrivateKey(keyBytes)
+		if len(appKey) != 64 {
+			writeError(w, "indexd share requires a valid 64-byte app key", http.StatusBadRequest)
+			return
+		}
+	} else if share.Type == "indexd" {
+		// Path 2: complete a pending first-time registration.
+		pendingKey := u.String() + "/" + share.Name
+		v, ok := api.pendingBuilders.Load(pendingKey)
+		if !ok {
+			writeError(w, "no pending connection request found; call POST /connect/request first", http.StatusBadRequest)
+			return
+		}
+		builder := v.(*sdk.Builder)
+
+		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Minute)
+		defer cancel()
+
+		if err := builder.WaitForApproval(ctx); err != nil {
+			api.pendingBuilders.Delete(pendingKey)
+			log.Printf("connection approval failed: %v", err)
+			writeError(w, "connection not approved: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		sdkInst, err := builder.Register(req.Context(), api.cfg.SeedPhrase)
+		if err != nil {
+			api.pendingBuilders.Delete(pendingKey)
+			log.Printf("failed to register app: %v", err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		api.pendingBuilders.Delete(pendingKey)
+		appKey = sdkInst.AppKey()
 	}
+	// Path 3: renterd share — appKey stays nil, AddConnection handles it.
 
 	if err := api.store.AddConnection(wg, share, appKey); err != nil {
 		log.Printf("failed to add connection: %v", err)
@@ -873,7 +1002,11 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 		return
 	}
 
-	writeSuccess(w)
+	if len(appKey) > 0 {
+		writeJSON(w, ConnectResponse{AppKey: hex.EncodeToString(appKey)})
+	} else {
+		writeSuccess(w)
+	}
 }
 
 // connectHandlerDELETE handles the DELETE /connect/:workgroup/:share calls.
