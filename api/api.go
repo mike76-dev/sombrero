@@ -35,6 +35,7 @@ type Store interface {
 
 	AddWorkgroup(wg stores.Workgroup) error
 	FindWorkgroup(u uuid.UUID) (stores.Workgroup, error)
+	FindWorkgroupByName(name string) (stores.Workgroup, error)
 	RemoveWorkgroup(wg stores.Workgroup) error
 
 	GetAccessRights(share stores.Share, acc stores.Account) (ar stores.AccessRights, err error)
@@ -61,6 +62,7 @@ type IsBannedResponse struct {
 // WorkgroupResponse is the response type for POST /workgroup request.
 type WorkgroupResponse struct {
 	UUID uuid.UUID `json:"uuid"`
+	Name string    `json:"name,omitempty"`
 }
 
 // ConnectRequestResponse is the response type for POST /connect/request/:workgroup/:share.
@@ -195,11 +197,11 @@ func (api *API) buildHTTPRoutes() {
 		api.workgroupHandlerPOST(w, req, ps)
 	})
 
-	router.GET("/workgroup/:uuid", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	router.GET("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.workgroupHandlerGET(w, req, ps)
 	})
 
-	router.DELETE("/workgroup/:uuid", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	router.DELETE("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.workgroupHandlerDELETE(w, req, ps)
 	})
 
@@ -754,6 +756,36 @@ func (api *API) accountPolicyHandlerDELETE(w http.ResponseWriter, req *http.Requ
 	writeSuccess(w)
 }
 
+// resolveWorkgroup looks up a workgroup by UUID or name.
+// If param parses as a UUID it uses FindWorkgroup; otherwise FindWorkgroupByName.
+// On failure it writes the appropriate error response and returns false.
+func (api *API) resolveWorkgroup(w http.ResponseWriter, param string) (stores.Workgroup, bool) {
+	if u, err := uuid.Parse(param); err == nil {
+		wg, err := api.store.FindWorkgroup(u)
+		if err != nil {
+			log.Printf("failed to find workgroup: %v", err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return stores.Workgroup{}, false
+		}
+		if wg.ID == 0 {
+			writeError(w, "workgroup not found", http.StatusNotFound)
+			return stores.Workgroup{}, false
+		}
+		return wg, true
+	}
+	wg, err := api.store.FindWorkgroupByName(param)
+	if err != nil {
+		log.Printf("failed to find workgroup: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return stores.Workgroup{}, false
+	}
+	if wg.ID == 0 {
+		writeError(w, "workgroup not found", http.StatusNotFound)
+		return stores.Workgroup{}, false
+	}
+	return wg, true
+}
+
 // workgroupHandlerPOST handles the POST /workgroup calls.
 func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
@@ -761,65 +793,54 @@ func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _
 		return
 	}
 
+	var body struct {
+		Name string `json:"name,omitempty"`
+	}
+	if req.ContentLength > 0 {
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeError(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+	}
+
 	u := uuid.New()
-	if err := api.store.AddWorkgroup(stores.Workgroup{UUID: u}); err != nil {
+	wg := stores.Workgroup{UUID: u, Name: body.Name}
+	if err := api.store.AddWorkgroup(wg); err != nil {
 		log.Printf("failed to add workgroup: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
 	log.Printf("created new workgroup: %s", u)
-	writeJSON(w, WorkgroupResponse{UUID: u})
+	writeJSON(w, WorkgroupResponse{UUID: u, Name: body.Name})
 }
 
-// workgroupHandlerGET handles the GET /workgroup/:uuid calls.
+// workgroupHandlerGET handles the GET /workgroup/:id calls.
+// :id may be a UUID or a workgroup name.
 func (api *API) workgroupHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
 
-	u, err := uuid.Parse(ps.ByName("uuid"))
-	if err != nil {
-		writeError(w, "invalid UUID", http.StatusBadRequest)
-		return
-	}
-
-	wg, err := api.store.FindWorkgroup(u)
-	if err != nil {
-		log.Printf("failed to find workgroup: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if wg.ID == 0 {
-		writeError(w, "workgroup not found", http.StatusNotFound)
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("id"))
+	if !ok {
 		return
 	}
 
 	writeJSON(w, wg)
 }
 
-// workgroupHandlerDELETE handles the DELETE /workgroup/:uuid calls.
+// workgroupHandlerDELETE handles the DELETE /workgroup/:id calls.
+// :id may be a UUID or a workgroup name.
 func (api *API) workgroupHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
 
-	u, err := uuid.Parse(ps.ByName("uuid"))
-	if err != nil {
-		writeError(w, "invalid UUID", http.StatusBadRequest)
-		return
-	}
-
-	wg, err := api.store.FindWorkgroup(u)
-	if err != nil {
-		log.Printf("failed to find workgroup: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if wg.ID == 0 {
-		writeError(w, "workgroup not found", http.StatusNotFound)
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("id"))
+	if !ok {
 		return
 	}
 
@@ -835,26 +856,15 @@ func (api *API) workgroupHandlerDELETE(w http.ResponseWriter, req *http.Request,
 // connectHandlerPOST handles the POST /connect/:workgroup/:share calls.
 // It initiates an indexd connection-approval flow by sending a registration request
 // to the indexer and returning the URL the admin must visit to approve it.
+// :workgroup may be a UUID or a workgroup name.
 func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
 
-	u, err := uuid.Parse(ps.ByName("workgroup"))
-	if err != nil {
-		writeError(w, "invalid workgroup UUID", http.StatusBadRequest)
-		return
-	}
-
-	wg, err := api.store.FindWorkgroup(u)
-	if err != nil {
-		log.Printf("failed to find workgroup: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if wg.ID == 0 {
-		writeError(w, "workgroup not found", http.StatusNotFound)
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("workgroup"))
+	if !ok {
 		return
 	}
 
@@ -888,7 +898,7 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 		return
 	}
 
-	pendingKey := u.String() + "/" + share.Name
+	pendingKey := wg.UUID.String() + "/" + share.Name
 	api.pendingBuilders.Store(pendingKey, builder)
 	go func() {
 		select {
@@ -906,26 +916,15 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 //  2. No body, indexd share, pending builder present — complete the approval flow
 //     started by POST /connect/request, derive the app key, and return it.
 //  3. No body, renterd share — no key required.
+// :workgroup may be a UUID or a workgroup name.
 func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
 
-	u, err := uuid.Parse(ps.ByName("workgroup"))
-	if err != nil {
-		writeError(w, "invalid workgroup UUID", http.StatusBadRequest)
-		return
-	}
-
-	wg, err := api.store.FindWorkgroup(u)
-	if err != nil {
-		log.Printf("failed to find workgroup: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if wg.ID == 0 {
-		writeError(w, "workgroup not found", http.StatusNotFound)
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("workgroup"))
+	if !ok {
 		return
 	}
 
@@ -966,7 +965,7 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 		}
 	} else if share.Type == "indexd" {
 		// Path 2: complete a pending first-time registration.
-		pendingKey := u.String() + "/" + share.Name
+		pendingKey := wg.UUID.String() + "/" + share.Name
 		v, ok := api.pendingBuilders.Load(pendingKey)
 		if !ok {
 			writeError(w, "no pending connection request found; call POST /connect/request first", http.StatusBadRequest)
@@ -1010,26 +1009,15 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 }
 
 // connectHandlerDELETE handles the DELETE /connect/:workgroup/:share calls.
+// :workgroup may be a UUID or a workgroup name.
 func (api *API) connectHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
 
-	u, err := uuid.Parse(ps.ByName("workgroup"))
-	if err != nil {
-		writeError(w, "invalid workgroup UUID", http.StatusBadRequest)
-		return
-	}
-
-	wg, err := api.store.FindWorkgroup(u)
-	if err != nil {
-		log.Printf("failed to find workgroup: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if wg.ID == 0 {
-		writeError(w, "workgroup not found", http.StatusNotFound)
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("workgroup"))
+	if !ok {
 		return
 	}
 

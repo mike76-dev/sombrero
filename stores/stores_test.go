@@ -24,6 +24,7 @@ func TestWorkgroups(t *testing.T) {
 
 	u := uuid.New()
 
+	// Add without name.
 	if err := db.AddWorkgroup(Workgroup{UUID: u}); err != nil {
 		t.Fatalf("AddWorkgroup: %v", err)
 	}
@@ -38,6 +39,9 @@ func TestWorkgroups(t *testing.T) {
 	}
 	if wg.ID == 0 {
 		t.Fatal("FindWorkgroup: expected non-zero ID")
+	}
+	if wg.Name != "" {
+		t.Fatalf("FindWorkgroup: expected empty name, got %q", wg.Name)
 	}
 
 	// GetWorkgroupByID.
@@ -68,6 +72,42 @@ func TestWorkgroups(t *testing.T) {
 	}
 	if gone.ID != 0 {
 		t.Fatal("FindWorkgroup after remove: expected zero value")
+	}
+
+	// Add with name.
+	u2 := uuid.New()
+	if err := db.AddWorkgroup(Workgroup{UUID: u2, Name: "acme"}); err != nil {
+		t.Fatalf("AddWorkgroup with name: %v", err)
+	}
+
+	// FindWorkgroupByName.
+	wg2, err := db.FindWorkgroupByName("acme")
+	if err != nil {
+		t.Fatalf("FindWorkgroupByName: %v", err)
+	}
+	if wg2.UUID != u2 {
+		t.Fatalf("FindWorkgroupByName: want UUID %v, got %v", u2, wg2.UUID)
+	}
+	if wg2.Name != "acme" {
+		t.Fatalf("FindWorkgroupByName: want name %q, got %q", "acme", wg2.Name)
+	}
+
+	// FindWorkgroup by UUID also returns the name.
+	wg2ByUUID, err := db.FindWorkgroup(u2)
+	if err != nil {
+		t.Fatalf("FindWorkgroup (named): %v", err)
+	}
+	if wg2ByUUID.Name != "acme" {
+		t.Fatalf("FindWorkgroup (named): want name %q, got %q", "acme", wg2ByUUID.Name)
+	}
+
+	// FindWorkgroupByName for unknown name returns zero value.
+	noWG, err := db.FindWorkgroupByName("unknown")
+	if err != nil {
+		t.Fatalf("FindWorkgroupByName missing: %v", err)
+	}
+	if noWG.ID != 0 {
+		t.Fatal("FindWorkgroupByName missing: expected zero value")
 	}
 }
 

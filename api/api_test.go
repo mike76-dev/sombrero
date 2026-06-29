@@ -32,9 +32,10 @@ type mockStore struct {
 	removeAccount    func(string, string) error
 	findAccounts     func(string) ([]stores.Account, error)
 	removeAccounts   func(string) error
-	addWorkgroup     func(stores.Workgroup) error
-	findWorkgroup    func(uuid.UUID) (stores.Workgroup, error)
-	removeWorkgroup  func(stores.Workgroup) error
+	addWorkgroup          func(stores.Workgroup) error
+	findWorkgroup         func(uuid.UUID) (stores.Workgroup, error)
+	findWorkgroupByName   func(string) (stores.Workgroup, error)
+	removeWorkgroup       func(stores.Workgroup) error
 	getAccessRights  func(stores.Share, stores.Account) (stores.AccessRights, error)
 	setAccessRights  func(stores.AccessRights) error
 	removeAccess     func(stores.Share, stores.Account) error
@@ -123,6 +124,12 @@ func (m *mockStore) AddWorkgroup(wg stores.Workgroup) error {
 func (m *mockStore) FindWorkgroup(u uuid.UUID) (stores.Workgroup, error) {
 	if m.findWorkgroup != nil {
 		return m.findWorkgroup(u)
+	}
+	return stores.Workgroup{}, nil
+}
+func (m *mockStore) FindWorkgroupByName(name string) (stores.Workgroup, error) {
+	if m.findWorkgroupByName != nil {
+		return m.findWorkgroupByName(name)
 	}
 	return stores.Workgroup{}, nil
 }
@@ -233,10 +240,21 @@ func decodeJSON[T any](t *testing.T, w *httptest.ResponseRecorder) T {
 	return v
 }
 
+const testWorkgroupName = "acme"
+
 func foundWorkgroup() func(uuid.UUID) (stores.Workgroup, error) {
 	return func(u uuid.UUID) (stores.Workgroup, error) {
 		if u == testUUID {
-			return stores.Workgroup{ID: 1, UUID: testUUID}, nil
+			return stores.Workgroup{ID: 1, UUID: testUUID, Name: testWorkgroupName}, nil
+		}
+		return stores.Workgroup{}, nil
+	}
+}
+
+func foundWorkgroupByName() func(string) (stores.Workgroup, error) {
+	return func(name string) (stores.Workgroup, error) {
+		if name == testWorkgroupName {
+			return stores.Workgroup{ID: 1, UUID: testUUID, Name: testWorkgroupName}, nil
 		}
 		return stores.Workgroup{}, nil
 	}
@@ -786,7 +804,7 @@ func TestAccountShares(t *testing.T) {
 }
 
 func TestWorkgroups(t *testing.T) {
-	t.Run("POST creates workgroup", func(t *testing.T) {
+	t.Run("POST creates workgroup without name", func(t *testing.T) {
 		var got stores.Workgroup
 		ms := &mockStore{addWorkgroup: func(wg stores.Workgroup) error { got = wg; return nil }}
 		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", nil)
@@ -798,6 +816,26 @@ func TestWorkgroups(t *testing.T) {
 		if got.UUID != resp.UUID {
 			t.Errorf("stored UUID %v does not match response UUID %v", got.UUID, resp.UUID)
 		}
+		if resp.Name != "" {
+			t.Errorf("expected empty name, got %q", resp.Name)
+		}
+	})
+
+	t.Run("POST creates workgroup with name", func(t *testing.T) {
+		var got stores.Workgroup
+		ms := &mockStore{addWorkgroup: func(wg stores.Workgroup) error { got = wg; return nil }}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", map[string]string{"name": "acme"})
+		checkStatus(t, w, http.StatusOK)
+		resp := decodeJSON[WorkgroupResponse](t, w)
+		if resp.UUID == (uuid.UUID{}) {
+			t.Error("expected non-zero UUID in response")
+		}
+		if resp.Name != "acme" {
+			t.Errorf("name: want %q, got %q", "acme", resp.Name)
+		}
+		if got.Name != "acme" {
+			t.Errorf("stored name: want %q, got %q", "acme", got.Name)
+		}
 	})
 
 	t.Run("POST store error", func(t *testing.T) {
@@ -806,7 +844,7 @@ func TestWorkgroups(t *testing.T) {
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
-	t.Run("GET returns workgroup", func(t *testing.T) {
+	t.Run("GET returns workgroup by UUID", func(t *testing.T) {
 		ms := &mockStore{findWorkgroup: foundWorkgroup()}
 		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/"+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusOK)
@@ -816,25 +854,41 @@ func TestWorkgroups(t *testing.T) {
 		}
 	})
 
-	t.Run("GET not found returns 404", func(t *testing.T) {
+	t.Run("GET returns workgroup by name", func(t *testing.T) {
+		ms := &mockStore{findWorkgroupByName: foundWorkgroupByName()}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/"+testWorkgroupName, nil)
+		checkStatus(t, w, http.StatusOK)
+		wg := decodeJSON[stores.Workgroup](t, w)
+		if wg.Name != testWorkgroupName {
+			t.Errorf("name: want %q, got %q", testWorkgroupName, wg.Name)
+		}
+	})
+
+	t.Run("GET not found by UUID returns 404", func(t *testing.T) {
 		ms := &mockStore{findWorkgroup: func(uuid.UUID) (stores.Workgroup, error) { return stores.Workgroup{}, nil }}
 		other := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/"+other.String(), nil)
 		checkStatus(t, w, http.StatusNotFound)
 	})
 
-	t.Run("GET invalid UUID returns 400", func(t *testing.T) {
-		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/workgroup/not-a-uuid", nil)
-		checkStatus(t, w, http.StatusBadRequest)
+	t.Run("GET not found by name returns 404", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/workgroup/unknown-name", nil)
+		checkStatus(t, w, http.StatusNotFound)
 	})
 
-	t.Run("GET store error", func(t *testing.T) {
+	t.Run("GET store error by UUID", func(t *testing.T) {
 		ms := &mockStore{findWorkgroup: func(uuid.UUID) (stores.Workgroup, error) { return stores.Workgroup{}, errStore }}
 		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/"+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
-	t.Run("DELETE removes workgroup", func(t *testing.T) {
+	t.Run("GET store error by name", func(t *testing.T) {
+		ms := &mockStore{findWorkgroupByName: func(string) (stores.Workgroup, error) { return stores.Workgroup{}, errStore }}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/unknown-name", nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("DELETE removes workgroup by UUID", func(t *testing.T) {
 		called := false
 		ms := &mockStore{
 			findWorkgroup:   foundWorkgroup(),
@@ -847,15 +901,23 @@ func TestWorkgroups(t *testing.T) {
 		}
 	})
 
+	t.Run("DELETE removes workgroup by name", func(t *testing.T) {
+		called := false
+		ms := &mockStore{
+			findWorkgroupByName: foundWorkgroupByName(),
+			removeWorkgroup:     func(stores.Workgroup) error { called = true; return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodDelete, "/workgroup/"+testWorkgroupName, nil)
+		checkStatus(t, w, http.StatusNoContent)
+		if !called {
+			t.Error("RemoveWorkgroup not called")
+		}
+	})
+
 	t.Run("DELETE not found returns 404", func(t *testing.T) {
 		ms := &mockStore{findWorkgroup: func(uuid.UUID) (stores.Workgroup, error) { return stores.Workgroup{}, nil }}
 		w := doRequest(newTestAPI(ms), http.MethodDelete, "/workgroup/"+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusNotFound)
-	})
-
-	t.Run("DELETE invalid UUID returns 400", func(t *testing.T) {
-		w := doRequest(newTestAPI(&mockStore{}), http.MethodDelete, "/workgroup/bad-uuid", nil)
-		checkStatus(t, w, http.StatusBadRequest)
 	})
 
 	t.Run("DELETE store error", func(t *testing.T) {
@@ -874,12 +936,12 @@ func TestWorkgroups(t *testing.T) {
 func TestConnectRequest(t *testing.T) {
 	requestPath := "/connect/" + testUUID.String() + "/myshare"
 
-	t.Run("POST invalid workgroup UUID returns 400", func(t *testing.T) {
-		w := doRequest(newTestAPI(&mockStore{}), http.MethodPost, "/connect/bad-uuid/myshare", nil)
-		checkStatus(t, w, http.StatusBadRequest)
+	t.Run("POST unknown workgroup returns 404", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodPost, "/connect/unknown-name/myshare", nil)
+		checkStatus(t, w, http.StatusNotFound)
 	})
 
-	t.Run("POST workgroup not found returns 404", func(t *testing.T) {
+	t.Run("POST workgroup not found by UUID returns 404", func(t *testing.T) {
 		ms := &mockStore{findWorkgroup: func(uuid.UUID) (stores.Workgroup, error) { return stores.Workgroup{}, nil }}
 		w := doRequest(newTestAPI(ms), http.MethodPost, requestPath, nil)
 		checkStatus(t, w, http.StatusNotFound)
@@ -968,12 +1030,12 @@ func TestConnect(t *testing.T) {
 		}
 	})
 
-	t.Run("PUT invalid workgroup UUID returns 400", func(t *testing.T) {
-		w := doRequest(newTestAPI(&mockStore{}), http.MethodPut, "/connect/bad-uuid/myshare", nil)
-		checkStatus(t, w, http.StatusBadRequest)
+	t.Run("PUT unknown workgroup returns 404", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodPut, "/connect/unknown-name/myshare", nil)
+		checkStatus(t, w, http.StatusNotFound)
 	})
 
-	t.Run("PUT workgroup not found returns 404", func(t *testing.T) {
+	t.Run("PUT workgroup not found by UUID returns 404", func(t *testing.T) {
 		ms := &mockStore{findWorkgroup: func(uuid.UUID) (stores.Workgroup, error) { return stores.Workgroup{}, nil }}
 		w := doRequest(newTestAPI(ms), http.MethodPut, path, nil)
 		checkStatus(t, w, http.StatusNotFound)
@@ -1042,9 +1104,9 @@ func TestConnect(t *testing.T) {
 		}
 	})
 
-	t.Run("DELETE invalid workgroup UUID returns 400", func(t *testing.T) {
-		w := doRequest(newTestAPI(&mockStore{}), http.MethodDelete, "/connect/bad-uuid/myshare", nil)
-		checkStatus(t, w, http.StatusBadRequest)
+	t.Run("DELETE unknown workgroup returns 404", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodDelete, "/connect/unknown-name/myshare", nil)
+		checkStatus(t, w, http.StatusNotFound)
 	})
 
 	t.Run("DELETE workgroup not found returns 404", func(t *testing.T) {

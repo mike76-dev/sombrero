@@ -13,6 +13,7 @@ CREATE TABLE shares (
 CREATE TABLE workgroups (
     id SERIAL PRIMARY KEY,
     uuid BYTEA NOT NULL,
+    name TEXT UNIQUE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     CONSTRAINT workgroups_uuid_length CHECK (octet_length(uuid) = 16),
     CONSTRAINT workgroups_unique UNIQUE (uuid)
