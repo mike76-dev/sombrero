@@ -692,3 +692,215 @@ func mustNotReadEquals(t *testing.T, ctx context.Context, c Client, acc stores.A
 		t.Fatalf("Read(%s) unexpectedly matched old content", path)
 	}
 }
+
+func newTestWorkgroup(t *testing.T, db *stores.Database) stores.Workgroup {
+	t.Helper()
+
+	u := uuid.New()
+	if err := db.AddWorkgroup(stores.Workgroup{UUID: u}); err != nil {
+		t.Fatalf("AddWorkgroup: %v", err)
+	}
+	got, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
+	}
+	if got.ID == 0 {
+		t.Fatalf("FindWorkgroup returned empty workgroup for %s", u)
+	}
+	return got
+}
+
+func newTestAccountInWorkgroup(t *testing.T, db *stores.Database, username, password string, wg stores.Workgroup) stores.Account {
+	t.Helper()
+
+	acc := stores.Account{
+		Username:  username,
+		Password:  password,
+		Workgroup: wg.UUID.String(),
+	}
+	if err := db.AddAccount(acc); err != nil {
+		t.Fatalf("AddAccount(%s): %v", username, err)
+	}
+	got, err := db.FindAccount(username, wg.UUID.String())
+	if err != nil {
+		t.Fatalf("FindAccount(%s): %v", username, err)
+	}
+	if got.ID == 0 {
+		t.Fatalf("FindAccount returned empty account for %s", username)
+	}
+	return got
+}
+
+func mustNotFound(t *testing.T, ctx context.Context, c Client, acc stores.Account, path string, size int) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	err := c.Read(ctx, acc, path, 0, uint64(size), &buf)
+	if !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("Read(%s) as %s: expected ErrNotFound, got %v", path, acc.Username, err)
+	}
+}
+
+// TestIndexdClient_CrossWorkgroupIsolation verifies that files uploaded by an
+// account in one workgroup are never visible to an account in a different
+// workgroup, even when both are connected to the same share.
+func TestIndexdClient_CrossWorkgroupIsolation(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg1 := newTestWorkgroup(t, db)
+	wg2 := newTestWorkgroup(t, db)
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg1)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg2)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	content := []byte("alice's secret data")
+	path := "secret.txt"
+
+	uploadID, err := c.StartUpload(ctx, alice, path)
+	if err != nil {
+		t.Fatalf("StartUpload: %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), path, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload: %v", err)
+	}
+	waitForRead(t, ctx, c, alice, path, content)
+
+	mustReadEquals(t, ctx, c, alice, path, content)
+	mustNotFound(t, ctx, c, bob, path, len(content))
+}
+
+// TestIndexdClient_WithinWorkgroupPrivacy verifies that files in private
+// directories (the default) are invisible to other accounts in the same
+// workgroup, and that root-level files are always private.
+func TestIndexdClient_WithinWorkgroupPrivacy(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg := newTestWorkgroup(t, db)
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	content := []byte("alice's private content")
+
+	// Upload to root (directory_id = NULL, always private).
+	rootPath := "root.txt"
+	uploadID, err := c.StartUpload(ctx, alice, rootPath)
+	if err != nil {
+		t.Fatalf("StartUpload(root): %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), rootPath, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write(root): %v", err)
+	}
+	if err := c.FinishUpload(ctx, rootPath, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(root): %v", err)
+	}
+	waitForRead(t, ctx, c, alice, rootPath, content)
+
+	// Upload to a private directory (MakeDirectory always sets private=true).
+	if err := c.MakeDirectory(ctx, alice, "private-dir"); err != nil {
+		t.Fatalf("MakeDirectory: %v", err)
+	}
+	dirPath := "private-dir/file.txt"
+	uploadID, err = c.StartUpload(ctx, alice, dirPath)
+	if err != nil {
+		t.Fatalf("StartUpload(dir): %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), dirPath, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write(dir): %v", err)
+	}
+	if err := c.FinishUpload(ctx, dirPath, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(dir): %v", err)
+	}
+	waitForRead(t, ctx, c, alice, dirPath, content)
+
+	mustReadEquals(t, ctx, c, alice, rootPath, content)
+	mustReadEquals(t, ctx, c, alice, dirPath, content)
+
+	mustNotFound(t, ctx, c, bob, rootPath, len(content))
+	mustNotFound(t, ctx, c, bob, dirPath, len(content))
+}
+
+// TestIndexdClient_WithinWorkgroupPublicDirectory verifies that files in a
+// public directory (private=false) are visible to all accounts in the same
+// workgroup, while a private directory in the same workgroup remains hidden.
+func TestIndexdClient_WithinWorkgroupPublicDirectory(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg := newTestWorkgroup(t, db)
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Create a public directory directly via the store (the client always creates private dirs).
+	if err := db.CreateDirectory(alice, share.Name, "/shared", false); err != nil {
+		t.Fatalf("CreateDirectory(public): %v", err)
+	}
+
+	content := []byte("shared content")
+	sharedPath := "shared/file.txt"
+
+	uploadID, err := c.StartUpload(ctx, alice, sharedPath)
+	if err != nil {
+		t.Fatalf("StartUpload(shared): %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), sharedPath, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write(shared): %v", err)
+	}
+	if err := c.FinishUpload(ctx, sharedPath, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(shared): %v", err)
+	}
+	waitForRead(t, ctx, c, alice, sharedPath, content)
+
+	mustReadEquals(t, ctx, c, alice, sharedPath, content)
+	mustReadEquals(t, ctx, c, bob, sharedPath, content)
+
+	// Verify a private directory in the same workgroup still hides its files from bob.
+	if err := c.MakeDirectory(ctx, alice, "private-dir"); err != nil {
+		t.Fatalf("MakeDirectory(private): %v", err)
+	}
+	privatePath := "private-dir/secret.txt"
+	uploadID, err = c.StartUpload(ctx, alice, privatePath)
+	if err != nil {
+		t.Fatalf("StartUpload(private): %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), privatePath, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write(private): %v", err)
+	}
+	if err := c.FinishUpload(ctx, privatePath, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(private): %v", err)
+	}
+	waitForRead(t, ctx, c, alice, privatePath, content)
+
+	mustReadEquals(t, ctx, c, alice, privatePath, content)
+	mustNotFound(t, ctx, c, bob, privatePath, len(content))
+}
