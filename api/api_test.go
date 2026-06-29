@@ -368,7 +368,10 @@ func TestBans(t *testing.T) {
 
 func TestAccount(t *testing.T) {
 	t.Run("GET by username", func(t *testing.T) {
-		ms := &mockStore{findAccount: foundAccount("alice", testUUID.String())}
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   foundAccount("alice", testUUID.String()),
+		}
 		w := doRequest(newTestAPI(ms), http.MethodGet, "/account?username=alice&workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusOK)
 		acc := decodeJSON[stores.Account](t, w)
@@ -402,8 +405,11 @@ func TestAccount(t *testing.T) {
 	})
 
 	t.Run("GET by username store error", func(t *testing.T) {
-		ms := &mockStore{findAccount: func(string, string) (stores.Account, error) { return stores.Account{}, errStore }}
-		w := doRequest(newTestAPI(ms), http.MethodGet, "/account?username=alice", nil)
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   func(string, string) (stores.Account, error) { return stores.Account{}, errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/account?username=alice&workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
@@ -415,7 +421,10 @@ func TestAccount(t *testing.T) {
 
 	t.Run("POST creates account", func(t *testing.T) {
 		var got stores.Account
-		ms := &mockStore{addAccount: func(a stores.Account) error { got = a; return nil }}
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			addAccount:    func(a stores.Account) error { got = a; return nil },
+		}
 		w := doRequest(newTestAPI(ms), http.MethodPost, "/account", stores.Account{
 			Username:  "Alice",
 			Password:  "secret",
@@ -436,14 +445,20 @@ func TestAccount(t *testing.T) {
 	})
 
 	t.Run("POST store error", func(t *testing.T) {
-		ms := &mockStore{addAccount: func(stores.Account) error { return errStore }}
-		w := doRequest(newTestAPI(ms), http.MethodPost, "/account", stores.Account{Username: "alice"})
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			addAccount:    func(stores.Account) error { return errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/account", stores.Account{Username: "alice", Workgroup: testUUID.String()})
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
 	t.Run("DELETE removes account", func(t *testing.T) {
 		var gotUser, gotWG string
-		ms := &mockStore{removeAccount: func(u, w string) error { gotUser, gotWG = u, w; return nil }}
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			removeAccount: func(u, w string) error { gotUser, gotWG = u, w; return nil },
+		}
 		w := doRequest(newTestAPI(ms), http.MethodDelete, "/account?username=Alice&workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusNoContent)
 		if gotUser != "alice" {
@@ -460,8 +475,11 @@ func TestAccount(t *testing.T) {
 	})
 
 	t.Run("DELETE store error", func(t *testing.T) {
-		ms := &mockStore{removeAccount: func(string, string) error { return errStore }}
-		w := doRequest(newTestAPI(ms), http.MethodDelete, "/account?username=alice", nil)
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			removeAccount: func(string, string) error { return errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodDelete, "/account?username=alice&workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 }
@@ -474,7 +492,8 @@ func TestAccounts(t *testing.T) {
 
 	t.Run("GET returns accounts for workgroup", func(t *testing.T) {
 		ms := &mockStore{
-			findAccounts: func(wg string) ([]stores.Account, error) { return accs, nil },
+			findWorkgroup: foundWorkgroup(),
+			findAccounts:  func(wg string) ([]stores.Account, error) { return accs, nil },
 		}
 		w := doRequest(newTestAPI(ms), http.MethodGet, "/accounts?workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusOK)
@@ -485,14 +504,20 @@ func TestAccounts(t *testing.T) {
 	})
 
 	t.Run("GET store error", func(t *testing.T) {
-		ms := &mockStore{findAccounts: func(string) ([]stores.Account, error) { return nil, errStore }}
-		w := doRequest(newTestAPI(ms), http.MethodGet, "/accounts", nil)
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			findAccounts:  func(string) ([]stores.Account, error) { return nil, errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/accounts?workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
 	t.Run("DELETE removes accounts for workgroup", func(t *testing.T) {
 		var gotWG string
-		ms := &mockStore{removeAccounts: func(wg string) error { gotWG = wg; return nil }}
+		ms := &mockStore{
+			findWorkgroup:  foundWorkgroup(),
+			removeAccounts: func(wg string) error { gotWG = wg; return nil },
+		}
 		w := doRequest(newTestAPI(ms), http.MethodDelete, "/accounts?workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusNoContent)
 		if gotWG != testUUID.String() {
@@ -501,8 +526,11 @@ func TestAccounts(t *testing.T) {
 	})
 
 	t.Run("DELETE store error", func(t *testing.T) {
-		ms := &mockStore{removeAccounts: func(string) error { return errStore }}
-		w := doRequest(newTestAPI(ms), http.MethodDelete, "/accounts", nil)
+		ms := &mockStore{
+			findWorkgroup:  foundWorkgroup(),
+			removeAccounts: func(string) error { return errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodDelete, "/accounts?workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 }
@@ -621,8 +649,9 @@ func TestShareAccounts(t *testing.T) {
 func TestPolicy(t *testing.T) {
 	t.Run("GET returns access rights", func(t *testing.T) {
 		ms := &mockStore{
-			findAccount: foundAccount("alice", testUUID.String()),
-			getShare:    foundShare("myshare", "renterd"),
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			getShare:      foundShare("myshare", "renterd"),
 			getAccessRights: func(stores.Share, stores.Account) (stores.AccessRights, error) {
 				return stores.AccessRights{ShareName: "myshare", AccountID: 1, ReadAccess: true}, nil
 			},
@@ -643,24 +672,27 @@ func TestPolicy(t *testing.T) {
 
 	t.Run("GET findAccount store error", func(t *testing.T) {
 		ms := &mockStore{
-			findAccount: func(string, string) (stores.Account, error) { return stores.Account{}, errStore },
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   func(string, string) (stores.Account, error) { return stores.Account{}, errStore },
 		}
-		w := doRequest(newTestAPI(ms), http.MethodGet, "/share/myshare/policy?username=alice", nil)
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/share/myshare/policy?username=alice&workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
 	t.Run("GET getShare store error", func(t *testing.T) {
 		ms := &mockStore{
-			findAccount: foundAccount("alice", testUUID.String()),
-			getShare:    func(string) (stores.Share, error) { return stores.Share{}, errStore },
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			getShare:      func(string) (stores.Share, error) { return stores.Share{}, errStore },
 		}
-		w := doRequest(newTestAPI(ms), http.MethodGet, "/share/myshare/policy?username=alice", nil)
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/share/myshare/policy?username=alice&workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
 	t.Run("PUT sets access rights", func(t *testing.T) {
 		var gotAR stores.AccessRights
 		ms := &mockStore{
+			findWorkgroup:   foundWorkgroup(),
 			getShare:        foundShare("myshare", "renterd"),
 			findAccount:     foundAccount("alice", testUUID.String()),
 			setAccessRights: func(ar stores.AccessRights) error { gotAR = ar; return nil },
@@ -694,6 +726,7 @@ func TestPolicy(t *testing.T) {
 
 	t.Run("PUT setAccessRights store error", func(t *testing.T) {
 		ms := &mockStore{
+			findWorkgroup:   foundWorkgroup(),
 			getShare:        foundShare("myshare", "renterd"),
 			findAccount:     foundAccount("alice", testUUID.String()),
 			setAccessRights: func(stores.AccessRights) error { return errStore },
@@ -706,9 +739,10 @@ func TestPolicy(t *testing.T) {
 	t.Run("DELETE removes access rights", func(t *testing.T) {
 		called := false
 		ms := &mockStore{
-			findAccount:  foundAccount("alice", testUUID.String()),
-			getShare:     foundShare("myshare", "renterd"),
-			removeAccess: func(stores.Share, stores.Account) error { called = true; return nil },
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			getShare:      foundShare("myshare", "renterd"),
+			removeAccess:  func(stores.Share, stores.Account) error { called = true; return nil },
 		}
 		w := doRequest(newTestAPI(ms), http.MethodDelete,
 			"/share/myshare/policy?username=alice&workgroup="+testUUID.String(), nil)
@@ -725,9 +759,10 @@ func TestPolicy(t *testing.T) {
 
 	t.Run("DELETE store error", func(t *testing.T) {
 		ms := &mockStore{
-			findAccount:  foundAccount("alice", testUUID.String()),
-			getShare:     foundShare("myshare", "renterd"),
-			removeAccess: func(stores.Share, stores.Account) error { return errStore },
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			getShare:      foundShare("myshare", "renterd"),
+			removeAccess:  func(stores.Share, stores.Account) error { return errStore },
 		}
 		w := doRequest(newTestAPI(ms), http.MethodDelete,
 			"/share/myshare/policy?username=alice&workgroup="+testUUID.String(), nil)
@@ -743,8 +778,9 @@ func TestAccountShares(t *testing.T) {
 
 	t.Run("GET returns shares without passwords", func(t *testing.T) {
 		ms := &mockStore{
-			findAccount: foundAccount("alice", testUUID.String()),
-			getShares:   func(stores.Account) ([]stores.Share, error) { return shares, nil },
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			getShares:     func(stores.Account) ([]stores.Share, error) { return shares, nil },
 		}
 		w := doRequest(newTestAPI(ms), http.MethodGet,
 			"/account/shares?username=alice&workgroup="+testUUID.String(), nil)
@@ -767,18 +803,20 @@ func TestAccountShares(t *testing.T) {
 
 	t.Run("GET getShares store error", func(t *testing.T) {
 		ms := &mockStore{
-			findAccount: foundAccount("alice", testUUID.String()),
-			getShares:   func(stores.Account) ([]stores.Share, error) { return nil, errStore },
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			getShares:     func(stores.Account) ([]stores.Share, error) { return nil, errStore },
 		}
-		w := doRequest(newTestAPI(ms), http.MethodGet, "/account/shares?username=alice", nil)
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/account/shares?username=alice&workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
 	t.Run("DELETE /account/policy clears all access rights", func(t *testing.T) {
 		called := false
 		ms := &mockStore{
-			findAccount: foundAccount("alice", testUUID.String()),
-			clearAccess: func(stores.Account) error { called = true; return nil },
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			clearAccess:   func(stores.Account) error { called = true; return nil },
 		}
 		w := doRequest(newTestAPI(ms), http.MethodDelete,
 			"/account/policy?username=alice&workgroup="+testUUID.String(), nil)
@@ -795,10 +833,11 @@ func TestAccountShares(t *testing.T) {
 
 	t.Run("DELETE /account/policy store error", func(t *testing.T) {
 		ms := &mockStore{
-			findAccount: foundAccount("alice", testUUID.String()),
-			clearAccess: func(stores.Account) error { return errStore },
+			findWorkgroup: foundWorkgroup(),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			clearAccess:   func(stores.Account) error { return errStore },
 		}
-		w := doRequest(newTestAPI(ms), http.MethodDelete, "/account/policy?username=alice", nil)
+		w := doRequest(newTestAPI(ms), http.MethodDelete, "/account/policy?username=alice&workgroup="+testUUID.String(), nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 }

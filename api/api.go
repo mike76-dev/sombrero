@@ -328,12 +328,15 @@ func (api *API) accountHandlerGET(w http.ResponseWriter, req *http.Request, _ ht
 	idValue := req.FormValue("id")
 	if idValue == "" {
 		username := strings.ToLower(req.FormValue("username"))
-		workgroup := strings.ToLower(req.FormValue("workgroup"))
 		if username == "" {
 			writeError(w, "username cannot be empty", http.StatusBadRequest)
 			return
 		}
-		acc, err = api.store.FindAccount(username, workgroup)
+		wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+		if !ok {
+			return
+		}
+		acc, err = api.store.FindAccount(username, wg.UUID.String())
 		if err != nil {
 			log.Printf("failed to find account: %v", err)
 			writeError(w, "internal error", http.StatusInternalServerError)
@@ -369,7 +372,12 @@ func (api *API) accountHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 		return
 	}
 	acc.Username = strings.ToLower(acc.Username)
-	acc.Workgroup = strings.ToLower(acc.Workgroup)
+
+	wg, ok := api.resolveWorkgroup(w, acc.Workgroup)
+	if !ok {
+		return
+	}
+	acc.Workgroup = wg.UUID.String()
 
 	if err := api.store.AddAccount(acc); err != nil {
 		log.Printf("failed to add account: %v", err)
@@ -388,13 +396,17 @@ func (api *API) accountHandlerDELETE(w http.ResponseWriter, req *http.Request, _
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	if err := api.store.RemoveAccount(username, workgroup); err != nil {
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	if err := api.store.RemoveAccount(username, wg.UUID.String()); err != nil {
 		log.Printf("failed to remove account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
@@ -410,8 +422,12 @@ func (api *API) accountsHandlerGET(w http.ResponseWriter, req *http.Request, _ h
 		return
 	}
 
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
-	accs, err := api.store.FindAccounts(workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	accs, err := api.store.FindAccounts(wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find accounts: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -428,8 +444,12 @@ func (api *API) accountsHandlerDELETE(w http.ResponseWriter, req *http.Request, 
 		return
 	}
 
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
-	if err := api.store.RemoveAccounts(workgroup); err != nil {
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	if err := api.store.RemoveAccounts(wg.UUID.String()); err != nil {
 		log.Printf("failed to remove accounts: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
@@ -556,13 +576,17 @@ func (api *API) policyHandlerGET(w http.ResponseWriter, req *http.Request, ps ht
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -610,9 +634,13 @@ func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps ht
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
 		return
 	}
 
@@ -625,7 +653,7 @@ func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps ht
 	ea := strings.ToLower(req.FormValue("execute"))
 	executeAccess := ea == "true"
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -662,13 +690,17 @@ func (api *API) policyHandlerDELETE(w http.ResponseWriter, req *http.Request, ps
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -699,13 +731,17 @@ func (api *API) accountSharesHandlerGET(w http.ResponseWriter, req *http.Request
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -734,13 +770,17 @@ func (api *API) accountPolicyHandlerDELETE(w http.ResponseWriter, req *http.Requ
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
