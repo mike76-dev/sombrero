@@ -2,13 +2,13 @@ package stores
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"go.sia.tech/core/types"
+	"lukechampine.com/frand"
 )
 
 // SlabSlice represents a slice of data within an uploaded slab.
@@ -45,7 +45,7 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 	}
 
 	id := make([]byte, 32)
-	rand.Read(id)
+	frand.Read(id)
 	uploadID = hex.EncodeToString(id)
 
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
@@ -92,6 +92,7 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 					full_path,
 					size,
 					account,
+					workgroup,
 					temporary
 				)
 				SELECT
@@ -100,10 +101,12 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 					$5,
 					$4,
 					0,
-					$3,
+					c.id,
+					c.workgroup,
 					TRUE
 				FROM parent p
 				JOIN no_existing_upload n ON TRUE
+				CROSS JOIN caller c
 				RETURNING id
 			)
 			INSERT INTO uploads (upload_id, object_id)

@@ -382,6 +382,7 @@ func (db *Database) CreateDirectory(acc Account, share string, path string, priv
 				name,
 				full_path,
 				account,
+				workgroup,
 				private
 			)
 			SELECT
@@ -392,9 +393,11 @@ func (db *Database) CreateDirectory(acc Account, share string, path string, priv
 					WHEN p.full_path = '/' THEN '/' || $4
 					ELSE p.full_path || '/' || $4
 				END,
-				$3,
+				c.id,
+				c.workgroup,
 				$5
 			FROM parent p
+			CROSS JOIN caller c
 			RETURNING id
 		`
 		var id uint64

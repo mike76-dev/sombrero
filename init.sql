@@ -7,26 +7,48 @@ CREATE TABLE shares (
     remark TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     data_shards INT NOT NULL DEFAULT 0,
-    parity_shards INT NOT NULL DEFAULT 0,
-    app_key BYTEA
+    parity_shards INT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE workgroups (
+    id SERIAL PRIMARY KEY,
+    uuid BYTEA NOT NULL,
+    name TEXT UNIQUE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    CONSTRAINT workgroups_uuid_length CHECK (octet_length(uuid) = 16),
+    CONSTRAINT workgroups_unique UNIQUE (uuid)
 );
 
 CREATE TABLE accounts (
     id SERIAL PRIMARY KEY,
     account_name TEXT NOT NULL,
     password_hash BYTEA NOT NULL,
-    workgroup TEXT NOT NULL,
-    CONSTRAINT accounts_password_hash_length CHECK (octet_length(password_hash) = 16)
+    workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    CONSTRAINT accounts_password_hash_length CHECK (octet_length(password_hash) = 16),
+    CONSTRAINT accounts_unique UNIQUE (account_name, workgroup)
 );
+
+CREATE TABLE connections (
+    workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
+    share_name TEXT NOT NULL REFERENCES shares(share_name) ON DELETE CASCADE,
+    app_key BYTEA,
+    CONSTRAINT connections_unique UNIQUE (workgroup, share_name),
+    CONSTRAINT connections_app_key_length CHECK (app_key IS NULL OR octet_length(app_key) = 64)
+);
+CREATE INDEX idx_connections_workgroup ON connections (workgroup);
+CREATE INDEX idx_connections_share ON connections (share_name);
 
 CREATE TABLE policies (
     share_name TEXT NOT NULL,
     account INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    workgroup INT NOT NULL,
     read_access BOOLEAN NOT NULL,
     write_access BOOLEAN NOT NULL,
     delete_access BOOLEAN NOT NULL,
     execute_access BOOLEAN NOT NULL,
     CONSTRAINT policies_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
+    CONSTRAINT policies_connection_fk FOREIGN KEY (workgroup, share_name) REFERENCES connections(workgroup, share_name) ON DELETE CASCADE,
     CONSTRAINT share_account UNIQUE (share_name, account)
 );
 CREATE INDEX idx_policies_account ON policies (account);
@@ -43,15 +65,16 @@ CREATE TABLE directories (
     name TEXT NOT NULL,
     full_path TEXT NOT NULL,
     account INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
     private BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     modified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (share_name, id),
-    CONSTRAINT directories_id_unique UNIQUE (id),
-    CONSTRAINT directories_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
-    CONSTRAINT directories_parent_fk FOREIGN KEY (share_name, parent_id) REFERENCES directories(share_name, id) ON DELETE CASCADE,
-    CONSTRAINT directories_unique_path UNIQUE (share_name, full_path),
-    CONSTRAINT directories_unique_entry UNIQUE (share_name, parent_id, name)
+    UNIQUE (id),
+    FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
+    FOREIGN KEY (share_name, parent_id) REFERENCES directories(share_name, id) ON DELETE CASCADE,
+    UNIQUE (share_name, full_path),
+    UNIQUE (share_name, parent_id, name)
 );
 
 CREATE TABLE objects (
@@ -62,11 +85,12 @@ CREATE TABLE objects (
     full_path TEXT NOT NULL,
     size BIGINT NOT NULL DEFAULT 0,
     account INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     modified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     temporary BOOLEAN NOT NULL DEFAULT FALSE,
-    CONSTRAINT objects_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
-    CONSTRAINT objects_directory_fk FOREIGN KEY (share_name, directory_id) REFERENCES directories(share_name, id) ON DELETE CASCADE
+    FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
+    FOREIGN KEY (share_name, directory_id) REFERENCES directories(share_name, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_directories_lookup_path ON directories (share_name, full_path);

@@ -5,7 +5,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
@@ -21,6 +20,7 @@ import (
 	"github.com/mike76-dev/sombrero/kdf"
 	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
+	"lukechampine.com/frand"
 )
 
 const (
@@ -66,7 +66,7 @@ func (s *server) registerSession(connection *connection, req smb2.SessionSetupRe
 	var found bool
 	if req.Header().SessionID() == 0 { // A new session
 		sid := make([]byte, 8)
-		rand.Read(sid)
+		frand.Read(sid)
 		ss = &session{
 			sessionID:        binary.LittleEndian.Uint64(sid),
 			connection:       connection,
@@ -349,7 +349,7 @@ func (ss *session) encrypt(buf []byte) []byte {
 		return nil
 	}
 	nonce := make([]byte, encrypter.NonceSize())
-	rand.Read(nonce)
+	frand.Read(nonce)
 	output := smb2.Header(make([]byte, smb2.SMB2TransformHeaderSize+len(buf)+16))
 	output.SetProtocolID(smb2.PROTOCOL_SMB2_ENCRYPTED)
 	output.SetNonce(nonce)

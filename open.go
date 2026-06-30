@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"log"
@@ -22,6 +21,7 @@ import (
 	"github.com/oiweiwei/go-msrpc/msrpc/lsat/lsarpc/v0"
 	"go.sia.tech/renterd/v2/api"
 	"golang.org/x/crypto/blake2b"
+	"lukechampine.com/frand"
 )
 
 var (
@@ -164,7 +164,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 	}
 
 	fid := make([]byte, 16)
-	rand.Read(fid)
+	frand.Read(fid)
 	op := &open{
 		handle:         binary.LittleEndian.Uint64(id[:8]),
 		fileID:         binary.LittleEndian.Uint64(fid[:8]),
@@ -252,8 +252,7 @@ func (op *open) queryDirectory(acc stores.Account, pattern string) error {
 		return errNoDirectory
 	}
 
-	share := op.treeConnect.share
-	ois, err := share.client.List(op.ctx, acc, op.pathName+"/")
+	ois, err := op.treeConnect.client.List(op.ctx, acc, op.pathName+"/")
 	if err != nil {
 		return err
 	}
@@ -439,7 +438,7 @@ func (op *open) newLSAFrame(ctx ntlm.SecurityContext) *rpc.Frame {
 	defer op.mu.Unlock()
 
 	id := make([]byte, 16)
-	rand.Read(id)
+	frand.Read(id)
 	guid, _ := dtyp.GUIDFromBytes(id)
 	frame := &rpc.Frame{
 		Handle: lsarpc.Handle{
@@ -456,7 +455,7 @@ func (op *open) newLSAFrame(ctx ntlm.SecurityContext) *rpc.Frame {
 // checkForChanges monitors if any significant changes have occurred in the specified directory.
 // Significant changes include: file names, sizes, modify times, or contents.
 func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, acc stores.Account, stopChan chan struct{}) {
-	ois, err := op.treeConnect.share.client.List(op.ctx, acc, op.pathName)
+	ois, err := op.treeConnect.client.List(op.ctx, acc, op.pathName)
 	if err != nil {
 		return
 	}
@@ -494,7 +493,7 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, acc stores.Account
 		case <-time.After(15 * time.Second): // Check every 15 seconds
 		}
 
-		ois, err := op.treeConnect.share.client.List(op.ctx, acc, op.pathName)
+		ois, err := op.treeConnect.client.List(op.ctx, acc, op.pathName)
 		if err != nil {
 			continue
 		}
@@ -571,7 +570,7 @@ func (op *open) getResumeKey() []byte {
 func (op *open) getObjectID() []byte {
 	id := make([]byte, 64)
 	copy(id[:16], op.resumeKey[:16])
-	binary.LittleEndian.PutUint64(id[16:24], op.treeConnect.share.volumeID)
+	binary.LittleEndian.PutUint64(id[16:24], op.treeConnect.volumeID)
 	copy(id[32:48], op.resumeKey[:16])
 	return id
 }
@@ -589,7 +588,7 @@ func (op *open) read(offset, length uint64) []byte {
 
 	readData := func(acc stores.Account, o, l uint64) ([]byte, error) {
 		var buf bytes.Buffer
-		err := op.treeConnect.share.client.Read(op.ctx, acc, path, o, l, &buf)
+		err := op.treeConnect.client.Read(op.ctx, acc, path, o, l, &buf)
 		if err != nil {
 			return nil, err
 		}
@@ -671,7 +670,7 @@ func (op *open) startUpload() error {
 		return err
 	}
 
-	id, err := op.treeConnect.share.client.StartUpload(op.ctx, acc, op.pathName)
+	id, err := op.treeConnect.client.StartUpload(op.ctx, acc, op.pathName)
 	if err != nil {
 		return err
 	}
@@ -681,7 +680,7 @@ func (op *open) startUpload() error {
 		pending:    make(map[uint64]*uploadChunk),
 		nextOffset: 0,
 		bufOffset:  0,
-		maxLength:  op.treeConnect.share.maxUploadSize,
+		maxLength:  op.treeConnect.maxUploadSize,
 	}
 
 	return nil
@@ -738,7 +737,7 @@ func (op *open) write(offset uint64, data []byte) error {
 		partOffset := u.bufOffset
 
 		u.partCount++
-		eTag, err := op.treeConnect.share.client.Write(
+		eTag, err := op.treeConnect.client.Write(
 			op.ctx,
 			bytes.NewReader(sector),
 			op.pathName,
@@ -802,7 +801,7 @@ func (op *open) flush() error {
 		u.partCount++
 		partOffset := u.bufOffset
 		partSize := uint64(len(u.buf))
-		eTag, err := op.treeConnect.share.client.Write(
+		eTag, err := op.treeConnect.client.Write(
 			op.ctx,
 			bytes.NewReader(u.buf),
 			op.pathName,
@@ -828,7 +827,7 @@ func (op *open) flush() error {
 	finalSize := u.totalSize
 	u.mu.Unlock()
 
-	if err := op.treeConnect.share.client.FinishUpload(op.ctx, op.pathName, uploadID, parts); err != nil {
+	if err := op.treeConnect.client.FinishUpload(op.ctx, op.pathName, uploadID, parts); err != nil {
 		return err
 	}
 
@@ -863,5 +862,5 @@ func (op *open) cancelUpload() {
 	uploadID := u.uploadID
 	u.mu.Unlock()
 
-	_ = op.treeConnect.share.client.AbortUpload(op.ctx, op.pathName, uploadID)
+	_ = op.treeConnect.client.AbortUpload(op.ctx, op.pathName, uploadID)
 }

@@ -52,11 +52,16 @@ func (db *Database) GetAccessRights(share Share, acc Account) (ar AccessRights, 
 }
 
 // SetAccessRights stores the access policy in the database.
+// Returns an error if no connection exists between the account's workgroup and the share.
 func (db *Database) SetAccessRights(ar AccessRights) error {
+	sh, err := db.GetShare(ar.ShareName)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve share: %w", err)
+	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
-			INSERT INTO policies (share_name, account, read_access, write_access, delete_access, execute_access)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO policies (share_name, account, workgroup, read_access, write_access, delete_access, execute_access)
+			VALUES ($1, $2, (SELECT workgroup FROM accounts WHERE id = $2), $3, $4, $5, $6)
 			ON CONFLICT (share_name, account) DO UPDATE
 			SET read_access = EXCLUDED.read_access,
 				write_access = EXCLUDED.write_access,
@@ -66,15 +71,11 @@ func (db *Database) SetAccessRights(ar AccessRights) error {
 		_, err := tx.Exec(ctx, query, ar.ShareName, ar.AccountID, ar.ReadAccess, ar.WriteAccess, ar.DeleteAccess, ar.ExecuteAccess)
 		if err != nil {
 			return fmt.Errorf("failed to update policy: %w", err)
-		} else {
-			sh, err := db.GetShare(ar.ShareName)
-			if err != nil {
-				return fmt.Errorf("failed to retrieve share: %w", err)
-			} else if err := db.shares.UpdateAccessRights(sh, ar); err != nil {
-				return fmt.Errorf("failed to update access rights: %w", err)
-			}
-			return nil
 		}
+		if err := db.shares.UpdateAccessRights(sh, ar); err != nil {
+			return fmt.Errorf("failed to update access rights: %w", err)
+		}
+		return nil
 	})
 }
 

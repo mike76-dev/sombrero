@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
@@ -23,6 +22,7 @@ import (
 	"github.com/mike76-dev/sombrero/utils"
 	"github.com/oiweiwei/go-msrpc/msrpc/lsat/lsarpc/v0"
 	"github.com/oiweiwei/go-msrpc/ndr"
+	"lukechampine.com/frand"
 )
 
 const (
@@ -114,7 +114,7 @@ func (c *connection) acceptRequest(msg []byte) error {
 
 	// Assign a random cancel ID.
 	cid := make([]byte, 8)
-	rand.Read(cid)
+	frand.Read(cid)
 
 	// Check for encryption.
 	var tsid uint64
@@ -410,7 +410,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 			var blobs [][]byte
 			var salt [32]byte
-			rand.Read(salt[:])
+			frand.Read(salt[:])
 			blobs = append(blobs, smb2.PreauthIntegrityCapabilities(salt[:]))
 
 			if ciphers != nil {
@@ -791,7 +791,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				return resp, ss, nil
 			}
 
-			info, err = tc.share.client.Object(ctx, acc, path)
+			info, err = tc.client.Object(ctx, acc, path)
 			if err != nil && errors.Is(err, context.DeadlineExceeded) {
 				cancel()
 				resp := smb2.NewErrorResponse(cr, smb2.STATUS_IO_TIMEOUT, 0, nil)
@@ -842,7 +842,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					result = smb2.FILE_CREATED
 					if cr.CreateOptions()&smb2.FILE_DIRECTORY_FILE > 0 { // Make a new directory
 						info.Key += "/"
-						if err := tc.share.client.MakeDirectory(ctx, acc, path); err != nil {
+						if err := tc.client.MakeDirectory(ctx, acc, path); err != nil {
 							cancel()
 							if errors.Is(err, stores.ErrDirectoryExists) {
 								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
@@ -873,7 +873,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 						result = smb2.FILE_CREATED
 						if cr.CreateOptions()&smb2.FILE_DIRECTORY_FILE > 0 { // Make a new directory
 							info.Key += "/"
-							if err := tc.share.client.MakeDirectory(ctx, acc, path); err != nil {
+							if err := tc.client.MakeDirectory(ctx, acc, path); err != nil {
 								cancel()
 								if errors.Is(err, stores.ErrDirectoryExists) {
 									resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
@@ -920,7 +920,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 						result = smb2.FILE_CREATED
 						if cr.CreateOptions()&smb2.FILE_DIRECTORY_FILE > 0 { // Make a new directory
 							info.Key += "/"
-							if err := tc.share.client.MakeDirectory(ctx, acc, path); err != nil {
+							if err := tc.client.MakeDirectory(ctx, acc, path); err != nil {
 								cancel()
 								if errors.Is(err, stores.ErrDirectoryExists) {
 									resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
@@ -979,7 +979,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
 				respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, op.lastModified, op.grantedAccess)
 			case smb2.CREATE_QUERY_ON_DISK_ID:
-				respContexts[id] = smb2.HandleCreateQueryOnDiskID(op.handle, tc.share.volumeID)
+				respContexts[id] = smb2.HandleCreateQueryOnDiskID(op.handle, tc.volumeID)
 			case smb2.CREATE_ALLOCATION_SIZE: // The file is about to be uploaded, we just got its size
 				op.mu.Lock()
 				op.allocated = binary.LittleEndian.Uint64(ctx)
@@ -1072,7 +1072,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			tc.mu.Lock()
 			delete(tc.persistedOpens, path)
 			tc.mu.Unlock()
-			if err := tc.share.client.Delete(op.ctx, acc, path, attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0); err != nil {
+			if err := tc.client.Delete(op.ctx, acc, path, attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0); err != nil {
 				log.Printf("Error deleting object %s: %v", path, err)
 			}
 		}
@@ -1248,7 +1248,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// to drop the connection. We send an interim response and process the request asynchronously
 		// to prevent that.
 		aid := make([]byte, 8)
-		rand.Read(aid)
+		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
 		c.mu.Lock()
 		c.asyncCommandList[asyncID] = req
@@ -1388,7 +1388,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// to drop the connection. We send an interim response and process the request asynchronously
 		// to prevent that.
 		aid := make([]byte, 8)
-		rand.Read(aid)
+		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
 		c.mu.Lock()
 		c.asyncCommandList[asyncID] = req
@@ -1886,7 +1886,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				return resp, ss, nil
 			}
 
-			dir, parentDir, err := tc.share.client.Parents(op.ctx, acc, searchPath)
+			dir, parentDir, err := tc.client.Parents(op.ctx, acc, searchPath)
 			if err != nil {
 				log.Printf("Error getting parent directories of path %s: %v", searchPath, err)
 				resp := smb2.NewErrorResponse(qdr, smb2.STATUS_BAD_NETWORK_NAME, 0, nil)
@@ -1965,7 +1965,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		// Put the request in the async command list.
 		aid := make([]byte, 8)
-		rand.Read(aid)
+		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
 		req.Header().SetAsyncID(asyncID)
 		req.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
@@ -2069,11 +2069,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		case smb2.INFO_FILESYSTEM:
 			switch qir.FileInfoClass() {
 			case smb2.FileFsVolumeInformation:
-				info = smb2.FileFsVolumeInfo(tc.share.createdAt, tc.share.serialNo(), tc.share.name)
+				info = smb2.FileFsVolumeInfo(tc.createdAt, uint32(tc.volumeID), tc.share.name)
 			case smb2.FileFsAttributeInformation:
 				info = smb2.FileFsAttributeInfo(tc.share.backend)
 			case smb2.FileFsSizeInformation:
-				si, err := tc.share.client.Storage(op.ctx)
+				si, err := tc.client.Storage(op.ctx)
 				if err != nil {
 					log.Println("Error getting storage info:", err)
 				} else {
@@ -2081,7 +2081,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				}
 			case smb2.FileFsFullSizeInformation:
 				// Same as above.
-				si, err := tc.share.client.Storage(op.ctx)
+				si, err := tc.client.Storage(op.ctx)
 				if err != nil {
 					log.Println("Error getting storage info:", err)
 				} else {
@@ -2090,7 +2090,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			case smb2.FileFsDeviceInformation:
 				info = smb2.FileFsDeviceInfo()
 			case smb2.FileFsObjectIdInformation:
-				info = smb2.FileFsObjectIDInfo(tc.share.volumeID)
+				info = smb2.FileFsObjectIDInfo(tc.volumeID)
 			default: // Other classes are not supported yet
 				resp := smb2.NewErrorResponse(qir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
 				return resp, ss, nil
@@ -2242,7 +2242,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 				if sir.Buffer()[0] == 1 { // Set the delete flag
 					if attr&smb2.FILE_ATTRIBUTE_DIRECTORY != 0 {
-						empty, err := tc.share.client.IsEmpty(op.ctx, acc, path+"/")
+						empty, err := tc.client.IsEmpty(op.ctx, acc, path+"/")
 						if err != nil {
 							log.Printf("Error listing directory contents on %s: %v", path, err)
 							resp := smb2.NewErrorResponse(sir, smb2.STATUS_NETWORK_NAME_DELETED, 0, nil)
@@ -2305,7 +2305,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					op.mu.Unlock()
 					tc.mu.Unlock()
 				} else {
-					if err := tc.share.client.Rename(
+					if err := tc.client.Rename(
 						op.ctx,
 						acc,
 						path,

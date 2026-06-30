@@ -90,11 +90,11 @@ database:
   database: <DATABASE>     # the name of the PostgreSQL database from the previous section
   sslMode: disable         # the SSL mode of the PostgreSQL server
 indexd:
-  appName: Sombrero                       # the name of the app, unique to the `indexd` node being connected to
-  description: Sombrero SMB server        # description of the app
-  logoURL: https://example.com/logo.png   # URL of the app logo, can be left as it is
-  serviceURL: https://example.com/service # URL of the app itself, can be left as it is (Sombrero has no service page)
-  seedPhrase: ''                          # if omitted, the server will generate a new seed phrase and put it here
+  appName: Sombrero                                                              # the name of the app, unique to the `indexd` node being connected to
+  description: Sombrero SMB server                                               # description of the app
+  logoURL: https://raw.githubusercontent.com/mike76-dev/sombrero/master/logo.png # URL of the app logo, can be left as it is
+  serviceURL: https://github.com/mike76-dev/sombrero                             # URL of the app itself, can be left as it is (Sombrero has no service page)
+  seedPhrase: ''                                                                 # if omitted, the server will generate a new seed phrase and put it here
 ```
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash
@@ -103,22 +103,65 @@ sudo sombrero --dir=<PATH_TO_SOMBRERO.YML>
 The superuser access is required because of the port 445 that the server is listening on.
 
 Now, you need to register shares and add user accounts that will be accessing these shares.
+The typical workflow is:
 
-To register a share, run (for example):
+### 1. Create a workgroup
+A workgroup can contain an arbitrary number of user accounts. Each workgroup can connect to a remote share and have its own storage quota on that share.
 ```Bash
-curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/share" -d '{"name":"shared","type":"renterd","serverName":"http://127.0.0.1:9980","password":"1234","bucket":"default","remark":"renterd"}'
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/workgroup"
 ```
 or
 ```Bash
-curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/share" -d '{"name":"shared","type":"indexd","serverName":"https://sia.storage","remark":"Sia Foundation indexer","dataShards":10,"parityShards":20}'
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/workgroup" -d '{"name":"home"}'
 ```
-To register a new account, run (for example):
+The difference between the two calls is that the second call allows creating a named workgroup.
+This is only useful when you a running a private server and know for sure that no other workgroup with the same name will ever be created.
+
+Example of the output:
+```Bash
+{"uuid":"8303eeb8-f30e-4607-9eb7-875df2c5bd52"}
+```
+### 2. Add user account(s) to the workgroup
+```Bash
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/account" -d '{"username":"test","password":"123","workgroup":"8303eeb8-f30e-4607-9eb7-875df2c5bd52"}'
+```
+or
 ```Bash
 curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/account" -d '{"username":"test","password":"123","workgroup":"home"}'
 ```
-To grant the account access to the share, run:
+### 3. Register a share
 ```Bash
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/share/shared/policy?username=test&workgroup=home&read=true&write=true&delete=true&execute=true"
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/share" -d '{"name":"shared-renterd","type":"renterd","serverName":"http://127.0.0.1:9980","password":"1234","bucket":"default","remark":"renterd"}'
+```
+or
+```Bash
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/share" -d '{"name":"shared-indexd","type":"indexd","serverName":"https://sia.storage","remark":"Sia Foundation indexer","dataShards":10,"parityShards":20}'
+```
+### 4. Connect the workgroup to the share
+In case of a `renterd` share, simply call
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/connect/home/shared-renterd"
+```
+Connecting to an `indexd` share is slightly more involved. First, request a connection:
+```Bash
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
+```
+Example of the output:
+```Bash
+{"url":"https://sia.storage/auth/connect/d10f2a960d7dfc947248f58758619b74"}
+```
+After visiting the URL provided and accepting the connection, run
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
+```
+Example of the output:
+```Bash
+{"appKey":"03a2aab52b79f674354af35b0030cd0cd45b51f53a1a75795a58c85844767b3d3ac38242c05637cac5b8b7fbcea55d29826845fdfc0ef19894d7640438f43a22"}
+```
+### 5. Grant access to the share
+To grant an account access to the share, run:
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/share/shared-indexd/policy?username=test&workgroup=8303eeb8-f30e-4607-9eb7-875df2c5bd52&read=true&write=true&delete=true&execute=true"
 ```
 
 ## Security Considerations
@@ -200,7 +243,7 @@ export TEST_INIT_SQL=../init.sql
 ```
 3. Run the tests
 ```Bash
-go test ./client -v
+go test ./... -v
 ```
 
 ## Bug Reporting

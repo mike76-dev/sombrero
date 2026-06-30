@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.sia.tech/core/types"
 )
 
 // Database represents a PostgreSQL-backed store.
@@ -22,6 +23,8 @@ type Shares interface {
 	RemoveShare(sh Share) error
 	UpdateAccessRights(ss Share, ar AccessRights) error
 	RemoveAccess(acc Account)
+	AddConnection(wg Workgroup, share Share, appKey types.PrivateKey) error
+	RemoveConnection(wg Workgroup, share Share) error
 }
 
 // Close closes the underlying database connection.

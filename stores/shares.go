@@ -8,21 +8,19 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"go.sia.tech/core/types"
 )
 
 // Share represents a renterd bucket, which is mounted as a remote share.
 type Share struct {
-	Name         string           `json:"name"`
-	Type         string           `json:"type"`
-	ServerName   string           `json:"serverName"`
-	Password     string           `json:"password,omitempty"`
-	Bucket       string           `json:"bucket,omitempty"`
-	Remark       string           `json:"remark,omitempty"`
-	CreatedAt    time.Time        `json:"createdAt,omitempty"`
-	DataShards   uint8            `json:"dataShards,omitempty"`
-	ParityShards uint8            `json:"parityShards,omitempty"`
-	AppKey       types.PrivateKey `json:"-"`
+	Name         string    `json:"name"`
+	Type         string    `json:"type"`
+	ServerName   string    `json:"serverName"`
+	Password     string    `json:"password,omitempty"`
+	Bucket       string    `json:"bucket,omitempty"`
+	Remark       string    `json:"remark,omitempty"`
+	CreatedAt    time.Time `json:"createdAt,omitempty"`
+	DataShards   uint8     `json:"dataShards,omitempty"`
+	ParityShards uint8     `json:"parityShards,omitempty"`
 }
 
 // RegisterShare registers a new share in the database.
@@ -38,12 +36,11 @@ func (db *Database) RegisterShare(s Share) error {
 				remark,
 				created_at,
 				data_shards,
-				parity_shards,
-				app_key
+				parity_shards
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		`
-		_, err := tx.Exec(ctx, query, s.Name, s.Type, s.ServerName, s.Password, s.Bucket, s.Remark, time.Now(), s.DataShards, s.ParityShards, s.AppKey)
+		_, err := tx.Exec(ctx, query, s.Name, s.Type, s.ServerName, s.Password, s.Bucket, s.Remark, time.Now(), s.DataShards, s.ParityShards)
 		if err != nil {
 			return fmt.Errorf("failed to register share: %w", err)
 		} else if err := db.shares.RegisterShare(s); err != nil {
@@ -100,16 +97,14 @@ func (db *Database) GetShare(name string) (s Share, err error) {
 				remark,
 				created_at,
 				data_shards,
-				parity_shards,
-				app_key
+				parity_shards
 			FROM shares
 			WHERE share_name = $1
 		`
 		var backend, server, password, bucket, remark string
 		var created time.Time
 		var dataShards, parityShards int
-		var appKey types.PrivateKey
-		err = tx.QueryRow(ctx, query, name).Scan(&backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards, &appKey)
+		err = tx.QueryRow(ctx, query, name).Scan(&backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		} else if err != nil {
@@ -125,7 +120,6 @@ func (db *Database) GetShare(name string) (s Share, err error) {
 			CreatedAt:    created,
 			DataShards:   uint8(dataShards),
 			ParityShards: uint8(parityShards),
-			AppKey:       appKey,
 		}
 		return nil
 	})
@@ -145,8 +139,7 @@ func (db *Database) GetShares(acc Account) (shares []Share, err error) {
 				s.remark,
 				s.created_at,
 				s.data_shards,
-				s.parity_shards,
-				s.app_key
+				s.parity_shards
 			FROM shares AS s
 			JOIN policies AS p
 			ON p.share_name = s.share_name
@@ -165,8 +158,7 @@ func (db *Database) GetShares(acc Account) (shares []Share, err error) {
 			var name, backend, server, password, bucket, remark string
 			var created time.Time
 			var dataShards, parityShards int
-			var appKey types.PrivateKey
-			if err := rows.Scan(&name, &backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards, &appKey); err != nil {
+			if err := rows.Scan(&name, &backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards); err != nil {
 				return fmt.Errorf("failed to retrieve share: %w", err)
 			}
 			shares = append(shares, Share{
@@ -179,7 +171,6 @@ func (db *Database) GetShares(acc Account) (shares []Share, err error) {
 				CreatedAt:    created,
 				DataShards:   uint8(dataShards),
 				ParityShards: uint8(parityShards),
-				AppKey:       appKey,
 			})
 		}
 		return nil

@@ -2,13 +2,16 @@ package api
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/julienschmidt/httprouter"
 	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
@@ -30,6 +33,11 @@ type Store interface {
 	FindAccounts(workgroup string) (accs []stores.Account, err error)
 	RemoveAccounts(workgroup string) error
 
+	AddWorkgroup(wg stores.Workgroup) error
+	FindWorkgroup(u uuid.UUID) (stores.Workgroup, error)
+	FindWorkgroupByName(name string) (stores.Workgroup, error)
+	RemoveWorkgroup(wg stores.Workgroup) error
+
 	GetAccessRights(share stores.Share, acc stores.Account) (ar stores.AccessRights, err error)
 	SetAccessRights(ar stores.AccessRights) error
 	RemoveAccessRights(share stores.Share, acc stores.Account) error
@@ -40,6 +48,9 @@ type Store interface {
 	GetShare(name string) (s stores.Share, err error)
 	GetShares(acc stores.Account) (shares []stores.Share, err error)
 	GetAccounts(sh stores.Share) (ars []stores.AccessRights, err error)
+
+	AddConnection(wg stores.Workgroup, share stores.Share, appKey types.PrivateKey) error
+	RemoveConnection(wg stores.Workgroup, share stores.Share) error
 }
 
 // IsBannedResponse is the response type for GET /banned request.
@@ -48,13 +59,32 @@ type IsBannedResponse struct {
 	Reason string `json:"reason"`
 }
 
+// WorkgroupResponse is the response type for POST /workgroup request.
+type WorkgroupResponse struct {
+	UUID uuid.UUID `json:"uuid"`
+	Name string    `json:"name,omitempty"`
+}
+
+// ConnectRequestResponse is the response type for POST /connect/request/:workgroup/:share.
+type ConnectRequestResponse struct {
+	URL string `json:"url"`
+}
+
+// ConnectResponse is the response type for PUT /connect/:workgroup/:share when
+// completing a first-time registration. AppKey is the derived key the caller
+// should persist for future reconnections.
+type ConnectResponse struct {
+	AppKey string `json:"appKey"`
+}
+
 // API represents the API call handler.
 type API struct {
-	router httprouter.Router
-	store  Store
-	cfg    stores.IndexdConfig
-	ctx    context.Context
-	rl     *ratelimiter
+	router          httprouter.Router
+	store           Store
+	cfg             stores.IndexdConfig
+	ctx             context.Context
+	rl              *ratelimiter
+	pendingBuilders sync.Map // key: "workgroupUUID/shareName" → *sdk.Builder
 }
 
 // NewAPI returns an initialized API object.
@@ -91,8 +121,8 @@ func (api *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (api *API) buildHTTPRoutes() {
 	router := httprouter.New()
 
-	router.GET("/banned/:host", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-		api.bannedHandlerGET(w, req, ps)
+	router.GET("/ban/:host", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.banHandlerGET(w, req, ps)
 	})
 
 	router.PUT("/ban/:host", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -163,6 +193,30 @@ func (api *API) buildHTTPRoutes() {
 		api.accountPolicyHandlerDELETE(w, req, ps)
 	})
 
+	router.POST("/workgroup", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.workgroupHandlerPOST(w, req, ps)
+	})
+
+	router.GET("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.workgroupHandlerGET(w, req, ps)
+	})
+
+	router.DELETE("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.workgroupHandlerDELETE(w, req, ps)
+	})
+
+	router.POST("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.connectHandlerPOST(w, req, ps)
+	})
+
+	router.PUT("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.connectHandlerPUT(w, req, ps)
+	})
+
+	router.DELETE("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.connectHandlerDELETE(w, req, ps)
+	})
+
 	api.router = *router
 }
 
@@ -190,8 +244,8 @@ func writeSuccess(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// bannedHandlerGET handles the GET /banned/:host calls.
-func (api *API) bannedHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+// banHandlerGET handles the GET /ban/:host calls.
+func (api *API) banHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
 		return
@@ -274,12 +328,15 @@ func (api *API) accountHandlerGET(w http.ResponseWriter, req *http.Request, _ ht
 	idValue := req.FormValue("id")
 	if idValue == "" {
 		username := strings.ToLower(req.FormValue("username"))
-		workgroup := strings.ToLower(req.FormValue("workgroup"))
 		if username == "" {
 			writeError(w, "username cannot be empty", http.StatusBadRequest)
 			return
 		}
-		acc, err = api.store.FindAccount(username, workgroup)
+		wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+		if !ok {
+			return
+		}
+		acc, err = api.store.FindAccount(username, wg.UUID.String())
 		if err != nil {
 			log.Printf("failed to find account: %v", err)
 			writeError(w, "internal error", http.StatusInternalServerError)
@@ -315,7 +372,12 @@ func (api *API) accountHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 		return
 	}
 	acc.Username = strings.ToLower(acc.Username)
-	acc.Workgroup = strings.ToLower(acc.Workgroup)
+
+	wg, ok := api.resolveWorkgroup(w, acc.Workgroup)
+	if !ok {
+		return
+	}
+	acc.Workgroup = wg.UUID.String()
 
 	if err := api.store.AddAccount(acc); err != nil {
 		log.Printf("failed to add account: %v", err)
@@ -334,13 +396,17 @@ func (api *API) accountHandlerDELETE(w http.ResponseWriter, req *http.Request, _
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	if err := api.store.RemoveAccount(username, workgroup); err != nil {
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	if err := api.store.RemoveAccount(username, wg.UUID.String()); err != nil {
 		log.Printf("failed to remove account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
@@ -356,8 +422,12 @@ func (api *API) accountsHandlerGET(w http.ResponseWriter, req *http.Request, _ h
 		return
 	}
 
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
-	accs, err := api.store.FindAccounts(workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	accs, err := api.store.FindAccounts(wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find accounts: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -374,8 +444,12 @@ func (api *API) accountsHandlerDELETE(w http.ResponseWriter, req *http.Request, 
 		return
 	}
 
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
-	if err := api.store.RemoveAccounts(workgroup); err != nil {
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	if err := api.store.RemoveAccounts(wg.UUID.String()); err != nil {
 		log.Printf("failed to remove accounts: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
@@ -403,38 +477,6 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 		return
 	}
 
-	if share.Type == "indexd" {
-		builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
-			ID:          types.HashBytes(append([]byte(api.cfg.Name), []byte(api.cfg.Description)...)),
-			Name:        api.cfg.Name,
-			Description: api.cfg.Description,
-			LogoURL:     api.cfg.LogoURL,
-			ServiceURL:  api.cfg.ServiceURL,
-		})
-		respURL, err := builder.RequestConnection(api.ctx)
-		if err != nil {
-			log.Printf("failed to request app connection: %v", err)
-			writeError(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		fmt.Println("Please approve the app connection by visiting the following URL:", respURL)
-		err = builder.WaitForApproval(api.ctx)
-		if err != nil {
-			log.Printf("failed to wait for app approval: %v", err)
-			writeError(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		client, err := builder.Register(api.ctx, api.cfg.SeedPhrase)
-		if err != nil {
-			log.Printf("failed to register app: %v", err)
-			writeError(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		share.AppKey = make(types.PrivateKey, 64)
-		copy(share.AppKey, client.AppKey()[:])
-		log.Print("app registered successfully")
-	}
-
 	if err := api.store.RegisterShare(share); err != nil {
 		log.Printf("failed to register share: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -444,7 +486,7 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 	writeSuccess(w)
 }
 
-// shareHandlerGET handles the GET /share/:idorname calls.
+// shareHandlerGET handles the GET /share/:name calls.
 func (api *API) shareHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
@@ -468,7 +510,7 @@ func (api *API) shareHandlerGET(w http.ResponseWriter, req *http.Request, ps htt
 	writeJSON(w, share)
 }
 
-// shareHandlerDELETE handles the DELETE /share/:idorname calls.
+// shareHandlerDELETE handles the DELETE /share/:name calls.
 func (api *API) shareHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
@@ -490,7 +532,7 @@ func (api *API) shareHandlerDELETE(w http.ResponseWriter, req *http.Request, ps 
 	writeSuccess(w)
 }
 
-// shareAccountsHandlerGET handles the GET /share/:idorname/accounts calls.
+// shareAccountsHandlerGET handles the GET /share/:name/accounts calls.
 func (api *API) shareAccountsHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
@@ -520,7 +562,7 @@ func (api *API) shareAccountsHandlerGET(w http.ResponseWriter, req *http.Request
 	writeJSON(w, ars)
 }
 
-// policyHandlerGET handles the GET /share/:idorname/policy calls.
+// policyHandlerGET handles the GET /share/:name/policy calls.
 func (api *API) policyHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
@@ -534,13 +576,17 @@ func (api *API) policyHandlerGET(w http.ResponseWriter, req *http.Request, ps ht
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -564,7 +610,7 @@ func (api *API) policyHandlerGET(w http.ResponseWriter, req *http.Request, ps ht
 	writeJSON(w, ar)
 }
 
-// policyHandlerPUT handles the PUT /share/:idorname/policy calls.
+// policyHandlerPUT handles the PUT /share/:name/policy calls.
 func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
@@ -588,9 +634,13 @@ func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps ht
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
 		return
 	}
 
@@ -603,7 +653,7 @@ func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps ht
 	ea := strings.ToLower(req.FormValue("execute"))
 	executeAccess := ea == "true"
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -626,7 +676,7 @@ func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps ht
 	writeSuccess(w)
 }
 
-// policyHandlerDELETE handles the DELETE /share/:idorname/policy calls.
+// policyHandlerDELETE handles the DELETE /share/:name/policy calls.
 func (api *API) policyHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
 		writeError(w, "too many requests", http.StatusTooManyRequests)
@@ -640,13 +690,17 @@ func (api *API) policyHandlerDELETE(w http.ResponseWriter, req *http.Request, ps
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -677,13 +731,17 @@ func (api *API) accountSharesHandlerGET(w http.ResponseWriter, req *http.Request
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -712,13 +770,17 @@ func (api *API) accountPolicyHandlerDELETE(w http.ResponseWriter, req *http.Requ
 	}
 
 	username := strings.ToLower(req.FormValue("username"))
-	workgroup := strings.ToLower(req.FormValue("workgroup"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, workgroup)
+	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
+	if !ok {
+		return
+	}
+
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
 	if err != nil {
 		log.Printf("failed to find account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -727,6 +789,291 @@ func (api *API) accountPolicyHandlerDELETE(w http.ResponseWriter, req *http.Requ
 
 	if err := api.store.ClearAccessRights(acc); err != nil {
 		log.Printf("failed to clear policies: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeSuccess(w)
+}
+
+// resolveWorkgroup looks up a workgroup by UUID or name.
+// If param parses as a UUID it uses FindWorkgroup; otherwise FindWorkgroupByName.
+// On failure it writes the appropriate error response and returns false.
+func (api *API) resolveWorkgroup(w http.ResponseWriter, param string) (stores.Workgroup, bool) {
+	if u, err := uuid.Parse(param); err == nil {
+		wg, err := api.store.FindWorkgroup(u)
+		if err != nil {
+			log.Printf("failed to find workgroup: %v", err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return stores.Workgroup{}, false
+		}
+		if wg.ID == 0 {
+			writeError(w, "workgroup not found", http.StatusNotFound)
+			return stores.Workgroup{}, false
+		}
+		return wg, true
+	}
+	wg, err := api.store.FindWorkgroupByName(param)
+	if err != nil {
+		log.Printf("failed to find workgroup: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return stores.Workgroup{}, false
+	}
+	if wg.ID == 0 {
+		writeError(w, "workgroup not found", http.StatusNotFound)
+		return stores.Workgroup{}, false
+	}
+	return wg, true
+}
+
+// workgroupHandlerPOST handles the POST /workgroup calls.
+func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	var body struct {
+		Name string `json:"name,omitempty"`
+	}
+	if req.ContentLength > 0 {
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeError(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	u := uuid.New()
+	wg := stores.Workgroup{UUID: u, Name: body.Name}
+	if err := api.store.AddWorkgroup(wg); err != nil {
+		log.Printf("failed to add workgroup: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("created new workgroup: %s", u)
+	writeJSON(w, WorkgroupResponse{UUID: u, Name: body.Name})
+}
+
+// workgroupHandlerGET handles the GET /workgroup/:id calls.
+// :id may be a UUID or a workgroup name.
+func (api *API) workgroupHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("id"))
+	if !ok {
+		return
+	}
+
+	writeJSON(w, wg)
+}
+
+// workgroupHandlerDELETE handles the DELETE /workgroup/:id calls.
+// :id may be a UUID or a workgroup name.
+func (api *API) workgroupHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("id"))
+	if !ok {
+		return
+	}
+
+	if err := api.store.RemoveWorkgroup(wg); err != nil {
+		log.Printf("failed to remove workgroup: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeSuccess(w)
+}
+
+// connectHandlerPOST handles the POST /connect/:workgroup/:share calls.
+// It initiates an indexd connection-approval flow by sending a registration request
+// to the indexer and returning the URL the admin must visit to approve it.
+// :workgroup may be a UUID or a workgroup name.
+func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("workgroup"))
+	if !ok {
+		return
+	}
+
+	share, err := api.store.GetShare(strings.ToLower(ps.ByName("share")))
+	if err != nil {
+		log.Printf("failed to find share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if share.Name == "" {
+		writeError(w, "share not found", http.StatusNotFound)
+		return
+	}
+	if share.Type != "indexd" {
+		writeError(w, "connection requests are only supported for indexd shares", http.StatusBadRequest)
+		return
+	}
+
+	builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
+		ID:          types.HashBytes(append([]byte(api.cfg.Name), []byte(api.cfg.Description)...)),
+		Name:        api.cfg.Name,
+		Description: api.cfg.Description,
+		LogoURL:     api.cfg.LogoURL,
+		ServiceURL:  api.cfg.ServiceURL,
+	})
+
+	approvalURL, err := builder.RequestConnection(req.Context())
+	if err != nil {
+		log.Printf("failed to request connection: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	pendingKey := wg.UUID.String() + "/" + share.Name
+	api.pendingBuilders.Store(pendingKey, builder)
+	go func() {
+		select {
+		case <-time.After(10 * time.Minute):
+			api.pendingBuilders.Delete(pendingKey)
+		case <-api.ctx.Done():
+		}
+	}()
+	writeJSON(w, ConnectRequestResponse{URL: approvalURL})
+}
+
+// connectHandlerPUT handles the PUT /connect/:workgroup/:share calls.
+// Three paths:
+//  1. Body with appKey (hex) — reconnect using an existing key.
+//  2. No body, indexd share, pending builder present — complete the approval flow
+//     started by POST /connect/request, derive the app key, and return it.
+//  3. No body, renterd share — no key required.
+// :workgroup may be a UUID or a workgroup name.
+func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("workgroup"))
+	if !ok {
+		return
+	}
+
+	share, err := api.store.GetShare(strings.ToLower(ps.ByName("share")))
+	if err != nil {
+		log.Printf("failed to find share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if share.Name == "" {
+		writeError(w, "share not found", http.StatusNotFound)
+		return
+	}
+
+	var body struct {
+		AppKey string `json:"appKey,omitempty"` // hex-encoded
+	}
+	if req.ContentLength > 0 {
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeError(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	var appKey types.PrivateKey
+
+	if body.AppKey != "" {
+		// Path 1: reconnect with a known app key.
+		keyBytes, err := hex.DecodeString(body.AppKey)
+		if err != nil {
+			writeError(w, "invalid app key encoding", http.StatusBadRequest)
+			return
+		}
+		appKey = types.PrivateKey(keyBytes)
+		if len(appKey) != 64 {
+			writeError(w, "indexd share requires a valid 64-byte app key", http.StatusBadRequest)
+			return
+		}
+	} else if share.Type == "indexd" {
+		// Path 2: complete a pending first-time registration.
+		pendingKey := wg.UUID.String() + "/" + share.Name
+		v, ok := api.pendingBuilders.Load(pendingKey)
+		if !ok {
+			writeError(w, "no pending connection request found; call POST /connect/request first", http.StatusBadRequest)
+			return
+		}
+		builder := v.(*sdk.Builder)
+
+		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Minute)
+		defer cancel()
+
+		if err := builder.WaitForApproval(ctx); err != nil {
+			api.pendingBuilders.Delete(pendingKey)
+			log.Printf("connection approval failed: %v", err)
+			writeError(w, "connection not approved: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		sdkInst, err := builder.Register(req.Context(), api.cfg.SeedPhrase)
+		if err != nil {
+			api.pendingBuilders.Delete(pendingKey)
+			log.Printf("failed to register app: %v", err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		api.pendingBuilders.Delete(pendingKey)
+		appKey = sdkInst.AppKey()
+	}
+	// Path 3: renterd share — appKey stays nil, AddConnection handles it.
+
+	if err := api.store.AddConnection(wg, share, appKey); err != nil {
+		log.Printf("failed to add connection: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if len(appKey) > 0 {
+		writeJSON(w, ConnectResponse{AppKey: hex.EncodeToString(appKey)})
+	} else {
+		writeSuccess(w)
+	}
+}
+
+// connectHandlerDELETE handles the DELETE /connect/:workgroup/:share calls.
+// :workgroup may be a UUID or a workgroup name.
+func (api *API) connectHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("workgroup"))
+	if !ok {
+		return
+	}
+
+	share, err := api.store.GetShare(strings.ToLower(ps.ByName("share")))
+	if err != nil {
+		log.Printf("failed to find share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if share.Name == "" {
+		writeError(w, "share not found", http.StatusNotFound)
+		return
+	}
+
+	if err := api.store.RemoveConnection(wg, share); err != nil {
+		log.Printf("failed to remove connection: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
 	}

@@ -2,7 +2,6 @@
 package rpc
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"io"
 	"log"
@@ -12,6 +11,7 @@ import (
 	"github.com/oiweiwei/go-msrpc/msrpc/dtyp"
 	"github.com/oiweiwei/go-msrpc/msrpc/lsat/lsarpc/v0"
 	"github.com/oiweiwei/go-msrpc/ndr"
+	"lukechampine.com/frand"
 )
 
 const (
@@ -85,7 +85,7 @@ func NewBindAck(callID uint32, addr string, contexts []*Context) *OutboundPacket
 	}
 
 	ag := make([]byte, 4)
-	rand.Read(ag)
+	frand.Read(ag)
 	packet := &OutboundPacket{
 		Header: NewHeader(PACKET_TYPE_BIND_ACK, PFC_FIRST_FRAG|PFC_LAST_FRAG, callID),
 		Body: &BindAck{
