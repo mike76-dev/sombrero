@@ -284,6 +284,10 @@ func TestGetShares(t *testing.T) {
 	if err := db.AddWorkgroup(Workgroup{UUID: u}); err != nil {
 		t.Fatalf("AddWorkgroup: %v", err)
 	}
+	wg, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
+	}
 	if err := db.AddAccount(Account{Username: "user1", Password: "pw", Workgroup: u.String()}); err != nil {
 		t.Fatalf("AddAccount: %v", err)
 	}
@@ -296,6 +300,14 @@ func TestGetShares(t *testing.T) {
 		if err := db.RegisterShare(Share{Name: name, Type: "renterd", ServerName: "srv"}); err != nil {
 			t.Fatalf("RegisterShare %s: %v", name, err)
 		}
+	}
+
+	shareA, err := db.GetShare("shareA")
+	if err != nil {
+		t.Fatalf("GetShare shareA: %v", err)
+	}
+	if err := db.AddConnection(wg, shareA, makeKey(t)); err != nil {
+		t.Fatalf("AddConnection: %v", err)
 	}
 
 	// Grant read access to shareA only.
@@ -429,6 +441,10 @@ func TestPolicies(t *testing.T) {
 	if err := db.AddWorkgroup(Workgroup{UUID: u}); err != nil {
 		t.Fatalf("AddWorkgroup: %v", err)
 	}
+	wg, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
+	}
 	if err := db.AddAccount(Account{Username: "puser", Password: "pw", Workgroup: u.String()}); err != nil {
 		t.Fatalf("AddAccount: %v", err)
 	}
@@ -451,6 +467,16 @@ func TestPolicies(t *testing.T) {
 	}
 	if ar.AccountID != 0 {
 		t.Fatal("GetAccessRights pre-set: expected zero value")
+	}
+
+	// SetAccessRights without a connection must be rejected.
+	if err := db.SetAccessRights(AccessRights{ShareName: share.Name, AccountID: acc.ID, ReadAccess: true}); err == nil {
+		t.Fatal("SetAccessRights without connection: expected error, got nil")
+	}
+
+	// Establish connection so policy operations are now permitted.
+	if err := db.AddConnection(wg, share, makeKey(t)); err != nil {
+		t.Fatalf("AddConnection: %v", err)
 	}
 
 	// SetAccessRights.
@@ -518,6 +544,26 @@ func TestPolicies(t *testing.T) {
 	}
 	if len(ars) != 0 {
 		t.Fatalf("GetAccounts after clear: want 0, got %d", len(ars))
+	}
+
+	// RemoveConnection cascades and clears all policies for the workgroup on that share.
+	if err := db.SetAccessRights(want); err != nil {
+		t.Fatalf("SetAccessRights before disconnect: %v", err)
+	}
+	if err := db.RemoveConnection(wg, share); err != nil {
+		t.Fatalf("RemoveConnection: %v", err)
+	}
+	ar, err = db.GetAccessRights(share, acc)
+	if err != nil {
+		t.Fatalf("GetAccessRights after disconnect: %v", err)
+	}
+	if ar.AccountID != 0 {
+		t.Fatal("GetAccessRights after disconnect: expected policy to be cascade-deleted")
+	}
+
+	// SetAccessRights without a connection must again be rejected.
+	if err := db.SetAccessRights(want); err == nil {
+		t.Fatal("SetAccessRights after disconnect: expected error, got nil")
 	}
 }
 

@@ -42,11 +42,13 @@ CREATE INDEX idx_connections_share ON connections (share_name);
 CREATE TABLE policies (
     share_name TEXT NOT NULL,
     account INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    workgroup INT NOT NULL,
     read_access BOOLEAN NOT NULL,
     write_access BOOLEAN NOT NULL,
     delete_access BOOLEAN NOT NULL,
     execute_access BOOLEAN NOT NULL,
     CONSTRAINT policies_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
+    CONSTRAINT policies_connection_fk FOREIGN KEY (workgroup, share_name) REFERENCES connections(workgroup, share_name) ON DELETE CASCADE,
     CONSTRAINT share_account UNIQUE (share_name, account)
 );
 CREATE INDEX idx_policies_account ON policies (account);

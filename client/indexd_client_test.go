@@ -327,15 +327,26 @@ func newTestShare(t *testing.T, db *stores.Database, name string) stores.Share {
 func grantFullAccess(t *testing.T, db *stores.Database, sh stores.Share, acc stores.Account) {
 	t.Helper()
 
-	err := db.SetAccessRights(stores.AccessRights{
+	wgUUID, err := uuid.Parse(acc.Workgroup)
+	if err != nil {
+		t.Fatalf("parse workgroup UUID: %v", err)
+	}
+	wg, err := db.FindWorkgroup(wgUUID)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
+	}
+	// AddConnection is idempotent; safe to call once per (workgroup, share) pair.
+	if err := db.AddConnection(wg, sh, make(types.PrivateKey, 64)); err != nil {
+		t.Fatalf("AddConnection: %v", err)
+	}
+	if err := db.SetAccessRights(stores.AccessRights{
 		ShareName:     sh.Name,
 		AccountID:     acc.ID,
 		ReadAccess:    true,
 		WriteAccess:   true,
 		DeleteAccess:  true,
 		ExecuteAccess: true,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("SetAccessRights: %v", err)
 	}
 }

@@ -52,6 +52,7 @@ func (db *Database) GetAccessRights(share Share, acc Account) (ar AccessRights, 
 }
 
 // SetAccessRights stores the access policy in the database.
+// Returns an error if no connection exists between the account's workgroup and the share.
 func (db *Database) SetAccessRights(ar AccessRights) error {
 	sh, err := db.GetShare(ar.ShareName)
 	if err != nil {
@@ -59,8 +60,8 @@ func (db *Database) SetAccessRights(ar AccessRights) error {
 	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
-			INSERT INTO policies (share_name, account, read_access, write_access, delete_access, execute_access)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO policies (share_name, account, workgroup, read_access, write_access, delete_access, execute_access)
+			VALUES ($1, $2, (SELECT workgroup FROM accounts WHERE id = $2), $3, $4, $5, $6)
 			ON CONFLICT (share_name, account) DO UPDATE
 			SET read_access = EXCLUDED.read_access,
 				write_access = EXCLUDED.write_access,
