@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/stores"
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
@@ -442,8 +443,27 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 }
 
 // MakeDirectory creates a new directory in the specified path.
+// If the directory name matches one of the workgroup's public dirs, it is created as non-private
+// so that all workgroup members can see files placed inside it.
 func (ic *IndexdClient) MakeDirectory(ctx context.Context, acc stores.Account, path string) error {
-	return ic.db.CreateDirectory(acc, ic.share, path, true)
+	private := true
+	if u, err := uuid.Parse(acc.Workgroup); err == nil {
+		if wg, err := ic.db.FindWorkgroup(u); err == nil && len(wg.PublicDirs) > 0 {
+			name := path[strings.LastIndex(path, "/")+1:]
+			for _, dir := range wg.PublicDirs {
+				if wg.CaseSensitive {
+					if dir == name {
+						private = false
+						break
+					}
+				} else if strings.EqualFold(dir, name) {
+					private = false
+					break
+				}
+			}
+		}
+	}
+	return ic.db.CreateDirectory(acc, ic.share, path, private)
 }
 
 // Rename renames a file or a directory.

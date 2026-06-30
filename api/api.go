@@ -34,6 +34,7 @@ type Store interface {
 	RemoveAccounts(workgroup string) error
 
 	AddWorkgroup(wg stores.Workgroup) error
+	UpdateWorkgroup(wg stores.Workgroup) error
 	FindWorkgroup(u uuid.UUID) (stores.Workgroup, error)
 	FindWorkgroupByName(name string) (stores.Workgroup, error)
 	RemoveWorkgroup(wg stores.Workgroup) error
@@ -199,6 +200,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.GET("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.workgroupHandlerGET(w, req, ps)
+	})
+
+	router.PUT("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.workgroupHandlerPUT(w, req, ps)
 	})
 
 	router.DELETE("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -869,6 +874,41 @@ func (api *API) workgroupHandlerGET(w http.ResponseWriter, req *http.Request, ps
 	}
 
 	writeJSON(w, wg)
+}
+
+// workgroupHandlerPUT handles the PUT /workgroup/:id calls.
+// It updates the publicDirs and caseSensitive settings of an existing workgroup.
+// :id may be a UUID or a workgroup name.
+func (api *API) workgroupHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("id"))
+	if !ok {
+		return
+	}
+
+	var body struct {
+		PublicDirs    []string `json:"publicDirs"`
+		CaseSensitive bool     `json:"caseSensitive"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	wg.PublicDirs = body.PublicDirs
+	wg.CaseSensitive = body.CaseSensitive
+
+	if err := api.store.UpdateWorkgroup(wg); err != nil {
+		log.Printf("failed to update workgroup: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeSuccess(w)
 }
 
 // workgroupHandlerDELETE handles the DELETE /workgroup/:id calls.

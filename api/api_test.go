@@ -33,6 +33,7 @@ type mockStore struct {
 	findAccounts     func(string) ([]stores.Account, error)
 	removeAccounts   func(string) error
 	addWorkgroup          func(stores.Workgroup) error
+	updateWorkgroup       func(stores.Workgroup) error
 	findWorkgroup         func(uuid.UUID) (stores.Workgroup, error)
 	findWorkgroupByName   func(string) (stores.Workgroup, error)
 	removeWorkgroup       func(stores.Workgroup) error
@@ -118,6 +119,12 @@ func (m *mockStore) RemoveAccounts(w string) error {
 func (m *mockStore) AddWorkgroup(wg stores.Workgroup) error {
 	if m.addWorkgroup != nil {
 		return m.addWorkgroup(wg)
+	}
+	return nil
+}
+func (m *mockStore) UpdateWorkgroup(wg stores.Workgroup) error {
+	if m.updateWorkgroup != nil {
+		return m.updateWorkgroup(wg)
 	}
 	return nil
 }
