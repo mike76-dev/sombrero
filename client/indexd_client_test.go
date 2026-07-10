@@ -721,6 +721,23 @@ func newTestWorkgroup(t *testing.T, db *stores.Database) stores.Workgroup {
 	return got
 }
 
+func newTestWorkgroupWithPublicDirs(t *testing.T, db *stores.Database, dirs []string, caseSensitive bool) stores.Workgroup {
+	t.Helper()
+
+	u := uuid.New()
+	if err := db.AddWorkgroup(stores.Workgroup{UUID: u, PublicDirs: dirs, CaseSensitive: caseSensitive}); err != nil {
+		t.Fatalf("AddWorkgroup: %v", err)
+	}
+	got, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
+	}
+	if got.ID == 0 {
+		t.Fatalf("FindWorkgroup returned empty workgroup for %s", u)
+	}
+	return got
+}
+
 func newTestAccountInWorkgroup(t *testing.T, db *stores.Database, username, password string, wg stores.Workgroup) stores.Account {
 	t.Helper()
 
@@ -872,7 +889,9 @@ func TestIndexdClient_WithinWorkgroupPublicDirectory(t *testing.T) {
 	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
 	t.Cleanup(func() { _ = c.Close() })
 
-	// Create a public directory directly via the store (the client always creates private dirs).
+	// Create a public directory directly via the store. This workgroup has no PublicDirs
+	// configured, so MakeDirectory would produce a private dir; bypassing it lets the
+	// test focus on the visibility SQL rather than the name-matching logic.
 	if err := db.CreateDirectory(alice, share.Name, "/shared", false); err != nil {
 		t.Fatalf("CreateDirectory(public): %v", err)
 	}
@@ -914,4 +933,185 @@ func TestIndexdClient_WithinWorkgroupPublicDirectory(t *testing.T) {
 
 	mustReadEquals(t, ctx, c, alice, privatePath, content)
 	mustNotFound(t, ctx, c, bob, privatePath, len(content))
+}
+
+// TestIndexdClient_MakeDirectoryAutoPublic verifies that MakeDirectory creates a
+// non-private directory when its name matches the workgroup's PublicDirs list,
+// making files inside visible to all workgroup members, while a non-matching
+// directory name still results in a private directory.
+func TestIndexdClient_MakeDirectoryAutoPublic(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg := newTestWorkgroupWithPublicDirs(t, db, []string{"shared"}, false)
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// "shared" is in PublicDirs so MakeDirectory must create a non-private directory.
+	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
+		t.Fatalf("MakeDirectory(shared): %v", err)
+	}
+
+	content := []byte("workgroup content")
+	sharedPath := "shared/file.txt"
+	uploadID, err := c.StartUpload(ctx, alice, sharedPath)
+	if err != nil {
+		t.Fatalf("StartUpload(shared): %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), sharedPath, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write(shared): %v", err)
+	}
+	if err := c.FinishUpload(ctx, sharedPath, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(shared): %v", err)
+	}
+	waitForRead(t, ctx, c, alice, sharedPath, content)
+
+	mustReadEquals(t, ctx, c, alice, sharedPath, content)
+	mustReadEquals(t, ctx, c, bob, sharedPath, content)
+
+	// "other" is not in PublicDirs, so it stays private.
+	if err := c.MakeDirectory(ctx, alice, "other"); err != nil {
+		t.Fatalf("MakeDirectory(other): %v", err)
+	}
+	privatePath := "other/secret.txt"
+	uploadID, err = c.StartUpload(ctx, alice, privatePath)
+	if err != nil {
+		t.Fatalf("StartUpload(private): %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), privatePath, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write(private): %v", err)
+	}
+	if err := c.FinishUpload(ctx, privatePath, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(private): %v", err)
+	}
+	waitForRead(t, ctx, c, alice, privatePath, content)
+
+	mustReadEquals(t, ctx, c, alice, privatePath, content)
+	mustNotFound(t, ctx, c, bob, privatePath, len(content))
+}
+
+// TestIndexdClient_PublicDirCaseSensitivity verifies that the CaseSensitive flag
+// on the workgroup controls whether the directory-name comparison is exact.
+func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	content := []byte("test data")
+
+	t.Run("case-insensitive matches uppercase name", func(t *testing.T) {
+		share := newTestShare(t, db, "share-ci")
+		wg := newTestWorkgroupWithPublicDirs(t, db, []string{"shared"}, false)
+		alice := newTestAccountInWorkgroup(t, db, "alice-ci", "secret", wg)
+		bob := newTestAccountInWorkgroup(t, db, "bob-ci", "secret", wg)
+		grantFullAccess(t, db, share, alice)
+		grantFullAccess(t, db, share, bob)
+
+		c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+		t.Cleanup(func() { _ = c.Close() })
+
+		// "SHARED" should match "shared" in PublicDirs when case-insensitive.
+		if err := c.MakeDirectory(ctx, alice, "SHARED"); err != nil {
+			t.Fatalf("MakeDirectory: %v", err)
+		}
+		path := "SHARED/file.txt"
+		uploadID, err := c.StartUpload(ctx, alice, path)
+		if err != nil {
+			t.Fatalf("StartUpload: %v", err)
+		}
+		if _, err := c.Write(ctx, bytes.NewReader(content), path, uploadID, 1, 0, uint64(len(content))); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
+			t.Fatalf("FinishUpload: %v", err)
+		}
+		waitForRead(t, ctx, c, alice, path, content)
+
+		mustReadEquals(t, ctx, c, bob, path, content)
+	})
+
+	t.Run("case-sensitive does not match uppercase name", func(t *testing.T) {
+		share := newTestShare(t, db, "share-cs")
+		wg := newTestWorkgroupWithPublicDirs(t, db, []string{"shared"}, true)
+		alice := newTestAccountInWorkgroup(t, db, "alice-cs", "secret", wg)
+		bob := newTestAccountInWorkgroup(t, db, "bob-cs", "secret", wg)
+		grantFullAccess(t, db, share, alice)
+		grantFullAccess(t, db, share, bob)
+
+		c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+		t.Cleanup(func() { _ = c.Close() })
+
+		// "SHARED" must not match "shared" in PublicDirs when case-sensitive.
+		if err := c.MakeDirectory(ctx, alice, "SHARED"); err != nil {
+			t.Fatalf("MakeDirectory: %v", err)
+		}
+		path := "SHARED/file.txt"
+		uploadID, err := c.StartUpload(ctx, alice, path)
+		if err != nil {
+			t.Fatalf("StartUpload: %v", err)
+		}
+		if _, err := c.Write(ctx, bytes.NewReader(content), path, uploadID, 1, 0, uint64(len(content))); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
+			t.Fatalf("FinishUpload: %v", err)
+		}
+		waitForRead(t, ctx, c, alice, path, content)
+
+		mustNotFound(t, ctx, c, bob, path, len(content))
+	})
+}
+
+// TestIndexdClient_PublicDirCrossWorkgroupIsolation verifies that a public
+// directory (created via PublicDirs name-matching) in one workgroup is invisible
+// to accounts that belong to a different workgroup.
+func TestIndexdClient_PublicDirCrossWorkgroupIsolation(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg1 := newTestWorkgroupWithPublicDirs(t, db, []string{"shared"}, false)
+	wg2 := newTestWorkgroup(t, db)
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg1)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg2)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
+		t.Fatalf("MakeDirectory(shared): %v", err)
+	}
+
+	content := []byte("wg1 only content")
+	path := "shared/file.txt"
+	uploadID, err := c.StartUpload(ctx, alice, path)
+	if err != nil {
+		t.Fatalf("StartUpload: %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), path, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload: %v", err)
+	}
+	waitForRead(t, ctx, c, alice, path, content)
+
+	mustReadEquals(t, ctx, c, alice, path, content)
+	// Bob belongs to a different workgroup and must not see Alice's public dir.
+	mustNotFound(t, ctx, c, bob, path, len(content))
 }

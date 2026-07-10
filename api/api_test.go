@@ -934,6 +934,61 @@ func TestWorkgroups(t *testing.T) {
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
+	t.Run("PUT updates workgroup by UUID", func(t *testing.T) {
+		var got stores.Workgroup
+		ms := &mockStore{
+			findWorkgroup:   foundWorkgroup(),
+			updateWorkgroup: func(wg stores.Workgroup) error { got = wg; return nil },
+		}
+		body := map[string]any{"publicDirs": []string{"shared", "public"}, "caseSensitive": true}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/workgroup/"+testUUID.String(), body)
+		checkStatus(t, w, http.StatusNoContent)
+		if len(got.PublicDirs) != 2 || got.PublicDirs[0] != "shared" || got.PublicDirs[1] != "public" {
+			t.Errorf("PublicDirs: want [shared public], got %v", got.PublicDirs)
+		}
+		if !got.CaseSensitive {
+			t.Error("CaseSensitive: want true")
+		}
+	})
+
+	t.Run("PUT updates workgroup by name", func(t *testing.T) {
+		var got stores.Workgroup
+		ms := &mockStore{
+			findWorkgroupByName: foundWorkgroupByName(),
+			updateWorkgroup:     func(wg stores.Workgroup) error { got = wg; return nil },
+		}
+		body := map[string]any{"publicDirs": []string{"docs"}, "caseSensitive": false}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/workgroup/"+testWorkgroupName, body)
+		checkStatus(t, w, http.StatusNoContent)
+		if len(got.PublicDirs) != 1 || got.PublicDirs[0] != "docs" {
+			t.Errorf("PublicDirs: want [docs], got %v", got.PublicDirs)
+		}
+	})
+
+	t.Run("PUT invalid body returns 400", func(t *testing.T) {
+		ms := &mockStore{findWorkgroup: foundWorkgroup()}
+		req := httptest.NewRequest(http.MethodPut, "/workgroup/"+testUUID.String(), bytes.NewReader([]byte("not-json")))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		newTestAPI(ms).ServeHTTP(w, req)
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("PUT workgroup not found returns 404", func(t *testing.T) {
+		ms := &mockStore{findWorkgroup: func(uuid.UUID) (stores.Workgroup, error) { return stores.Workgroup{}, nil }}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/workgroup/"+testUUID.String(), map[string]any{"publicDirs": []string{}})
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("PUT store error returns 500", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup:   foundWorkgroup(),
+			updateWorkgroup: func(stores.Workgroup) error { return errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/workgroup/"+testUUID.String(), map[string]any{"publicDirs": []string{}})
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
 	t.Run("DELETE removes workgroup by UUID", func(t *testing.T) {
 		called := false
 		ms := &mockStore{
