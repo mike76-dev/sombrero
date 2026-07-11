@@ -78,6 +78,7 @@ Inside the `psql` prompt:
 A config file, `sombrero.yml`, needs to be created in the directory where the server will be running. It should contain the following lines:
 ```YAML
 debug: false               # indicates whether to display the session ID and key for tools like Wireshark to decrypt the encrypted data
+mode: normal               # the server mode: 'normal' or 'lite' (see below)
 maxConnections: 30         # the maximum number of connections accepted from the same IP within 10 minutes
 api:
   port: 9999               # the port number that the API is listening on
@@ -96,6 +97,9 @@ indexd:
   serviceURL: https://github.com/mike76-dev/sombrero                             # URL of the app itself, can be left as it is (Sombrero has no service page)
   seedPhrase: ''                                                                 # if omitted, the server will generate a new seed phrase and put it here
 ```
+### Lite Mode
+If you only intend to connect to `renterd` shares, you can run the server in the Lite mode by setting `mode: lite` in the config file. In this mode, no PostgreSQL database is required: the shares, workgroups, accounts, access policies, and the ban list are kept in a JSON file (`store.json`) in the data directory, and the `database` and `indexd` sections of the config file may be omitted. `indexd` shares are not supported in the Lite mode.
+
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash
 sudo sombrero --dir=<PATH_TO_SOMBRERO.YML>
