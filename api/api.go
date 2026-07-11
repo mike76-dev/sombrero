@@ -34,8 +34,10 @@ type Store interface {
 	RemoveAccounts(workgroup string) error
 
 	AddWorkgroup(wg stores.Workgroup) error
+	UpdateWorkgroup(wg stores.Workgroup) error
 	FindWorkgroup(u uuid.UUID) (stores.Workgroup, error)
 	FindWorkgroupByName(name string) (stores.Workgroup, error)
+	GetWorkgroups() ([]stores.Workgroup, error)
 	RemoveWorkgroup(wg stores.Workgroup) error
 
 	GetAccessRights(share stores.Share, acc stores.Account) (ar stores.AccessRights, err error)
@@ -47,6 +49,7 @@ type Store interface {
 	UnregisterShare(name string) error
 	GetShare(name string) (s stores.Share, err error)
 	GetShares(acc stores.Account) (shares []stores.Share, err error)
+	GetAllShares() (shares []stores.Share, err error)
 	GetAccounts(sh stores.Share) (ars []stores.AccessRights, err error)
 
 	AddConnection(wg stores.Workgroup, share stores.Share, appKey types.PrivateKey) error
@@ -161,6 +164,10 @@ func (api *API) buildHTTPRoutes() {
 		api.shareHandlerPOST(w, req, ps)
 	})
 
+	router.GET("/shares", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.sharesHandlerGET(w, req, ps)
+	})
+
 	router.GET("/share/:name", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.shareHandlerGET(w, req, ps)
 	})
@@ -197,8 +204,16 @@ func (api *API) buildHTTPRoutes() {
 		api.workgroupHandlerPOST(w, req, ps)
 	})
 
+	router.GET("/workgroups", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.workgroupsHandlerGET(w, req, ps)
+	})
+
 	router.GET("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.workgroupHandlerGET(w, req, ps)
+	})
+
+	router.PUT("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.workgroupHandlerPUT(w, req, ps)
 	})
 
 	router.DELETE("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -484,6 +499,27 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 	}
 
 	writeSuccess(w)
+}
+
+// sharesHandlerGET handles the GET /shares calls.
+func (api *API) sharesHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	shares, err := api.store.GetAllShares()
+	if err != nil {
+		log.Printf("failed to retrieve shares: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	for i := range shares {
+		shares[i].Password = "" // Do not expose the API password.
+	}
+
+	writeJSON(w, shares)
 }
 
 // shareHandlerGET handles the GET /share/:name calls.
@@ -855,6 +891,23 @@ func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _
 	writeJSON(w, WorkgroupResponse{UUID: u, Name: body.Name})
 }
 
+// workgroupsHandlerGET handles the GET /workgroups calls.
+func (api *API) workgroupsHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	wgs, err := api.store.GetWorkgroups()
+	if err != nil {
+		log.Printf("failed to retrieve workgroups: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, wgs)
+}
+
 // workgroupHandlerGET handles the GET /workgroup/:id calls.
 // :id may be a UUID or a workgroup name.
 func (api *API) workgroupHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -869,6 +922,41 @@ func (api *API) workgroupHandlerGET(w http.ResponseWriter, req *http.Request, ps
 	}
 
 	writeJSON(w, wg)
+}
+
+// workgroupHandlerPUT handles the PUT /workgroup/:id calls.
+// It updates the publicDirs and caseSensitive settings of an existing workgroup.
+// :id may be a UUID or a workgroup name.
+func (api *API) workgroupHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	wg, ok := api.resolveWorkgroup(w, ps.ByName("id"))
+	if !ok {
+		return
+	}
+
+	var body struct {
+		PublicDirs    []string `json:"publicDirs"`
+		CaseSensitive bool     `json:"caseSensitive"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	wg.PublicDirs = body.PublicDirs
+	wg.CaseSensitive = body.CaseSensitive
+
+	if err := api.store.UpdateWorkgroup(wg); err != nil {
+		log.Printf("failed to update workgroup: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeSuccess(w)
 }
 
 // workgroupHandlerDELETE handles the DELETE /workgroup/:id calls.

@@ -164,6 +164,15 @@ To grant an account access to the share, run:
 curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/share/shared-indexd/policy?username=test&workgroup=8303eeb8-f30e-4607-9eb7-875df2c5bd52&read=true&write=true&delete=true&execute=true"
 ```
 
+## Shared Folders
+It is now possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup.
+
+To create such list, run:
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/workgroup/8303eeb8-f30e-4607-9eb7-875df2c5bd52" -d '{"publicDirs":"Public;Temp","caseSensitive":true}'
+```
+The list is semicolon-separated, like in the example above. `caseSensitive` is an optional parameter and defaults to `false`.
+
 ## Security Considerations
 An open TCP port 445 attracts thousands of attackers and those who look for a free storage. For this reason, guest and anonymous accesses are disabled. Even when the server is running on a private LAN, it should not be a problem to create a password-protected account like described above.
 

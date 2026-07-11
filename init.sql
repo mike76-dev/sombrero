@@ -15,6 +15,8 @@ CREATE TABLE workgroups (
     uuid BYTEA NOT NULL,
     name TEXT UNIQUE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    public_dirs TEXT NOT NULL DEFAULT '',
+    case_sensitive BOOLEAN NOT NULL DEFAULT FALSE,
     CONSTRAINT workgroups_uuid_length CHECK (octet_length(uuid) = 16),
     CONSTRAINT workgroups_unique UNIQUE (uuid)
 );

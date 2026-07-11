@@ -178,6 +178,52 @@ func (db *Database) GetShares(acc Account) (shares []Share, err error) {
 	return
 }
 
+// GetAllShares lists all registered shares.
+func (db *Database) GetAllShares() (shares []Share, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT
+				share_name,
+				share_type,
+				server_name,
+				api_password,
+				bucket,
+				remark,
+				created_at,
+				data_shards,
+				parity_shards
+			FROM shares
+			ORDER BY share_name
+		`
+		rows, err := tx.Query(ctx, query)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve shares: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name, backend, server, password, bucket, remark string
+			var created time.Time
+			var dataShards, parityShards int
+			if err := rows.Scan(&name, &backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards); err != nil {
+				return fmt.Errorf("failed to retrieve shares: %w", err)
+			}
+			shares = append(shares, Share{
+				Name:         name,
+				Type:         backend,
+				ServerName:   server,
+				Password:     password,
+				Bucket:       bucket,
+				Remark:       remark,
+				CreatedAt:    created,
+				DataShards:   uint8(dataShards),
+				ParityShards: uint8(parityShards),
+			})
+		}
+		return nil
+	})
+	return
+}
+
 // GetAccounts lists all the accounts that can connect to the specified share.
 func (db *Database) GetAccounts(sh Share) (ars []AccessRights, err error) {
 	if sh.Name == "" {

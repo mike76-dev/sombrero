@@ -111,6 +111,112 @@ func TestWorkgroups(t *testing.T) {
 	}
 }
 
+func TestUpdateWorkgroup(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	u := uuid.New()
+	if err := db.AddWorkgroup(Workgroup{UUID: u}); err != nil {
+		t.Fatalf("AddWorkgroup: %v", err)
+	}
+	wg, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
+	}
+
+	// New workgroup has no public dirs and case_sensitive defaults to false.
+	if len(wg.PublicDirs) != 0 {
+		t.Fatalf("PublicDirs: want empty, got %v", wg.PublicDirs)
+	}
+	if wg.CaseSensitive {
+		t.Fatal("CaseSensitive: want false initially")
+	}
+
+	// UpdateWorkgroup persists new dirs and case sensitivity.
+	wg.PublicDirs = []string{"shared", "public"}
+	wg.CaseSensitive = true
+	if err := db.UpdateWorkgroup(wg); err != nil {
+		t.Fatalf("UpdateWorkgroup: %v", err)
+	}
+
+	// FindWorkgroup reflects the update.
+	updated, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup after update: %v", err)
+	}
+	if len(updated.PublicDirs) != 2 || updated.PublicDirs[0] != "shared" || updated.PublicDirs[1] != "public" {
+		t.Fatalf("PublicDirs: want [shared public], got %v", updated.PublicDirs)
+	}
+	if !updated.CaseSensitive {
+		t.Fatal("CaseSensitive: want true after update")
+	}
+
+	// GetWorkgroupByID also reflects the update.
+	byID, err := db.GetWorkgroupByID(wg.ID)
+	if err != nil {
+		t.Fatalf("GetWorkgroupByID after update: %v", err)
+	}
+	if len(byID.PublicDirs) != 2 || byID.PublicDirs[0] != "shared" {
+		t.Fatalf("GetWorkgroupByID PublicDirs: want [shared public], got %v", byID.PublicDirs)
+	}
+	if !byID.CaseSensitive {
+		t.Fatal("GetWorkgroupByID CaseSensitive: want true")
+	}
+
+	// Clearing dirs sets them back to empty.
+	wg.PublicDirs = nil
+	wg.CaseSensitive = false
+	if err := db.UpdateWorkgroup(wg); err != nil {
+		t.Fatalf("UpdateWorkgroup clear: %v", err)
+	}
+	cleared, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup after clear: %v", err)
+	}
+	if len(cleared.PublicDirs) != 0 {
+		t.Fatalf("PublicDirs after clear: want empty, got %v", cleared.PublicDirs)
+	}
+	if cleared.CaseSensitive {
+		t.Fatal("CaseSensitive after clear: want false")
+	}
+
+	// UpdateWorkgroup on a missing ID returns an error.
+	ghost := Workgroup{ID: 999999, PublicDirs: []string{"x"}}
+	if err := db.UpdateWorkgroup(ghost); err == nil {
+		t.Fatal("UpdateWorkgroup missing ID: expected error, got nil")
+	}
+
+	// AddWorkgroup with dirs pre-set round-trips through FindWorkgroup.
+	u2 := uuid.New()
+	if err := db.AddWorkgroup(Workgroup{UUID: u2, PublicDirs: []string{"reports"}, CaseSensitive: true}); err != nil {
+		t.Fatalf("AddWorkgroup with dirs: %v", err)
+	}
+	wg2, err := db.FindWorkgroup(u2)
+	if err != nil {
+		t.Fatalf("FindWorkgroup with dirs: %v", err)
+	}
+	if len(wg2.PublicDirs) != 1 || wg2.PublicDirs[0] != "reports" {
+		t.Fatalf("FindWorkgroup PublicDirs: want [reports], got %v", wg2.PublicDirs)
+	}
+	if !wg2.CaseSensitive {
+		t.Fatal("FindWorkgroup CaseSensitive: want true")
+	}
+
+	// FindWorkgroupByName returns public dirs as well.
+	u3 := uuid.New()
+	if err := db.AddWorkgroup(Workgroup{UUID: u3, Name: "labeled", PublicDirs: []string{"inbox"}}); err != nil {
+		t.Fatalf("AddWorkgroup with name and dirs: %v", err)
+	}
+	wg3, err := db.FindWorkgroupByName("labeled")
+	if err != nil {
+		t.Fatalf("FindWorkgroupByName: %v", err)
+	}
+	if len(wg3.PublicDirs) != 1 || wg3.PublicDirs[0] != "inbox" {
+		t.Fatalf("FindWorkgroupByName PublicDirs: want [inbox], got %v", wg3.PublicDirs)
+	}
+}
+
 func TestAccounts(t *testing.T) {
 	ctx := context.Background()
 	db := NewTestStore(t, ctx)
