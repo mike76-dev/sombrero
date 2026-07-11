@@ -133,9 +133,9 @@ func (db *Database) RemoveAccount(username, workgroup string) error {
 		_, err := tx.Exec(ctx, query, username, u[:])
 		if err != nil {
 			return fmt.Errorf("failed to remove account: %w", err)
-		} else {
-			return nil
 		}
+		db.shares.RemoveAccess(Account{Username: username, Workgroup: workgroup})
+		return nil
 	})
 }
 
@@ -183,6 +183,10 @@ func (db *Database) RemoveAccounts(workgroup string) error {
 	if err != nil {
 		return fmt.Errorf("invalid workgroup UUID: %w", err)
 	}
+	accs, err := db.FindAccounts(workgroup)
+	if err != nil {
+		return err
+	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
 			DELETE FROM accounts
@@ -191,8 +195,10 @@ func (db *Database) RemoveAccounts(workgroup string) error {
 		_, err := tx.Exec(ctx, query, u[:])
 		if err != nil {
 			return fmt.Errorf("failed to remove accounts: %w", err)
-		} else {
-			return nil
 		}
+		for _, acc := range accs {
+			db.shares.RemoveAccess(acc)
+		}
+		return nil
 	})
 }
