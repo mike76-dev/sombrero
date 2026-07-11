@@ -4,9 +4,55 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// ServerMode describes the mode in which the server is running.
+type ServerMode int
+
+const (
+	ModeNormal ServerMode = iota
+	ModeLite
+)
+
+// String implements fmt.Stringer.
+func (m ServerMode) String() string {
+	switch m {
+	case ModeNormal:
+		return "normal"
+	case ModeLite:
+		return "lite"
+	default:
+		return "unknown"
+	}
+}
+
+// MarshalYAML implements yaml.Marshaler.
+func (m ServerMode) MarshalYAML() (any, error) {
+	if m != ModeNormal && m != ModeLite {
+		return nil, fmt.Errorf("unknown server mode: %d", m)
+	}
+	return m.String(), nil
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (m *ServerMode) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	switch strings.ToLower(s) {
+	case "", "normal":
+		*m = ModeNormal
+	case "lite":
+		*m = ModeLite
+	default:
+		return fmt.Errorf("unknown server mode: %q", s)
+	}
+	return nil
+}
 
 // APIConfig lists the API-related fields.
 type APIConfig struct {
@@ -41,9 +87,10 @@ type IndexdConfig struct {
 // Config lists the config fields.
 type Config struct {
 	Debug          bool           `yaml:"debug"`
+	Mode           ServerMode     `yaml:"mode"`
 	MaxConnections int            `yaml:"maxConnections"`
 	API            APIConfig      `yaml:"api"`
-	Database       DatabaseConfig `yaml:"database"`
+	Database       DatabaseConfig `yaml:"database,omitempty"`
 	Indexd         IndexdConfig   `yaml:"indexd,omitempty"`
 }
 
