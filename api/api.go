@@ -37,6 +37,7 @@ type Store interface {
 	UpdateWorkgroup(wg stores.Workgroup) error
 	FindWorkgroup(u uuid.UUID) (stores.Workgroup, error)
 	FindWorkgroupByName(name string) (stores.Workgroup, error)
+	GetWorkgroups() ([]stores.Workgroup, error)
 	RemoveWorkgroup(wg stores.Workgroup) error
 
 	GetAccessRights(share stores.Share, acc stores.Account) (ar stores.AccessRights, err error)
@@ -48,6 +49,7 @@ type Store interface {
 	UnregisterShare(name string) error
 	GetShare(name string) (s stores.Share, err error)
 	GetShares(acc stores.Account) (shares []stores.Share, err error)
+	GetAllShares() (shares []stores.Share, err error)
 	GetAccounts(sh stores.Share) (ars []stores.AccessRights, err error)
 
 	AddConnection(wg stores.Workgroup, share stores.Share, appKey types.PrivateKey) error
@@ -162,6 +164,10 @@ func (api *API) buildHTTPRoutes() {
 		api.shareHandlerPOST(w, req, ps)
 	})
 
+	router.GET("/shares", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.sharesHandlerGET(w, req, ps)
+	})
+
 	router.GET("/share/:name", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.shareHandlerGET(w, req, ps)
 	})
@@ -196,6 +202,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.POST("/workgroup", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.workgroupHandlerPOST(w, req, ps)
+	})
+
+	router.GET("/workgroups", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.workgroupsHandlerGET(w, req, ps)
 	})
 
 	router.GET("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -489,6 +499,27 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 	}
 
 	writeSuccess(w)
+}
+
+// sharesHandlerGET handles the GET /shares calls.
+func (api *API) sharesHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	shares, err := api.store.GetAllShares()
+	if err != nil {
+		log.Printf("failed to retrieve shares: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	for i := range shares {
+		shares[i].Password = "" // Do not expose the API password.
+	}
+
+	writeJSON(w, shares)
 }
 
 // shareHandlerGET handles the GET /share/:name calls.
@@ -858,6 +889,23 @@ func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _
 
 	log.Printf("created new workgroup: %s", u)
 	writeJSON(w, WorkgroupResponse{UUID: u, Name: body.Name})
+}
+
+// workgroupsHandlerGET handles the GET /workgroups calls.
+func (api *API) workgroupsHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	wgs, err := api.store.GetWorkgroups()
+	if err != nil {
+		log.Printf("failed to retrieve workgroups: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, wgs)
 }
 
 // workgroupHandlerGET handles the GET /workgroup/:id calls.

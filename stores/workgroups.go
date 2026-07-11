@@ -111,6 +111,39 @@ func (db *Database) FindWorkgroupByName(name string) (wg Workgroup, err error) {
 	return
 }
 
+// GetWorkgroups lists all workgroups.
+func (db *Database) GetWorkgroups() (wgs []Workgroup, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT id, uuid, name, public_dirs, case_sensitive
+			FROM workgroups
+			ORDER BY id
+		`
+		rows, err := tx.Query(ctx, query)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve workgroups: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int
+			var u uuid.UUID
+			var name *string
+			var publicDirs string
+			var caseSensitive bool
+			if err := rows.Scan(&id, &u, &name, &publicDirs, &caseSensitive); err != nil {
+				return fmt.Errorf("failed to retrieve workgroups: %w", err)
+			}
+			wg := Workgroup{ID: id, UUID: u, PublicDirs: publicDirsFromDB(publicDirs), CaseSensitive: caseSensitive}
+			if name != nil {
+				wg.Name = *name
+			}
+			wgs = append(wgs, wg)
+		}
+		return nil
+	})
+	return
+}
+
 // AddWorkgroup adds a new workgroup to the database.
 func (db *Database) AddWorkgroup(wg Workgroup) error {
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {

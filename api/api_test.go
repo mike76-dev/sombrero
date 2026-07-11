@@ -36,6 +36,7 @@ type mockStore struct {
 	updateWorkgroup       func(stores.Workgroup) error
 	findWorkgroup         func(uuid.UUID) (stores.Workgroup, error)
 	findWorkgroupByName   func(string) (stores.Workgroup, error)
+	getWorkgroups         func() ([]stores.Workgroup, error)
 	removeWorkgroup       func(stores.Workgroup) error
 	getAccessRights  func(stores.Share, stores.Account) (stores.AccessRights, error)
 	setAccessRights  func(stores.AccessRights) error
@@ -45,6 +46,7 @@ type mockStore struct {
 	unregisterShare  func(string) error
 	getShare         func(string) (stores.Share, error)
 	getShares        func(stores.Account) ([]stores.Share, error)
+	getAllShares     func() ([]stores.Share, error)
 	getAccounts      func(stores.Share) ([]stores.AccessRights, error)
 	addConnection    func(stores.Workgroup, stores.Share, types.PrivateKey) error
 	removeConnection func(stores.Workgroup, stores.Share) error
@@ -140,6 +142,12 @@ func (m *mockStore) FindWorkgroupByName(name string) (stores.Workgroup, error) {
 	}
 	return stores.Workgroup{}, nil
 }
+func (m *mockStore) GetWorkgroups() ([]stores.Workgroup, error) {
+	if m.getWorkgroups != nil {
+		return m.getWorkgroups()
+	}
+	return nil, nil
+}
 func (m *mockStore) RemoveWorkgroup(wg stores.Workgroup) error {
 	if m.removeWorkgroup != nil {
 		return m.removeWorkgroup(wg)
@@ -191,6 +199,12 @@ func (m *mockStore) GetShare(n string) (stores.Share, error) {
 func (m *mockStore) GetShares(a stores.Account) ([]stores.Share, error) {
 	if m.getShares != nil {
 		return m.getShares(a)
+	}
+	return nil, nil
+}
+func (m *mockStore) GetAllShares() ([]stores.Share, error) {
+	if m.getAllShares != nil {
+		return m.getAllShares()
 	}
 	return nil, nil
 }
@@ -617,6 +631,37 @@ func TestShares(t *testing.T) {
 		w := doRequest(newTestAPI(ms), http.MethodDelete, "/share/myshare", nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
+
+	t.Run("GET /shares lists shares without passwords", func(t *testing.T) {
+		ms := &mockStore{getAllShares: func() ([]stores.Share, error) {
+			return []stores.Share{
+				{Name: "share1", Type: "renterd", Password: "secret"},
+				{Name: "share2", Type: "indexd", Password: "secret"},
+			}, nil
+		}}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/shares", nil)
+		checkStatus(t, w, http.StatusOK)
+		got := decodeJSON[[]stores.Share](t, w)
+		if len(got) != 2 {
+			t.Fatalf("want 2 shares, got %d", len(got))
+		}
+		for _, sh := range got {
+			if sh.Password != "" {
+				t.Error("password must not be exposed")
+			}
+		}
+	})
+
+	t.Run("GET /shares empty", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/shares", nil)
+		checkStatus(t, w, http.StatusOK)
+	})
+
+	t.Run("GET /shares store error", func(t *testing.T) {
+		ms := &mockStore{getAllShares: func() ([]stores.Share, error) { return nil, errStore }}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/shares", nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
 }
 
 func TestShareAccounts(t *testing.T) {
@@ -931,6 +976,35 @@ func TestWorkgroups(t *testing.T) {
 	t.Run("GET store error by name", func(t *testing.T) {
 		ms := &mockStore{findWorkgroupByName: func(string) (stores.Workgroup, error) { return stores.Workgroup{}, errStore }}
 		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/unknown-name", nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("GET /workgroups lists workgroups", func(t *testing.T) {
+		ms := &mockStore{getWorkgroups: func() ([]stores.Workgroup, error) {
+			return []stores.Workgroup{
+				{ID: 1, UUID: testUUID, Name: testWorkgroupName},
+				{ID: 2, UUID: uuid.MustParse("00000000-0000-0000-0000-000000000002")},
+			}, nil
+		}}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroups", nil)
+		checkStatus(t, w, http.StatusOK)
+		got := decodeJSON[[]stores.Workgroup](t, w)
+		if len(got) != 2 {
+			t.Fatalf("want 2 workgroups, got %d", len(got))
+		}
+		if got[0].UUID != testUUID || got[0].Name != testWorkgroupName {
+			t.Errorf("unexpected first workgroup: %+v", got[0])
+		}
+	})
+
+	t.Run("GET /workgroups empty", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/workgroups", nil)
+		checkStatus(t, w, http.StatusOK)
+	})
+
+	t.Run("GET /workgroups store error", func(t *testing.T) {
+		ms := &mockStore{getWorkgroups: func() ([]stores.Workgroup, error) { return nil, errStore }}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroups", nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
