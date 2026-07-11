@@ -85,16 +85,18 @@ type API struct {
 	router          httprouter.Router
 	store           Store
 	cfg             stores.IndexdConfig
+	mode            stores.ServerMode
 	ctx             context.Context
 	rl              *ratelimiter
 	pendingBuilders sync.Map // key: "workgroupUUID/shareName" → *sdk.Builder
 }
 
 // NewAPI returns an initialized API object.
-func NewAPI(ctx context.Context, s Store, cfg stores.IndexdConfig) *API {
+func NewAPI(ctx context.Context, s Store, cfg stores.IndexdConfig, mode stores.ServerMode) *API {
 	api := &API{
 		store: s,
 		cfg:   cfg,
+		mode:  mode,
 		ctx:   ctx,
 		rl:    newRatelimiter(ctx),
 	}
@@ -489,6 +491,10 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 	share.Type = strings.ToLower(share.Type)
 	if share.Type != "renterd" && share.Type != "indexd" {
 		writeError(w, "wrong share type", http.StatusBadRequest)
+		return
+	}
+	if api.mode == stores.ModeLite && share.Type != "renterd" {
+		writeError(w, "only renterd shares are supported in Lite mode", http.StatusBadRequest)
 		return
 	}
 

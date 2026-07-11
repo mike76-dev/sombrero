@@ -42,25 +42,35 @@ func main() {
 		panic(err)
 	}
 
-	if len(cfg.Database.Password) < 4 {
-		log.Fatal("database password too short")
-	}
-
-	if cfg.Indexd.SeedPhrase == "" {
-		// Generate a new seed phrase.
-		cfg.Indexd.SeedPhrase = sdk.NewSeedPhrase()
-		if err := stores.SaveConfig(cfg, dir); err != nil {
-			log.Fatalf("failed to generate seed phrase: %v", err)
+	if cfg.Mode == stores.ModeNormal {
+		if len(cfg.Database.Password) < 4 {
+			log.Fatal("database password too short")
 		}
-		log.Printf("Generated seed phrase: %s", cfg.Indexd.SeedPhrase)
+
+		if cfg.Indexd.SeedPhrase == "" {
+			// Generate a new seed phrase.
+			cfg.Indexd.SeedPhrase = sdk.NewSeedPhrase()
+			if err := stores.SaveConfig(cfg, dir); err != nil {
+				log.Fatalf("failed to generate seed phrase: %v", err)
+			}
+			log.Printf("Generated seed phrase: %s", cfg.Indexd.SeedPhrase)
+		}
+	} else {
+		log.Println("Running in Lite mode: only renterd shares are supported")
 	}
 
 	// Start a thread to watch for the stop signal.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Connect to the SQL database.
-	db, err := stores.NewStore(ctx, cfg.Database)
+	// Open the store: a SQL database in the Normal mode,
+	// a JSON file in the Lite mode.
+	var db stores.Store
+	if cfg.Mode == stores.ModeLite {
+		db, err = stores.NewJSONStore(dir)
+	} else {
+		db, err = stores.NewStore(ctx, cfg.Database)
+	}
 	if err != nil {
 		panic(err)
 	}
@@ -95,7 +105,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer lAPI.Close()
-	a := api.NewAPI(ctx, db, cfg.Indexd)
+	a := api.NewAPI(ctx, db, cfg.Indexd, cfg.Mode)
 	apiSrv := &http.Server{Handler: api.BasicAuth(cfg.API.Password)(a)}
 	go apiSrv.Serve(lAPI)
 	log.Printf("API: listening at %s ...\n", lAPI.Addr())
