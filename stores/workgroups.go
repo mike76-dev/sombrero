@@ -184,14 +184,46 @@ func (db *Database) UpdateWorkgroup(wg Workgroup) error {
 
 // RemoveWorkgroup removes the specified workgroup and all associated accounts from the database.
 func (db *Database) RemoveWorkgroup(wg Workgroup) error {
+	accs, err := db.FindAccounts(wg.UUID.String())
+	if err != nil {
+		return err
+	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const connQuery = `
+			SELECT share_name
+			FROM connections
+			WHERE workgroup = $1
+		`
+		rows, err := tx.Query(ctx, connQuery, wg.ID)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve connections: %w", err)
+		}
+		var shareNames []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
+				return fmt.Errorf("failed to retrieve connections: %w", err)
+			}
+			shareNames = append(shareNames, name)
+		}
+		rows.Close()
+
 		const query = `
 			DELETE FROM workgroups
 			WHERE id = $1
 		`
-		_, err := tx.Exec(ctx, query, wg.ID)
-		if err != nil {
+		if _, err := tx.Exec(ctx, query, wg.ID); err != nil {
 			return fmt.Errorf("failed to remove workgroup: %w", err)
+		}
+
+		for _, name := range shareNames {
+			if err := db.shares.RemoveConnection(wg, Share{Name: name}); err != nil {
+				return fmt.Errorf("failed to disconnect share: %w", err)
+			}
+		}
+		for _, acc := range accs {
+			db.shares.RemoveAccess(acc)
 		}
 		return nil
 	})

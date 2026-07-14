@@ -253,6 +253,10 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 	}
 
 	if sh.backend == "indexd" {
+		db, ok := s.store.(*stores.Database)
+		if !ok {
+			return errors.New("indexd shares require a database-backed store")
+		}
 		builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
 			ID:          types.HashBytes(append([]byte(s.cfg.Name), []byte(s.cfg.Description)...)),
 			Name:        s.cfg.Name,
@@ -264,7 +268,7 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 		if err != nil {
 			return err
 		}
-		c := client.NewIndexdClient(s.store, sdkClient, share.Name, share.DataShards, share.ParityShards)
+		c := client.NewIndexdClient(db, sdkClient, share.Name, share.DataShards, share.ParityShards)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

@@ -694,3 +694,68 @@ func TestFlagsFromAccessRights(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoveNotifications verifies that removing accounts and workgroups
+// notifies the share manager, so that no stale security entries remain
+// on the SMB server.
+func TestRemoveNotifications(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	rs := &recordingShares{}
+	db.WithShares(rs)
+
+	u := uuid.New()
+	if err := db.AddWorkgroup(Workgroup{UUID: u}); err != nil {
+		t.Fatalf("AddWorkgroup: %v", err)
+	}
+	wg, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
+	}
+	if err := db.RegisterShare(Share{Name: "s1", Type: "renterd", ServerName: "srv"}); err != nil {
+		t.Fatalf("RegisterShare: %v", err)
+	}
+	share, err := db.GetShare("s1")
+	if err != nil {
+		t.Fatalf("GetShare: %v", err)
+	}
+	if err := db.AddConnection(wg, share, nil); err != nil {
+		t.Fatalf("AddConnection: %v", err)
+	}
+	for _, name := range []string{"user1", "user2", "user3"} {
+		if err := db.AddAccount(Account{Username: name, Password: "pw", Workgroup: u.String()}); err != nil {
+			t.Fatalf("AddAccount: %v", err)
+		}
+	}
+
+	// RemoveAccount notifies RemoveAccess.
+	if err := db.RemoveAccount("user1", u.String()); err != nil {
+		t.Fatalf("RemoveAccount: %v", err)
+	}
+	if len(rs.accessGone) != 1 || rs.accessGone[0] != u.String()+"/user1" {
+		t.Fatalf("RemoveAccess not called on RemoveAccount: %+v", rs.accessGone)
+	}
+
+	// RemoveAccounts notifies RemoveAccess for each remaining account.
+	if err := db.RemoveAccounts(u.String()); err != nil {
+		t.Fatalf("RemoveAccounts: %v", err)
+	}
+	if len(rs.accessGone) != 3 {
+		t.Fatalf("RemoveAccess not called on RemoveAccounts: %+v", rs.accessGone)
+	}
+
+	// RemoveWorkgroup notifies RemoveConnection and RemoveAccess.
+	if err := db.AddAccount(Account{Username: "user4", Password: "pw", Workgroup: u.String()}); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	if err := db.RemoveWorkgroup(wg); err != nil {
+		t.Fatalf("RemoveWorkgroup: %v", err)
+	}
+	if len(rs.disconnected) != 1 || rs.disconnected[0] != u.String()+"/s1" {
+		t.Fatalf("RemoveConnection not called on RemoveWorkgroup: %+v", rs.disconnected)
+	}
+	if len(rs.accessGone) != 4 || rs.accessGone[3] != u.String()+"/user4" {
+		t.Fatalf("RemoveAccess not called on RemoveWorkgroup: %+v", rs.accessGone)
+	}
+}

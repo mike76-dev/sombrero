@@ -228,7 +228,11 @@ func (m *mockStore) RemoveConnection(wg stores.Workgroup, s stores.Share) error 
 }
 
 func newTestAPI(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, stores.IndexdConfig{})
+	return NewAPI(context.Background(), ms, stores.IndexdConfig{}, stores.ModeNormal)
+}
+
+func newTestLiteAPI(ms *mockStore) *API {
+	return NewAPI(context.Background(), ms, stores.IndexdConfig{}, stores.ModeLite)
 }
 
 func doRequest(api *API, method, path string, body any) *httptest.ResponseRecorder {
@@ -575,6 +579,24 @@ func TestShares(t *testing.T) {
 	t.Run("POST registers indexd share", func(t *testing.T) {
 		ms := &mockStore{registerShare: func(s stores.Share) error { return nil }}
 		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{Name: "s2", Type: "indexd"})
+		checkStatus(t, w, http.StatusNoContent)
+	})
+
+	t.Run("POST indexd share in Lite mode returns 400", func(t *testing.T) {
+		registered := false
+		ms := &mockStore{registerShare: func(stores.Share) error { registered = true; return nil }}
+		w := doRequest(newTestLiteAPI(ms), http.MethodPost, "/share", stores.Share{Name: "s2", Type: "indexd"})
+		checkStatus(t, w, http.StatusBadRequest)
+		if registered {
+			t.Error("indexd share must not be registered in Lite mode")
+		}
+	})
+
+	t.Run("POST renterd share in Lite mode succeeds", func(t *testing.T) {
+		ms := &mockStore{registerShare: func(s stores.Share) error { return nil }}
+		w := doRequest(newTestLiteAPI(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s1", Type: "renterd", ServerName: "srv",
+		})
 		checkStatus(t, w, http.StatusNoContent)
 	})
 

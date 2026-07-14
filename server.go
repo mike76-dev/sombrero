@@ -66,14 +66,14 @@ type server struct {
 	listener        net.Listener
 	mu              sync.Mutex
 	connectionCount map[string]int
-	store           *stores.Database
+	store           stores.Store
 	debug           bool
 	cfg             stores.IndexdConfig
 	ctx             context.Context
 }
 
 // newServer returns an initialized SMB server.
-func newServer(ctx context.Context, l net.Listener, db *stores.Database, debug bool, cfg stores.IndexdConfig) *server {
+func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool, cfg stores.IndexdConfig) *server {
 	s := &server{
 		enabled:            true,
 		serverGuid:         uuid.New(),

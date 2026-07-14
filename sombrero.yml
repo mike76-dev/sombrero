@@ -1,4 +1,5 @@
 debug: false
+mode: normal
 maxConnections: 30
 api:
   port: 9999
