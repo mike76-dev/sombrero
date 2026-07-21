@@ -326,6 +326,7 @@ textarea {
   font-weight: 600;
 }
 
+.table tbody tr:last-child th,
 .table tbody tr:last-child td {
   border-bottom: none;
 }

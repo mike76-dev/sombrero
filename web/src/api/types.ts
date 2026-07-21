@@ -39,6 +39,16 @@ export interface AccessRights {
   ExecuteAccess: boolean
 }
 
+export interface ServerStats {
+  start: string
+  fOpens: number
+  sOpens: number
+  pwErrors: number
+  permErrors: number
+  bytesSent: number
+  bytesRcvd: number
+}
+
 export interface IsBannedResponse {
   banned: boolean
   reason: string

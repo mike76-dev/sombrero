@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/stores"
@@ -228,11 +229,11 @@ func (m *mockStore) RemoveConnection(wg stores.Workgroup, s stores.Share) error 
 }
 
 func newTestAPI(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, stores.IndexdConfig{}, stores.ModeNormal)
+	return NewAPI(context.Background(), ms, stores.IndexdConfig{}, stores.ModeNormal, nil)
 }
 
 func newTestLiteAPI(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, stores.IndexdConfig{}, stores.ModeLite)
+	return NewAPI(context.Background(), ms, stores.IndexdConfig{}, stores.ModeLite, nil)
 }
 
 func doRequest(api *API, method, path string, body any) *httptest.ResponseRecorder {
@@ -1329,5 +1330,34 @@ func TestConnect(t *testing.T) {
 		}
 		w := doRequest(newTestAPI(ms), http.MethodDelete, path, nil)
 		checkStatus(t, w, http.StatusInternalServerError)
+	})
+}
+
+func TestStats(t *testing.T) {
+	t.Run("GET returns the server stats", func(t *testing.T) {
+		stats := ServerStats{
+			Start:      time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC),
+			SOpens:     3,
+			PwErrors:   1,
+			PermErrors: 2,
+			BytesSent:  1024,
+			BytesRcvd:  2048,
+		}
+		api := NewAPI(context.Background(), &mockStore{}, stores.IndexdConfig{}, stores.ModeNormal, func() ServerStats { return stats })
+		w := doRequest(api, http.MethodGet, "/stats", nil)
+		checkStatus(t, w, http.StatusOK)
+		got := decodeJSON[ServerStats](t, w)
+		if got != stats {
+			t.Errorf("stats: want %+v, got %+v", stats, got)
+		}
+	})
+
+	t.Run("GET with nil provider returns zero stats", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/stats", nil)
+		checkStatus(t, w, http.StatusOK)
+		got := decodeJSON[ServerStats](t, w)
+		if got != (ServerStats{}) {
+			t.Errorf("stats: want zero value, got %+v", got)
+		}
 	})
 }

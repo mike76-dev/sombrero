@@ -8,29 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mike76-dev/sombrero/api"
 	"github.com/mike76-dev/sombrero/rpc"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
 )
-
-// serverStats keeps track of the server statistics.
-type serverStats struct {
-	start  time.Time
-	fOpens uint32
-	// devOpens uint32
-	// jobsQueued uint32
-	sOpens    uint32
-	sTimedOut uint32
-	// sErrorOut uint32
-	pwErrors   uint32
-	permErrors uint32
-	// sysErrors uint32
-	bytesSent uint64
-	bytesRcvd uint64
-	// avResponse time.Time
-	// reqBufNeed uint32
-	// bigBufNeed uint32
-}
 
 // ServerHashLevel values.
 const (
@@ -50,7 +32,7 @@ var (
 // server is the implementation of an SMB server.
 type server struct {
 	enabled                     bool
-	stats                       serverStats
+	stats                       api.ServerStats
 	shareList                   map[string]*share
 	globalOpenTable             map[uint64]*open
 	globalSessionTable          map[uint64]*session
@@ -89,8 +71,15 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool,
 		cfg:                cfg,
 		ctx:                ctx,
 	}
-	s.stats.start = time.Now()
+	s.stats.Start = time.Now()
 	return s
+}
+
+// Stats returns a snapshot of the current server statistics.
+func (s *server) Stats() api.ServerStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stats
 }
 
 // newConnection creates a new Connection object.
@@ -199,7 +188,7 @@ func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResp
 	c.writeChan <- buf
 
 	s.mu.Lock()
-	s.stats.bytesSent += uint64(len(buf))
+	s.stats.BytesSent += uint64(len(buf))
 	s.mu.Unlock()
 }
 

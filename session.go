@@ -81,7 +81,7 @@ func (s *server) registerSession(connection *connection, req smb2.SessionSetupRe
 		connection.mu.Unlock()
 		s.mu.Lock()
 		s.globalSessionTable[ss.sessionID] = ss
-		s.stats.sOpens++
+		s.stats.SOpens++
 		s.mu.Unlock()
 
 		if connection.negotiateDialect == smb2.SMB_DIALECT_311 {
@@ -135,7 +135,7 @@ func (s *server) deregisterSession(connection *connection, sid uint64) (*session
 
 	s.mu.Lock()
 	delete(s.globalSessionTable, sid)
-	s.stats.sOpens--
+	s.stats.SOpens--
 	s.mu.Unlock()
 
 	return ss, nil
