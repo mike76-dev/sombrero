@@ -202,6 +202,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 
 	ss.connection.server.mu.Lock()
 	ss.connection.server.globalOpenTable[op.durableFileID] = op
+	ss.connection.server.stats.FOpens++
 	ss.connection.server.mu.Unlock()
 
 	tc.mu.Lock()
