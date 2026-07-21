@@ -4,6 +4,7 @@ import { AccountsPage } from './pages/AccountsPage'
 import { SharesPage } from './pages/SharesPage'
 import { ConnectionsPage } from './pages/ConnectionsPage'
 import { BansPage } from './pages/BansPage'
+import { StatsPage } from './pages/StatsPage'
 import { SettingsPage } from './pages/SettingsPage'
 
 type Theme = 'light' | 'dark'
@@ -25,6 +26,7 @@ const pages = {
   shares: { label: 'Shares', component: SharesPage },
   connections: { label: 'Connections', component: ConnectionsPage },
   bans: { label: 'Bans', component: BansPage },
+  stats: { label: 'Stats', component: StatsPage },
   settings: { label: 'Settings', component: SettingsPage },
 } as const
 

@@ -5,6 +5,7 @@ import type {
   ConnectRequestResponse,
   ConnectResponse,
   IsBannedResponse,
+  ServerStats,
   Share,
   Workgroup,
   WorkgroupResponse,
@@ -107,6 +108,10 @@ export const updateWorkgroup = (id: string, publicDirs: string[], caseSensitive:
 
 export const removeWorkgroup = (id: string) =>
   request(`/workgroup/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+// Stats
+
+export const getStats = () => request<ServerStats>('/stats')
 
 // Connections
 
