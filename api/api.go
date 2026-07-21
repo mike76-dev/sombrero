@@ -56,6 +56,17 @@ type Store interface {
 	RemoveConnection(wg stores.Workgroup, share stores.Share) error
 }
 
+// ServerStats keeps track of the server statistics.
+type ServerStats struct {
+	Start      time.Time `json:"start"`      // The time the server started
+	FOpens     uint32    `json:"fOpens"`     // The number of total opens
+	SOpens     uint32    `json:"sOpens"`     // The number of sessions established
+	PwErrors   uint32    `json:"pwErrors"`   // The number of password violations
+	PermErrors uint32    `json:"permErrors"` // The number of access permission errors
+	BytesSent  uint64    `json:"bytesSent"`  // The total number of bytes sent
+	BytesRcvd  uint64    `json:"bytesRcvd"`  // The total number of bytes received
+}
+
 // IsBannedResponse is the response type for GET /banned request.
 type IsBannedResponse struct {
 	Banned bool   `json:"banned"`
@@ -88,17 +99,20 @@ type API struct {
 	mode            stores.ServerMode
 	ctx             context.Context
 	rl              *ratelimiter
+	stats           func() ServerStats
 	pendingBuilders sync.Map // key: "workgroupUUID/shareName" → *sdk.Builder
 }
 
-// NewAPI returns an initialized API object.
-func NewAPI(ctx context.Context, s Store, cfg stores.IndexdConfig, mode stores.ServerMode) *API {
+// NewAPI returns an initialized API object. stats returns a snapshot
+// of the current server statistics; it may be nil.
+func NewAPI(ctx context.Context, s Store, cfg stores.IndexdConfig, mode stores.ServerMode, stats func() ServerStats) *API {
 	api := &API{
 		store: s,
 		cfg:   cfg,
 		mode:  mode,
 		ctx:   ctx,
 		rl:    newRatelimiter(ctx),
+		stats: stats,
 	}
 	api.buildHTTPRoutes()
 	return api
@@ -220,6 +234,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.DELETE("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.workgroupHandlerDELETE(w, req, ps)
+	})
+
+	router.GET("/stats", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.statsHandlerGET(w, req, ps)
 	})
 
 	router.POST("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -987,6 +1005,21 @@ func (api *API) workgroupHandlerDELETE(w http.ResponseWriter, req *http.Request,
 	writeSuccess(w)
 }
 
+// statsHandlerGET handles the GET /stats calls.
+func (api *API) statsHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	if api.rl.limitExceeded(getRemoteHost(req)) {
+		writeError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	var stats ServerStats
+	if api.stats != nil {
+		stats = api.stats()
+	}
+
+	writeJSON(w, stats)
+}
+
 // connectHandlerPOST handles the POST /connect/:workgroup/:share calls.
 // It initiates an indexd connection-approval flow by sending a registration request
 // to the indexer and returning the URL the admin must visit to approve it.
@@ -1050,6 +1083,7 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 //  2. No body, indexd share, pending builder present — complete the approval flow
 //     started by POST /connect/request, derive the app key, and return it.
 //  3. No body, renterd share — no key required.
+//
 // :workgroup may be a UUID or a workgroup name.
 func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {

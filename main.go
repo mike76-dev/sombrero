@@ -105,7 +105,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer lAPI.Close()
-	a := api.NewAPI(ctx, db, cfg.Indexd, cfg.Mode)
+	a := api.NewAPI(ctx, db, cfg.Indexd, cfg.Mode, server.Stats)
 	apiSrv := &http.Server{Handler: api.BasicAuth(cfg.API.Password)(a)}
 	go apiSrv.Serve(lAPI)
 	log.Printf("API: listening at %s ...\n", lAPI.Addr())
@@ -219,7 +219,7 @@ func main() {
 					}
 
 					server.mu.Lock()
-					server.stats.bytesRcvd += uint64(len(msg))
+					server.stats.BytesRcvd += uint64(len(msg))
 					server.mu.Unlock()
 
 					if err := c.acceptRequest(msg); err != nil {

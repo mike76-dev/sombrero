@@ -484,7 +484,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			if err := c.ntlmServer.Authenticate(authToken.ResponseToken); err != nil {
 				c.server.deregisterSession(c, ss.sessionID)
 				c.server.mu.Lock()
-				c.server.stats.pwErrors++
+				c.server.stats.PwErrors++
 				c.server.mu.Unlock()
 				resp := smb2.NewErrorResponse(ssr, smb2.STATUS_NO_SUCH_USER, 0, nil)
 				return resp, nil, nil
@@ -775,7 +775,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			default: // Other named pipes are not supported
 				cancel()
 				c.server.mu.Lock()
-				c.server.stats.permErrors++
+				c.server.stats.PermErrors++
 				c.server.mu.Unlock()
 				resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
 				return resp, ss, nil
@@ -786,7 +786,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				cancel()
 				resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
 				c.server.mu.Lock()
-				c.server.stats.permErrors++
+				c.server.stats.PermErrors++
 				c.server.mu.Unlock()
 				return resp, ss, nil
 			}
