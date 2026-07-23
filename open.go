@@ -89,13 +89,16 @@ type open struct {
 	// if pendingUpload is not nil, it points to an active multipart upload.
 	pendingUpload *upload
 
-	// SMB 2.0.2 dialect has a limitation of the chunk size of 64KiB. In order to mitigate this,
-	// read buffering is implemented. The buffer consists of several caches, because the SMB2_READ
-	// requests may come out of order.
-	buffer       map[uint64][]byte
+	// To speed up the downloads, read buffering is implemented. The buffer consists of several
+	// caches, because the SMB2_READ requests may come out of order. Chunks are downloaded in the
+	// background, so an entry may still be in flight; readers wait on its done channel. When the
+	// reads look sequential, the next few chunks are prefetched so the network transfer overlaps
+	// with serving cached data.
+	buffer       map[uint64]*readChunk
 	cacheOrder   []uint64
 	chunkSize    uint64
 	maxCacheSize int
+	lastReadEnd  uint64
 
 	// A collection of LSARPS frames (if the open is associated with the IPC$ share).
 	lsaFrames map[uint32]*rpc.Frame
@@ -108,6 +111,56 @@ type open struct {
 
 	inflight int
 	cond     *sync.Cond
+}
+
+// readChunk is a cached chunk of a file. The download runs in the background;
+// done is closed once data (or err) is set.
+type readChunk struct {
+	data []byte
+	err  error
+	done chan struct{}
+}
+
+const (
+	// Bounds for the read chunk size. Within these bounds, chunks are kept aligned to the
+	// slab size of the backend, so that a chunk download translates into as few range
+	// requests as possible.
+	minReadChunkSize = 16 * 1024 * 1024
+	maxReadChunkSize = 32 * 1024 * 1024
+
+	// How many chunks to prefetch ahead of a sequential read.
+	readPrefetchDepth = 3
+
+	// Rough per-open memory budget of the read cache, used to derive maxCacheSize.
+	readCacheBudget = 128 * 1024 * 1024
+)
+
+// readChunkSize picks a read chunk size for the given slab size: a whole multiple of
+// small slabs, or an exact fraction of a large slab.
+func readChunkSize(slabSize uint64) uint64 {
+	if slabSize == 0 {
+		return minReadChunkSize
+	}
+
+	chunk := slabSize
+	for chunk < minReadChunkSize {
+		chunk += slabSize
+	}
+	for chunk > maxReadChunkSize {
+		chunk /= 2
+	}
+
+	return chunk
+}
+
+// readCacheSize derives the chunk count limit of the read cache from the chunk size.
+func readCacheSize(chunkSize uint64) int {
+	size := int(readCacheBudget / chunkSize)
+	if size < readPrefetchDepth+1 {
+		size = readPrefetchDepth + 1
+	}
+
+	return size
 }
 
 // grantAccess returns true if the user's access rights are sufficient for performing the requested operation(s) on the file.
@@ -185,10 +238,12 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 		ctx:            ctx,
 		cancel:         cancel,
 		lsaFrames:      make(map[uint32]*rpc.Frame),
-		buffer:         make(map[uint64][]byte),
-		chunkSize:      smb2.BytesPerSector * 4,
-		maxCacheSize:   4,
+		buffer:         make(map[uint64]*readChunk),
+		// maxUploadSize equals the slab size of the backend, which is also the
+		// alignment that makes downloads the cheapest.
+		chunkSize: readChunkSize(tc.maxUploadSize),
 	}
+	op.maxCacheSize = readCacheSize(op.chunkSize)
 	op.cond = sync.NewCond(&op.mu)
 
 	if isDir {
@@ -584,17 +639,7 @@ func (op *open) read(offset, length uint64) []byte {
 	size := op.size
 	path := op.pathName
 	chunkSize := op.chunkSize
-	maxCacheSize := op.maxCacheSize
 	op.mu.Unlock()
-
-	readData := func(acc stores.Account, o, l uint64) ([]byte, error) {
-		var buf bytes.Buffer
-		err := op.treeConnect.client.Read(op.ctx, acc, path, o, l, &buf)
-		if err != nil {
-			return nil, err
-		}
-		return buf.Bytes(), nil
-	}
 
 	if offset >= size {
 		return nil
@@ -604,57 +649,132 @@ func (op *open) read(offset, length uint64) []byte {
 		length = size - offset
 	}
 
-	var result []byte
-	remaining := int64(length)
-
 	acc, err := op.session.connection.server.store.FindAccount(op.session.userName, op.session.workgroup)
 	if err != nil {
 		log.Printf("Access denied (%s): %v", path, err)
 		return nil
 	}
 
+	firstChunk := (offset / chunkSize) * chunkSize
+	lastChunk := ((offset + length - 1) / chunkSize) * chunkSize
+
+	// Start (or find in flight) the downloads of all chunks of the requested range,
+	// then release the lock before waiting on them, so that concurrent reads on the
+	// same open can proceed in parallel.
 	op.mu.Lock()
-	defer op.mu.Unlock()
+	var chunks []*readChunk
+	for chunkOffset := firstChunk; chunkOffset <= lastChunk; chunkOffset += chunkSize {
+		chunks = append(chunks, op.ensureChunk(acc, chunkOffset, size))
+	}
 
-	for remaining > 0 {
-		chunkOffset := (offset / chunkSize) * chunkSize
-		chunkStart := offset % chunkSize
-		chunkEnd := chunkStart + uint64(remaining)
+	// If the reads look sequential, prefetch the next chunks so that the transfer
+	// keeps going while the already cached data is being served.
+	sequential := offset == 0 ||
+		(offset <= op.lastReadEnd+2*chunkSize && op.lastReadEnd <= offset+length+2*chunkSize)
+	if op.lastReadEnd < offset+length {
+		op.lastReadEnd = offset + length
+	}
+	if sequential {
+		for i, chunkOffset := 0, lastChunk+chunkSize; i < readPrefetchDepth && chunkOffset < size; i, chunkOffset = i+1, chunkOffset+chunkSize {
+			op.ensureChunk(acc, chunkOffset, size)
+		}
+	}
+	op.mu.Unlock()
 
-		if chunkEnd > chunkSize {
-			chunkEnd = chunkSize
+	result := make([]byte, 0, length)
+	for i, chunk := range chunks {
+		<-chunk.done
+		if chunk.err != nil {
+			log.Printf("Error reading object: %s: %v", path, chunk.err)
+			return nil
 		}
 
-		if data, ok := op.buffer[chunkOffset]; ok {
-			result = append(result, data[chunkStart:chunkEnd]...)
-		} else {
-			toRead := chunkSize
-			if chunkOffset+toRead > size {
-				toRead = size - chunkOffset
-			}
-
-			data, err := readData(acc, chunkOffset, toRead)
-			if err != nil {
-				log.Printf("Error reading object: %s: %v", path, err)
-				return nil
-			}
-
-			op.buffer[chunkOffset] = data
-			op.cacheOrder = append(op.cacheOrder, chunkOffset)
-			result = append(result, data[chunkStart:chunkEnd]...)
+		chunkOffset := firstChunk + uint64(i)*chunkSize
+		start := uint64(0)
+		if offset > chunkOffset {
+			start = offset - chunkOffset
+		}
+		end := uint64(len(chunk.data))
+		if chunkOffset+end > offset+length {
+			end = offset + length - chunkOffset
 		}
 
-		if len(op.buffer) > maxCacheSize {
-			oldest := op.cacheOrder[0]
-			delete(op.buffer, oldest)
-			op.cacheOrder = op.cacheOrder[1:]
-		}
-
-		remaining -= int64(chunkEnd - chunkStart)
-		offset += (chunkEnd - chunkStart)
+		result = append(result, chunk.data[start:end]...)
 	}
 
 	return result
+}
+
+// ensureChunk returns the cache entry for the chunk at chunkOffset, starting a
+// background download if there is no entry yet. op.mu must be held.
+func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readChunk {
+	if chunk, ok := op.buffer[chunkOffset]; ok {
+		return chunk
+	}
+
+	chunk := &readChunk{done: make(chan struct{})}
+	op.buffer[chunkOffset] = chunk
+	op.cacheOrder = append(op.cacheOrder, chunkOffset)
+	op.evictChunks()
+
+	toRead := op.chunkSize
+	if chunkOffset+toRead > size {
+		toRead = size - chunkOffset
+	}
+	path := op.pathName
+
+	go func() {
+		var buf bytes.Buffer
+		err := op.treeConnect.client.Read(op.ctx, acc, path, chunkOffset, toRead, &buf)
+
+		op.mu.Lock()
+		if err != nil {
+			chunk.err = err
+			// Drop the failed chunk from the cache so that a later read retries it.
+			if op.buffer[chunkOffset] == chunk {
+				delete(op.buffer, chunkOffset)
+				for i, co := range op.cacheOrder {
+					if co == chunkOffset {
+						op.cacheOrder = append(op.cacheOrder[:i], op.cacheOrder[i+1:]...)
+						break
+					}
+				}
+			}
+		} else {
+			chunk.data = buf.Bytes()
+		}
+		op.mu.Unlock()
+
+		close(chunk.done)
+	}()
+
+	return chunk
+}
+
+// evictChunks drops the oldest completed chunks until the cache fits into its limit.
+// Chunks that are still being downloaded are never dropped. op.mu must be held.
+func (op *open) evictChunks() {
+	for len(op.buffer) > op.maxCacheSize {
+		evicted := false
+		for i, chunkOffset := range op.cacheOrder {
+			chunk := op.buffer[chunkOffset]
+			select {
+			case <-chunk.done:
+			default:
+				continue // still in flight
+			}
+
+			delete(op.buffer, chunkOffset)
+			op.cacheOrder = append(op.cacheOrder[:i], op.cacheOrder[i+1:]...)
+			evicted = true
+			break
+		}
+
+		if !evicted {
+			// Everything is still in flight; allow a temporary overshoot.
+			break
+		}
+	}
 }
 
 // startUpload initiates a multipart upload.
