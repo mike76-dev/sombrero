@@ -106,7 +106,7 @@ CREATE UNIQUE INDEX idx_objects_lookup_entry ON objects (share_name, directory_i
 CREATE TABLE buffers (
     id BIGSERIAL PRIMARY KEY,
     share_name TEXT NOT NULL,
-    data BYTEA NOT NULL,
+    data BYTEA STORAGE EXTERNAL NOT NULL,
     CONSTRAINT buffers_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE
 );
 
