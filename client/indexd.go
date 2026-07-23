@@ -331,7 +331,7 @@ func (ic *IndexdClient) Parents(ctx context.Context, acc stores.Account, path st
 
 // Read downloads a file from the Sia network.
 func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path string, offset, length uint64, buf io.Writer) (err error) {
-	slabs, err := ic.db.GetMetadata(acc, ic.share, path)
+	slabs, err := ic.db.GetMetadata(acc, ic.share, path, offset, length)
 	if err != nil {
 		return err
 	}

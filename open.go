@@ -239,8 +239,10 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 		cancel:         cancel,
 		lsaFrames:      make(map[uint32]*rpc.Frame),
 		buffer:         make(map[uint64]*readChunk),
-		// maxUploadSize equals the slab size of the backend, which is also the
-		// alignment that makes downloads the cheapest.
+		// For indexd shares, maxUploadSize equals the slab size, which is also the
+		// alignment that makes downloads the cheapest. For renterd shares, it is
+		// merely the multipart part size; renterd serves arbitrary ranges, so the
+		// chunk size derived from it is just a reasonable default.
 		chunkSize: readChunkSize(tc.maxUploadSize),
 	}
 	op.maxCacheSize = readCacheSize(op.chunkSize)
