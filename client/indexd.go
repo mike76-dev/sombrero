@@ -21,12 +21,18 @@ import (
 	"go.sia.tech/renterd/v2/api"
 	sdk "go.sia.tech/siastorage"
 	"golang.org/x/crypto/blake2b"
+	"golang.org/x/sync/errgroup"
 )
 
 // uploadWorkers is the number of concurrent slab uploads per share.
 // Slab uploads are latency-bound, so a few parallel uploads multiply
 // throughput at the cost of holding that many slabs in memory.
 const uploadWorkers = 3
+
+// slabDownloadThreads is the maximum number of concurrent slab downloads
+// within a single Read call. A read range only spans multiple slabs when
+// the slab size is smaller than the read chunk size (low dataShards).
+const slabDownloadThreads = 4
 
 // storageBackend is the minimal interface for `indexd` SDK.
 type storageBackend interface {
@@ -329,7 +335,8 @@ func (ic *IndexdClient) Parents(ctx context.Context, acc stores.Account, path st
 	return
 }
 
-// Read downloads a file from the Sia network.
+// Read downloads a file from the Sia network. The slabs covering the requested
+// range are downloaded concurrently and assembled in order.
 func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path string, offset, length uint64, buf io.Writer) (err error) {
 	slabs, err := ic.db.GetMetadata(acc, ic.share, path, offset, length)
 	if err != nil {
@@ -338,14 +345,17 @@ func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path strin
 
 	end := offset + length
 
-	for _, slab := range slabs {
+	parts := make([][]byte, len(slabs))
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(slabDownloadThreads)
+
+	for i, slab := range slabs {
+		// The slices returned by GetMetadata are already clipped to the
+		// requested range; clamp once more to be safe.
 		slabStart := slab.At
 		slabEnd := slab.At + slab.Length
-		if slabEnd <= offset {
+		if slabEnd <= offset || slabStart >= end {
 			continue
-		}
-		if slabStart >= end {
-			break
 		}
 
 		readStart := max(offset, slabStart)
@@ -354,13 +364,31 @@ func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path strin
 		rangeLength := readEnd - readStart
 
 		if (slab.Key != types.Hash256{}) {
-			if err = ic.backend.Download(ctx, slab.Key, rangeOffset, rangeLength, buf); err != nil {
-				return err
-			}
+			eg.Go(func() error {
+				var part bytes.Buffer
+				part.Grow(int(rangeLength))
+				if err := ic.backend.Download(egCtx, slab.Key, rangeOffset, rangeLength, &part); err != nil {
+					return err
+				}
+
+				parts[i] = part.Bytes()
+				return nil
+			})
 		} else if slab.Data != nil {
-			if _, err = io.Copy(buf, bytes.NewReader(slab.Data[readStart-slabStart:readEnd-slabStart])); err != nil {
-				return err
-			}
+			parts[i] = slab.Data[readStart-slabStart : readEnd-slabStart]
+		}
+	}
+
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+
+	for _, part := range parts {
+		if part == nil {
+			continue
+		}
+		if _, err := buf.Write(part); err != nil {
+			return err
 		}
 	}
 

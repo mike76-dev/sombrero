@@ -14,7 +14,9 @@ require (
 	go.sia.tech/renterd/v2 v2.9.3-0.20260615081323-2b8e3b095b1f
 	go.sia.tech/siastorage v0.1.1-0.20260609121956-07a0de07a6e0
 	golang.org/x/crypto v0.53.0
+	golang.org/x/sync v0.21.0
 	gopkg.in/yaml.v3 v3.0.1
+	lukechampine.com/frand v1.5.1
 )
 
 require (
@@ -50,10 +52,8 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.46.0 // indirect
-	lukechampine.com/frand v1.5.1 // indirect
 )
