@@ -703,7 +703,6 @@ func (op *open) write(offset uint64, data []byte) error {
 	}
 
 	u.mu.Lock()
-	defer u.mu.Unlock()
 
 	buf := make([]byte, len(data))
 	copy(buf, data)
@@ -733,31 +732,40 @@ func (op *open) write(offset uint64, data []byte) error {
 		op.mu.Unlock()
 	}
 
+	// Detach any complete slabs while holding the lock, then upload them
+	// after releasing it, so that concurrent writes to the same file can
+	// keep buffering in the meantime.
+	var slabs []uploadChunk
+	var partNumbers []int
 	for uint64(len(u.buf)) >= u.maxLength {
-		sector := u.buf[:u.maxLength]
-		partOffset := u.bufOffset
-
 		u.partCount++
+		slabs = append(slabs, uploadChunk{offset: u.bufOffset, data: u.buf[:u.maxLength:u.maxLength]})
+		partNumbers = append(partNumbers, u.partCount)
+		u.buf = u.buf[u.maxLength:]
+		u.bufOffset += u.maxLength
+	}
+	u.mu.Unlock()
+
+	for i, slab := range slabs {
 		eTag, err := op.treeConnect.client.Write(
 			op.ctx,
-			bytes.NewReader(sector),
+			bytes.NewReader(slab.data),
 			op.pathName,
 			u.uploadID,
-			u.partCount,
-			partOffset,
-			u.maxLength,
+			partNumbers[i],
+			slab.offset,
+			uint64(len(slab.data)),
 		)
 		if err != nil {
 			return err
 		}
 
+		u.mu.Lock()
 		u.parts = append(u.parts, api.MultipartCompletedPart{
-			PartNumber: u.partCount,
+			PartNumber: partNumbers[i],
 			ETag:       eTag,
 		})
-
-		u.buf = u.buf[u.maxLength:]
-		u.bufOffset += u.maxLength
+		u.mu.Unlock()
 	}
 
 	return nil
