@@ -23,6 +23,11 @@ import (
 	"golang.org/x/crypto/blake2b"
 )
 
+// uploadWorkers is the number of concurrent slab uploads per share.
+// Slab uploads are latency-bound, so a few parallel uploads multiply
+// throughput at the cost of holding that many slabs in memory.
+const uploadWorkers = 3
+
 // storageBackend is the minimal interface for `indexd` SDK.
 type storageBackend interface {
 	Account(ctx context.Context) (app.AccountResponse, error)
@@ -158,12 +163,14 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		closeChan:    cc,
 	}
 
-	// Start background upload thread.
-	ic.wg.Add(1)
-	go func() {
-		defer ic.wg.Done()
-		ic.processUploads(ic.closeChan)
-	}()
+	// Start background upload threads.
+	for range uploadWorkers {
+		ic.wg.Add(1)
+		go func() {
+			defer ic.wg.Done()
+			ic.processUploads(ic.closeChan)
+		}()
+	}
 
 	return ic
 }
