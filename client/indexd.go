@@ -172,6 +172,13 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		}()
 	}
 
+	// Start background cleanup of stale upload jobs.
+	ic.wg.Add(1)
+	go func() {
+		defer ic.wg.Done()
+		ic.cleanupUploadJobs(ic.closeChan)
+	}()
+
 	return ic
 }
 
@@ -547,6 +554,24 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// cleanupUploadJobs periodically removes upload jobs that can no longer be processed.
+func (ic *IndexdClient) cleanupUploadJobs(closeChan chan struct{}) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		if err := ic.db.CleanupUploadJobs(); err != nil {
+			log.Printf("failed to clean up upload jobs: %v", err)
+		}
+
+		select {
+		case <-closeChan:
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // processUploads runs the upload jobs in the background.

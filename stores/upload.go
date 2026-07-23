@@ -304,20 +304,6 @@ func (db *Database) AddBufferedSlab(uploadID string, offset uint64, data []byte)
 // ClaimUploadJob retrieves and locks the next pending upload job for processing.
 func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const cleanupQuery = `
-			DELETE FROM upload_jobs uj
-			WHERE NOT EXISTS (
-				SELECT 1
-				FROM metadata m
-				JOIN buffers b ON b.id = m.buffer_id
-				WHERE m.id = uj.metadata_id
-			)
-		`
-
-		if _, err := tx.Exec(ctx, cleanupQuery); err != nil {
-			return fmt.Errorf("failed to clean up stale upload jobs: %w", err)
-		}
-
 		const query = `
 			WITH picked AS (
 				SELECT
@@ -376,10 +362,31 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 		if end > uint64(len(data)) {
 			return fmt.Errorf("buffer slice out of bounds: offset %d, length %d, buffer size %d", job.DataOffset, job.DataLength, len(data))
 		}
-		job.Data = append([]byte(nil), data[job.DataOffset:end]...)
+		job.Data = data[job.DataOffset:end]
 		return nil
 	})
 	return
+}
+
+// CleanupUploadJobs removes upload jobs whose metadata no longer references a buffer,
+// e.g. after a requeued job was completed by another worker.
+func (db *Database) CleanupUploadJobs() error {
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			DELETE FROM upload_jobs uj
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM metadata m
+				JOIN buffers b ON b.id = m.buffer_id
+				WHERE m.id = uj.metadata_id
+			)
+		`
+
+		if _, err := tx.Exec(ctx, query); err != nil {
+			return fmt.Errorf("failed to clean up stale upload jobs: %w", err)
+		}
+		return nil
+	})
 }
 
 // CompleteUploadJob marks the given upload job as completed by associating the provided slab key
