@@ -143,6 +143,7 @@ type IndexdClient struct {
 	dataShards   uint8
 	parityShards uint8
 	closeChan    chan struct{}
+	jobsChan     chan struct{}
 	wg           sync.WaitGroup
 }
 
@@ -161,6 +162,7 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		dataShards:   dataShards,
 		parityShards: parityShards,
 		closeChan:    cc,
+		jobsChan:     make(chan struct{}, uploadWorkers),
 	}
 
 	// Start background upload threads.
@@ -429,6 +431,12 @@ func (ic *IndexdClient) Write(ctx context.Context, r io.Reader, path string, upl
 		return "", fmt.Errorf("couldn't add buffered slab to the database: %v", err)
 	}
 
+	// Wake up an idle upload worker.
+	select {
+	case ic.jobsChan <- struct{}{}:
+	default:
+	}
+
 	return
 }
 
@@ -586,25 +594,29 @@ func (ic *IndexdClient) processUploads(closeChan chan struct{}) {
 		default:
 		}
 
-		if err := ic.processUpload(ctx); err != nil {
+		err := ic.processUpload(ctx)
+		if err == nil {
+			continue
+		}
+
+		if errors.Is(err, stores.ErrNoUploadJobs) {
+			// Wait until a new job is signaled, with a periodic fallback
+			// poll in case the signal was missed.
 			select {
 			case <-closeChan:
 				return
-			default:
+			case <-ic.jobsChan:
+			case <-time.After(time.Second):
 			}
+			continue
+		}
 
-			time.Sleep(time.Second)
+		log.Printf("failed to run upload job: %v", err)
 
-			select {
-			case <-closeChan:
-				return
-			default:
-			}
-
-			if errors.Is(err, stores.ErrNoUploadJobs) {
-				continue
-			}
-			log.Printf("failed to run upload job: %v", err)
+		select {
+		case <-closeChan:
+			return
+		case <-time.After(time.Second):
 		}
 	}
 }
