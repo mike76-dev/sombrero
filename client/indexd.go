@@ -23,6 +23,11 @@ import (
 	"golang.org/x/crypto/blake2b"
 )
 
+// uploadWorkers is the number of concurrent slab uploads per share.
+// Slab uploads are latency-bound, so a few parallel uploads multiply
+// throughput at the cost of holding that many slabs in memory.
+const uploadWorkers = 3
+
 // storageBackend is the minimal interface for `indexd` SDK.
 type storageBackend interface {
 	Account(ctx context.Context) (app.AccountResponse, error)
@@ -138,6 +143,7 @@ type IndexdClient struct {
 	dataShards   uint8
 	parityShards uint8
 	closeChan    chan struct{}
+	jobsChan     chan struct{}
 	wg           sync.WaitGroup
 }
 
@@ -156,13 +162,23 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		dataShards:   dataShards,
 		parityShards: parityShards,
 		closeChan:    cc,
+		jobsChan:     make(chan struct{}, uploadWorkers),
 	}
 
-	// Start background upload thread.
+	// Start background upload threads.
+	for range uploadWorkers {
+		ic.wg.Add(1)
+		go func() {
+			defer ic.wg.Done()
+			ic.processUploads(ic.closeChan)
+		}()
+	}
+
+	// Start background cleanup of stale upload jobs.
 	ic.wg.Add(1)
 	go func() {
 		defer ic.wg.Done()
-		ic.processUploads(ic.closeChan)
+		ic.cleanupUploadJobs(ic.closeChan)
 	}()
 
 	return ic
@@ -415,6 +431,12 @@ func (ic *IndexdClient) Write(ctx context.Context, r io.Reader, path string, upl
 		return "", fmt.Errorf("couldn't add buffered slab to the database: %v", err)
 	}
 
+	// Wake up an idle upload worker.
+	select {
+	case ic.jobsChan <- struct{}{}:
+	default:
+	}
+
 	return
 }
 
@@ -542,6 +564,24 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 	return nil
 }
 
+// cleanupUploadJobs periodically removes upload jobs that can no longer be processed.
+func (ic *IndexdClient) cleanupUploadJobs(closeChan chan struct{}) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		if err := ic.db.CleanupUploadJobs(); err != nil {
+			log.Printf("failed to clean up upload jobs: %v", err)
+		}
+
+		select {
+		case <-closeChan:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 // processUploads runs the upload jobs in the background.
 func (ic *IndexdClient) processUploads(closeChan chan struct{}) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -554,25 +594,29 @@ func (ic *IndexdClient) processUploads(closeChan chan struct{}) {
 		default:
 		}
 
-		if err := ic.processUpload(ctx); err != nil {
+		err := ic.processUpload(ctx)
+		if err == nil {
+			continue
+		}
+
+		if errors.Is(err, stores.ErrNoUploadJobs) {
+			// Wait until a new job is signaled, with a periodic fallback
+			// poll in case the signal was missed.
 			select {
 			case <-closeChan:
 				return
-			default:
+			case <-ic.jobsChan:
+			case <-time.After(time.Second):
 			}
+			continue
+		}
 
-			time.Sleep(time.Second)
+		log.Printf("failed to run upload job: %v", err)
 
-			select {
-			case <-closeChan:
-				return
-			default:
-			}
-
-			if errors.Is(err, stores.ErrNoUploadJobs) {
-				continue
-			}
-			log.Printf("failed to run upload job: %v", err)
+		select {
+		case <-closeChan:
+			return
+		case <-time.After(time.Second):
 		}
 	}
 }

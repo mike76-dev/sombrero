@@ -16,9 +16,14 @@ The setup process of an `indexd` node is described here: [https://github.com/Sia
 ## Installing PostgreSQL
 This section will assume you are running Ubuntu Server 24.04. On the other systems, the commands may be different.
 
-Run the following command:
+The default Ubuntu repositories ship an older PostgreSQL version, so add the official PostgreSQL (PGDG) repository first:
 ```Bash
-sudo apt install postgresql postgresql-contrib -y
+sudo apt install postgresql-common -y
+sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+```
+Then install PostgreSQL 18:
+```Bash
+sudo apt install postgresql-18 postgresql-contrib -y
 ```
 Verify the installation:
 ```Bash
@@ -42,9 +47,9 @@ Then open the PostgreSQL shell:
 ```Bash
 psql
 ```
-You should see:
+You should see something like:
 ```
-psql (16.x)
+psql (18.x)
 Type "help" for help.
 
 postgres=#
