@@ -782,8 +782,11 @@ func (db *Database) ListSlabs(acc Account, share, path string) (slabs []types.Ha
 	return
 }
 
-// GetMetadata retrieves the metadata of the file at the specified path.
-func (db *Database) GetMetadata(acc Account, share, path string) (slabs []SlabSlice, err error) {
+// GetMetadata retrieves the metadata of the file at the specified path that
+// intersects the given range. The returned slab slices are clipped to the range,
+// so that only the requested part of any buffered slab data is fetched from the
+// database.
+func (db *Database) GetMetadata(acc Account, share, path string, offset, length uint64) (slabs []SlabSlice, err error) {
 	path = normalizePath(path)
 
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
@@ -811,20 +814,31 @@ func (db *Database) GetMetadata(acc Account, share, path string) (slabs []SlabSl
 							AND owner.workgroup = c.workgroup
 						)
 					)
+			),
+			clipped AS (
+				SELECT
+					m.slab_key,
+					m.buffer_id,
+					GREATEST(m.obj_offset, $4::BIGINT) AS obj_offset,
+					m.data_offset + GREATEST(m.obj_offset, $4::BIGINT) - m.obj_offset AS data_offset,
+					LEAST(m.obj_offset + m.data_length, $4::BIGINT + $5::BIGINT) - GREATEST(m.obj_offset, $4::BIGINT) AS data_length
+				FROM metadata m
+				JOIN target t ON t.id = m.object_id
+				WHERE m.obj_offset < $4::BIGINT + $5::BIGINT
+					AND m.obj_offset + m.data_length > $4::BIGINT
 			)
 			SELECT
-				m.obj_offset,
-				m.slab_key,
-				m.data_offset,
-				m.data_length,
-				b.data
-			FROM metadata m
-			JOIN target t ON t.id = m.object_id
-			LEFT JOIN buffers b ON b.id = m.buffer_id
-			ORDER BY m.obj_offset
+				c.obj_offset,
+				c.slab_key,
+				c.data_offset,
+				c.data_length,
+				SUBSTRING(b.data FROM c.data_offset::INT + 1 FOR c.data_length::INT)
+			FROM clipped c
+			LEFT JOIN buffers b ON b.id = c.buffer_id
+			ORDER BY c.obj_offset
 		`
 
-		rows, err := tx.Query(ctx, query, share, path, acc.ID)
+		rows, err := tx.Query(ctx, query, share, path, acc.ID, int64(offset), int64(length))
 		if err != nil {
 			return fmt.Errorf("failed to query object metadata: %v", err)
 		}
@@ -851,7 +865,7 @@ func (db *Database) GetMetadata(acc Account, share, path string) (slabs []SlabSl
 					Offset: dataOffset,
 					Length: dataLength,
 					At:     objOffset,
-					Data:   chunk[dataOffset : dataOffset+dataLength],
+					Data:   chunk,
 				}
 				slabs = append(slabs, pr)
 				continue

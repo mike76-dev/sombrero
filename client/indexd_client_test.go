@@ -400,7 +400,7 @@ func waitForMixedState(t *testing.T, db *stores.Database, acc stores.Account, sh
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		slabs, err := db.GetMetadata(acc, share, path)
+		slabs, err := db.GetMetadata(acc, share, path, 0, 1<<62)
 		if err == nil {
 			var remote, local int
 			for _, s := range slabs {
@@ -490,6 +490,80 @@ func TestIndexdClient_RenameDuringMixedUpload(t *testing.T) {
 	// Final state: 2 uploaded slabs, 1 short local tail.
 	waitForMixedState(t, db, acc, share.Name, newPath, 2, 1)
 	mustReadFull(t, ctx, c, acc, newPath, content)
+}
+
+func TestIndexdClient_RangedReads(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newGatedFakeBackend()
+	c := newIndexdClient(db, backend, share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	content := makeLargeMixedContent()
+	path := "ranges.bin"
+
+	uploadID, err := c.StartUpload(ctx, acc, path)
+	if err != nil {
+		t.Fatalf("StartUpload: %v", err)
+	}
+
+	uploadInThreeChunks(t, ctx, c, path, uploadID, content)
+
+	if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload: %v", err)
+	}
+
+	// Let exactly one full slab upload, so that the ranges below cover both
+	// remote and buffered slabs.
+	backend.allowUploads(1)
+	waitForMixedState(t, db, acc, share.Name, path, 1, 2)
+
+	full := uint64(proto.SectorSize)
+	size := uint64(len(content))
+	ranges := []struct{ offset, length uint64 }{
+		{0, size},            // whole file
+		{100, 1000},          // within the remote slab
+		{full - 500, 1000},   // across the remote/buffered boundary
+		{full + 1234, 4096},  // within the buffered slab
+		{2*full - 100, 200},  // across the buffered/tail boundary
+		{size - 345, 345},    // end of the tail
+		{0, 1},               // first byte
+		{size - 1, 1},        // last byte
+		{full - 1, full + 2}, // spanning all three slabs
+	}
+
+	for _, r := range ranges {
+		mustReadRange(t, ctx, c, acc, path, content, r.offset, r.length)
+	}
+
+	// Let the remaining full slab upload and verify the same ranges again.
+	backend.allowUploads(1)
+	waitForMixedState(t, db, acc, share.Name, path, 2, 1)
+
+	for _, r := range ranges {
+		mustReadRange(t, ctx, c, acc, path, content, r.offset, r.length)
+	}
+}
+
+func mustReadRange(t *testing.T, ctx context.Context, c Client, acc stores.Account, path string, content []byte, offset, length uint64) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	if err := c.Read(ctx, acc, path, offset, length, &buf); err != nil {
+		t.Fatalf("Read(%s, %d, %d): %v", path, offset, length, err)
+	}
+
+	want := content[offset : offset+length]
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("Read(%s, %d, %d) mismatch: got %d bytes, want %d bytes", path, offset, length, len(buf.Bytes()), len(want))
+	}
 }
 
 func TestIndexdClient_DeleteDuringMixedUpload(t *testing.T) {

@@ -21,12 +21,18 @@ import (
 	"go.sia.tech/renterd/v2/api"
 	sdk "go.sia.tech/siastorage"
 	"golang.org/x/crypto/blake2b"
+	"golang.org/x/sync/errgroup"
 )
 
 // uploadWorkers is the number of concurrent slab uploads per share.
 // Slab uploads are latency-bound, so a few parallel uploads multiply
 // throughput at the cost of holding that many slabs in memory.
 const uploadWorkers = 3
+
+// slabDownloadThreads is the maximum number of concurrent slab downloads
+// within a single Read call. A read range only spans multiple slabs when
+// the slab size is smaller than the read chunk size (low dataShards).
+const slabDownloadThreads = 4
 
 // storageBackend is the minimal interface for `indexd` SDK.
 type storageBackend interface {
@@ -39,9 +45,65 @@ type storageBackend interface {
 	Close() error
 }
 
+// objCacheSize is the maximum number of slab objects cached by sdkBackend.
+const objCacheSize = 128
+
 // sdkBackend is a wrapper around the SDK.
 type sdkBackend struct {
 	sdk *sdk.SDK
+
+	// Slab objects are content-addressed and immutable, so the lookups are
+	// cached to save a round trip on repeat downloads of the same slab.
+	mu       sync.Mutex
+	objCache map[types.Hash256]sdk.Object
+	objOrder []types.Hash256
+}
+
+// object returns the slab object with the given key, looking it up remotely
+// on a cache miss.
+func (b *sdkBackend) object(ctx context.Context, key types.Hash256) (sdk.Object, error) {
+	b.mu.Lock()
+	obj, ok := b.objCache[key]
+	b.mu.Unlock()
+	if ok {
+		return obj, nil
+	}
+
+	obj, err := b.sdk.Object(ctx, key)
+	if err != nil {
+		return sdk.Object{}, err
+	}
+
+	b.mu.Lock()
+	if _, ok := b.objCache[key]; !ok {
+		b.objCache[key] = obj
+		b.objOrder = append(b.objOrder, key)
+		if len(b.objOrder) > objCacheSize {
+			delete(b.objCache, b.objOrder[0])
+			b.objOrder = b.objOrder[1:]
+		}
+	}
+	b.mu.Unlock()
+
+	return obj, nil
+}
+
+// forgetObject removes the slab object with the given key from the cache.
+func (b *sdkBackend) forgetObject(key types.Hash256) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, ok := b.objCache[key]; !ok {
+		return
+	}
+
+	delete(b.objCache, key)
+	for i, k := range b.objOrder {
+		if k == key {
+			b.objOrder = append(b.objOrder[:i], b.objOrder[i+1:]...)
+			break
+		}
+	}
 }
 
 // Account calls sdk.Account.
@@ -74,7 +136,7 @@ func (b *sdkBackend) Upload(ctx context.Context, r io.Reader, dataShards, parity
 
 // Download downloads the object by its key.
 func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, length uint64, w io.Writer) error {
-	obj, err := b.sdk.Object(ctx, key)
+	obj, err := b.object(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -107,6 +169,7 @@ func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, le
 
 // DeleteObject calls sdk.DeleteObject.
 func (b *sdkBackend) DeleteObject(ctx context.Context, key types.Hash256) error {
+	b.forgetObject(key)
 	return b.sdk.DeleteObject(ctx, key)
 }
 
@@ -149,7 +212,11 @@ type IndexdClient struct {
 
 // NewIndexdClient returns an initialized IndexdClient.
 func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, dataShards, parityShards uint8) Client {
-	return newIndexdClient(db, &sdkBackend{sdk: sdkClient}, share, dataShards, parityShards)
+	backend := &sdkBackend{
+		sdk:      sdkClient,
+		objCache: make(map[types.Hash256]sdk.Object),
+	}
+	return newIndexdClient(db, backend, share, dataShards, parityShards)
 }
 
 // newIndexdClient allows using a mock SDK for testing.
@@ -329,23 +396,27 @@ func (ic *IndexdClient) Parents(ctx context.Context, acc stores.Account, path st
 	return
 }
 
-// Read downloads a file from the Sia network.
+// Read downloads a file from the Sia network. The slabs covering the requested
+// range are downloaded concurrently and assembled in order.
 func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path string, offset, length uint64, buf io.Writer) (err error) {
-	slabs, err := ic.db.GetMetadata(acc, ic.share, path)
+	slabs, err := ic.db.GetMetadata(acc, ic.share, path, offset, length)
 	if err != nil {
 		return err
 	}
 
 	end := offset + length
 
-	for _, slab := range slabs {
+	parts := make([][]byte, len(slabs))
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(slabDownloadThreads)
+
+	for i, slab := range slabs {
+		// The slices returned by GetMetadata are already clipped to the
+		// requested range; clamp once more to be safe.
 		slabStart := slab.At
 		slabEnd := slab.At + slab.Length
-		if slabEnd <= offset {
+		if slabEnd <= offset || slabStart >= end {
 			continue
-		}
-		if slabStart >= end {
-			break
 		}
 
 		readStart := max(offset, slabStart)
@@ -354,13 +425,31 @@ func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path strin
 		rangeLength := readEnd - readStart
 
 		if (slab.Key != types.Hash256{}) {
-			if err = ic.backend.Download(ctx, slab.Key, rangeOffset, rangeLength, buf); err != nil {
-				return err
-			}
+			eg.Go(func() error {
+				var part bytes.Buffer
+				part.Grow(int(rangeLength))
+				if err := ic.backend.Download(egCtx, slab.Key, rangeOffset, rangeLength, &part); err != nil {
+					return err
+				}
+
+				parts[i] = part.Bytes()
+				return nil
+			})
 		} else if slab.Data != nil {
-			if _, err = io.Copy(buf, bytes.NewReader(slab.Data[readStart-slabStart:readEnd-slabStart])); err != nil {
-				return err
-			}
+			parts[i] = slab.Data[readStart-slabStart : readEnd-slabStart]
+		}
+	}
+
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+
+	for _, part := range parts {
+		if part == nil {
+			continue
+		}
+		if _, err := buf.Write(part); err != nil {
+			return err
 		}
 	}
 
