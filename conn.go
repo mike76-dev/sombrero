@@ -1244,6 +1244,26 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		length := uint64(rr.Length())
+		if rr.Offset()+length >= size {
+			length = size - rr.Offset()
+		}
+
+		// If the whole range is already cached, respond right away. Going async here
+		// would race the interim response against the final one: the read completes
+		// in microseconds, and a client that sees the final response before the
+		// interim treats it as a protocol violation and drops the connection.
+		if data, ok := op.tryReadCached(rr.Offset(), length); ok {
+			if len(data) < int(rr.MinimumCount()) {
+				resp := smb2.NewErrorResponse(rr, smb2.STATUS_END_OF_FILE, 0, nil)
+				return resp, ss, nil
+			}
+			resp := &smb2.ReadResponse{}
+			resp.FromRequest(rr)
+			resp.Generate(data, rr.Padding())
+			return resp, ss, nil
+		}
+
 		// An SMB2_READ request can take long enough, especially on the Sia network, for the client
 		// to drop the connection. We send an interim response and process the request asynchronously
 		// to prevent that.
@@ -1262,23 +1282,23 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		resp.Header()[len(resp.Header())-1] = 0x21
 
 		go func() {
-			length := uint64(rr.Length())
-
-			if rr.Offset()+length >= size {
-				length = size - rr.Offset()
-			}
-
 			var resp smb2.GenericResponse
-			data := op.read(rr.Offset(), length)
-			if len(data) < int(rr.MinimumCount()) {
+			data, err := op.read(rr.Offset(), length)
+			if err != nil {
+				// A failed download is an I/O error, not an end of file: the client
+				// may retry the read, while an EOF would truncate the file for it.
+				resp = smb2.NewErrorResponse(rr, smb2.STATUS_DATA_ERROR, 0, nil)
+			} else if len(data) < int(rr.MinimumCount()) {
 				resp = smb2.NewErrorResponse(rr, smb2.STATUS_END_OF_FILE, 0, nil)
 			} else {
 				resp = &smb2.ReadResponse{}
 				resp.FromRequest(rr)
 				resp.(*smb2.ReadResponse).Generate(data, rr.Padding())
-				resp.Header().SetAsyncID(asyncID)
-				resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
 			}
+			// The final response of an async operation must carry the async flag and
+			// ID in all cases, including errors.
+			resp.Header().SetAsyncID(asyncID)
+			resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
 
 			c.mu.Lock()
 			delete(c.requestList, resp.Header().MessageID())

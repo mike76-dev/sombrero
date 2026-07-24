@@ -633,9 +633,104 @@ func (op *open) getObjectID() []byte {
 	return id
 }
 
-// read checks if the requested chunk of data has already been downloaded. If so, it retrieves the data
-// from the buffer. If not, it downloads it from the Sia network and caches it.
-func (op *open) read(offset, length uint64) []byte {
+// tryReadCached serves a read synchronously if every chunk of the requested range
+// has already been downloaded. It returns false if any part of the range is missing
+// or still in flight, in which case the caller should fall back to op.read.
+func (op *open) tryReadCached(offset, length uint64) ([]byte, bool) {
+	op.mu.Lock()
+	size := op.size
+	chunkSize := op.chunkSize
+
+	if offset >= size {
+		op.mu.Unlock()
+		return nil, false
+	}
+	if offset+length >= size {
+		length = size - offset
+	}
+
+	firstChunk := (offset / chunkSize) * chunkSize
+	lastChunk := ((offset + length - 1) / chunkSize) * chunkSize
+
+	var chunks []*readChunk
+	for chunkOffset := firstChunk; chunkOffset <= lastChunk; chunkOffset += chunkSize {
+		chunk, ok := op.buffer[chunkOffset]
+		if !ok {
+			op.mu.Unlock()
+			return nil, false
+		}
+		select {
+		case <-chunk.done:
+		default:
+			op.mu.Unlock()
+			return nil, false
+		}
+		if chunk.err != nil {
+			op.mu.Unlock()
+			return nil, false
+		}
+		op.touchChunk(chunkOffset)
+		chunks = append(chunks, chunk)
+	}
+
+	// If the reads look sequential, prefetch the next chunks so that the transfer
+	// keeps going while the already cached data is being served. A read counts as
+	// sequential if it lands near where the previous read ended, or if it continues
+	// a chunk that is already cached — the latter keeps the prefetch alive when the
+	// reads of two file regions are interleaved (e.g. a video player periodically
+	// consulting the index at the end of the file during playback). This is the only
+	// path that prefetches: a prefetch started by a read that is itself waiting for
+	// a download would compete with it for bandwidth.
+	prevCached := false
+	if firstChunk >= chunkSize {
+		_, prevCached = op.buffer[firstChunk-chunkSize]
+	}
+	sequential := offset == 0 || prevCached ||
+		(offset <= op.lastReadEnd+2*chunkSize && op.lastReadEnd <= offset+length+2*chunkSize)
+	op.lastReadEnd = offset + length
+
+	var prefetch []uint64
+	if sequential {
+		for i, chunkOffset := 0, lastChunk+chunkSize; i < readPrefetchDepth && chunkOffset < size; i, chunkOffset = i+1, chunkOffset+chunkSize {
+			if _, ok := op.buffer[chunkOffset]; !ok {
+				prefetch = append(prefetch, chunkOffset)
+			}
+		}
+	}
+
+	result := make([]byte, 0, length)
+	for i, chunk := range chunks {
+		chunkOffset := firstChunk + uint64(i)*chunkSize
+		start := uint64(0)
+		if offset > chunkOffset {
+			start = offset - chunkOffset
+		}
+		end := uint64(len(chunk.data))
+		if chunkOffset+end > offset+length {
+			end = offset + length - chunkOffset
+		}
+		result = append(result, chunk.data[start:end]...)
+	}
+	op.mu.Unlock()
+
+	if len(prefetch) > 0 {
+		acc, err := op.session.connection.server.store.FindAccount(op.session.userName, op.session.workgroup)
+		if err == nil {
+			op.mu.Lock()
+			for _, chunkOffset := range prefetch {
+				op.ensureChunk(acc, chunkOffset, size)
+			}
+			op.mu.Unlock()
+		}
+	}
+
+	return result, true
+}
+
+// read retrieves the requested chunk of data, downloading the missing parts from
+// the Sia network and caching them. It blocks until the downloads complete; reads
+// that can be served from the cache alone should use tryReadCached instead.
+func (op *open) read(offset, length uint64) ([]byte, error) {
 	// Fetch variables for convenience.
 	op.mu.Lock()
 	size := op.size
@@ -644,7 +739,7 @@ func (op *open) read(offset, length uint64) []byte {
 	op.mu.Unlock()
 
 	if offset >= size {
-		return nil
+		return nil, nil
 	}
 
 	if offset+length >= size {
@@ -654,7 +749,7 @@ func (op *open) read(offset, length uint64) []byte {
 	acc, err := op.session.connection.server.store.FindAccount(op.session.userName, op.session.workgroup)
 	if err != nil {
 		log.Printf("Access denied (%s): %v", path, err)
-		return nil
+		return nil, err
 	}
 
 	firstChunk := (offset / chunkSize) * chunkSize
@@ -662,25 +757,15 @@ func (op *open) read(offset, length uint64) []byte {
 
 	// Start (or find in flight) the downloads of all chunks of the requested range,
 	// then release the lock before waiting on them, so that concurrent reads on the
-	// same open can proceed in parallel.
+	// same open can proceed in parallel. No prefetch is started here — it would
+	// compete with the blocking downloads for bandwidth; cache-hit reads keep the
+	// prefetch pipeline going instead (see tryReadCached).
 	op.mu.Lock()
 	var chunks []*readChunk
 	for chunkOffset := firstChunk; chunkOffset <= lastChunk; chunkOffset += chunkSize {
 		chunks = append(chunks, op.ensureChunk(acc, chunkOffset, size))
 	}
-
-	// If the reads look sequential, prefetch the next chunks so that the transfer
-	// keeps going while the already cached data is being served.
-	sequential := offset == 0 ||
-		(offset <= op.lastReadEnd+2*chunkSize && op.lastReadEnd <= offset+length+2*chunkSize)
-	if op.lastReadEnd < offset+length {
-		op.lastReadEnd = offset + length
-	}
-	if sequential {
-		for i, chunkOffset := 0, lastChunk+chunkSize; i < readPrefetchDepth && chunkOffset < size; i, chunkOffset = i+1, chunkOffset+chunkSize {
-			op.ensureChunk(acc, chunkOffset, size)
-		}
-	}
+	op.lastReadEnd = offset + length
 	op.mu.Unlock()
 
 	result := make([]byte, 0, length)
@@ -688,7 +773,7 @@ func (op *open) read(offset, length uint64) []byte {
 		<-chunk.done
 		if chunk.err != nil {
 			log.Printf("Error reading object: %s: %v", path, chunk.err)
-			return nil
+			return nil, chunk.err
 		}
 
 		chunkOffset := firstChunk + uint64(i)*chunkSize
@@ -704,13 +789,25 @@ func (op *open) read(offset, length uint64) []byte {
 		result = append(result, chunk.data[start:end]...)
 	}
 
-	return result
+	return result, nil
+}
+
+// touchChunk moves the chunk to the back of the eviction queue. op.mu must be held.
+func (op *open) touchChunk(chunkOffset uint64) {
+	for i, co := range op.cacheOrder {
+		if co == chunkOffset {
+			op.cacheOrder = append(op.cacheOrder[:i], op.cacheOrder[i+1:]...)
+			op.cacheOrder = append(op.cacheOrder, chunkOffset)
+			return
+		}
+	}
 }
 
 // ensureChunk returns the cache entry for the chunk at chunkOffset, starting a
 // background download if there is no entry yet. op.mu must be held.
 func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readChunk {
 	if chunk, ok := op.buffer[chunkOffset]; ok {
+		op.touchChunk(chunkOffset)
 		return chunk
 	}
 
@@ -753,8 +850,10 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readC
 	return chunk
 }
 
-// evictChunks drops the oldest completed chunks until the cache fits into its limit.
-// Chunks that are still being downloaded are never dropped. op.mu must be held.
+// evictChunks drops the least recently used completed chunks until the cache fits
+// into its limit. Chunks that are still being downloaded are never dropped, and
+// touchChunk refreshes a chunk's position, so periodically re-read chunks (like a
+// video index) stay cached. op.mu must be held.
 func (op *open) evictChunks() {
 	for len(op.buffer) > op.maxCacheSize {
 		evicted := false
