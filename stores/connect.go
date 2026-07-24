@@ -62,11 +62,16 @@ func (db *Database) IsConnected(wg Workgroup, share Share) (bool, types.PrivateK
 		err := tx.QueryRow(ctx, query, wg.ID, share.Name).Scan(&appKey)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
+		} else if err != nil {
+			return fmt.Errorf("failed to retrieve connection: %w", err)
 		}
 		connected = true
 		return nil
 	})
-	return connected, appKey, err
+	if err != nil {
+		return false, nil, err
+	}
+	return connected, appKey, nil
 }
 
 // SetAppKey sets the app key for the connection between a workgroup and a share.
