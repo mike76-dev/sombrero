@@ -45,9 +45,65 @@ type storageBackend interface {
 	Close() error
 }
 
+// objCacheSize is the maximum number of slab objects cached by sdkBackend.
+const objCacheSize = 128
+
 // sdkBackend is a wrapper around the SDK.
 type sdkBackend struct {
 	sdk *sdk.SDK
+
+	// Slab objects are content-addressed and immutable, so the lookups are
+	// cached to save a round trip on repeat downloads of the same slab.
+	mu       sync.Mutex
+	objCache map[types.Hash256]sdk.Object
+	objOrder []types.Hash256
+}
+
+// object returns the slab object with the given key, looking it up remotely
+// on a cache miss.
+func (b *sdkBackend) object(ctx context.Context, key types.Hash256) (sdk.Object, error) {
+	b.mu.Lock()
+	obj, ok := b.objCache[key]
+	b.mu.Unlock()
+	if ok {
+		return obj, nil
+	}
+
+	obj, err := b.sdk.Object(ctx, key)
+	if err != nil {
+		return sdk.Object{}, err
+	}
+
+	b.mu.Lock()
+	if _, ok := b.objCache[key]; !ok {
+		b.objCache[key] = obj
+		b.objOrder = append(b.objOrder, key)
+		if len(b.objOrder) > objCacheSize {
+			delete(b.objCache, b.objOrder[0])
+			b.objOrder = b.objOrder[1:]
+		}
+	}
+	b.mu.Unlock()
+
+	return obj, nil
+}
+
+// forgetObject removes the slab object with the given key from the cache.
+func (b *sdkBackend) forgetObject(key types.Hash256) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, ok := b.objCache[key]; !ok {
+		return
+	}
+
+	delete(b.objCache, key)
+	for i, k := range b.objOrder {
+		if k == key {
+			b.objOrder = append(b.objOrder[:i], b.objOrder[i+1:]...)
+			break
+		}
+	}
 }
 
 // Account calls sdk.Account.
@@ -80,7 +136,7 @@ func (b *sdkBackend) Upload(ctx context.Context, r io.Reader, dataShards, parity
 
 // Download downloads the object by its key.
 func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, length uint64, w io.Writer) error {
-	obj, err := b.sdk.Object(ctx, key)
+	obj, err := b.object(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -113,6 +169,7 @@ func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, le
 
 // DeleteObject calls sdk.DeleteObject.
 func (b *sdkBackend) DeleteObject(ctx context.Context, key types.Hash256) error {
+	b.forgetObject(key)
 	return b.sdk.DeleteObject(ctx, key)
 }
 
@@ -155,7 +212,11 @@ type IndexdClient struct {
 
 // NewIndexdClient returns an initialized IndexdClient.
 func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, dataShards, parityShards uint8) Client {
-	return newIndexdClient(db, &sdkBackend{sdk: sdkClient}, share, dataShards, parityShards)
+	backend := &sdkBackend{
+		sdk:      sdkClient,
+		objCache: make(map[types.Hash256]sdk.Object),
+	}
+	return newIndexdClient(db, backend, share, dataShards, parityShards)
 }
 
 // newIndexdClient allows using a mock SDK for testing.
