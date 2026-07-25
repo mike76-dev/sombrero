@@ -297,21 +297,34 @@ func TestStoreWorkgroups(t *testing.T) {
 	})
 }
 
+// samePublicDirs compares two public folder lists, order included.
+func samePublicDirs(a, b []PublicDir) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestStoreWorkgroupSettings(t *testing.T) {
 	forEachStore(t, func(t *testing.T, st Store, _ *recordingShares) {
 		wg := addWorkgroup(t, st, "")
 
-		// A new workgroup has no public dirs and is not case sensitive.
+		// A new workgroup has no public folders.
 		if len(wg.PublicDirs) != 0 {
 			t.Fatalf("PublicDirs: want empty, got %v", wg.PublicDirs)
 		}
-		if wg.CaseSensitive {
-			t.Fatal("CaseSensitive: want false initially")
-		}
 
-		// UpdateWorkgroup persists new dirs and case sensitivity.
-		wg.PublicDirs = []string{"shared", "public"}
-		wg.CaseSensitive = true
+		// UpdateWorkgroup persists the folders together with their flags.
+		want := []PublicDir{
+			{Path: "shared"},
+			{Path: "public", ReadOnly: true, CaseSensitive: true},
+		}
+		wg.PublicDirs = want
 		if err := st.UpdateWorkgroup(wg); err != nil {
 			t.Fatalf("UpdateWorkgroup: %v", err)
 		}
@@ -321,23 +334,32 @@ func TestStoreWorkgroupSettings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("FindWorkgroup after update: %v", err)
 		}
-		if len(updated.PublicDirs) != 2 || updated.PublicDirs[0] != "shared" || updated.PublicDirs[1] != "public" {
-			t.Fatalf("PublicDirs: want [shared public], got %v", updated.PublicDirs)
-		}
-		if !updated.CaseSensitive {
-			t.Fatal("CaseSensitive: want true after update")
+		if !samePublicDirs(updated.PublicDirs, want) {
+			t.Fatalf("PublicDirs: want %+v, got %+v", want, updated.PublicDirs)
 		}
 		byID, err := st.GetWorkgroupByID(wg.ID)
 		if err != nil {
 			t.Fatalf("GetWorkgroupByID after update: %v", err)
 		}
-		if len(byID.PublicDirs) != 2 || !byID.CaseSensitive {
+		if !samePublicDirs(byID.PublicDirs, want) {
 			t.Fatalf("GetWorkgroupByID after update: got %+v", byID)
 		}
 
-		// Clearing the dirs sets them back to empty.
+		// A folder can be flipped between read-only and rewritable.
+		wg.PublicDirs = []PublicDir{{Path: "shared", ReadOnly: true}}
+		if err := st.UpdateWorkgroup(wg); err != nil {
+			t.Fatalf("UpdateWorkgroup flip: %v", err)
+		}
+		flipped, err := st.FindWorkgroup(wg.UUID)
+		if err != nil {
+			t.Fatalf("FindWorkgroup after flip: %v", err)
+		}
+		if !samePublicDirs(flipped.PublicDirs, []PublicDir{{Path: "shared", ReadOnly: true}}) {
+			t.Fatalf("after flip: got %+v", flipped.PublicDirs)
+		}
+
+		// Clearing the folders sets them back to empty.
 		wg.PublicDirs = nil
-		wg.CaseSensitive = false
 		if err := st.UpdateWorkgroup(wg); err != nil {
 			t.Fatalf("UpdateWorkgroup clear: %v", err)
 		}
@@ -345,35 +367,98 @@ func TestStoreWorkgroupSettings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("FindWorkgroup after clear: %v", err)
 		}
-		if len(cleared.PublicDirs) != 0 || cleared.CaseSensitive {
+		if len(cleared.PublicDirs) != 0 {
 			t.Fatalf("after clear: got %+v", cleared)
 		}
 
 		// UpdateWorkgroup on a missing ID returns an error.
-		if err := st.UpdateWorkgroup(Workgroup{ID: 999999, PublicDirs: []string{"x"}}); err == nil {
+		if err := st.UpdateWorkgroup(Workgroup{ID: 999999, PublicDirs: []PublicDir{{Path: "x"}}}); err == nil {
 			t.Fatal("UpdateWorkgroup missing ID: expected error, got nil")
 		}
 
-		// The settings can also be passed to AddWorkgroup directly.
+		// The folders can also be passed to AddWorkgroup directly.
 		u := uuid.New()
-		if err := st.AddWorkgroup(Workgroup{UUID: u, Name: "labeled", PublicDirs: []string{"reports"}, CaseSensitive: true}); err != nil {
+		reports := []PublicDir{{Path: "reports", ReadOnly: true, CaseSensitive: true}}
+		if err := st.AddWorkgroup(Workgroup{UUID: u, Name: "labeled", PublicDirs: reports}); err != nil {
 			t.Fatalf("AddWorkgroup with dirs: %v", err)
 		}
 		added, err := st.FindWorkgroup(u)
 		if err != nil {
 			t.Fatalf("FindWorkgroup with dirs: %v", err)
 		}
-		if len(added.PublicDirs) != 1 || added.PublicDirs[0] != "reports" || !added.CaseSensitive {
+		if !samePublicDirs(added.PublicDirs, reports) {
 			t.Fatalf("FindWorkgroup with dirs: got %+v", added)
 		}
 		byName, err := st.FindWorkgroupByName("labeled")
 		if err != nil {
 			t.Fatalf("FindWorkgroupByName with dirs: %v", err)
 		}
-		if len(byName.PublicDirs) != 1 || byName.PublicDirs[0] != "reports" || !byName.CaseSensitive {
+		if !samePublicDirs(byName.PublicDirs, reports) {
 			t.Fatalf("FindWorkgroupByName with dirs: got %+v", byName)
 		}
 	})
+}
+
+// TestStoreDuplicatePublicDirs verifies that entries with an empty path are
+// dropped and that duplicate paths collapse to the first entry, matching the
+// first-match-wins rule of FindPublicDir and the directory restamping.
+func TestStoreDuplicatePublicDirs(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store, _ *recordingShares) {
+		dirty := []PublicDir{
+			{Path: "dup"},
+			{Path: ""},
+			{Path: "dup", ReadOnly: true},
+			{Path: "other", CaseSensitive: true},
+		}
+		want := []PublicDir{
+			{Path: "dup"},
+			{Path: "other", CaseSensitive: true},
+		}
+
+		wg := addWorkgroup(t, st, "")
+		wg.PublicDirs = dirty
+		if err := st.UpdateWorkgroup(wg); err != nil {
+			t.Fatalf("UpdateWorkgroup: %v", err)
+		}
+		updated, err := st.FindWorkgroup(wg.UUID)
+		if err != nil {
+			t.Fatalf("FindWorkgroup after update: %v", err)
+		}
+		if !samePublicDirs(updated.PublicDirs, want) {
+			t.Fatalf("UpdateWorkgroup: want %+v, got %+v", want, updated.PublicDirs)
+		}
+
+		u := uuid.New()
+		if err := st.AddWorkgroup(Workgroup{UUID: u, PublicDirs: dirty}); err != nil {
+			t.Fatalf("AddWorkgroup: %v", err)
+		}
+		added, err := st.FindWorkgroup(u)
+		if err != nil {
+			t.Fatalf("FindWorkgroup after add: %v", err)
+		}
+		if !samePublicDirs(added.PublicDirs, want) {
+			t.Fatalf("AddWorkgroup: want %+v, got %+v", want, added.PublicDirs)
+		}
+	})
+}
+
+func TestPublicDirMatches(t *testing.T) {
+	tests := []struct {
+		dir  PublicDir
+		name string
+		want bool
+	}{
+		{PublicDir{Path: "shared"}, "shared", true},
+		{PublicDir{Path: "shared"}, "SHARED", true},
+		{PublicDir{Path: "shared"}, "other", false},
+		{PublicDir{Path: "shared", CaseSensitive: true}, "shared", true},
+		{PublicDir{Path: "shared", CaseSensitive: true}, "SHARED", false},
+	}
+	for _, tt := range tests {
+		if got := tt.dir.Matches(tt.name); got != tt.want {
+			t.Errorf("%+v.Matches(%q) = %v, want %v", tt.dir, tt.name, got, tt.want)
+		}
+	}
 }
 
 func TestStoreAccounts(t *testing.T) {

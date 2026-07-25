@@ -437,18 +437,18 @@ func (js *JSONStore) AddWorkgroup(wg Workgroup) error {
 		}
 		wg.ID = d.NextWorkgroupID
 		d.NextWorkgroupID++
+		wg.PublicDirs = normalizePublicDirs(wg.PublicDirs)
 		d.Workgroups = append(d.Workgroups, wg)
 		return nil
 	}, nil)
 }
 
-// UpdateWorkgroup updates the public dirs and case sensitivity settings of a workgroup.
+// UpdateWorkgroup replaces the public folders of a workgroup.
 func (js *JSONStore) UpdateWorkgroup(wg Workgroup) error {
 	return js.update(func(d *jsonData) error {
 		for i, w := range d.Workgroups {
 			if w.ID == wg.ID {
-				d.Workgroups[i].PublicDirs = wg.PublicDirs
-				d.Workgroups[i].CaseSensitive = wg.CaseSensitive
+				d.Workgroups[i].PublicDirs = normalizePublicDirs(wg.PublicDirs)
 				return nil
 			}
 		}

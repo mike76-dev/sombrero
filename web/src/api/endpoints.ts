@@ -5,6 +5,7 @@ import type {
   ConnectRequestResponse,
   ConnectResponse,
   IsBannedResponse,
+  PublicDir,
   ServerStats,
   Share,
   Workgroup,
@@ -100,10 +101,10 @@ export const listWorkgroups = () => request<Workgroup[] | null>('/workgroups')
 export const getWorkgroup = (id: string) =>
   request<Workgroup>(`/workgroup/${encodeURIComponent(id)}`)
 
-export const updateWorkgroup = (id: string, publicDirs: string[], caseSensitive: boolean) =>
+export const updateWorkgroup = (id: string, publicDirs: PublicDir[]) =>
   request(`/workgroup/${encodeURIComponent(id)}`, {
     method: 'PUT',
-    body: { publicDirs, caseSensitive },
+    body: { publicDirs },
   })
 
 export const removeWorkgroup = (id: string) =>

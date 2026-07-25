@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Workgroup } from '../api/types'
+import { PublicDir, Workgroup } from '../api/types'
 import {
   createWorkgroup,
   listWorkgroups,
@@ -16,20 +16,57 @@ import {
   useApiData,
 } from '../components/common'
 
+function PublicDirRow({
+  dir,
+  onChange,
+  onRemove,
+}: {
+  dir: PublicDir
+  onChange: (dir: PublicDir) => void
+  onRemove: () => void
+}) {
+  return (
+    <div className="row">
+      <div className="field">
+        <input
+          type="text"
+          value={dir.path}
+          onChange={(e) => onChange({ ...dir, path: e.target.value })}
+          placeholder="e.g. Public"
+        />
+      </div>
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={!!dir.readOnly}
+          onChange={(e) => onChange({ ...dir, readOnly: e.target.checked })}
+        />
+        Read-only
+      </label>
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={!!dir.caseSensitive}
+          onChange={(e) => onChange({ ...dir, caseSensitive: e.target.checked })}
+        />
+        Case-sensitive
+      </label>
+      <button className="btn btn-small" onClick={onRemove}>
+        Remove
+      </button>
+    </div>
+  )
+}
+
 function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void }) {
   const { run, busy, error, message } = useApiAction()
-  const [publicDirs, setPublicDirs] = useState((wg.publicDirs || []).join('\n'))
-  const [caseSensitive, setCaseSensitive] = useState(!!wg.caseSensitive)
+  const [publicDirs, setPublicDirs] = useState<PublicDir[]>(wg.publicDirs || [])
 
   const save = () =>
     run(async () => {
       await updateWorkgroup(
         wg.uuid,
-        publicDirs
-          .split('\n')
-          .map((d) => d.trim())
-          .filter(Boolean),
-        caseSensitive,
+        publicDirs.map((d) => ({ ...d, path: d.path.trim() })).filter((d) => d.path),
       )
       onChanged()
     }, 'Workgroup updated.')
@@ -56,22 +93,32 @@ function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void
         </button>
       </div>
       <div className="stack">
-        <Field label="Public folders (one per line)">
-          <textarea
-            rows={3}
-            value={publicDirs}
-            onChange={(e) => setPublicDirs(e.target.value)}
-            placeholder="e.g. share1/public"
-          />
+        <Field label="Public folders">
+          {publicDirs.length === 0 && <p className="muted">No public folders.</p>}
+          {publicDirs.map((dir, i) => (
+            <PublicDirRow
+              key={i}
+              dir={dir}
+              onChange={(next) =>
+                setPublicDirs(publicDirs.map((d, j) => (i === j ? next : d)))
+              }
+              onRemove={() => setPublicDirs(publicDirs.filter((_, j) => i !== j))}
+            />
+          ))}
         </Field>
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={caseSensitive}
-            onChange={(e) => setCaseSensitive(e.target.checked)}
-          />
-          Case-sensitive paths
-        </label>
+        <div className="row">
+          <button
+            className="btn btn-small"
+            onClick={() => setPublicDirs([...publicDirs, { path: '' }])}
+          >
+            Add folder
+          </button>
+        </div>
+        <p className="muted">
+          Files in a public folder are visible to every member of the workgroup. In a
+          read-only folder, only the account that uploaded a file may overwrite or delete
+          it.
+        </p>
         <div className="row">
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             Save
