@@ -646,6 +646,196 @@ func (db *Database) CompleteUploadJob(metadataID uint64, bufferID uint64, slabKe
 	})
 }
 
+// packedItemDone reports whether the metadata entry has already been completed
+// with the given slab key, which is the case when a batch is retried after it
+// had partly gone through. An entry that has disappeared is reported as not
+// done, so that a slab none of whose items survived can be unpinned.
+func packedItemDone(ctx context.Context, tx pgx.Tx, metadataID uint64, slabKey types.Hash256) (bool, error) {
+	const query = `
+		SELECT buffer_id, slab_key
+		FROM metadata
+		WHERE id = $1
+	`
+
+	var (
+		bid *uint64
+		raw []byte
+	)
+
+	if err := tx.QueryRow(ctx, query, metadataID).Scan(&bid, &raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to verify metadata state: %w", err)
+	}
+
+	if bid != nil {
+		return false, fmt.Errorf("metadata %d references an unexpected buffer", metadataID)
+	}
+	if len(raw) != len(slabKey) {
+		return false, fmt.Errorf("invalid slab key length: %d", len(raw))
+	}
+
+	var existing types.Hash256
+	copy(existing[:], raw)
+	if existing != slabKey {
+		return false, fmt.Errorf("metadata %d already completed with different slab key", metadataID)
+	}
+
+	return true, nil
+}
+
+// splitPackedItem moves the part of the item's buffer that did not fit into the
+// slab into a buffer of its own and queues it, so that it becomes the head of
+// the next packed slab. The remainder is copied inside the database, which
+// keeps the bytes that did make it into the slab from lingering there.
+func splitPackedItem(ctx context.Context, tx pgx.Tx, job UploadJob, taken uint64) error {
+	// The entry stays free of an upload ID: only buffers of finalized
+	// uploads are packed, and the remainder of one is no different.
+	const query = `
+		WITH remainder AS (
+			INSERT INTO buffers (share_name, data)
+			SELECT
+				b.share_name,
+				SUBSTRING(b.data FROM $2::INT + 1 FOR $3::INT)
+			FROM buffers b
+			WHERE b.id = $1
+			RETURNING id
+		),
+		entry AS (
+			INSERT INTO metadata (
+				object_id,
+				obj_offset,
+				buffer_id,
+				data_offset,
+				data_length
+			)
+			SELECT $4, $5, r.id, 0, $3
+			FROM remainder r
+			RETURNING id
+		)
+		INSERT INTO upload_jobs (upload_id, metadata_id)
+		SELECT $6, e.id
+		FROM entry e
+	`
+
+	rest := job.DataLength - taken
+	tag, err := tx.Exec(
+		ctx,
+		query,
+		job.BufferID,
+		int64(job.DataOffset+taken),
+		int64(rest),
+		job.ObjectID,
+		int64(job.ObjOffset+taken),
+		job.UploadID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to split buffer %d: %w", job.BufferID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("failed to split buffer %d: buffer is gone", job.BufferID)
+	}
+
+	return nil
+}
+
+// CompletePackedSlab marks a batch of buffers as uploaded under the given slab
+// key. The items are laid out in the slab in the order in which they are
+// passed, each one at the offset that follows the previous one.
+//
+// The data of the last item may have been trimmed by the caller to what fitted
+// into the slab, in which case the remainder is moved into a buffer of its own
+// and queued for the next packed slab.
+//
+// Items whose metadata has meanwhile disappeared, e.g. because the file was
+// deleted while the slab was being uploaded, are skipped. ErrNotFound is only
+// returned when nothing of the batch is left, which is the one case where the
+// caller may unpin the slab it has just uploaded.
+func (db *Database) CompletePackedSlab(jobs []UploadJob, slabKey types.Hash256) error {
+	if len(jobs) == 0 {
+		return errors.New("cannot complete an empty packed slab")
+	}
+
+	for i, job := range jobs {
+		taken := uint64(len(job.Data))
+		if taken == 0 || taken > job.DataLength {
+			return fmt.Errorf("item %d takes %d of %d buffered bytes", i, taken, job.DataLength)
+		}
+		if taken < job.DataLength && i != len(jobs)-1 {
+			return fmt.Errorf("item %d is split, but only the last item of a packed slab may be", i)
+		}
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		var completed, offset uint64
+		for _, job := range jobs {
+			taken := uint64(len(job.Data))
+
+			// The length only changes for a split item, for which it
+			// shrinks to the part that made it into the slab.
+			const updateQuery = `
+				UPDATE metadata
+				SET
+					slab_key = $3,
+					data_offset = $4,
+					data_length = $5,
+					buffer_id = NULL,
+					upload_id = NULL
+				WHERE id = $1
+					AND buffer_id = $2
+			`
+
+			tag, err := tx.Exec(ctx, updateQuery, job.MetadataID, job.BufferID, slabKey[:], int64(offset), int64(taken))
+			if err != nil {
+				return fmt.Errorf("failed to update metadata: %w", err)
+			}
+
+			offset += taken
+
+			if tag.RowsAffected() == 0 {
+				// Either the entry is gone or this batch has already been
+				// completed, in which case its remainder was queued then.
+				done, err := packedItemDone(ctx, tx, job.MetadataID, slabKey)
+				if err != nil {
+					return err
+				}
+				if done {
+					completed++
+				}
+				continue
+			}
+
+			completed++
+
+			if taken < job.DataLength {
+				if err := splitPackedItem(ctx, tx, job, taken); err != nil {
+					return err
+				}
+			}
+
+			const deleteQuery = `
+				DELETE FROM buffers b
+				WHERE b.id = $1
+					AND NOT EXISTS (
+						SELECT 1
+						FROM metadata m
+						WHERE m.buffer_id = b.id
+					)
+			`
+
+			if _, err := tx.Exec(ctx, deleteQuery, job.BufferID); err != nil {
+				return fmt.Errorf("failed to delete orphaned buffer: %w", err)
+			}
+		}
+
+		if completed == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
 // RequeueUploadJob re-adds the given upload job to the queue for retrying.
 func (db *Database) RequeueUploadJob(uploadID, metadataID uint64) error {
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {

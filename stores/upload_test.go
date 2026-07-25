@@ -149,6 +149,36 @@ func pendingJobs(t *testing.T, db *Database) int {
 	return n
 }
 
+// storedBuffers returns the number of buffers held in the database.
+func storedBuffers(t *testing.T, db *Database) int {
+	t.Helper()
+
+	var n int
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COUNT(*) FROM buffers`).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("count buffers: %v", err)
+	}
+
+	return n
+}
+
+// bufferedBytes returns the number of bytes held in buffers.
+func bufferedBytes(t *testing.T, db *Database) int {
+	t.Helper()
+
+	var n int
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COALESCE(SUM(OCTET_LENGTH(data)), 0) FROM buffers`).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("sum buffered bytes: %v", err)
+	}
+
+	return n
+}
+
 // assertSlabs compares the slab keys reported by a delete against the expected
 // set, ignoring their order.
 func assertSlabs(t *testing.T, what string, got, want []types.Hash256) {
@@ -411,5 +441,237 @@ func TestClaimPackedSlabRequeue(t *testing.T) {
 		if again[i].MetadataID != jobs[i].MetadataID || !bytes.Equal(again[i].Data, jobs[i].Data) {
 			t.Fatalf("reclaimed batch differs from the original claim")
 		}
+	}
+}
+
+// packSlab concatenates a claimed batch into the slab that would be uploaded,
+// trimming the last item to the slab boundary the way the packer does.
+func packSlab(t *testing.T, jobs []UploadJob, size uint64) []byte {
+	t.Helper()
+
+	slab := make([]byte, 0, size)
+	for i := range jobs {
+		if uint64(len(slab)+len(jobs[i].Data)) > size {
+			jobs[i].Data = jobs[i].Data[:size-uint64(len(slab))]
+		}
+		slab = append(slab, jobs[i].Data...)
+	}
+
+	return slab
+}
+
+// readPacked reassembles a file from its metadata, taking the slab-backed
+// slices from the given slab contents and the buffered ones from the database.
+func readPacked(t *testing.T, db *Database, acc Account, share, path string, size uint64, slab []byte) []byte {
+	t.Helper()
+
+	slices, err := db.GetMetadata(acc, share, path, 0, size)
+	if err != nil {
+		t.Fatalf("GetMetadata(%s): %v", path, err)
+	}
+
+	out := make([]byte, 0, size)
+	for _, s := range slices {
+		if (s.Key == types.Hash256{}) {
+			out = append(out, s.Data...)
+			continue
+		}
+		if s.Offset+s.Length > uint64(len(slab)) {
+			t.Fatalf("%s: slice [%d,%d) reaches past the %d byte slab", path, s.Offset, s.Offset+s.Length, len(slab))
+		}
+		out = append(out, slab[s.Offset:s.Offset+s.Length]...)
+	}
+
+	return out
+}
+
+// TestCompletePackedSlab verifies that a packed slab's items end up addressing
+// their own stretch of the uploaded slab, so that every file still reads back
+// exactly as it was written.
+func TestCompletePackedSlab(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share := newSlabTestFixture(t, db)
+
+	// The three buffers add up to exactly one slab, so nothing is split.
+	want := map[string][]byte{
+		"a.txt": plantBufferedFile(t, db, share, acc, "a.txt", 300, false),
+		"b.txt": plantBufferedFile(t, db, share, acc, "b.txt", 300, false),
+		"c.txt": plantBufferedFile(t, db, share, acc, "c.txt", 400, false),
+	}
+
+	jobs, err := db.ClaimPackedSlab(share, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	slab := packSlab(t, jobs, slabSize)
+	if len(slab) != slabSize {
+		t.Fatalf("want a %d byte slab, got %d", slabSize, len(slab))
+	}
+
+	key := types.Hash256{9}
+	if err := db.CompletePackedSlab(jobs, key); err != nil {
+		t.Fatalf("CompletePackedSlab: %v", err)
+	}
+
+	for path, content := range want {
+		if got := readPacked(t, db, acc, share, path, uint64(len(content)), slab); !bytes.Equal(got, content) {
+			t.Fatalf("%s reads back wrong after packing", path)
+		}
+	}
+
+	// Every buffer made it into the slab, so none may be left behind.
+	if n := pendingJobs(t, db); n != 0 {
+		t.Fatalf("want an empty queue, got %d jobs", n)
+	}
+	if n := storedBuffers(t, db); n != 0 {
+		t.Fatalf("want no buffers left, got %d", n)
+	}
+}
+
+// TestCompletePackedSlabSplit verifies that the part of the last buffer that
+// does not fit into the slab is kept as a buffer of its own and queued for the
+// next one, while the file reads back as a whole.
+func TestCompletePackedSlabSplit(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share := newSlabTestFixture(t, db)
+
+	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
+	b := plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
+
+	jobs, err := db.ClaimPackedSlab(share, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	slab := packSlab(t, jobs, slabSize)
+
+	key := types.Hash256{9}
+	if err := db.CompletePackedSlab(jobs, key); err != nil {
+		t.Fatalf("CompletePackedSlab: %v", err)
+	}
+
+	// a.txt fits entirely, b.txt is split after its first 400 bytes.
+	if got := readPacked(t, db, acc, share, "a.txt", uint64(len(a)), slab); !bytes.Equal(got, a) {
+		t.Fatalf("a.txt reads back wrong after packing")
+	}
+	if got := readPacked(t, db, acc, share, "b.txt", uint64(len(b)), slab); !bytes.Equal(got, b) {
+		t.Fatalf("b.txt reads back wrong after being split")
+	}
+
+	// The remainder is queued, and holds only the bytes that did not fit.
+	if n := pendingJobs(t, db); n != 1 {
+		t.Fatalf("want the remainder queued, got %d jobs", n)
+	}
+	if n := storedBuffers(t, db); n != 1 {
+		t.Fatalf("want 1 buffer left, got %d", n)
+	}
+	if n := bufferedBytes(t, db); n != len(b)-400 {
+		t.Fatalf("want %d buffered bytes left, got %d", len(b)-400, n)
+	}
+
+	// The remainder alone is not enough for another slab.
+	if _, err := db.ClaimPackedSlab(share, slabSize); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("ClaimPackedSlab after the split: want %v, got %v", ErrNoUploadJobs, err)
+	}
+}
+
+// TestCompletePackedSlabDeletedFile verifies that a file deleted while its slab
+// was being uploaded does not take the rest of the slab down with it, and that
+// the slab is only reported as unneeded once every one of its files is gone.
+func TestCompletePackedSlabDeletedFile(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share := newSlabTestFixture(t, db)
+
+	plantBufferedFile(t, db, share, acc, "a.txt", 500, false)
+	b := plantBufferedFile(t, db, share, acc, "b.txt", 500, false)
+
+	jobs, err := db.ClaimPackedSlab(share, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	slab := packSlab(t, jobs, slabSize)
+
+	// a.txt goes away while the slab is in flight.
+	if _, err := db.DeleteFile(acc, share, "a.txt"); err != nil {
+		t.Fatalf("DeleteFile(a.txt): %v", err)
+	}
+
+	key := types.Hash256{9}
+	if err := db.CompletePackedSlab(jobs, key); err != nil {
+		t.Fatalf("CompletePackedSlab: %v", err)
+	}
+	if got := readPacked(t, db, acc, share, "b.txt", uint64(len(b)), slab); !bytes.Equal(got, b) {
+		t.Fatalf("b.txt reads back wrong after a.txt was deleted")
+	}
+
+	// With every file of the batch gone, the caller has to be told that the
+	// slab it uploaded is not needed after all.
+	plantBufferedFile(t, db, share, acc, "c.txt", 500, false)
+	plantBufferedFile(t, db, share, acc, "d.txt", 500, false)
+
+	jobs, err = db.ClaimPackedSlab(share, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	packSlab(t, jobs, slabSize)
+
+	if _, err := db.DeleteFile(acc, share, "c.txt"); err != nil {
+		t.Fatalf("DeleteFile(c.txt): %v", err)
+	}
+	if _, err := db.DeleteFile(acc, share, "d.txt"); err != nil {
+		t.Fatalf("DeleteFile(d.txt): %v", err)
+	}
+
+	if err := db.CompletePackedSlab(jobs, types.Hash256{8}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("CompletePackedSlab with every file gone: want %v, got %v", ErrNotFound, err)
+	}
+}
+
+// TestCompletePackedSlabRetry verifies that completing the same batch twice is
+// harmless, so that a retry after a partial failure cannot duplicate the
+// remainder of a split buffer.
+func TestCompletePackedSlabRetry(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share := newSlabTestFixture(t, db)
+
+	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
+	b := plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
+
+	jobs, err := db.ClaimPackedSlab(share, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	slab := packSlab(t, jobs, slabSize)
+
+	key := types.Hash256{9}
+	if err := db.CompletePackedSlab(jobs, key); err != nil {
+		t.Fatalf("CompletePackedSlab: %v", err)
+	}
+	if err := db.CompletePackedSlab(jobs, key); err != nil {
+		t.Fatalf("CompletePackedSlab again: %v", err)
+	}
+
+	if got := readPacked(t, db, acc, share, "a.txt", uint64(len(a)), slab); !bytes.Equal(got, a) {
+		t.Fatalf("a.txt reads back wrong after a repeated completion")
+	}
+	if got := readPacked(t, db, acc, share, "b.txt", uint64(len(b)), slab); !bytes.Equal(got, b) {
+		t.Fatalf("b.txt reads back wrong after a repeated completion")
+	}
+	if n := pendingJobs(t, db); n != 1 {
+		t.Fatalf("want the remainder queued once, got %d jobs", n)
+	}
+	if n := storedBuffers(t, db); n != 1 {
+		t.Fatalf("want 1 buffer left, got %d", n)
 	}
 }
