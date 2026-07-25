@@ -529,11 +529,22 @@ func (ic *IndexdClient) Write(ctx context.Context, r io.Reader, path string, upl
 	return
 }
 
-// Delete deletes a file or a directory.
+// Delete deletes a file or a directory. Only the slabs that are left
+// unreferenced by the deletion are unpinned; a slab shared with a surviving
+// file stays in place.
 func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path string, batch bool) (err error) {
-	slabs, err := ic.db.ListSlabs(acc, ic.share, path)
+	var slabs []types.Hash256
+	if batch {
+		slabs, err = ic.db.DeleteDirectory(acc, ic.share, path)
+	} else {
+		slabs, err = ic.db.DeleteFile(acc, ic.share, path)
+	}
 	if err != nil {
 		return err
+	}
+
+	if len(slabs) == 0 {
+		return nil
 	}
 
 	for _, key := range slabs {
@@ -546,11 +557,7 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 		return fmt.Errorf("couldn't prune slabs: %v", err)
 	}
 
-	if batch {
-		return ic.db.DeleteDirectory(acc, ic.share, path)
-	}
-
-	return ic.db.DeleteFile(acc, ic.share, path)
+	return nil
 }
 
 // MakeDirectory creates a new directory in the specified path.

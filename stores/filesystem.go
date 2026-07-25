@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"go.sia.tech/core/types"
 )
 
 var (
@@ -818,10 +819,11 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 	})
 }
 
-// DeleteFile deletes a file.
-func (db *Database) DeleteFile(acc Account, share string, path string) error {
+// DeleteFile deletes a file. It returns the keys of the slabs that no other
+// file references any more, so that the caller can unpin them.
+func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
-	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const collectQuery = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -848,33 +850,20 @@ func (db *Database) DeleteFile(acc Account, share string, path string) error {
 						)
 					)
 			)
-			SELECT DISTINCT m.buffer_id
+			SELECT DISTINCT m.buffer_id, m.slab_key
 			FROM metadata m
 			JOIN target t ON m.object_id = t.id
-			WHERE m.buffer_id IS NOT NULL
 		`
 
 		rows, err := tx.Query(ctx, collectQuery, share, path, acc.ID)
 		if err != nil {
-			return fmt.Errorf("failed to collect file buffers: %w", err)
+			return fmt.Errorf("failed to collect file storage: %w", err)
 		}
 
-		var bids []uint64
-		for rows.Next() {
-			var bid uint64
-			if err := rows.Scan(&bid); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan buffer ID: %w", err)
-			}
-			bids = append(bids, bid)
+		bids, keys, err := collectStorage(rows)
+		if err != nil {
+			return err
 		}
-
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate buffer IDs: %w", err)
-		}
-
-		rows.Close()
 
 		const deleteQuery = `
 			WITH caller AS (
@@ -935,14 +924,24 @@ func (db *Database) DeleteFile(acc Account, share string, path string) error {
 			}
 		}
 
-		return nil
+		// The metadata is gone by now, so any slab that is still referenced
+		// belongs to another file and must stay pinned.
+		slabs, err = unreferencedSlabs(ctx, tx, keys)
+		return err
 	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
 }
 
-// DeleteDirectory deletes a directory and all its contents.
-func (db *Database) DeleteDirectory(acc Account, share string, path string) error {
+// DeleteDirectory deletes a directory and all its contents. It returns the keys
+// of the slabs that no other file references any more, so that the caller can
+// unpin them.
+func (db *Database) DeleteDirectory(acc Account, share string, path string) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
-	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const collectQuery = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -973,33 +972,20 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) erro
 					AND o.full_path LIKE s.full_path || '/%%'
 					And o.temporary = FALSE
 			)
-			SELECT DISTINCT m.buffer_id
+			SELECT DISTINCT m.buffer_id, m.slab_key
 			FROM metadata m
 			JOIN target_objects t ON m.object_id = t.id
-			WHERE m.buffer_id IS NOT NULL
 		`
 
 		rows, err := tx.Query(ctx, collectQuery, share, path, acc.ID)
 		if err != nil {
-			return fmt.Errorf("failed to collect directory buffers: %w", err)
+			return fmt.Errorf("failed to collect directory storage: %w", err)
 		}
 
-		var bids []uint64
-		for rows.Next() {
-			var bid uint64
-			if err := rows.Scan(&bid); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan buffer ID: %w", err)
-			}
-			bids = append(bids, bid)
+		bids, keys, err := collectStorage(rows)
+		if err != nil {
+			return err
 		}
-
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate buffer IDs: %w", err)
-		}
-
-		rows.Close()
 
 		const deleteQuery = `
 			WITH caller AS (
@@ -1071,6 +1057,14 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) erro
 			}
 		}
 
-		return nil
+		// The metadata is gone by now, so any slab that is still referenced
+		// belongs to another file and must stay pinned.
+		slabs, err = unreferencedSlabs(ctx, tx, keys)
+		return err
 	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
 }

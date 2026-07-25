@@ -36,6 +36,80 @@ type UploadJob struct {
 // ErrNoUploadJobs is returned when there are no pending upload jobs available for processing.
 var ErrNoUploadJobs = errors.New("no upload jobs available")
 
+// collectStorage scans pairs of buffer IDs and slab keys, as returned by the
+// queries that gather the storage referenced by a set of metadata entries.
+// Exactly one of the two is set in any given row.
+func collectStorage(rows pgx.Rows) (bids []uint64, keys [][]byte, err error) {
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			bid *uint64
+			key []byte
+		)
+		if err := rows.Scan(&bid, &key); err != nil {
+			return nil, nil, fmt.Errorf("failed to scan storage reference: %w", err)
+		}
+		if bid != nil {
+			bids = append(bids, *bid)
+		}
+		if key != nil {
+			keys = append(keys, key)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("failed to iterate storage references: %w", err)
+	}
+
+	return bids, keys, nil
+}
+
+// unreferencedSlabs returns those of the given slab keys that no metadata entry
+// references any more. It has to be called after the referencing metadata has
+// been deleted, so that slabs which are still shared with surviving files stay
+// pinned.
+func unreferencedSlabs(ctx context.Context, tx pgx.Tx, keys [][]byte) (slabs []types.Hash256, err error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	const query = `
+		SELECT k
+		FROM UNNEST($1::BYTEA[]) AS k
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM metadata m
+			WHERE m.slab_key = k
+		)
+	`
+
+	rows, err := tx.Query(ctx, query, keys)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter unreferenced slabs: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("failed to scan slab key: %w", err)
+		}
+		if len(raw) != 32 {
+			return nil, fmt.Errorf("invalid slab key length: %d", len(raw))
+		}
+		var h types.Hash256
+		copy(h[:], raw)
+		slabs = append(slabs, h)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate slab keys: %w", err)
+	}
+
+	return slabs, nil
+}
+
 // CreateUpload creates a new upload entry in the database and returns the generated upload ID.
 func (db *Database) CreateUpload(acc Account, share, path string) (uploadID string, err error) {
 	path = normalizePath(path)
@@ -178,63 +252,21 @@ func (db *Database) RemoveUpload(uploadID string) (slabs []types.Hash256, err er
 			return fmt.Errorf("failed to lookup upload: %w", err)
 		}
 
-		const collectBuffers = `
-			SELECT DISTINCT m.buffer_id
+		const collectStorageQuery = `
+			SELECT DISTINCT m.buffer_id, m.slab_key
 			FROM metadata m
 			WHERE m.object_id = $1
-				AND m.buffer_id IS NOT NULL
 		`
 
-		rows, err := tx.Query(ctx, collectBuffers, soid)
+		rows, err := tx.Query(ctx, collectStorageQuery, soid)
 		if err != nil {
-			return fmt.Errorf("failed to collect buffers: %w", err)
+			return fmt.Errorf("failed to collect storage: %w", err)
 		}
-		var bids []uint64
-		for rows.Next() {
-			var bid uint64
-			if err := rows.Scan(&bid); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan buffer ID: %w", err)
-			}
-			bids = append(bids, bid)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate buffer IDs: %w", err)
-		}
-		rows.Close()
 
-		const collectSlabs = `
-			SELECT DISTINCT m.slab_key
-			FROM metadata m
-			WHERE m.object_id = $1
-				AND m.slab_key IS NOT NULL
-			ORDER BY m.slab_key
-		`
-
-		rows, err = tx.Query(ctx, collectSlabs, soid)
+		bids, keys, err := collectStorage(rows)
 		if err != nil {
-			return fmt.Errorf("failed to collect slab keys: %w", err)
+			return err
 		}
-		for rows.Next() {
-			var raw []byte
-			if err := rows.Scan(&raw); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan slab key: %w", err)
-			}
-			if len(raw) != 32 {
-				rows.Close()
-				return fmt.Errorf("invalid slab key length: %d", len(raw))
-			}
-			var h types.Hash256
-			copy(h[:], raw)
-			slabs = append(slabs, h)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate slab keys: %w", err)
-		}
-		rows.Close()
 
 		if _, err := tx.Exec(ctx, `DELETE FROM uploads WHERE id = $1`, uid); err != nil {
 			return fmt.Errorf("failed to delete upload: %w", err)
@@ -258,9 +290,15 @@ func (db *Database) RemoveUpload(uploadID string) (slabs []types.Hash256, err er
 			}
 		}
 
-		return nil
+		// The metadata is gone by now, so any slab that is still referenced
+		// belongs to another file and must stay pinned.
+		slabs, err = unreferencedSlabs(ctx, tx, keys)
+		return err
 	})
 
+	if err != nil {
+		return nil, err
+	}
 	return
 }
 
@@ -704,118 +742,6 @@ func (db *Database) FinalizeUpload(uploadID string) error {
 
 		return nil
 	})
-}
-
-// ListSlabs retrieves the slab keys of all files at or down the specified path.
-func (db *Database) ListSlabs(acc Account, share, path string) (slabs []types.Hash256, err error) {
-	path = normalizePath(path)
-
-	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const query = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $3
-			),
-			target_file AS (
-				SELECT o.id, o.full_path
-				FROM objects o
-				JOIN accounts owner ON owner.id = o.account
-				LEFT JOIN directories od
-					ON od.share_name = o.share_name
-					AND od.id = o.directory_id
-				CROSS JOIN caller c
-				WHERE o.share_name = $1
-					AND o.full_path = $2
-					AND o.temporary = FALSE
-					AND (
-						o.account = c.id
-						OR (
-							od.private = FALSE
-							AND owner.workgroup = c.workgroup
-						)
-					)
-			),
-			target_dir AS (
-				SELECT d.id, d.full_path
-				FROM directories d
-				JOIN accounts owner ON owner.id = d.account
-				CROSS JOIN caller c
-				WHERE d.share_name = $1
-					AND d.full_path = $2
-					AND (
-						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
-					)
-			),
-			visible_objects AS (
-				SELECT o.id
-				FROM objects o
-				JOIN target_file tf ON tf.id = o.id
-
-				UNION
-
-				SELECT o.id
-				FROM objects o
-				JOIN accounts owner ON owner.id = o.account
-				LEFT JOIN directories od
-					ON od.share_name = o.share_name
-					AND od.id = o.directory_id
-				JOIN target_dir td ON TRUE
-				CROSS JOIN caller c
-				WHERE o.share_name = $1
-					AND o.full_path LIKE td.full_path || '/%%'
-					AND o.temporary = FALSE
-					AND (
-						o.account = c.id
-						OR (
-							od.private = FALSE
-							AND owner.workgroup = c.workgroup
-						)
-					)
-			),
-			target_exists AS (
-				SELECT EXISTS (SELECT 1 FROM target_file)
-					OR EXISTS (SELECT 1 FROM target_dir) AS found
-			)
-			SELECT
-				te.found,
-				(
-					SELECT COALESCE(
-						ARRAY_AGG(DISTINCT m.slab_key),
-						'{}'::bytea[]
-					)
-					FROM visible_objects vo
-					JOIN metadata m ON m.object_id = vo.id
-					WHERE m.slab_key IS NOT NULL
-				) AS slab_keys
-			FROM target_exists te
-
-		`
-
-		var found bool
-		var rawKeys [][]byte
-
-		if err := tx.QueryRow(ctx, query, share, path, acc.ID).Scan(&found, &rawKeys); err != nil {
-			return err
-		}
-		if !found {
-			return ErrNotFound
-		}
-
-		slabs = make([]types.Hash256, 0, len(rawKeys))
-		for _, b := range rawKeys {
-			if len(b) != 32 {
-				return fmt.Errorf("invalid slab key length: %d", len(b))
-			}
-			var h types.Hash256
-			copy(h[:], b)
-			slabs = append(slabs, h)
-		}
-		return nil
-	})
-
-	return
 }
 
 // GetMetadata retrieves the metadata of the file at the specified path that
