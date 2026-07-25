@@ -73,6 +73,9 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 				FROM caller
 				WHERE $2 = '/'
 			),
+			-- Only an upload whose object is still temporary is in flight. Once it
+			-- has been finalized, its uploads entry may linger until the buffered
+			-- slabs have made it to the Sia network, and must not block the path.
 			no_existing_upload AS (
 				SELECT 1
 				FROM parent p
@@ -82,6 +85,24 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 					JOIN objects o ON o.id = u.object_id
 					WHERE o.share_name = $1
 						AND o.full_path = $4
+						AND o.temporary = TRUE
+				)
+			),
+			not_read_only AS (
+				SELECT 1
+				FROM parent p
+				CROSS JOIN caller c
+				WHERE NOT EXISTS (
+					SELECT 1
+					FROM objects o
+					JOIN directories d
+						ON d.share_name = o.share_name
+						AND d.id = o.directory_id
+					WHERE o.share_name = $1
+						AND o.full_path = $4
+						AND o.temporary = FALSE
+						AND o.account <> c.id
+						AND d.read_only = TRUE
 				)
 			),
 			staging AS (
@@ -106,6 +127,7 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 					TRUE
 				FROM parent p
 				JOIN no_existing_upload n ON TRUE
+				JOIN not_read_only r ON TRUE
 				CROSS JOIN caller c
 				RETURNING id
 			)
@@ -602,6 +624,20 @@ func (db *Database) FinalizeUpload(uploadID string) error {
 
 			if _, err := tx.Exec(ctx, moveMetadata, oid, soid); err != nil {
 				return fmt.Errorf("failed to move metadata: %w", err)
+			}
+
+			// The upload has to follow its metadata onto the visible object.
+			// Deleting the temporary object below would otherwise cascade into
+			// the uploads entry, taking the metadata that was just moved and any
+			// pending upload job with it.
+			const moveUpload = `
+				UPDATE uploads
+				SET object_id = $1
+				WHERE id = $2
+			`
+
+			if _, err := tx.Exec(ctx, moveUpload, oid, uid); err != nil {
+				return fmt.Errorf("failed to move upload: %w", err)
 			}
 
 			const updateVisible = `

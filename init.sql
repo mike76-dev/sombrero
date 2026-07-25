@@ -15,11 +15,19 @@ CREATE TABLE workgroups (
     uuid BYTEA NOT NULL,
     name TEXT UNIQUE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    public_dirs TEXT NOT NULL DEFAULT '',
-    case_sensitive BOOLEAN NOT NULL DEFAULT FALSE,
     CONSTRAINT workgroups_uuid_length CHECK (octet_length(uuid) = 16),
     CONSTRAINT workgroups_unique UNIQUE (uuid)
 );
+
+CREATE TABLE public_dirs (
+    id SERIAL PRIMARY KEY,
+    workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    read_only BOOLEAN NOT NULL DEFAULT FALSE,
+    case_sensitive BOOLEAN NOT NULL DEFAULT FALSE,
+    CONSTRAINT public_dirs_unique UNIQUE (workgroup, path)
+);
+CREATE INDEX idx_public_dirs_workgroup ON public_dirs (workgroup);
 
 CREATE TABLE accounts (
     id SERIAL PRIMARY KEY,
@@ -69,6 +77,7 @@ CREATE TABLE directories (
     account INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
     private BOOLEAN NOT NULL DEFAULT TRUE,
+    read_only BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     modified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (share_name, id),

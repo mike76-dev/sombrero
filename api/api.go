@@ -949,7 +949,7 @@ func (api *API) workgroupHandlerGET(w http.ResponseWriter, req *http.Request, ps
 }
 
 // workgroupHandlerPUT handles the PUT /workgroup/:id calls.
-// It updates the publicDirs and caseSensitive settings of an existing workgroup.
+// It replaces the list of public folders of an existing workgroup.
 // :id may be a UUID or a workgroup name.
 func (api *API) workgroupHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	if api.rl.limitExceeded(getRemoteHost(req)) {
@@ -963,8 +963,7 @@ func (api *API) workgroupHandlerPUT(w http.ResponseWriter, req *http.Request, ps
 	}
 
 	var body struct {
-		PublicDirs    []string `json:"publicDirs"`
-		CaseSensitive bool     `json:"caseSensitive"`
+		PublicDirs []stores.PublicDir `json:"publicDirs"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		writeError(w, "invalid body", http.StatusBadRequest)
@@ -972,7 +971,6 @@ func (api *API) workgroupHandlerPUT(w http.ResponseWriter, req *http.Request, ps
 	}
 
 	wg.PublicDirs = body.PublicDirs
-	wg.CaseSensitive = body.CaseSensitive
 
 	if err := api.store.UpdateWorkgroup(wg); err != nil {
 		log.Printf("failed to update workgroup: %v", err)

@@ -14,6 +14,7 @@ var (
 	ErrNotFound        = errors.New("object not found")
 	ErrNameInvalid     = errors.New("invalid name")
 	ErrDirectoryExists = errors.New("directory already exists")
+	ErrAccessDenied    = errors.New("access denied")
 )
 
 // ObjectMeta represents the metadata of an object in the share.
@@ -344,7 +345,10 @@ func (db *Database) CurrentAndParent(acc Account, shareName, path string) (curre
 
 // CreateDirectory creates a new directory in the database.
 // If the directory exists, an error is returned.
-func (db *Database) CreateDirectory(acc Account, share string, path string, private bool) error {
+// A non-private directory is visible to the whole workgroup of the caller; if it
+// is also read-only, only the owner of a file inside it may overwrite or delete
+// that file.
+func (db *Database) CreateDirectory(acc Account, share string, path string, private, readOnly bool) error {
 	path = normalizePath(path)
 	parentDir, name := splitPath(path)
 	if name == "" {
@@ -383,7 +387,8 @@ func (db *Database) CreateDirectory(acc Account, share string, path string, priv
 				full_path,
 				account,
 				workgroup,
-				private
+				private,
+				read_only
 			)
 			SELECT
 				$1,
@@ -395,13 +400,14 @@ func (db *Database) CreateDirectory(acc Account, share string, path string, priv
 				END,
 				c.id,
 				c.workgroup,
-				$5
+				$5,
+				$6
 			FROM parent p
 			CROSS JOIN caller c
 			RETURNING id
 		`
 		var id uint64
-		if err := tx.QueryRow(ctx, query, share, parentDir, acc.ID, name, private).Scan(&id); err != nil {
+		if err := tx.QueryRow(ctx, query, share, parentDir, acc.ID, name, private, readOnly).Scan(&id); err != nil {
 			if strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
 				return ErrDirectoryExists
 			}
@@ -421,6 +427,34 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 	}
 
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		if force && oldPath != newPath {
+			// A file that belongs to another account and sits in a read-only
+			// folder must not be renamed over. Refuse up front: the delete
+			// below skips such a file, and the rename would then surface an
+			// opaque unique-index violation instead.
+			const protectedQuery = `
+				SELECT EXISTS (
+					SELECT 1
+					FROM objects o
+					JOIN directories d
+						ON d.share_name = o.share_name
+						AND d.id = o.directory_id
+					WHERE o.share_name = $1
+						AND o.full_path = $2
+						AND o.temporary = FALSE
+						AND o.account <> $3
+						AND d.read_only = TRUE
+				)
+			`
+			var protected bool
+			if err := tx.QueryRow(ctx, protectedQuery, share, newPath, acc.ID).Scan(&protected); err != nil {
+				return fmt.Errorf("failed to check destination file: %w", err)
+			}
+			if protected {
+				return ErrAccessDenied
+			}
+		}
+
 		const collectQuery = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -437,7 +471,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 					AND o.account = c.id
 			),
 			dst_parent AS (
-				SELECT d.id, d.full_path
+				SELECT d.id, d.full_path, d.read_only
 				FROM directories d
 				JOIN accounts owner ON owner.id = d.account
 				CROSS JOIN caller c
@@ -450,7 +484,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 
 				UNION ALL
 
-				SELECT NULL::bigint, '/'
+				SELECT NULL::bigint, '/', FALSE
 				FROM caller
 				WHERE $3 = '/'
 			),
@@ -458,6 +492,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 				SELECT
 					s.id AS src_id,
 					p.id AS new_parent_id,
+					p.read_only AS new_parent_read_only,
 					$4::text AS new_name,
 					$5::text AS new_path
 				FROM src s
@@ -465,7 +500,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 				WHERE $5 <> $2
 			),
 			check_no_dir_conflict AS (
-				SELECT 1
+				SELECT t.new_path, t.new_parent_read_only
 				FROM target t
 				WHERE NOT EXISTS (
 					SELECT 1
@@ -478,10 +513,12 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 				SELECT o.id
 				FROM objects o
 				JOIN target t ON o.full_path = t.new_path
-				JOIN check_no_dir_conflict c ON TRUE
+				JOIN check_no_dir_conflict n ON TRUE
+				CROSS JOIN caller c
 				WHERE o.share_name = $1
 					AND o.temporary = FALSE
 					AND $7::boolean
+					AND (o.account = c.id OR t.new_parent_read_only = FALSE)
 			)
 			SELECT DISTINCT m.buffer_id
 			FROM doomed_target dt
@@ -516,7 +553,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 					WHERE id = $4
 				),
 				dst_parent AS (
-					SELECT d.id, d.full_path
+					SELECT d.id, d.full_path, d.read_only
 					FROM directories d
 					JOIN accounts owner ON owner.id = d.account
 					CROSS JOIN caller c
@@ -529,13 +566,14 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 
 					UNION ALL
 
-					SELECT NULL::bigint, '/'
+					SELECT NULL::bigint, '/', FALSE
 					FROM caller
 					WHERE $2 = '/'
 				),
 				check_no_dir_conflict AS (
-					SELECT 1
+					SELECT c.id AS caller_id, p.read_only
 					FROM dst_parent p
+					CROSS JOIN caller c
 					WHERE NOT EXISTS (
 						SELECT 1
 						FROM directories d
@@ -544,10 +582,11 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 					)
 				)
 				DELETE FROM objects o
-				USING check_no_dir_conflict c
+				USING check_no_dir_conflict n
 				WHERE o.share_name = $1
 					AND o.full_path = $3
 					AND o.temporary = FALSE
+					AND (o.account = n.caller_id OR n.read_only = FALSE)
 			`
 
 			if _, err := tx.Exec(ctx, deleteQuery, share, dir, newPath, acc.ID); err != nil {
@@ -651,6 +690,30 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 	}
 
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		if force && oldPath != newPath {
+			// A read-only directory that belongs to another account must not
+			// be renamed over. Refuse up front: the delete below skips such a
+			// directory, and the rename would then surface an opaque
+			// unique-constraint violation instead.
+			const protectedQuery = `
+				SELECT EXISTS (
+					SELECT 1
+					FROM directories d
+					WHERE d.share_name = $1
+						AND d.full_path = $2
+						AND d.account <> $3
+						AND d.read_only = TRUE
+				)
+			`
+			var protected bool
+			if err := tx.QueryRow(ctx, protectedQuery, share, newPath, acc.ID).Scan(&protected); err != nil {
+				return fmt.Errorf("failed to check destination directory: %w", err)
+			}
+			if protected {
+				return ErrAccessDenied
+			}
+		}
+
 		const query = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -666,7 +729,11 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 					AND d.full_path = $2
 					AND (
 						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+						OR (
+							d.private = FALSE
+							AND d.read_only = FALSE
+							AND owner.workgroup = c.workgroup
+						)
 					)
 			),
 			dst_parent AS (
@@ -701,37 +768,34 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 			),
 			delete_existing AS (
 				DELETE FROM directories d
-				USING target t
+				USING target t, caller c
 				WHERE $7::boolean
 					AND d.share_name = $1
 					AND d.full_path = t.new_path
+					AND (d.account = c.id OR d.read_only = FALSE)
 			),
+			-- The permission to rename is decided on the directory itself in
+			-- src; everything underneath it has to follow the rename
+			-- unconditionally, or the paths of the entries the caller may not
+			-- touch would go stale.
 			update_subdirs AS (
 				UPDATE directories d
 				SET
 					full_path = t.new_path || substring(d.full_path FROM length(t.old_path) + 1),
 					modified_at = NOW()
-				FROM target t, accounts owner, caller c
-				WHERE owner.id = d.account
-					AND d.share_name = $1
+				FROM target t
+				WHERE d.share_name = $1
 					AND d.id <> t.src_id
 					AND d.full_path LIKE t.old_path || '/%%'
-					AND (
-						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
-					)
 			),
 			update_files AS (
 				UPDATE objects o
 				SET
 					full_path = t.new_path || substring(o.full_path FROM length(t.old_path) + 1),
 					modified_at = NOW()
-				FROM target t, accounts owner, caller c
-				WHERE owner.id = o.account
-					AND o.share_name = $1
+				FROM target t
+				WHERE o.share_name = $1
 					AND o.full_path LIKE t.old_path || '/%%'
-					AND o.account = c.id
-					AND o.temporary = FALSE
 			)
 			UPDATE directories d
 			SET
@@ -779,6 +843,7 @@ func (db *Database) DeleteFile(acc Account, share string, path string) error {
 						o.account = c.id
 						OR (
 							od.private = FALSE
+							AND od.read_only = FALSE
 							AND owner.workgroup = c.workgroup
 						)
 					)
@@ -832,6 +897,7 @@ func (db *Database) DeleteFile(acc Account, share string, path string) error {
 						o.account = c.id
 						OR (
 							od.private = FALSE
+							AND od.read_only = FALSE
 							AND owner.workgroup = c.workgroup
 						)
 					)
@@ -892,7 +958,11 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) erro
 					AND d.full_path = $2
 					AND (
 						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+						OR (
+							d.private = FALSE
+							AND d.read_only = FALSE
+							AND owner.workgroup = c.workgroup
+						)
 					)
 			),
 			target_objects AS (
@@ -946,7 +1016,11 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) erro
 					AND d.full_path = $2
 					AND (
 						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+						OR (
+							d.private = FALSE
+							AND d.read_only = FALSE
+							AND owner.workgroup = c.workgroup
+						)
 					)
 			),
 			delete_files AS (

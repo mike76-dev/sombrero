@@ -554,27 +554,20 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 }
 
 // MakeDirectory creates a new directory in the specified path.
-// If the directory name matches one of the workgroup's public dirs, it is created as non-private
-// so that all workgroup members can see files placed inside it.
+// If the directory name matches one of the workgroup's public folders, it is created as
+// non-private so that all workgroup members can see files placed inside it, and it inherits
+// the read-only flag of that public folder.
 func (ic *IndexdClient) MakeDirectory(ctx context.Context, acc stores.Account, path string) error {
-	private := true
+	private, readOnly := true, false
 	if u, err := uuid.Parse(acc.Workgroup); err == nil {
-		if wg, err := ic.db.FindWorkgroup(u); err == nil && len(wg.PublicDirs) > 0 {
+		if wg, err := ic.db.FindWorkgroup(u); err == nil {
 			name := path[strings.LastIndex(path, "/")+1:]
-			for _, dir := range wg.PublicDirs {
-				if wg.CaseSensitive {
-					if dir == name {
-						private = false
-						break
-					}
-				} else if strings.EqualFold(dir, name) {
-					private = false
-					break
-				}
+			if dir, ok := wg.FindPublicDir(name); ok {
+				private, readOnly = false, dir.ReadOnly
 			}
 		}
 	}
-	return ic.db.CreateDirectory(acc, ic.share, path, private)
+	return ic.db.CreateDirectory(acc, ic.share, path, private, readOnly)
 }
 
 // Rename renames a file or a directory.

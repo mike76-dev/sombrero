@@ -2334,7 +2334,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 						fri.ReplaceIfExists,
 					); err != nil {
 						log.Printf("Error renaming path %s to %s: %v", path, newName, err)
-						resp := smb2.NewErrorResponse(sir, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
+						status := uint32(smb2.STATUS_OBJECT_NAME_COLLISION)
+						if errors.Is(err, stores.ErrAccessDenied) {
+							status = smb2.STATUS_ACCESS_DENIED
+						}
+						resp := smb2.NewErrorResponse(sir, status, 0, nil)
 						return resp, ss, nil
 					}
 				}
