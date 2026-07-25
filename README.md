@@ -174,9 +174,19 @@ It is now possible to define a list of shared folder names for each workgroup. F
 
 To create such list, run:
 ```Bash
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/workgroup/8303eeb8-f30e-4607-9eb7-875df2c5bd52" -d '{"publicDirs":"Public;Temp","caseSensitive":true}'
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/workgroup/8303eeb8-f30e-4607-9eb7-875df2c5bd52" -d '{"publicDirs":[{"path":"Public"},{"path":"Reports","readOnly":true,"caseSensitive":true}]}'
 ```
-The list is semicolon-separated, like in the example above. `caseSensitive` is an optional parameter and defaults to `false`.
+Every entry has the following fields:
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `path` | | The name of the shared folder. |
+| `readOnly` | `false` | If `true`, a file in the folder may only be overwritten, renamed over, or deleted by the account that placed it there. The other members of the workgroup can only read it. If `false`, any member of the workgroup may rewrite or delete any file in the folder. |
+| `caseSensitive` | `false` | If `true`, a folder is only shared when its name matches `path` exactly. |
+
+The call replaces the whole list, so passing an empty list removes all shared folders of the workgroup. If the same folder name appears in the list more than once, only the first entry is kept.
+
+Changing the list also applies to the folders that already exist: a folder whose name starts matching an entry becomes shared, a folder that no longer matches any entry becomes private again, and a folder that stays matched picks up the new flags.
 
 ## Lite Mode
 If you only intend to connect to `renterd` shares, you can run the server in the Lite mode by setting `mode: lite` in the config file. In this mode, no PostgreSQL database is required: the shares, workgroups, accounts, access policies, and the ban list are kept in a JSON file (`store.json`) in the data directory, and the `database` and `indexd` sections of the config file may be omitted. `indexd` shares are not supported in the Lite mode.
