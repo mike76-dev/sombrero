@@ -1,13 +1,16 @@
 package stores
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"sort"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"go.sia.tech/core/types"
+	"lukechampine.com/frand"
 )
 
 // sliceLength is the size of every metadata entry planted by plantObject.
@@ -106,6 +109,46 @@ func plantObject(t *testing.T, db *Database, share string, acc Account, path str
 	}
 }
 
+// plantBufferedFile uploads a file of the given size that stays in a buffer,
+// and returns its contents. Unless inFlight is set, the upload is finalized,
+// which is what makes its buffer eligible for packing.
+func plantBufferedFile(t *testing.T, db *Database, share string, acc Account, path string, size int, inFlight bool) []byte {
+	t.Helper()
+
+	data := make([]byte, size)
+	frand.Read(data)
+
+	uploadID, err := db.CreateUpload(acc, share, path)
+	if err != nil {
+		t.Fatalf("CreateUpload(%s): %v", path, err)
+	}
+	if err := db.AddBufferedSlab(uploadID, 0, data); err != nil {
+		t.Fatalf("AddBufferedSlab(%s): %v", path, err)
+	}
+	if !inFlight {
+		if err := db.FinalizeUpload(uploadID); err != nil {
+			t.Fatalf("FinalizeUpload(%s): %v", path, err)
+		}
+	}
+
+	return data
+}
+
+// pendingJobs returns the number of entries left in the upload queue.
+func pendingJobs(t *testing.T, db *Database) int {
+	t.Helper()
+
+	var n int
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COUNT(*) FROM upload_jobs`).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("count upload jobs: %v", err)
+	}
+
+	return n
+}
+
 // assertSlabs compares the slab keys reported by a delete against the expected
 // set, ignoring their order.
 func assertSlabs(t *testing.T, what string, got, want []types.Hash256) {
@@ -192,4 +235,181 @@ func TestDeleteDirectorySharedSlab(t *testing.T) {
 		t.Fatalf("DeleteFile(outside.txt): %v", err)
 	}
 	assertSlabs(t, "DeleteFile(outside.txt)", slabs, []types.Hash256{shared})
+}
+
+// slabSize is the size of a slab in the packing tests. The real one is
+// dataShards * SectorSize, which is too large to move around in a test.
+const slabSize = 1000
+
+// TestClaimPackedSlabIncomplete verifies that nothing is claimed while the
+// pending buffers do not add up to a full slab, so that no slab is ever paid
+// for before it is worth uploading.
+func TestClaimPackedSlabIncomplete(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share := newSlabTestFixture(t, db)
+
+	if _, err := db.ClaimPackedSlab(share, slabSize); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("ClaimPackedSlab on an empty share: want %v, got %v", ErrNoUploadJobs, err)
+	}
+
+	plantBufferedFile(t, db, share, acc, "a.txt", 400, false)
+	plantBufferedFile(t, db, share, acc, "b.txt", 400, false)
+
+	if _, err := db.ClaimPackedSlab(share, slabSize); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("ClaimPackedSlab below a full slab: want %v, got %v", ErrNoUploadJobs, err)
+	}
+	if n := pendingJobs(t, db); n != 2 {
+		t.Fatalf("want 2 jobs left in the queue, got %d", n)
+	}
+}
+
+// TestClaimPackedSlabFull verifies that a claim takes just enough buffers to
+// fill a slab, hands back their data in packing order, and leaves the rest of
+// the queue alone.
+func TestClaimPackedSlabFull(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share := newSlabTestFixture(t, db)
+
+	a := plantBufferedFile(t, db, share, acc, "a.txt", 400, false)
+	b := plantBufferedFile(t, db, share, acc, "b.txt", 400, false)
+	c := plantBufferedFile(t, db, share, acc, "c.txt", 400, false)
+	plantBufferedFile(t, db, share, acc, "d.txt", 400, false)
+
+	jobs, err := db.ClaimPackedSlab(share, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+
+	// The first two buffers fall short of a slab, so the third is claimed as
+	// well and overshoots the boundary.
+	if len(jobs) != 3 {
+		t.Fatalf("want 3 claimed buffers, got %d", len(jobs))
+	}
+
+	var total uint64
+	packed := make([]byte, 0, slabSize)
+	for _, job := range jobs {
+		total += job.DataLength
+		packed = append(packed, job.Data...)
+	}
+	if total < slabSize {
+		t.Fatalf("claimed %d bytes, want at least %d", total, slabSize)
+	}
+
+	if want := append(append(append([]byte{}, a...), b...), c...); !bytes.Equal(packed, want) {
+		t.Fatalf("claimed data does not match the buffered contents")
+	}
+
+	// Only the claimed entries leave the queue.
+	if n := pendingJobs(t, db); n != 1 {
+		t.Fatalf("want 1 job left in the queue, got %d", n)
+	}
+
+	// The remaining buffer alone cannot fill a slab.
+	if _, err := db.ClaimPackedSlab(share, slabSize); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("second ClaimPackedSlab: want %v, got %v", ErrNoUploadJobs, err)
+	}
+}
+
+// TestClaimPackedSlabSkipsIneligible verifies that buffers of uploads that are
+// still in flight, buffers of other shares, and buffers that already fill a
+// slab on their own are all left out of a packed slab.
+func TestClaimPackedSlabSkipsIneligible(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share := newSlabTestFixture(t, db)
+
+	other := Share{
+		Name:         "othershare",
+		Type:         "indexd",
+		ServerName:   "test-server",
+		DataShards:   1,
+		ParityShards: 0,
+	}
+	if err := db.RegisterShare(other); err != nil {
+		t.Fatalf("RegisterShare(other): %v", err)
+	}
+
+	// None of these may be claimed, even though they add up to several slabs.
+	plantBufferedFile(t, db, share, acc, "inflight.txt", 600, true)
+	plantBufferedFile(t, db, share, acc, "whole.txt", slabSize, false)
+	plantBufferedFile(t, db, other.Name, acc, "elsewhere.txt", 600, false)
+
+	if _, err := db.ClaimPackedSlab(share, slabSize); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("ClaimPackedSlab with only ineligible buffers: want %v, got %v", ErrNoUploadJobs, err)
+	}
+
+	// Adding an eligible pair of buffers claims those and nothing else. The
+	// contents are compared rather than the sizes, because an ineligible
+	// buffer of the same size would pass a size check unnoticed.
+	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
+	b := plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
+
+	jobs, err := db.ClaimPackedSlab(share, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("want 2 claimed buffers, got %d", len(jobs))
+	}
+
+	packed := make([]byte, 0, slabSize)
+	for _, job := range jobs {
+		packed = append(packed, job.Data...)
+	}
+	if want := append(append([]byte{}, a...), b...); !bytes.Equal(packed, want) {
+		t.Fatalf("claimed buffers other than the eligible pair")
+	}
+}
+
+// TestClaimPackedSlabRequeue verifies that a claimed batch can be put back,
+// which is what happens when the upload of a packed slab fails.
+func TestClaimPackedSlabRequeue(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share := newSlabTestFixture(t, db)
+
+	plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
+	plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
+
+	jobs, err := db.ClaimPackedSlab(share, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	if n := pendingJobs(t, db); n != 0 {
+		t.Fatalf("want an empty queue after the claim, got %d jobs", n)
+	}
+
+	for _, job := range jobs {
+		if err := db.RequeueUploadJob(job.UploadID, job.MetadataID); err != nil {
+			t.Fatalf("RequeueUploadJob: %v", err)
+		}
+	}
+
+	if n := pendingJobs(t, db); n != len(jobs) {
+		t.Fatalf("want %d jobs back in the queue, got %d", len(jobs), n)
+	}
+
+	again, err := db.ClaimPackedSlab(share, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab after requeue: %v", err)
+	}
+	if len(again) != len(jobs) {
+		t.Fatalf("want %d buffers reclaimed, got %d", len(jobs), len(again))
+	}
+	for i := range again {
+		if again[i].MetadataID != jobs[i].MetadataID || !bytes.Equal(again[i].Data, jobs[i].Data) {
+			t.Fatalf("reclaimed batch differs from the original claim")
+		}
+	}
 }

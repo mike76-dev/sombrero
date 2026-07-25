@@ -428,6 +428,135 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 	return
 }
 
+// maxPackedItems is the largest number of buffers that may be combined into a
+// single packed slab. It bounds the work done by one claim; a share with more
+// pending buffers than this simply fills its slabs over several passes.
+const maxPackedItems = 256
+
+// ClaimPackedSlab claims the buffers that together fill one slab of the given
+// share, so that they can be uploaded as a single packed slab. The buffers are
+// returned in the order in which they are to be concatenated, and the last one
+// commonly overshoots the slab boundary; it is up to the caller to only use as
+// much of it as fits.
+//
+// Only buffers belonging to finalized uploads are eligible. A buffer whose
+// upload is still in flight may yet be abandoned or replaced, which would leave
+// the data of an aborted upload sitting in a slab that has already been paid
+// for.
+//
+// ErrNoUploadJobs is returned when the pending buffers do not add up to a full
+// slab, in which case nothing is claimed.
+func (db *Database) ClaimPackedSlab(share string, slabSize uint64) (jobs []UploadJob, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		// The candidates are locked first, because a running total cannot be
+		// computed over a locking select. Only the queue entries are locked,
+		// so that the claim does not collide with unrelated work on the
+		// objects and their metadata.
+		//
+		// A buffer that already fills a slab on its own is left to
+		// ClaimUploadJob, which makes the two claims disjoint.
+		const query = `
+			WITH locked AS (
+				SELECT
+					uj.id,
+					uj.upload_id,
+					uj.metadata_id,
+					m.object_id,
+					m.buffer_id,
+					m.obj_offset,
+					m.data_offset,
+					m.data_length
+				FROM upload_jobs uj
+				JOIN metadata m ON m.id = uj.metadata_id
+				JOIN objects o ON o.id = m.object_id
+				WHERE o.share_name = $1
+					AND m.buffer_id IS NOT NULL
+					AND m.upload_id IS NULL
+					AND m.data_length < $2::BIGINT
+				ORDER BY m.object_id, m.obj_offset
+				LIMIT $3
+				FOR UPDATE OF uj SKIP LOCKED
+			),
+			running AS (
+				SELECT
+					l.*,
+					SUM(l.data_length) OVER (
+						ORDER BY l.object_id, l.obj_offset, l.id
+					) AS total
+				FROM locked l
+			),
+			picked AS (
+				SELECT r.*
+				FROM running r
+				WHERE r.total - r.data_length < $2::BIGINT
+					AND (SELECT COALESCE(SUM(data_length), 0) FROM locked) >= $2::BIGINT
+			),
+			-- Data-modifying CTEs always run to completion, so the claimed
+			-- entries leave the queue whether or not this is read below.
+			deleted AS (
+				DELETE FROM upload_jobs uj
+				USING picked p
+				WHERE uj.id = p.id
+				RETURNING uj.id
+			)
+			SELECT
+				p.id,
+				p.upload_id,
+				p.metadata_id,
+				p.object_id,
+				p.buffer_id,
+				p.obj_offset,
+				p.data_offset,
+				p.data_length,
+				SUBSTRING(b.data FROM p.data_offset::INT + 1 FOR p.data_length::INT)
+			FROM picked p
+			JOIN buffers b ON b.id = p.buffer_id
+			ORDER BY p.object_id, p.obj_offset, p.id
+		`
+
+		rows, err := tx.Query(ctx, query, share, int64(slabSize), maxPackedItems)
+		if err != nil {
+			return fmt.Errorf("failed to claim packed slab: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var job UploadJob
+			if err := rows.Scan(
+				&job.ID,
+				&job.UploadID,
+				&job.MetadataID,
+				&job.ObjectID,
+				&job.BufferID,
+				&job.ObjOffset,
+				&job.DataOffset,
+				&job.DataLength,
+				&job.Data,
+			); err != nil {
+				return fmt.Errorf("failed to scan packed slab item: %w", err)
+			}
+			if uint64(len(job.Data)) != job.DataLength {
+				return fmt.Errorf("buffer slice out of bounds: offset %d, length %d, slice size %d", job.DataOffset, job.DataLength, len(job.Data))
+			}
+			jobs = append(jobs, job)
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("failed to iterate packed slab items: %w", err)
+		}
+
+		if len(jobs) == 0 {
+			return ErrNoUploadJobs
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
 // CleanupUploadJobs removes upload jobs whose metadata no longer references a buffer,
 // e.g. after a requeued job was completed by another worker.
 func (db *Database) CleanupUploadJobs() error {
