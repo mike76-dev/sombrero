@@ -20,12 +20,17 @@ export interface Share {
   parityShards?: number
 }
 
+export interface PublicDir {
+  path: string
+  readOnly?: boolean
+  caseSensitive?: boolean
+}
+
 export interface Workgroup {
   id: number
   uuid: string
   name?: string
-  publicDirs?: string[]
-  caseSensitive?: boolean
+  publicDirs?: PublicDir[]
 }
 
 // stores.AccessRights has no json tags, so the fields serialize
