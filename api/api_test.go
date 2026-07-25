@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -1037,14 +1038,18 @@ func TestWorkgroups(t *testing.T) {
 			findWorkgroup:   foundWorkgroup(),
 			updateWorkgroup: func(wg stores.Workgroup) error { got = wg; return nil },
 		}
-		body := map[string]any{"publicDirs": []string{"shared", "public"}, "caseSensitive": true}
+		body := map[string]any{"publicDirs": []any{
+			map[string]any{"path": "shared"},
+			map[string]any{"path": "public", "readOnly": true, "caseSensitive": true},
+		}}
 		w := doRequest(newTestAPI(ms), http.MethodPut, "/workgroup/"+testUUID.String(), body)
 		checkStatus(t, w, http.StatusNoContent)
-		if len(got.PublicDirs) != 2 || got.PublicDirs[0] != "shared" || got.PublicDirs[1] != "public" {
-			t.Errorf("PublicDirs: want [shared public], got %v", got.PublicDirs)
+		want := []stores.PublicDir{
+			{Path: "shared"},
+			{Path: "public", ReadOnly: true, CaseSensitive: true},
 		}
-		if !got.CaseSensitive {
-			t.Error("CaseSensitive: want true")
+		if !reflect.DeepEqual(got.PublicDirs, want) {
+			t.Errorf("PublicDirs: want %+v, got %+v", want, got.PublicDirs)
 		}
 	})
 
@@ -1054,11 +1059,11 @@ func TestWorkgroups(t *testing.T) {
 			findWorkgroupByName: foundWorkgroupByName(),
 			updateWorkgroup:     func(wg stores.Workgroup) error { got = wg; return nil },
 		}
-		body := map[string]any{"publicDirs": []string{"docs"}, "caseSensitive": false}
+		body := map[string]any{"publicDirs": []any{map[string]any{"path": "docs"}}}
 		w := doRequest(newTestAPI(ms), http.MethodPut, "/workgroup/"+testWorkgroupName, body)
 		checkStatus(t, w, http.StatusNoContent)
-		if len(got.PublicDirs) != 1 || got.PublicDirs[0] != "docs" {
-			t.Errorf("PublicDirs: want [docs], got %v", got.PublicDirs)
+		if len(got.PublicDirs) != 1 || got.PublicDirs[0].Path != "docs" {
+			t.Errorf("PublicDirs: want [docs], got %+v", got.PublicDirs)
 		}
 	})
 

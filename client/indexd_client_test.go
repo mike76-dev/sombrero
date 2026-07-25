@@ -795,11 +795,11 @@ func newTestWorkgroup(t *testing.T, db *stores.Database) stores.Workgroup {
 	return got
 }
 
-func newTestWorkgroupWithPublicDirs(t *testing.T, db *stores.Database, dirs []string, caseSensitive bool) stores.Workgroup {
+func newTestWorkgroupWithPublicDirs(t *testing.T, db *stores.Database, dirs ...stores.PublicDir) stores.Workgroup {
 	t.Helper()
 
 	u := uuid.New()
-	if err := db.AddWorkgroup(stores.Workgroup{UUID: u, PublicDirs: dirs, CaseSensitive: caseSensitive}); err != nil {
+	if err := db.AddWorkgroup(stores.Workgroup{UUID: u, PublicDirs: dirs}); err != nil {
 		t.Fatalf("AddWorkgroup: %v", err)
 	}
 	got, err := db.FindWorkgroup(u)
@@ -966,7 +966,7 @@ func TestIndexdClient_WithinWorkgroupPublicDirectory(t *testing.T) {
 	// Create a public directory directly via the store. This workgroup has no PublicDirs
 	// configured, so MakeDirectory would produce a private dir; bypassing it lets the
 	// test focus on the visibility SQL rather than the name-matching logic.
-	if err := db.CreateDirectory(alice, share.Name, "/shared", false); err != nil {
+	if err := db.CreateDirectory(alice, share.Name, "/shared", false, false); err != nil {
 		t.Fatalf("CreateDirectory(public): %v", err)
 	}
 
@@ -1019,7 +1019,7 @@ func TestIndexdClient_MakeDirectoryAutoPublic(t *testing.T) {
 	db := stores.NewTestStore(t, ctx)
 	t.Cleanup(db.Close)
 
-	wg := newTestWorkgroupWithPublicDirs(t, db, []string{"shared"}, false)
+	wg := newTestWorkgroupWithPublicDirs(t, db, stores.PublicDir{Path: "shared"})
 	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg)
 	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg)
 
@@ -1074,7 +1074,7 @@ func TestIndexdClient_MakeDirectoryAutoPublic(t *testing.T) {
 }
 
 // TestIndexdClient_PublicDirCaseSensitivity verifies that the CaseSensitive flag
-// on the workgroup controls whether the directory-name comparison is exact.
+// of a public folder controls whether the directory-name comparison is exact.
 func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
 	ctx := context.Background()
 
@@ -1085,7 +1085,7 @@ func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
 
 	t.Run("case-insensitive matches uppercase name", func(t *testing.T) {
 		share := newTestShare(t, db, "share-ci")
-		wg := newTestWorkgroupWithPublicDirs(t, db, []string{"shared"}, false)
+		wg := newTestWorkgroupWithPublicDirs(t, db, stores.PublicDir{Path: "shared"})
 		alice := newTestAccountInWorkgroup(t, db, "alice-ci", "secret", wg)
 		bob := newTestAccountInWorkgroup(t, db, "bob-ci", "secret", wg)
 		grantFullAccess(t, db, share, alice)
@@ -1116,7 +1116,7 @@ func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
 
 	t.Run("case-sensitive does not match uppercase name", func(t *testing.T) {
 		share := newTestShare(t, db, "share-cs")
-		wg := newTestWorkgroupWithPublicDirs(t, db, []string{"shared"}, true)
+		wg := newTestWorkgroupWithPublicDirs(t, db, stores.PublicDir{Path: "shared", CaseSensitive: true})
 		alice := newTestAccountInWorkgroup(t, db, "alice-cs", "secret", wg)
 		bob := newTestAccountInWorkgroup(t, db, "bob-cs", "secret", wg)
 		grantFullAccess(t, db, share, alice)
@@ -1155,7 +1155,7 @@ func TestIndexdClient_PublicDirCrossWorkgroupIsolation(t *testing.T) {
 	db := stores.NewTestStore(t, ctx)
 	t.Cleanup(db.Close)
 
-	wg1 := newTestWorkgroupWithPublicDirs(t, db, []string{"shared"}, false)
+	wg1 := newTestWorkgroupWithPublicDirs(t, db, stores.PublicDir{Path: "shared"})
 	wg2 := newTestWorkgroup(t, db)
 	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg1)
 	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg2)
@@ -1188,4 +1188,343 @@ func TestIndexdClient_PublicDirCrossWorkgroupIsolation(t *testing.T) {
 	mustReadEquals(t, ctx, c, alice, path, content)
 	// Bob belongs to a different workgroup and must not see Alice's public dir.
 	mustNotFound(t, ctx, c, bob, path, len(content))
+}
+
+// uploadFile uploads content to path as acc and waits until it can be read back.
+func uploadFile(t *testing.T, ctx context.Context, c Client, acc stores.Account, path string, content []byte) {
+	t.Helper()
+
+	uploadID, err := c.StartUpload(ctx, acc, path)
+	if err != nil {
+		t.Fatalf("StartUpload(%s) as %s: %v", path, acc.Username, err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), path, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write(%s) as %s: %v", path, acc.Username, err)
+	}
+	if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(%s) as %s: %v", path, acc.Username, err)
+	}
+	waitForRead(t, ctx, c, acc, path, content)
+}
+
+// TestIndexdClient_ReadOnlyPublicDir verifies that a file in a read-only public
+// folder stays readable for the whole workgroup but may only be deleted,
+// renamed over, or overwritten by the account that owns it.
+func TestIndexdClient_ReadOnlyPublicDir(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg := newTestWorkgroupWithPublicDirs(t, db, stores.PublicDir{Path: "readonly", ReadOnly: true})
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	if err := c.MakeDirectory(ctx, alice, "readonly"); err != nil {
+		t.Fatalf("MakeDirectory: %v", err)
+	}
+
+	content := []byte("alice's shared report")
+	path := "readonly/report.txt"
+	uploadFile(t, ctx, c, alice, path, content)
+
+	// The folder is public, so bob sees the file.
+	mustReadEquals(t, ctx, c, bob, path, content)
+
+	// The folder is read-only, so bob may neither delete nor overwrite the file.
+	if err := c.Delete(ctx, bob, path, false); !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("Delete as bob: expected ErrNotFound, got %v", err)
+	}
+	if _, err := c.StartUpload(ctx, bob, path); !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("StartUpload as bob: expected ErrNotFound, got %v", err)
+	}
+	mustReadEquals(t, ctx, c, bob, path, content)
+
+	// Alice, who owns the file, may overwrite it.
+	updated := []byte("alice's revised report")
+	uploadFile(t, ctx, c, alice, path, updated)
+	mustReadEquals(t, ctx, c, bob, path, updated)
+	content = updated
+
+	// Bob may still place his own file into the folder, and alice can read it.
+	bobContent := []byte("bob's own notes")
+	bobPath := "readonly/notes.txt"
+	uploadFile(t, ctx, c, bob, bobPath, bobContent)
+	mustReadEquals(t, ctx, c, alice, bobPath, bobContent)
+
+	// Bob may not rename his own file over alice's; both files stay intact.
+	if err := c.Rename(ctx, bob, bobPath, path, false, true); !errors.Is(err, stores.ErrAccessDenied) {
+		t.Errorf("Rename as bob over alice's file: expected ErrAccessDenied, got %v", err)
+	}
+	mustReadEquals(t, ctx, c, alice, path, content)
+	mustReadEquals(t, ctx, c, bob, bobPath, bobContent)
+
+	// Alice, who owns the file, may delete it.
+	if err := c.Delete(ctx, alice, path, false); err != nil {
+		t.Fatalf("Delete as alice: %v", err)
+	}
+	mustNotFound(t, ctx, c, alice, path, len(content))
+}
+
+// TestIndexdClient_RewritablePublicDir verifies that in a public folder that is
+// not read-only, any member of the workgroup may delete and rename over the
+// files of the other members.
+func TestIndexdClient_RewritablePublicDir(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg := newTestWorkgroupWithPublicDirs(t, db, stores.PublicDir{Path: "shared"})
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
+		t.Fatalf("MakeDirectory: %v", err)
+	}
+
+	content := []byte("alice's draft")
+	path := "shared/draft.txt"
+	uploadFile(t, ctx, c, alice, path, content)
+	mustReadEquals(t, ctx, c, bob, path, content)
+
+	// Bob overwrites alice's file.
+	bobContent := []byte("bob's revision")
+	uploadFile(t, ctx, c, bob, path, bobContent)
+	mustReadEquals(t, ctx, c, alice, path, bobContent)
+
+	// Bob also renames another of his files over it.
+	renamed := []byte("bob's second revision")
+	bobPath := "shared/revision.txt"
+	uploadFile(t, ctx, c, bob, bobPath, renamed)
+	if err := c.Rename(ctx, bob, bobPath, path, false, true); err != nil {
+		t.Fatalf("Rename as bob: %v", err)
+	}
+	mustReadEquals(t, ctx, c, alice, path, renamed)
+	bobContent = renamed
+
+	// Bob deletes the file, too.
+	if err := c.Delete(ctx, bob, path, false); err != nil {
+		t.Fatalf("Delete as bob: %v", err)
+	}
+	mustNotFound(t, ctx, c, alice, path, len(bobContent))
+}
+
+// TestIndexdClient_OverwriteOwnFile verifies that a file can be uploaded again
+// after a previous upload to the same path has been finalized. The uploads entry
+// of the finished upload lingers until its buffered slabs reach the Sia network,
+// and must not be mistaken for an upload that is still in flight.
+func TestIndexdClient_OverwriteOwnFile(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	path := "file.txt"
+	uploadFile(t, ctx, c, acc, path, []byte("first revision"))
+
+	second := []byte("second revision")
+	uploadFile(t, ctx, c, acc, path, second)
+	mustReadEquals(t, ctx, c, acc, path, second)
+
+	// A second upload to a path that already has one in flight is still refused.
+	inFlight, err := c.StartUpload(ctx, acc, "pending.txt")
+	if err != nil {
+		t.Fatalf("StartUpload(pending): %v", err)
+	}
+	if _, err := c.StartUpload(ctx, acc, "pending.txt"); !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("StartUpload(pending) while in flight: expected ErrNotFound, got %v", err)
+	}
+	if err := c.AbortUpload(ctx, "pending.txt", inFlight); err != nil {
+		t.Fatalf("AbortUpload(pending): %v", err)
+	}
+}
+
+// TestIndexdClient_UpdateWorkgroupRestampsDirectories verifies that changing the
+// public folders of a workgroup also re-applies them to the folders that already
+// exist, so that a folder can be shared, switched to read-only, and made private
+// again after it has been created.
+func TestIndexdClient_UpdateWorkgroupRestampsDirectories(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg := newTestWorkgroup(t, db)
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// The workgroup has no public folders yet, so the directory starts private.
+	if err := c.MakeDirectory(ctx, alice, "team"); err != nil {
+		t.Fatalf("MakeDirectory: %v", err)
+	}
+
+	content := []byte("team content")
+	path := "team/notes.txt"
+	uploadFile(t, ctx, c, alice, path, content)
+	mustNotFound(t, ctx, c, bob, path, len(content))
+
+	setPublicDirs := func(dirs ...stores.PublicDir) {
+		t.Helper()
+		wg.PublicDirs = dirs
+		if err := db.UpdateWorkgroup(wg); err != nil {
+			t.Fatalf("UpdateWorkgroup: %v", err)
+		}
+	}
+
+	// Sharing the folder makes the existing file visible to the workgroup, and
+	// rewritable, since the entry is not read-only.
+	setPublicDirs(stores.PublicDir{Path: "team"})
+	mustReadEquals(t, ctx, c, bob, path, content)
+
+	// Switching the entry to read-only protects the existing file from bob.
+	setPublicDirs(stores.PublicDir{Path: "team", ReadOnly: true})
+	mustReadEquals(t, ctx, c, bob, path, content)
+	if err := c.Delete(ctx, bob, path, false); !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("Delete as bob: expected ErrNotFound, got %v", err)
+	}
+
+	// A case-sensitive entry that no longer matches makes the folder private.
+	setPublicDirs(stores.PublicDir{Path: "TEAM", ReadOnly: true, CaseSensitive: true})
+	mustNotFound(t, ctx, c, bob, path, len(content))
+
+	// Dropping the list entirely leaves the folder private, too.
+	setPublicDirs(stores.PublicDir{Path: "team"})
+	mustReadEquals(t, ctx, c, bob, path, content)
+	setPublicDirs()
+	mustNotFound(t, ctx, c, bob, path, len(content))
+
+	// Alice, who owns the folder, keeps her access throughout.
+	mustReadEquals(t, ctx, c, alice, path, content)
+}
+
+// TestIndexdClient_RenamePublicDirMovesAllContents verifies that renaming a
+// public folder also moves the entries the caller may not touch directly: the
+// files of the other members and their read-only subfolders have to follow the
+// renamed folder instead of keeping their old paths.
+func TestIndexdClient_RenamePublicDirMovesAllContents(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg := newTestWorkgroupWithPublicDirs(t, db,
+		stores.PublicDir{Path: "shared"},
+		stores.PublicDir{Path: "ro", ReadOnly: true},
+	)
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Alice sets up a public folder holding one of her files and a read-only
+	// subfolder with another one.
+	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
+		t.Fatalf("MakeDirectory(shared): %v", err)
+	}
+	if err := c.MakeDirectory(ctx, alice, "shared/ro"); err != nil {
+		t.Fatalf("MakeDirectory(shared/ro): %v", err)
+	}
+	doc := []byte("alice's document")
+	report := []byte("alice's report")
+	uploadFile(t, ctx, c, alice, "shared/doc.txt", doc)
+	uploadFile(t, ctx, c, alice, "shared/ro/report.txt", report)
+
+	// Bob may rename the folder, since it is public and not read-only.
+	if err := c.Rename(ctx, bob, "shared", "team", true, false); err != nil {
+		t.Fatalf("Rename as bob: %v", err)
+	}
+
+	// Everything inside moved along, for both members.
+	mustReadEquals(t, ctx, c, alice, "team/doc.txt", doc)
+	mustReadEquals(t, ctx, c, bob, "team/doc.txt", doc)
+	mustReadEquals(t, ctx, c, alice, "team/ro/report.txt", report)
+	mustReadEquals(t, ctx, c, bob, "team/ro/report.txt", report)
+	mustNotFound(t, ctx, c, alice, "shared/doc.txt", len(doc))
+	mustNotFound(t, ctx, c, alice, "shared/ro/report.txt", len(report))
+}
+
+// TestIndexdClient_DuplicatePublicDirEntries verifies that when the same path
+// appears twice in the public folder list, the first entry decides the flags
+// everywhere: in the stored list and on the directories it is applied to.
+func TestIndexdClient_DuplicatePublicDirEntries(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	wg := newTestWorkgroup(t, db)
+	alice := newTestAccountInWorkgroup(t, db, "alice", "secret", wg)
+	bob := newTestAccountInWorkgroup(t, db, "bob", "secret", wg)
+
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, alice)
+	grantFullAccess(t, db, share, bob)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	if err := c.MakeDirectory(ctx, alice, "dup"); err != nil {
+		t.Fatalf("MakeDirectory: %v", err)
+	}
+	content := []byte("alice's file")
+	path := "dup/file.txt"
+	uploadFile(t, ctx, c, alice, path, content)
+
+	// The first entry is not read-only and wins over the second.
+	wg.PublicDirs = []stores.PublicDir{
+		{Path: "dup"},
+		{Path: "dup", ReadOnly: true},
+	}
+	if err := db.UpdateWorkgroup(wg); err != nil {
+		t.Fatalf("UpdateWorkgroup: %v", err)
+	}
+
+	stored, err := db.FindWorkgroup(wg.UUID)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
+	}
+	if len(stored.PublicDirs) != 1 || stored.PublicDirs[0].ReadOnly {
+		t.Fatalf("stored config: want [{dup}], got %+v", stored.PublicDirs)
+	}
+
+	// The folder is stamped rewritable accordingly, so bob may delete
+	// alice's file.
+	if err := c.Delete(ctx, bob, path, false); err != nil {
+		t.Fatalf("Delete as bob: %v", err)
+	}
+	mustNotFound(t, ctx, c, alice, path, len(content))
 }
