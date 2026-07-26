@@ -259,6 +259,13 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		packChan:     make(chan struct{}, 1),
 	}
 
+	// Leftover data that reaches the slab size is uploaded as a full slab
+	// before it can ever age, so a minimum at or above that size leaves the
+	// age with nothing left to trigger on.
+	if ic.maxBufferAge > 0 && ic.minPackSize >= ic.slabSize {
+		log.Printf("share %s: minPackedSlabSize of %d is not below the slab size of %d, so maxBufferAge of %s will never upload anything", share, ic.minPackSize, ic.slabSize, ic.maxBufferAge)
+	}
+
 	// Start background upload threads.
 	for range uploadWorkers {
 		ic.wg.Add(1)
