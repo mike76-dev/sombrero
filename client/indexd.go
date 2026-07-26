@@ -211,23 +211,39 @@ type IndexdClient struct {
 	dataShards   uint8
 	parityShards uint8
 	slabSize     uint64
+	minPackSize  uint64
+	maxBufferAge time.Duration
 	closeChan    chan struct{}
 	jobsChan     chan struct{}
 	packChan     chan struct{}
 	wg           sync.WaitGroup
 }
 
+// PackingOptions describes when the data that does not fill a slab is uploaded
+// anyway, instead of waiting to be packed together with the data of other
+// files. The zero value keeps it waiting for as long as that takes, which is
+// what makes every uploaded slab a full one.
+type PackingOptions struct {
+	// MinSize is the least amount of leftover data, in bytes, that an
+	// incomplete slab is uploaded with. Zero puts no lower bound on it.
+	MinSize uint64
+
+	// MaxAge is how long the leftover data may wait. Zero means forever, in
+	// which case MinSize has no effect either.
+	MaxAge time.Duration
+}
+
 // NewIndexdClient returns an initialized IndexdClient.
-func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, dataShards, parityShards uint8) Client {
+func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, dataShards, parityShards uint8, packing PackingOptions) Client {
 	backend := &sdkBackend{
 		sdk:      sdkClient,
 		objCache: make(map[types.Hash256]sdk.Object),
 	}
-	return newIndexdClient(db, backend, share, dataShards, parityShards)
+	return newIndexdClient(db, backend, share, dataShards, parityShards, packing)
 }
 
 // newIndexdClient allows using a mock SDK for testing.
-func newIndexdClient(db *stores.Database, backend storageBackend, share string, dataShards, parityShards uint8) Client {
+func newIndexdClient(db *stores.Database, backend storageBackend, share string, dataShards, parityShards uint8, packing PackingOptions) Client {
 	cc := make(chan struct{})
 	ic := &IndexdClient{
 		share:        share,
@@ -236,6 +252,8 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		dataShards:   dataShards,
 		parityShards: parityShards,
 		slabSize:     uint64(dataShards) * proto.SectorSize,
+		minPackSize:  packing.MinSize,
+		maxBufferAge: packing.MaxAge,
 		closeChan:    cc,
 		jobsChan:     make(chan struct{}, uploadWorkers),
 		packChan:     make(chan struct{}, 1),
@@ -696,7 +714,7 @@ func packSlab(jobs []stores.UploadJob, size uint64) []byte {
 // processPackedSlab checks if the buffered pieces of several files add up to a
 // slab and, if so, uploads them together as a single packed slab.
 func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
-	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.slabSize)
+	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.slabSize, ic.minPackSize, ic.maxBufferAge)
 	if err != nil {
 		return err
 	}

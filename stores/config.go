@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -75,6 +76,55 @@ func (dc DatabaseConfig) String() string {
 	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", dc.Host, dc.Port, dc.User, dc.Password, dc.Database, dc.SSLMode)
 }
 
+// BufferAge is how long the data that does not fill a slab may sit in the
+// database before it is uploaded anyway. The zero value means never: the data
+// waits for as long as it takes for enough of it to accumulate, which keeps a
+// partly filled slab from being paid for at the price of a full one.
+type BufferAge time.Duration
+
+// String implements fmt.Stringer.
+func (a BufferAge) String() string {
+	if a <= 0 {
+		return "never"
+	}
+	return time.Duration(a).String()
+}
+
+// Duration returns the age as a time.Duration.
+func (a BufferAge) Duration() time.Duration {
+	return time.Duration(a)
+}
+
+// MarshalYAML implements yaml.Marshaler.
+func (a BufferAge) MarshalYAML() (any, error) {
+	return a.String(), nil
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (a *BufferAge) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "never":
+		*a = 0
+		return nil
+	}
+
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("unknown buffer age: %q", s)
+	}
+	if d <= 0 {
+		return fmt.Errorf("buffer age must be positive: %q", s)
+	}
+
+	*a = BufferAge(d)
+	return nil
+}
+
 // IndexdConfig lists all parameters required to connect to an `indexd` node.
 type IndexdConfig struct {
 	Name        string `yaml:"appName"`
@@ -82,6 +132,18 @@ type IndexdConfig struct {
 	LogoURL     string `yaml:"logoURL"`
 	ServiceURL  string `yaml:"serviceURL"`
 	SeedPhrase  string `yaml:"seedPhrase"`
+
+	// The data of a file that does not fill a slab is kept in the database
+	// until it can be packed into a full slab together with the data of other
+	// files. These two set the point at which an incomplete slab is uploaded
+	// regardless: once the leftover data of a share has been waiting for
+	// MaxBufferAge and amounts to at least MinPackedSlabSize bytes.
+	//
+	// Unset, MaxBufferAge keeps the leftover data waiting indefinitely, so
+	// that only full slabs are ever uploaded. Unset, MinPackedSlabSize puts
+	// no lower bound on what an aged upload may carry.
+	MinPackedSlabSize uint64    `yaml:"minPackedSlabSize,omitempty"`
+	MaxBufferAge      BufferAge `yaml:"maxBufferAge,omitempty"`
 }
 
 // Config lists the config fields.

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"go.sia.tech/core/types"
@@ -444,9 +445,14 @@ const maxPackedItems = 256
 // the data of an aborted upload sitting in a slab that has already been paid
 // for.
 //
-// ErrNoUploadJobs is returned when the pending buffers do not add up to a full
-// slab, in which case nothing is claimed.
-func (db *Database) ClaimPackedSlab(share string, slabSize uint64) (jobs []UploadJob, err error) {
+// A positive maxAge also claims buffers that fall short of a slab, once the
+// oldest of them has been waiting that long and they amount to at least minSize
+// bytes. Such a claim fills the slab only partly, which costs as much as a full
+// one, so with maxAge left at zero the buffers wait for as long as it takes.
+//
+// ErrNoUploadJobs is returned when neither applies, in which case nothing is
+// claimed.
+func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxAge time.Duration) (jobs []UploadJob, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		// The candidates are locked first, because a running total cannot be
 		// computed over a locking select. Only the queue entries are locked,
@@ -461,6 +467,7 @@ func (db *Database) ClaimPackedSlab(share string, slabSize uint64) (jobs []Uploa
 					uj.id,
 					uj.upload_id,
 					uj.metadata_id,
+					uj.created_at,
 					m.object_id,
 					m.buffer_id,
 					m.obj_offset,
@@ -485,11 +492,25 @@ func (db *Database) ClaimPackedSlab(share string, slabSize uint64) (jobs []Uploa
 					) AS total
 				FROM locked l
 			),
+			available AS (
+				SELECT
+					COALESCE(SUM(data_length), 0) AS total,
+					MIN(created_at) AS oldest
+				FROM locked
+			),
 			picked AS (
 				SELECT r.*
 				FROM running r
+				CROSS JOIN available a
 				WHERE r.total - r.data_length < $2::BIGINT
-					AND (SELECT COALESCE(SUM(data_length), 0) FROM locked) >= $2::BIGINT
+					AND (
+						a.total >= $2::BIGINT
+						OR (
+							$4::DOUBLE PRECISION > 0
+							AND a.total >= $5::BIGINT
+							AND a.oldest <= NOW() - MAKE_INTERVAL(secs => $4::DOUBLE PRECISION)
+						)
+					)
 			),
 			-- Data-modifying CTEs always run to completion, so the claimed
 			-- entries leave the queue whether or not this is read below.
@@ -514,7 +535,7 @@ func (db *Database) ClaimPackedSlab(share string, slabSize uint64) (jobs []Uploa
 			ORDER BY p.object_id, p.obj_offset, p.id
 		`
 
-		rows, err := tx.Query(ctx, query, share, int64(slabSize), maxPackedItems)
+		rows, err := tx.Query(ctx, query, share, int64(slabSize), maxPackedItems, maxAge.Seconds(), int64(minSize))
 		if err != nil {
 			return fmt.Errorf("failed to claim packed slab: %w", err)
 		}
