@@ -429,11 +429,6 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 	return
 }
 
-// maxPackedItems is the largest number of buffers that may be combined into a
-// single packed slab. It bounds the work done by one claim; a share with more
-// pending buffers than this simply fills its slabs over several passes.
-const maxPackedItems = 256
-
 // ClaimPackedSlab claims the buffers that together fill one slab of the given
 // share, so that they can be uploaded as a single packed slab. The buffers are
 // returned in the order in which they are to be concatenated, and the last one
@@ -454,15 +449,42 @@ const maxPackedItems = 256
 // claimed.
 func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxAge time.Duration) (jobs []UploadJob, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		// The candidates are locked first, because a running total cannot be
-		// computed over a locking select. Only the queue entries are locked,
-		// so that the claim does not collide with unrelated work on the
-		// objects and their metadata.
+		// A running total cannot be computed over a locking select, so the
+		// candidate prefix is cut at the slab boundary without locking first.
+		// The rows are then locked and the claim conditions re-checked over
+		// what was actually locked, so a row snatched away by a concurrent
+		// claim in between only shrinks this one below the slab size, in
+		// which case nothing is claimed. Cutting by size rather than by row
+		// count keeps a claim to one slab's worth of data no matter how many
+		// small pieces it takes to get there.
+		//
+		// Only the queue entries are locked, so that the claim does not
+		// collide with unrelated work on the objects and their metadata.
 		//
 		// A buffer that already fills a slab on its own is left to
 		// ClaimUploadJob, which makes the two claims disjoint.
 		const query = `
-			WITH locked AS (
+			WITH candidate AS (
+				SELECT
+					uj.id,
+					m.data_length,
+					SUM(m.data_length) OVER (
+						ORDER BY m.object_id, m.obj_offset, uj.id
+					) AS total
+				FROM upload_jobs uj
+				JOIN metadata m ON m.id = uj.metadata_id
+				JOIN objects o ON o.id = m.object_id
+				WHERE o.share_name = $1
+					AND m.buffer_id IS NOT NULL
+					AND m.upload_id IS NULL
+					AND m.data_length < $2::BIGINT
+			),
+			cutoff AS (
+				SELECT c.id
+				FROM candidate c
+				WHERE c.total - c.data_length < $2::BIGINT
+			),
+			locked AS (
 				SELECT
 					uj.id,
 					uj.upload_id,
@@ -474,14 +496,11 @@ func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxA
 					m.data_offset,
 					m.data_length
 				FROM upload_jobs uj
+				JOIN cutoff c ON c.id = uj.id
 				JOIN metadata m ON m.id = uj.metadata_id
-				JOIN objects o ON o.id = m.object_id
-				WHERE o.share_name = $1
-					AND m.buffer_id IS NOT NULL
+				WHERE m.buffer_id IS NOT NULL
 					AND m.upload_id IS NULL
 					AND m.data_length < $2::BIGINT
-				ORDER BY m.object_id, m.obj_offset
-				LIMIT $3
 				FOR UPDATE OF uj SKIP LOCKED
 			),
 			running AS (
@@ -506,9 +525,9 @@ func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxA
 					AND (
 						a.total >= $2::BIGINT
 						OR (
-							$4::DOUBLE PRECISION > 0
-							AND a.total >= $5::BIGINT
-							AND a.oldest <= NOW() - MAKE_INTERVAL(secs => $4::DOUBLE PRECISION)
+							$3::DOUBLE PRECISION > 0
+							AND a.total >= $4::BIGINT
+							AND a.oldest <= NOW() - MAKE_INTERVAL(secs => $3::DOUBLE PRECISION)
 						)
 					)
 			),
@@ -535,7 +554,7 @@ func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxA
 			ORDER BY p.object_id, p.obj_offset, p.id
 		`
 
-		rows, err := tx.Query(ctx, query, share, int64(slabSize), maxPackedItems, maxAge.Seconds(), int64(minSize))
+		rows, err := tx.Query(ctx, query, share, int64(slabSize), maxAge.Seconds(), int64(minSize))
 		if err != nil {
 			return fmt.Errorf("failed to claim packed slab: %w", err)
 		}

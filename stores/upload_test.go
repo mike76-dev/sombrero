@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -343,6 +344,49 @@ func TestClaimPackedSlabFull(t *testing.T) {
 	}
 
 	// The remaining buffer alone cannot fill a slab.
+	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("second ClaimPackedSlab: want %v, got %v", ErrNoUploadJobs, err)
+	}
+}
+
+// TestClaimPackedSlabManySmallPieces verifies that a slab fills up no matter
+// how many pieces it takes, since the claim is bounded by data size rather
+// than by a row count. A backlog of tiny buffers used to stall forever once
+// their number exceeded a fixed per-claim limit.
+func TestClaimPackedSlabManySmallPieces(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share := newSlabTestFixture(t, db)
+
+	// 400 pieces of 3 bytes each: filling a slab takes 334 of them, far more
+	// than the 256 rows the claim used to be capped at.
+	const pieces = 400
+	for i := range pieces {
+		plantBufferedFile(t, db, share, acc, fmt.Sprintf("tiny%03d.txt", i), 3, false)
+	}
+
+	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+
+	var total uint64
+	for _, job := range jobs {
+		total += job.DataLength
+	}
+	if total < slabSize {
+		t.Fatalf("claimed %d bytes, want at least %d", total, slabSize)
+	}
+	if want := 334; len(jobs) != want {
+		t.Fatalf("want %d claimed buffers, got %d", want, len(jobs))
+	}
+
+	// The rest falls short of another slab and stays queued.
+	if n := pendingJobs(t, db); n != pieces-len(jobs) {
+		t.Fatalf("want %d jobs left in the queue, got %d", pieces-len(jobs), n)
+	}
 	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("second ClaimPackedSlab: want %v, got %v", ErrNoUploadJobs, err)
 	}
