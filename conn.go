@@ -363,6 +363,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			c.serverCapabilities = c.serverCapabilities &^ smb2.GLOBAL_CAP_ENCRYPTION
 		}
 
+		if smb2.Is3X(c.negotiateDialect) && c.server.isMultiChannelCapable && c.clientCapabilities&smb2.GLOBAL_CAP_MULTI_CHANNEL > 0 {
+			c.serverCapabilities |= smb2.GLOBAL_CAP_MULTI_CHANNEL
+		}
+
 		if nr.SecurityMode()&smb2.NEGOTIATE_SIGNING_REQUIRED > 0 {
 			c.shouldSign = true
 		}
