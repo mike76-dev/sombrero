@@ -19,6 +19,11 @@ const (
 	SESSION_FLAG_ENCRYPT_DATA = 0x0004
 )
 
+const (
+	// Session setup request flags.
+	SESSION_FLAG_BINDING = 0x01
+)
+
 // SessionSetupRequest represents an SMB2_SESSION_SETUP request.
 type SessionSetupRequest struct {
 	Request
@@ -52,6 +57,15 @@ func (ssr SessionSetupRequest) Validate(supportsMultiCredit bool) error {
 	}
 
 	return nil
+}
+
+// Flags returns the Flags field of the SMB2_SESSION_SETUP request. Unlike the other
+// accessors, it may be called before the request is validated, so it checks the length.
+func (ssr SessionSetupRequest) Flags() uint8 {
+	if len(ssr.data) < SMB2HeaderSize+SMB2SessionSetupRequestMinSize {
+		return 0
+	}
+	return ssr.data[SMB2HeaderSize+2]
 }
 
 // SecurityMode returns the SecurityMode field of the SMB2_SESSION_SETUP request.

@@ -31,6 +31,7 @@ const (
 
 var (
 	errSessionNotFound = errors.New("session not found")
+	errNoSigningKey    = errors.New("no signing key available")
 )
 
 // session represents a Session object.
@@ -308,32 +309,72 @@ func (ss *session) sign(buf []byte, c *connection) {
 	}
 }
 
-// validateRequest returns true if the request is correctly signed by the client.
-func (ss *session) validateRequest(req *smb2.Request) bool {
+// isSessionBinding returns true if the request binds a session to a new channel.
+func isSessionBinding(req *smb2.Request) bool {
+	if req.Header().Command() != smb2.SMB2_SESSION_SETUP {
+		return false
+	}
+
+	ssr := smb2.SessionSetupRequest{Request: *req}
+	return ssr.Flags()&smb2.SESSION_FLAG_BINDING > 0
+}
+
+// verificationKeyFor returns the key to verify the signature of the request received on the
+// given connection with, or nil if that key is not available. In the SMB 3.x dialect family,
+// a request that binds a session to a new channel is signed with the signing key of the
+// session, because the channel it establishes has no key of its own yet; every other request
+// is signed with the key of the channel it arrives on. Older dialects have no channels and
+// sign with the session key.
+func (ss *session) verificationKeyFor(c *connection, req *smb2.Request) []byte {
+	if !smb2.Is3X(c.negotiateDialect) {
+		return ss.sessionKey
+	}
+
+	if isSessionBinding(req) {
+		return ss.signingKey
+	}
+
+	ch := ss.channel(c)
+	if ch == nil {
+		return nil
+	}
+
+	return ch.signingKey
+}
+
+// validateRequest verifies the signature of the request received on the connection. It returns
+// nil if the request is signed correctly, errNoSigningKey if the key needed to verify it is
+// not available, and errInvalidSignature if the signature doesn't match.
+func (ss *session) validateRequest(req *smb2.Request, c *connection) error {
 	if !req.Header().IsFlagSet(smb2.FLAGS_SIGNED) || req.IsEncrypted() {
-		return true
+		return nil
+	}
+
+	key := ss.verificationKeyFor(c, req)
+	if len(key) == 0 {
+		return errNoSigningKey
 	}
 
 	signature := req.Header().Signature()
 	req.Header().WipeSignature()
 	var verifier hash.Hash
-	switch ss.connection.negotiateDialect {
+	switch c.negotiateDialect {
 	case smb2.SMB_DIALECT_202, smb2.SMB_DIALECT_21:
-		verifier = hmac.New(sha256.New, ss.sessionKey)
+		verifier = hmac.New(sha256.New, key)
 	case smb2.SMB_DIALECT_30, smb2.SMB_DIALECT_302:
-		ciph, err := aes.NewCipher(ss.signingKey)
+		ciph, err := aes.NewCipher(key)
 		if err != nil {
 			log.Printf("Error creating cipher for verifying signature: %v", err)
-			return false
+			return errInvalidSignature
 		}
 		verifier = cmac.New(ciph)
 	case smb2.SMB_DIALECT_311:
-		switch ss.connection.signingAlgorithmID {
+		switch c.signingAlgorithmID {
 		case smb2.AES_CMAC:
-			ciph, err := aes.NewCipher(ss.signingKey)
+			ciph, err := aes.NewCipher(key)
 			if err != nil {
 				log.Printf("Error creating cipher for verifying signature: %v", err)
-				return false
+				return errInvalidSignature
 			}
 			verifier = cmac.New(ciph)
 		case smb2.AES_GMAC:
@@ -343,16 +384,16 @@ func (ss *session) validateRequest(req *smb2.Request) bool {
 				nonce[8] |= 2
 			}
 			var err error
-			verifier, err = gmac.New(ss.signingKey, nonce)
+			verifier, err = gmac.New(key, nonce)
 			if err != nil {
 				log.Printf("Error creating cipher for verifying signature: %v", err)
-				return false
+				return errInvalidSignature
 			}
 		default:
-			ciph, err := aes.NewCipher(ss.signingKey)
+			ciph, err := aes.NewCipher(key)
 			if err != nil {
 				log.Printf("Error creating cipher for verifying signature: %v", err)
-				return false
+				return errInvalidSignature
 			}
 			verifier = cmac.New(ciph)
 		}
@@ -360,7 +401,11 @@ func (ss *session) validateRequest(req *smb2.Request) bool {
 	verifier.Reset()
 	verifier.Write(req.Header())
 	sum := verifier.Sum(nil)
-	return bytes.Equal(signature, sum[:16])
+	if !bytes.Equal(signature, sum[:16]) {
+		return errInvalidSignature
+	}
+
+	return nil
 }
 
 // encrypt uses the encryption key to encrypt the SMB message.

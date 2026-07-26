@@ -238,8 +238,16 @@ func (c *connection) acceptRequest(msg []byte) error {
 			c.mu.Unlock()
 		}
 
-		if found && !ss.validateRequest(req) {
-			return errInvalidSignature
+		var rejectStatus uint32
+		if found {
+			if err := ss.validateRequest(req, c); err != nil {
+				if !errors.Is(err, errNoSigningKey) {
+					return err
+				}
+				// The key required to verify the signature is not available. The request
+				// must be failed and not processed any further.
+				rejectStatus = smb2.STATUS_NOT_SUPPORTED
+			}
 		}
 
 		// Request processed; this message ID is not allowed anymore.
@@ -257,6 +265,18 @@ func (c *connection) acceptRequest(msg []byte) error {
 				}
 				i++
 			}
+		}
+
+		if rejectStatus != 0 {
+			c.mu.Unlock()
+			// The response carries a copy of the request header, so the signature of the
+			// client has to be cleared: the response cannot be signed, since the key to
+			// sign it with is the one that couldn't be found.
+			resp := smb2.NewErrorResponse(*req, rejectStatus, 0, nil)
+			resp.Header().ClearFlag(smb2.FLAGS_SIGNED)
+			resp.Header().WipeSignature()
+			c.server.writeResponse(c, ss, resp)
+			continue
 		}
 
 		// Put request in the queue.
@@ -2569,8 +2589,10 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 	c.mu.Unlock()
 	if cr.Header().IsFlagSet(smb2.FLAGS_SIGNED) {
 		if found {
-			if !ss.validateRequest(req) {
-				return errInvalidSignature
+			// An SMB2_CANCEL request is never answered, so a request that cannot be
+			// verified is dropped rather than failed with a status code.
+			if err := ss.validateRequest(req, c); err != nil {
+				return err
 			}
 		} else {
 			return errSessionNotFound
