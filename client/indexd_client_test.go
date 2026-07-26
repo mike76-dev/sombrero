@@ -199,7 +199,7 @@ func TestIndexdClient_FileLifecycle(t *testing.T) {
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := []byte("hello world")
@@ -498,7 +498,7 @@ func TestIndexdClient_RenameDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := makeLargeMixedContent()
@@ -553,7 +553,7 @@ func TestIndexdClient_RangedReads(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := makeLargeMixedContent()
@@ -627,7 +627,7 @@ func TestIndexdClient_DeleteDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := makeLargeMixedContent()
@@ -682,7 +682,7 @@ func TestIndexdClient_RenameDirectoryDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	dir := "docs"
@@ -748,7 +748,7 @@ func TestIndexdClient_OverwriteFileDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	origContent := []byte("old content")
@@ -927,7 +927,7 @@ func TestIndexdClient_CrossWorkgroupIsolation(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := []byte("alice's secret data")
@@ -966,7 +966,7 @@ func TestIndexdClient_WithinWorkgroupPrivacy(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := []byte("alice's private content")
@@ -1026,7 +1026,7 @@ func TestIndexdClient_WithinWorkgroupPublicDirectory(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// Create a public directory directly via the store. This workgroup has no PublicDirs
@@ -1093,7 +1093,7 @@ func TestIndexdClient_MakeDirectoryAutoPublic(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// "shared" is in PublicDirs so MakeDirectory must create a non-private directory.
@@ -1157,7 +1157,7 @@ func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
 		grantFullAccess(t, db, share, alice)
 		grantFullAccess(t, db, share, bob)
 
-		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 		t.Cleanup(func() { _ = c.Close() })
 
 		// "SHARED" should match "shared" in PublicDirs when case-insensitive.
@@ -1188,7 +1188,7 @@ func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
 		grantFullAccess(t, db, share, alice)
 		grantFullAccess(t, db, share, bob)
 
-		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 		t.Cleanup(func() { _ = c.Close() })
 
 		// "SHARED" must not match "shared" in PublicDirs when case-sensitive.
@@ -1230,7 +1230,7 @@ func TestIndexdClient_PublicDirCrossWorkgroupIsolation(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
@@ -1290,7 +1290,7 @@ func TestIndexdClient_ReadOnlyPublicDir(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "readonly"); err != nil {
@@ -1356,7 +1356,7 @@ func TestIndexdClient_RewritablePublicDir(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
@@ -1404,7 +1404,7 @@ func TestIndexdClient_OverwriteOwnFile(t *testing.T) {
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	path := "file.txt"
@@ -1445,7 +1445,7 @@ func TestIndexdClient_UpdateWorkgroupRestampsDirectories(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// The workgroup has no public folders yet, so the directory starts private.
@@ -1513,7 +1513,7 @@ func TestIndexdClient_RenamePublicDirMovesAllContents(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// Alice sets up a public folder holding one of her files and a read-only
@@ -1560,7 +1560,7 @@ func TestIndexdClient_DuplicatePublicDirEntries(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "dup"); err != nil {
@@ -1650,7 +1650,7 @@ func TestIndexdClient_PackedSlab(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	fb := newFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// With a single data shard, three files of this size stay buffered on
@@ -1726,7 +1726,7 @@ func TestIndexdClient_PackedSlabUploadFailure(t *testing.T) {
 	fb := newFakeBackend()
 	fb.failUploads(errors.New("backend is down"))
 
-	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	slabSize := uint64(proto.SectorSize)
@@ -1777,7 +1777,7 @@ func TestIndexdClient_PackedSlabFilesDeletedDuringUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	fb := newGatedFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	slabSize := uint64(proto.SectorSize)
@@ -1872,7 +1872,7 @@ func TestIndexdClient_PackingOptionsWarning(t *testing.T) {
 			log.SetOutput(&out)
 			t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-			c := newIndexdClient(db, newFakeBackend(), "testshare", 1, 1, 0, tc.packing)
+			c := newIndexdClient(db, newFakeBackend(), "testshare", 1, 1, 0, tc.packing, false)
 			_ = c.Close()
 
 			if got := strings.Contains(out.String(), "will never upload anything"); got != tc.warn {
@@ -1948,7 +1948,7 @@ func TestIndexdClient_LateCompletionSharedSlab(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	fb := newFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 	ic := c.(*IndexdClient)
 
@@ -2011,7 +2011,7 @@ func TestIndexdClient_UnpinRetry(t *testing.T) {
 
 	wgID := workgroupID(t, db, acc)
 	fb := newFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 	ic := c.(*IndexdClient)
 
@@ -2091,7 +2091,7 @@ func TestIndexdClient_StrandedPieceRecovery(t *testing.T) {
 	}
 
 	fb := newFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{})
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 	ic := c.(*IndexdClient)
 

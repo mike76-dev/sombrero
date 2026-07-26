@@ -271,7 +271,7 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 		c := client.NewIndexdClient(db, sdkClient, share.Name, wg.ID, share.DataShards, share.ParityShards, client.PackingOptions{
 			MinSize: s.cfg.MinPackedSlabSize,
 			MaxAge:  s.cfg.MaxBufferAge.Duration(),
-		})
+		}, s.debug)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

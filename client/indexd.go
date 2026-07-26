@@ -243,6 +243,7 @@ type IndexdClient struct {
 	slabSize     uint64
 	minPackSize  uint64
 	maxBufferAge time.Duration
+	debug        bool
 	closeChan    chan struct{}
 	jobsChan     chan struct{}
 	packChan     chan struct{}
@@ -297,16 +298,16 @@ type PackingOptions struct {
 
 // NewIndexdClient returns an initialized IndexdClient serving the given
 // workgroup's connection to the share.
-func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions) Client {
+func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, debug bool) Client {
 	backend := &sdkBackend{
 		sdk:      sdkClient,
 		objCache: make(map[types.Hash256]sdk.Object),
 	}
-	return newIndexdClient(db, backend, share, workgroup, dataShards, parityShards, packing)
+	return newIndexdClient(db, backend, share, workgroup, dataShards, parityShards, packing, debug)
 }
 
 // newIndexdClient allows using a mock SDK for testing.
-func newIndexdClient(db *stores.Database, backend storageBackend, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions) Client {
+func newIndexdClient(db *stores.Database, backend storageBackend, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, debug bool) Client {
 	cc := make(chan struct{})
 	ic := &IndexdClient{
 		share:        share,
@@ -318,6 +319,7 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		slabSize:     uint64(dataShards) * proto.SectorSize,
 		minPackSize:  packing.MinSize,
 		maxBufferAge: packing.MaxAge,
+		debug:        debug,
 		closeChan:    cc,
 		jobsChan:     make(chan struct{}, uploadWorkers),
 		packChan:     make(chan struct{}, 1),
@@ -927,6 +929,26 @@ func packSlab(jobs []stores.UploadJob, size uint64) []byte {
 	return slab
 }
 
+// logPackedSlab reports which pieces went into the slab about to be uploaded,
+// in the order in which they are laid out in it. The pieces are already trimmed
+// to what fitted, so this is what the slab is made of, not what was claimed.
+func (ic *IndexdClient) logPackedSlab(jobs []stores.UploadJob, size int) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "share %s, workgroup %d: packing %d piece(s) into a slab of %d out of %d bytes", ic.share, ic.workgroup, len(jobs), size, ic.slabSize)
+
+	var offset uint64
+	for _, job := range jobs {
+		taken := uint64(len(job.Data))
+		fmt.Fprintf(&b, "\n\tobject %d, metadata %d, buffer %d: %d bytes at slab offset %d", job.ObjectID, job.MetadataID, job.BufferID, taken, offset)
+		if taken < job.DataLength {
+			fmt.Fprintf(&b, " (split, %d bytes left for the next slab)", job.DataLength-taken)
+		}
+		offset += taken
+	}
+
+	log.Println(b.String())
+}
+
 // processPackedSlab checks if the buffered pieces of several files add up to a
 // slab and, if so, uploads them together as a single packed slab.
 func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
@@ -943,7 +965,12 @@ func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
 		}
 	}()
 
-	key, err := ic.backend.Upload(ctx, bytes.NewReader(packSlab(jobs, ic.slabSize)), ic.dataShards, ic.parityShards)
+	slab := packSlab(jobs, ic.slabSize)
+	if ic.debug {
+		ic.logPackedSlab(jobs, len(slab))
+	}
+
+	key, err := ic.backend.Upload(ctx, bytes.NewReader(slab), ic.dataShards, ic.parityShards)
 	if err != nil {
 		for _, job := range jobs {
 			if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {
@@ -976,6 +1003,10 @@ func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
 			}
 		}
 		return fmt.Errorf("couldn't complete packed slab %s: %v", key, err)
+	}
+
+	if ic.debug {
+		log.Printf("share %s, workgroup %d: uploaded packed slab %s of %d bytes from %d piece(s)", ic.share, ic.workgroup, key, len(slab), len(jobs))
 	}
 
 	return nil
