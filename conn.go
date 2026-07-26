@@ -1073,9 +1073,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		id := cr.FileID()
-		op := c.findOpen(ss, id, req)
-		if op == nil {
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_FILE_CLOSED, 0, nil)
+		op, status := c.findOpen(ss, id, req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(cr, status, 0, nil)
 			return resp, ss, nil
 		}
 
@@ -1194,9 +1194,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		id := rr.FileID()
-		op := c.findOpen(ss, id, req)
-		if op == nil {
-			resp := smb2.NewErrorResponse(rr, smb2.STATUS_FILE_CLOSED, 0, nil)
+		op, status := c.findOpen(ss, id, req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(rr, status, 0, nil)
 			return resp, ss, nil
 		}
 
@@ -1376,9 +1376,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		id := wr.FileID()
-		op := c.findOpen(ss, id, req)
-		if op == nil {
-			resp := smb2.NewErrorResponse(wr, smb2.STATUS_FILE_CLOSED, 0, nil)
+		op, status := c.findOpen(ss, id, req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(wr, status, 0, nil)
 			return resp, ss, nil
 		}
 
@@ -1612,9 +1612,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				return resp, ss, nil
 			}
 
-			op := c.findOpen(ss, id, req)
-			if op == nil {
-				resp := smb2.NewErrorResponse(ir, smb2.STATUS_FILE_CLOSED, 0, nil)
+			op, status := c.findOpen(ss, id, req)
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(ir, status, 0, nil)
 				return resp, ss, nil
 			}
 
@@ -1753,9 +1753,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 
 		case smb2.FSCTL_SRV_REQUEST_RESUME_KEY:
-			op := c.findOpen(ss, id, req)
-			if op == nil {
-				resp := smb2.NewErrorResponse(ir, smb2.STATUS_FILE_CLOSED, 0, nil)
+			op, status := c.findOpen(ss, id, req)
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(ir, status, 0, nil)
 				return resp, ss, nil
 			}
 
@@ -1765,9 +1765,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 
 		case smb2.FSCTL_CREATE_OR_GET_OBJECT_ID:
-			op := c.findOpen(ss, id, req)
-			if op == nil {
-				resp := smb2.NewErrorResponse(ir, smb2.STATUS_FILE_CLOSED, 0, nil)
+			op, status := c.findOpen(ss, id, req)
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(ir, status, 0, nil)
 				return resp, ss, nil
 			}
 
@@ -1878,9 +1878,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		id := qdr.FileID()
-		op := c.findOpen(ss, id, req)
-		if op == nil {
-			resp := smb2.NewErrorResponse(qdr, smb2.STATUS_FILE_CLOSED, 0, nil)
+		op, status := c.findOpen(ss, id, req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(qdr, status, 0, nil)
 			return resp, ss, nil
 		}
 
@@ -1992,9 +1992,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		id := cnr.FileID()
-		op := c.findOpen(ss, id, req)
-		if op == nil {
-			resp := smb2.NewErrorResponse(cnr, smb2.STATUS_FILE_CLOSED, 0, nil)
+		op, status := c.findOpen(ss, id, req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(cnr, status, 0, nil)
 			return resp, ss, nil
 		}
 
@@ -2076,9 +2076,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		id := qir.FileID()
-		op := c.findOpen(ss, id, req)
-		if op == nil {
-			resp := smb2.NewErrorResponse(qir, smb2.STATUS_FILE_CLOSED, 0, nil)
+		op, status := c.findOpen(ss, id, req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(qir, status, 0, nil)
 			return resp, ss, nil
 		}
 
@@ -2222,9 +2222,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		id := sir.FileID()
-		op := c.findOpen(ss, id, req)
-		if op == nil {
-			resp := smb2.NewErrorResponse(sir, smb2.STATUS_FILE_CLOSED, 0, nil)
+		op, status := c.findOpen(ss, id, req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(sir, status, 0, nil)
 			return resp, ss, nil
 		}
 
@@ -2494,8 +2494,9 @@ func (c *connection) sendResponses() {
 	}
 }
 
-// findOpen is a helper function that tries to find an open by its ID.
-func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) *open {
+// findOpen is a helper function that tries to find an open by its ID. It returns the status
+// to fail the request with, or STATUS_OK if the request may be processed.
+func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open, uint32) {
 	fid := binary.LittleEndian.Uint64(id[:8])
 	dfid := binary.LittleEndian.Uint64(id[8:16])
 
@@ -2513,15 +2514,78 @@ func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) *open {
 		}
 	}
 
-	// Remember the association, so that the outstanding request counters of the Open
-	// can be decremented once the response to this request goes out.
-	if op != nil {
+	if op == nil {
+		return nil, smb2.STATUS_FILE_CLOSED
+	}
+
+	return op, c.verifyChannelSequence(op, req)
+}
+
+// verifyChannelSequence verifies the channel sequence number of a request that includes a
+// FileId, and maintains the outstanding request counters of the Open, which tell the requests
+// sent before the client reconnected the channel apart from those sent after it. A request
+// that is counted is also remembered, so that the counter it was added to is decremented once
+// the response to it goes out. Requests that cannot be counted are failed with
+// STATUS_FILE_NOT_AVAILABLE, but only if they modify the file: the client is expected to
+// resend those on a healthy channel, while the rest are harmless to process uncounted.
+// Dialects older than 3.x have no channel sequence, so nothing is verified or counted.
+func (c *connection) verifyChannelSequence(op *open, req *smb2.Request) uint32 {
+	if !smb2.Is3X(c.negotiateDialect) {
+		return smb2.STATUS_OK
+	}
+
+	cs := req.Header().ChannelSequence()
+	replay := req.Header().IsFlagSet(smb2.FLAGS_REPLAY_OPERATION)
+
+	op.mu.Lock()
+
+	// The difference is calculated using 16-bit arithmetic, so that it stays correct when
+	// the channel sequence of the client wraps around.
+	diff := cs - op.channelSequence
+
+	var counted bool
+	switch {
+	case diff == 0:
+		// The request belongs to the same channel as the previous ones. A replayed request
+		// may only be counted if none of the requests that preceded the reconnect are
+		// still outstanding, because it could otherwise overtake one of them.
+		if !replay || op.outstandingPreviousRequestCount == 0 {
+			op.outstandingRequestCount++
+			counted = true
+		}
+
+	case diff <= 0x7FFF:
+		// The client has reconnected the channel, so everything counted so far belongs to
+		// the previous channel now.
+		op.outstandingPreviousRequestCount += op.outstandingRequestCount
+		op.channelSequence = cs
+		if !replay || op.outstandingPreviousRequestCount == 0 {
+			op.outstandingRequestCount = 1
+			counted = true
+		} else {
+			op.outstandingRequestCount = 0
+		}
+
+		// Otherwise the channel sequence of the request is older than the one of the Open,
+		// which means the request comes from a channel that the client has already given
+		// up on. It isn't counted.
+	}
+
+	op.mu.Unlock()
+
+	if counted {
 		c.mu.Lock()
 		c.requestOpens[req.Header().MessageID()] = op
 		c.mu.Unlock()
+		return smb2.STATUS_OK
 	}
 
-	return op
+	switch req.Header().Command() {
+	case smb2.SMB2_WRITE, smb2.SMB2_SET_INFO, smb2.SMB2_IOCTL:
+		return smb2.STATUS_FILE_NOT_AVAILABLE
+	}
+
+	return smb2.STATUS_OK
 }
 
 // releaseOpen decrements the outstanding request counters of the Open that the request
