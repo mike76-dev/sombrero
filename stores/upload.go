@@ -478,6 +478,9 @@ func (db *Database) ClaimUploadJob(share string, workgroup int, minSize uint64) 
 // oldest of them has been waiting that long and they amount to at least minSize
 // bytes. Such a claim fills the slab only partly, which costs as much as a full
 // one, so with maxAge left at zero the buffers wait for as long as it takes.
+// The age is measured from the creation of a buffer's upload, so it is not
+// reset when a failed claim requeues the buffer, and the remainder that a
+// split leaves behind keeps the age of the upload it came from.
 //
 // ErrNoUploadJobs is returned when neither applies, in which case nothing is
 // claimed.
@@ -524,7 +527,7 @@ func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSi
 					uj.id,
 					uj.upload_id,
 					uj.metadata_id,
-					uj.created_at,
+					u.created_at,
 					m.object_id,
 					m.buffer_id,
 					m.obj_offset,
@@ -532,6 +535,7 @@ func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSi
 					m.data_length
 				FROM upload_jobs uj
 				JOIN cutoff c ON c.id = uj.id
+				JOIN uploads u ON u.id = uj.upload_id
 				JOIN metadata m ON m.id = uj.metadata_id
 				WHERE m.buffer_id IS NOT NULL
 					AND m.upload_id IS NULL

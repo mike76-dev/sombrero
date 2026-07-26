@@ -848,20 +848,22 @@ func TestCompletePackedSlabRetry(t *testing.T) {
 	}
 }
 
-// backdateJobs makes every queued job look as if it had been waiting for the
-// given duration, so that the age trigger can be tested without waiting.
-func backdateJobs(t *testing.T, db *Database, age time.Duration) {
+// backdateUploads makes every upload look as if it had been created the given
+// duration ago, so that the age trigger can be tested without waiting. The
+// buffer age counts from the upload's creation, not from its queue entry,
+// which a requeue would reset.
+func backdateUploads(t *testing.T, db *Database, age time.Duration) {
 	t.Helper()
 
 	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
-			UPDATE upload_jobs
+			UPDATE uploads
 			SET created_at = NOW() - MAKE_INTERVAL(secs => $1::DOUBLE PRECISION)
 		`, age.Seconds())
 		return err
 	})
 	if err != nil {
-		t.Fatalf("backdate upload jobs: %v", err)
+		t.Fatalf("backdate uploads: %v", err)
 	}
 }
 
@@ -877,7 +879,7 @@ func TestClaimPackedSlabAgeTrigger(t *testing.T) {
 
 	a := plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
-	backdateJobs(t, db, 48*time.Hour)
+	backdateUploads(t, db, 48*time.Hour)
 
 	// However long it has been waiting, without an age it waits on.
 	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
@@ -911,6 +913,41 @@ func TestClaimPackedSlabAgeTrigger(t *testing.T) {
 	}
 }
 
+// TestClaimPackedSlabAgeSurvivesRequeue verifies that requeueing a claimed
+// batch, which is what a failed upload does, leaves the buffer age untouched.
+// The age counts from the upload's creation; when it counted from the queue
+// entry, every requeue pushed the age trigger further out.
+func TestClaimPackedSlabAgeSurvivesRequeue(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+
+	plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
+	plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
+	backdateUploads(t, db, 48*time.Hour)
+
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab past the age: %v", err)
+	}
+
+	for _, job := range jobs {
+		if err := db.RequeueUploadJob(job.UploadID, job.MetadataID); err != nil {
+			t.Fatalf("RequeueUploadJob: %v", err)
+		}
+	}
+
+	jobs, err = db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab after the requeue: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("want both buffers claimed again, got %d", len(jobs))
+	}
+}
+
 // TestClaimPackedSlabMinSize verifies that the age trigger holds back until the
 // leftover data is worth a slab, since an incomplete slab costs as much as a
 // full one.
@@ -922,7 +959,7 @@ func TestClaimPackedSlabMinSize(t *testing.T) {
 	acc, share, wg := newSlabTestFixture(t, db)
 
 	plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
-	backdateJobs(t, db, 48*time.Hour)
+	backdateUploads(t, db, 48*time.Hour)
 
 	// Old enough, but not yet worth uploading.
 	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 500, 24*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
@@ -931,7 +968,7 @@ func TestClaimPackedSlabMinSize(t *testing.T) {
 
 	// A second file takes the leftover data past the minimum.
 	plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
-	backdateJobs(t, db, 48*time.Hour)
+	backdateUploads(t, db, 48*time.Hour)
 
 	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 500, 24*time.Hour)
 	if err != nil {
@@ -955,7 +992,7 @@ func TestClaimPackedSlabAgePrefersFullSlab(t *testing.T) {
 	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt"} {
 		plantBufferedFile(t, db, share, acc, name, 400, false)
 	}
-	backdateJobs(t, db, 48*time.Hour)
+	backdateUploads(t, db, 48*time.Hour)
 
 	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
 	if err != nil {
