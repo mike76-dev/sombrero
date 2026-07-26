@@ -107,7 +107,8 @@ func (a *BufferAge) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
-	switch strings.ToLower(strings.TrimSpace(s)) {
+	s = strings.TrimSpace(s)
+	switch strings.ToLower(s) {
 	case "", "never":
 		*a = 0
 		return nil
