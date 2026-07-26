@@ -76,6 +76,12 @@ type connection struct {
 	closeChan  chan struct{}
 	once       sync.Once
 	stopChans  map[uint64]chan struct{}
+
+	// requestOpens maps the message ID of an in-flight request that carries a FileId
+	// to the Open it refers to. It lets the outstanding request counters of the Open
+	// be decremented when the response to that request is sent, no matter whether the
+	// Open is still in the tables by then (an SMB2_CLOSE removes it before responding).
+	requestOpens map[uint64]*open
 }
 
 // grantCredits increases the number of credits available to the client by the given number.
@@ -1097,6 +1103,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			resp := smb2.NewErrorResponse(r, smb2.STATUS_NOTIFY_CLEANUP, 0, nil)
 			resp.Header().ClearFlag(smb2.FLAGS_RELATED_OPERATIONS)
 			resp.Header().SetAsyncID(aid)
+			c.releaseOpen(r)
 			c.server.writeResponse(c, ss, resp)
 		}
 
@@ -1312,6 +1319,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			default:
 			}
 
+			c.releaseOpen(req)
 			c.server.writeResponse(c, ss, resp)
 		}()
 
@@ -1457,6 +1465,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			default:
 			}
 
+			c.releaseOpen(req)
 			c.server.writeResponse(c, ss, resp)
 		}()
 
@@ -2433,6 +2442,12 @@ func (c *connection) processRequests() {
 				c.pendingResponses[resp.GroupID()] = resp
 				c.mu.Unlock()
 			}
+
+			// An interim response doesn't complete the request: the counters are
+			// decremented when the asynchronous command sends its final response.
+			if resp.Header().Status() != smb2.STATUS_PENDING {
+				c.releaseOpen(req)
+			}
 		}
 
 		select {
@@ -2478,7 +2493,46 @@ func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) *open {
 		}
 	}
 
+	// Remember the association, so that the outstanding request counters of the Open
+	// can be decremented once the response to this request goes out.
+	if op != nil {
+		c.mu.Lock()
+		c.requestOpens[req.Header().MessageID()] = op
+		c.mu.Unlock()
+	}
+
 	return op
+}
+
+// releaseOpen decrements the outstanding request counters of the Open that the request
+// refers to. It is called when the response to the request is about to be sent: if the
+// negotiated dialect belongs to the SMB 3.x family and the ChannelSequence of the request
+// equals Open.ChannelSequence, Open.OutstandingRequestCount is decremented, otherwise
+// Open.OutstandingPreRequestCount is. Requests that don't carry a FileId, and those whose
+// Open could not be resolved, are not counted, so calling this on them does nothing.
+// Repeated calls for the same request are a no-op as well, which keeps the interim and the
+// final response of an asynchronous command from being counted twice.
+func (c *connection) releaseOpen(req *smb2.Request) {
+	mid := req.Header().MessageID()
+	c.mu.Lock()
+	op, found := c.requestOpens[mid]
+	delete(c.requestOpens, mid)
+	c.mu.Unlock()
+
+	if !found {
+		return
+	}
+
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
+	if smb2.Is3X(c.negotiateDialect) && req.Header().ChannelSequence() == op.channelSequence {
+		if op.outstandingRequestCount > 0 {
+			op.outstandingRequestCount--
+		}
+	} else if op.outstandingPreviousRequestCount > 0 {
+		op.outstandingPreviousRequestCount--
+	}
 }
 
 // findOpenByGroupID finds an Open by the group ID of the response.
@@ -2574,6 +2628,7 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		resp.Header().SetAsyncID(target.Header().AsyncID())
 	}
 
+	c.releaseOpen(target)
 	c.server.writeResponse(c, ss, resp)
 
 	c.mu.Lock()

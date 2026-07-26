@@ -594,6 +594,7 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, acc stores.Account
 			resp := &smb2.ChangeNotifyResponse{}
 			resp.FromRequest(req)
 			resp.Header().SetStatus(smb2.STATUS_NOTIFY_ENUM_DIR)
+			op.connection.releaseOpen(&req.Request)
 			op.connection.server.writeResponse(op.connection, op.session, resp)
 			op.connection.mu.Lock()
 			delete(op.connection.stopChans, req.CancelRequestID())

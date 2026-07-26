@@ -90,6 +90,7 @@ func (s *server) newConnection(conn net.Conn) *connection {
 		requestList:           make(map[uint64]*smb2.Request),
 		asyncCommandList:      make(map[uint64]*smb2.Request),
 		pendingResponses:      make(map[uint64]smb2.GenericResponse),
+		requestOpens:          make(map[uint64]*open),
 		sessionTable:          make(map[uint64]*session),
 		conn:                  conn,
 		negotiateDialect:      smb2.SMB_DIALECT_UNKNOWN,
