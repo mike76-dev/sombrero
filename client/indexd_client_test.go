@@ -1710,6 +1710,119 @@ func TestIndexdClient_PackedSlab(t *testing.T) {
 	waitForObjects(t, fb, 0)
 }
 
+// TestIndexdClient_PackedSlabRangedReads verifies that partial reads of files
+// that share a packed slab return the right bytes. Their slices start at a
+// non-zero offset within the slab, so a ranged read has to clip on top of that
+// base rather than from the start of the slab.
+func TestIndexdClient_PackedSlabRangedReads(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// The same layout as TestIndexdClient_PackedSlab: three equal files, of
+	// which the first two fit into the slab whole, while the third is split
+	// between the slab and a buffer holding its tail.
+	slabSize := uint64(proto.SectorSize)
+	size := slabSize/2 - slabSize/8
+	inSlab := slabSize - 2*size // the part of the third file that made it into the slab
+
+	names := []string{"a.bin", "b.bin", "c.bin"}
+	contents := make(map[string][]byte, len(names))
+	for _, name := range names {
+		data := make([]byte, size)
+		frand.Read(data)
+		contents[name] = data
+		uploadBuffered(t, ctx, c, acc, name, data)
+	}
+
+	waitForObjects(t, fb, 1)
+
+	// Wait until the metadata points at the uploaded slab, otherwise the reads
+	// below would still be served from the buffers.
+	waitForMixedState(t, db, acc, share.Name, "a.bin", 1, 0)
+	waitForMixedState(t, db, acc, share.Name, "b.bin", 1, 0)
+	waitForMixedState(t, db, acc, share.Name, "c.bin", 1, 1)
+
+	// Make sure the packing came out as expected, so that the ranges below
+	// really do read from the middle of the slab.
+	if slices := mustGetMetadata(t, db, acc, share.Name, "b.bin", size); slices[0].Offset == 0 {
+		t.Fatal("b.bin should start at a non-zero offset within the packed slab")
+	}
+	if slices := mustGetMetadata(t, db, acc, share.Name, "c.bin", size); len(slices) != 2 || slices[0].Length != inSlab {
+		t.Fatalf("c.bin should be split into %d slab bytes and a buffered tail, got %d slices", inSlab, len(slices))
+	}
+
+	ranges := []struct {
+		path           string
+		offset, length uint64
+	}{
+		// The first file starts at the very beginning of the slab.
+		{"a.bin", 0, size},
+		{"a.bin", 0, 1},
+		{"a.bin", 100, 1000},
+		{"a.bin", size - 1, 1},
+
+		// The second one sits in the middle of the slab, so every read has to
+		// start from its own base offset.
+		{"b.bin", 0, size},
+		{"b.bin", 1, size - 2},
+		{"b.bin", 0, 1},
+		{"b.bin", size / 3, size / 3},
+		{"b.bin", size - 1, 1},
+
+		// The third one is split between the end of the slab and the buffer
+		// holding its tail.
+		{"c.bin", 0, size},
+		{"c.bin", 10, inSlab - 20},
+		{"c.bin", inSlab - 100, 200},
+		{"c.bin", inSlab, size - inSlab},
+		{"c.bin", inSlab + 5, 100},
+		{"c.bin", size - 1, 1},
+	}
+
+	for _, r := range ranges {
+		mustReadRange(t, ctx, c, acc, r.path, contents[r.path], r.offset, r.length)
+	}
+
+	// The same ranges must still hold once the other files that share the slab
+	// are gone and only the third one keeps it pinned.
+	for _, name := range names[:2] {
+		if err := c.Delete(ctx, acc, name, false); err != nil {
+			t.Fatalf("Delete(%s): %v", name, err)
+		}
+	}
+
+	for _, r := range ranges {
+		if r.path != "c.bin" {
+			continue
+		}
+		mustReadRange(t, ctx, c, acc, r.path, contents[r.path], r.offset, r.length)
+	}
+}
+
+func mustGetMetadata(t *testing.T, db *stores.Database, acc stores.Account, share, path string, size uint64) []stores.SlabSlice {
+	t.Helper()
+
+	slices, err := db.GetMetadata(acc, share, path, 0, size)
+	if err != nil {
+		t.Fatalf("GetMetadata(%s): %v", path, err)
+	}
+	if len(slices) == 0 {
+		t.Fatalf("GetMetadata(%s): no slices", path)
+	}
+
+	return slices
+}
+
 // TestIndexdClient_PackedSlabUploadFailure verifies that a packed slab whose
 // upload fails puts its pieces back in the queue, so that they are packed again
 // once the storage backend recovers.
@@ -1760,6 +1873,128 @@ func TestIndexdClient_PackedSlabUploadFailure(t *testing.T) {
 
 	for _, name := range names {
 		mustReadEquals(t, ctx, c, acc, name, contents[name])
+	}
+}
+
+// startStuckUpload brings up a client whose backend blocks in the middle of an
+// upload, and returns once a worker is in there. Closing such a client is what
+// the two tests below are about, so none of them registers a cleanup that
+// closes it: a Close that never returns would hang the whole test binary,
+// which is the very failure being tested. A leaked worker costs nothing.
+func startStuckUpload(t *testing.T, ctx context.Context, db *stores.Database, acc stores.Account, share, path string) (Client, *fakeBackend, []byte) {
+	t.Helper()
+
+	fb := newGatedFakeBackend()
+	c := newIndexdClient(db, fb, share, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+
+	// A full slab is uploaded as it is, without waiting to be packed.
+	content := make([]byte, proto.SectorSize)
+	frand.Read(content)
+	uploadBuffered(t, ctx, c, acc, path, content)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for fb.uploadAttempts() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the upload to start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	return c, fb, content
+}
+
+// mustClose closes the client in the background and fails if it does not return
+// within the given time.
+func mustClose(t *testing.T, c Client, within time.Duration) {
+	t.Helper()
+
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(within):
+		t.Fatalf("Close did not return within %s", within)
+	}
+}
+
+// TestIndexdClient_CloseDrainsUpload verifies that closing a client lets an
+// upload that is already in flight finish, so that the slab it is carrying is
+// recorded rather than left behind unpinned.
+func TestIndexdClient_CloseDrainsUpload(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	c, fb, content := startStuckUpload(t, ctx, db, acc, share.Name, "big.bin")
+
+	// Let the upload through just after the shutdown has begun, well within
+	// the drain window. Close has to wait for it rather than cancel it.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		fb.allowUploads(1)
+	}()
+
+	mustClose(t, c, 10*time.Second)
+
+	slices := mustGetMetadata(t, db, acc, share.Name, "big.bin", uint64(len(content)))
+	if len(slices) != 1 || slices[0].Key == (types.Hash256{}) {
+		t.Fatalf("want the drained upload recorded as one slab, got %d slice(s)", len(slices))
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("want 1 uploaded object, got %d", n)
+	}
+}
+
+// TestIndexdClient_CloseCancelsStuckUpload verifies that an upload that does not
+// come back within the drain window does not hold up the shutdown: it is
+// cancelled, and the piece it was carrying goes back into the queue for the
+// next run to pick up.
+func TestIndexdClient_CloseCancelsStuckUpload(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	c, fb, content := startStuckUpload(t, ctx, db, acc, share.Name, "big.bin")
+
+	// The gate is never opened, so only the cancellation can end the upload.
+	// The drain window is shortened to keep the test quick; the client is not
+	// serving anyone else by this point, so nothing else observes it.
+	c.(*IndexdClient).drainTimeout = 200 * time.Millisecond
+
+	mustClose(t, c, 10*time.Second)
+
+	// The cancelled upload left the file in its buffer rather than losing it,
+	// so a later run can upload it again.
+	slices := mustGetMetadata(t, db, acc, share.Name, "big.bin", uint64(len(content)))
+	for _, s := range slices {
+		if s.Key != (types.Hash256{}) {
+			t.Fatal("the cancelled upload should not have been recorded as a slab")
+		}
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("want no uploaded objects, got %d", n)
 	}
 }
 
