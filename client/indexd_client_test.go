@@ -1853,3 +1853,53 @@ func TestIndexdClient_PackingOptionsWarning(t *testing.T) {
 		})
 	}
 }
+
+// TestCompleteWithRetry verifies that recording an uploaded slab is retried on
+// transient failures, while a definite ErrNotFound is returned right away. A
+// batch that fell out of the queue at claim time depends on this to not be
+// abandoned over a database hiccup.
+func TestCompleteWithRetry(t *testing.T) {
+	t.Run("first try", func(t *testing.T) {
+		var calls int
+		if err := completeWithRetry(func() error {
+			calls++
+			return nil
+		}); err != nil || calls != 1 {
+			t.Fatalf("want success after 1 call, got err %v after %d calls", err, calls)
+		}
+	})
+
+	t.Run("not found is definite", func(t *testing.T) {
+		var calls int
+		if err := completeWithRetry(func() error {
+			calls++
+			return stores.ErrNotFound
+		}); !errors.Is(err, stores.ErrNotFound) || calls != 1 {
+			t.Fatalf("want ErrNotFound after 1 call, got err %v after %d calls", err, calls)
+		}
+	})
+
+	t.Run("transient failure", func(t *testing.T) {
+		var calls int
+		if err := completeWithRetry(func() error {
+			calls++
+			if calls == 1 {
+				return errors.New("hiccup")
+			}
+			return nil
+		}); err != nil || calls != 2 {
+			t.Fatalf("want success after 2 calls, got err %v after %d calls", err, calls)
+		}
+	})
+
+	t.Run("persistent failure", func(t *testing.T) {
+		fail := errors.New("database is down")
+		var calls int
+		if err := completeWithRetry(func() error {
+			calls++
+			return fail
+		}); !errors.Is(err, fail) || calls != completionAttempts {
+			t.Fatalf("want %v after %d calls, got err %v after %d calls", fail, completionAttempts, err, calls)
+		}
+	})
+}

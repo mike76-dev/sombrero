@@ -39,6 +39,30 @@ const slabDownloadThreads = 4
 // signals the packer directly.
 const packInterval = time.Minute
 
+// completionAttempts and completionRetryDelay bound the retries of recording
+// an uploaded slab in the database. By that point the slab has been paid for
+// and the claimed pieces are no longer in the queue, so completion is worth a
+// few attempts before the pieces are put back.
+const (
+	completionAttempts   = 3
+	completionRetryDelay = time.Second
+)
+
+// completeWithRetry retries the given completion on failures, so that a batch
+// whose slab has already been uploaded is not abandoned over a database
+// hiccup. ErrNotFound is not retried: it is a definite answer, not a failure.
+func completeWithRetry(complete func() error) (err error) {
+	for i := range completionAttempts {
+		if i > 0 {
+			time.Sleep(completionRetryDelay)
+		}
+		if err = complete(); err == nil || errors.Is(err, stores.ErrNotFound) {
+			return err
+		}
+	}
+	return err
+}
+
 // storageBackend is the minimal interface for `indexd` SDK.
 type storageBackend interface {
 	Account(ctx context.Context) (app.AccountResponse, error)
@@ -687,7 +711,10 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 		return fmt.Errorf("couldn't upload slab: %v", err)
 	}
 
-	if err := ic.db.CompleteUploadJob(job.MetadataID, job.BufferID, key); err != nil {
+	err = completeWithRetry(func() error {
+		return ic.db.CompleteUploadJob(job.MetadataID, job.BufferID, key)
+	})
+	if err != nil {
 		if errors.Is(err, stores.ErrNotFound) {
 			// The file has likely been deleted.
 			if derr := ic.backend.DeleteObject(ctx, key); derr != nil {
@@ -697,7 +724,17 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 			}
 			return nil
 		}
-		return fmt.Errorf("couldn't complete upload job: %v", err)
+
+		// The claim is already out of the queue, so leaving the completion
+		// unrecorded would strand the buffer; requeue it instead. The slab is
+		// left pinned, because the failure may have been an ambiguous commit
+		// that did record it, and deleting it then would lose file data. If
+		// it truly went unrecorded, the requeued buffer uploads the same
+		// content again, which yields the same key.
+		if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {
+			log.Printf("failed to requeue piece %d of unrecorded slab %s: %v", job.MetadataID, key, rerr)
+		}
+		return fmt.Errorf("couldn't complete upload job for slab %s: %v", key, err)
 	}
 
 	return nil
@@ -736,7 +773,10 @@ func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
 		return fmt.Errorf("couldn't upload packed slab: %v", err)
 	}
 
-	if err := ic.db.CompletePackedSlab(jobs, key); err != nil {
+	err = completeWithRetry(func() error {
+		return ic.db.CompletePackedSlab(jobs, key)
+	})
+	if err != nil {
 		if errors.Is(err, stores.ErrNotFound) {
 			// Every file that went into the slab has been deleted since.
 			if derr := ic.backend.DeleteObject(ctx, key); derr != nil {
@@ -746,7 +786,20 @@ func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
 			}
 			return nil
 		}
-		return fmt.Errorf("couldn't complete packed slab: %v", err)
+
+		// The claim is already out of the queue, so leaving the completion
+		// unrecorded would strand the pieces; requeue them instead. The slab
+		// is left pinned, because the failure may have been an ambiguous
+		// commit that did record it, and deleting it then would lose file
+		// data. If it truly went unrecorded, the repacked pieces usually form
+		// the identical slab again; at worst this one stays behind
+		// unreferenced, under the key named below.
+		for _, job := range jobs {
+			if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {
+				log.Printf("failed to requeue piece %d of unrecorded packed slab %s: %v", job.MetadataID, key, rerr)
+			}
+		}
+		return fmt.Errorf("couldn't complete packed slab %s: %v", key, err)
 	}
 
 	return nil
