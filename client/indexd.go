@@ -39,6 +39,13 @@ const slabDownloadThreads = 4
 // signals the packer directly.
 const packInterval = time.Minute
 
+// shutdownDrainTimeout is how long Close lets the background workers finish
+// what they already have in flight before cutting them off. A backend call that
+// is cut short after it has done its work leaves a slab behind — uploaded but
+// never pinned — so shutdown gives it a window to come back on its own. The
+// cancellation that follows is what guarantees that Close returns at all.
+const shutdownDrainTimeout = 30 * time.Second
+
 // completionAttempts and completionRetryDelay bound the retries of recording
 // an uploaded slab in the database. By that point the slab has been paid for
 // and the claimed pieces are no longer in the queue, so completion is worth a
@@ -244,7 +251,17 @@ type IndexdClient struct {
 	minPackSize  uint64
 	maxBufferAge time.Duration
 	debug        bool
-	closeChan    chan struct{}
+
+	// Shutdown happens in two stages. Close closes drainChan, on which the
+	// background loops stop taking on new work, and cancels ctx once they
+	// have had shutdownDrainTimeout to finish what is still in flight. A
+	// backend call aborted by that cancellation fails like any other, so the
+	// piece it was uploading is requeued rather than lost.
+	ctx          context.Context
+	cancel       context.CancelFunc
+	drainChan    chan struct{}
+	drainTimeout time.Duration
+	closeOnce    sync.Once
 	jobsChan     chan struct{}
 	packChan     chan struct{}
 	wg           sync.WaitGroup
@@ -308,7 +325,7 @@ func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, work
 
 // newIndexdClient allows using a mock SDK for testing.
 func newIndexdClient(db *stores.Database, backend storageBackend, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, debug bool) Client {
-	cc := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
 	ic := &IndexdClient{
 		share:        share,
 		workgroup:    workgroup,
@@ -320,7 +337,10 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		minPackSize:  packing.MinSize,
 		maxBufferAge: packing.MaxAge,
 		debug:        debug,
-		closeChan:    cc,
+		ctx:          ctx,
+		cancel:       cancel,
+		drainChan:    make(chan struct{}),
+		drainTimeout: shutdownDrainTimeout,
 		jobsChan:     make(chan struct{}, uploadWorkers),
 		packChan:     make(chan struct{}, 1),
 		claimed:      make(map[uint64]struct{}),
@@ -338,7 +358,7 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		ic.wg.Add(1)
 		go func() {
 			defer ic.wg.Done()
-			ic.processUploads(ic.closeChan)
+			ic.processUploads(ic.ctx)
 		}()
 	}
 
@@ -349,14 +369,14 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 	ic.wg.Add(1)
 	go func() {
 		defer ic.wg.Done()
-		ic.packSlabs(ic.closeChan)
+		ic.packSlabs(ic.ctx)
 	}()
 
 	// Start background cleanup of stale upload jobs.
 	ic.wg.Add(1)
 	go func() {
 		defer ic.wg.Done()
-		ic.cleanupUploadJobs(ic.closeChan)
+		ic.cleanupUploadJobs(ic.ctx)
 	}()
 
 	return ic
@@ -734,10 +754,29 @@ func (ic *IndexdClient) DeleteAll(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the client and releases all resources.
+// Close closes the client and releases all resources. The background workers
+// are first asked to stop taking on new work and given shutdownDrainTimeout to
+// finish what they still have in flight; whatever is left running by then is
+// cancelled, so that Close always returns.
 func (ic *IndexdClient) Close() error {
-	close(ic.closeChan)
-	ic.wg.Wait()
+	ic.closeOnce.Do(func() { close(ic.drainChan) })
+
+	drained := make(chan struct{})
+	go func() {
+		ic.wg.Wait()
+		close(drained)
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(ic.drainTimeout):
+		ic.cancel()
+		<-drained
+	}
+
+	// Also releases the context of a shutdown that drained in time.
+	ic.cancel()
+
 	return ic.backend.Close()
 }
 
@@ -1014,16 +1053,13 @@ func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
 
 // packSlabs combines the pieces that are left buffered into packed slabs in the
 // background.
-func (ic *IndexdClient) packSlabs(closeChan chan struct{}) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (ic *IndexdClient) packSlabs(ctx context.Context) {
 	ticker := time.NewTicker(packInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-closeChan:
+		case <-ic.drainChan:
 			return
 		default:
 		}
@@ -1037,12 +1073,18 @@ func (ic *IndexdClient) packSlabs(closeChan chan struct{}) {
 		}
 
 		if !errors.Is(err, stores.ErrNoUploadJobs) {
+			// A slab cut short by Close is not a failure worth
+			// reporting; its pieces are back in the queue.
+			if ctx.Err() != nil {
+				return
+			}
+
 			log.Printf("failed to pack a slab: %v", err)
 
 			// The pieces are back in the queue and the failure is
 			// likely transient, so retry shortly.
 			select {
-			case <-closeChan:
+			case <-ic.drainChan:
 				return
 			case <-time.After(time.Second):
 			}
@@ -1052,7 +1094,7 @@ func (ic *IndexdClient) packSlabs(closeChan chan struct{}) {
 		// Nothing to pack: wait until another upload has left a piece
 		// behind, with a periodic fallback in case the signal was missed.
 		select {
-		case <-closeChan:
+		case <-ic.drainChan:
 			return
 		case <-ic.packChan:
 		case <-ticker.C:
@@ -1063,10 +1105,7 @@ func (ic *IndexdClient) packSlabs(closeChan chan struct{}) {
 // cleanupUploadJobs periodically removes upload jobs that can no longer be
 // processed, retries unconfirmed unpins, and requeues stranded pieces.
 // Running once right away picks up what a previous run left behind.
-func (ic *IndexdClient) cleanupUploadJobs(closeChan chan struct{}) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (ic *IndexdClient) cleanupUploadJobs(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
@@ -1079,7 +1118,7 @@ func (ic *IndexdClient) cleanupUploadJobs(closeChan chan struct{}) {
 		suspects = ic.requeueStrandedPieces(suspects)
 
 		select {
-		case <-closeChan:
+		case <-ic.drainChan:
 			return
 		case <-ticker.C:
 		}
@@ -1087,13 +1126,10 @@ func (ic *IndexdClient) cleanupUploadJobs(closeChan chan struct{}) {
 }
 
 // processUploads runs the upload jobs in the background.
-func (ic *IndexdClient) processUploads(closeChan chan struct{}) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (ic *IndexdClient) processUploads(ctx context.Context) {
 	for {
 		select {
-		case <-closeChan:
+		case <-ic.drainChan:
 			return
 		default:
 		}
@@ -1107,7 +1143,7 @@ func (ic *IndexdClient) processUploads(closeChan chan struct{}) {
 			// Wait until a new job is signaled, with a periodic fallback
 			// poll in case the signal was missed.
 			select {
-			case <-closeChan:
+			case <-ic.drainChan:
 				return
 			case <-ic.jobsChan:
 			case <-time.After(time.Second):
@@ -1115,10 +1151,15 @@ func (ic *IndexdClient) processUploads(closeChan chan struct{}) {
 			continue
 		}
 
+		// A job cut short by Close is not a failure worth reporting.
+		if ctx.Err() != nil {
+			return
+		}
+
 		log.Printf("failed to run upload job: %v", err)
 
 		select {
-		case <-closeChan:
+		case <-ic.drainChan:
 			return
 		case <-time.After(time.Second):
 		}
