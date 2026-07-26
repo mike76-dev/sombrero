@@ -139,11 +139,20 @@ func (s *server) closeConnection(c *connection) {
 	}
 	s.mu.Unlock()
 
+	// The connection is no longer a channel of any of the sessions it carried.
 	c.mu.Lock()
+	sessions := make([]*session, 0, len(c.sessionTable))
+	for _, ss := range c.sessionTable {
+		sessions = append(sessions, ss)
+	}
 	for _, ch := range c.stopChans {
 		close(ch)
 	}
 	c.mu.Unlock()
+
+	for _, ss := range sessions {
+		ss.unbindChannel(c)
+	}
 
 	c.conn.Close()
 	c.once.Do(func() { close(c.closeChan) })
@@ -181,7 +190,7 @@ func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResp
 			}
 			buf = ss.encrypt(buf)
 		} else if resp.Header().Command() == smb2.SMB2_SESSION_SETUP || resp.Header().IsFlagSet(smb2.FLAGS_SIGNED) {
-			ss.sign(buf)
+			ss.sign(buf, c)
 		} else { // Otherwise, wipe the signature(s)
 			wipeSignatures(buf)
 		}

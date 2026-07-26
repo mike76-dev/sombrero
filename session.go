@@ -190,6 +190,12 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 		ss.decryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMBC2SCipherKey\x00"), ss.preauthIntegrityHashValue)
 	}
 
+	// The connection the session is established on becomes its first channel, and the
+	// signing key of that channel is the signing key of the session.
+	if smb2.Is3X(ss.connection.negotiateDialect) {
+		ss.bindChannel(ss.connection, ss.signingKey)
+	}
+
 	ss.connection.mu.Lock()
 	defer ss.connection.mu.Unlock()
 
@@ -207,8 +213,37 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 	ss.expirationTime = time.Now().Add(100 * 365 * 24 * time.Hour) // Impossibly long
 }
 
-// sign uses the session key to sign each response in the message.
-func (ss *session) sign(buf []byte) {
+// signingKeyFor returns the key to sign the response with. In the SMB 3.x dialect family, an
+// SMB2_SESSION_SETUP response that doesn't carry STATUS_SUCCESS is signed with the signing
+// key of the session: it is sent while the channel is still being established, so the
+// channel key isn't the one the client expects yet. Every other response is signed with the
+// signing key of the channel that the sending connection belongs to.
+func (ss *session) signingKeyFor(c *connection, header smb2.Header) []byte {
+	if !smb2.Is3X(c.negotiateDialect) {
+		return ss.signingKey
+	}
+
+	if header.Command() == smb2.SMB2_SESSION_SETUP && header.Status() != smb2.STATUS_OK {
+		return ss.signingKey
+	}
+
+	ch := ss.channel(c)
+	if ch == nil {
+		// The connection isn't bound to the session, which shouldn't happen for a valid
+		// session. Fall back to the session key, so that the client at least has a chance
+		// of accepting the response.
+		if c.server.debug {
+			log.Printf("Connection %s is not a channel of session %d", c.clientName, ss.sessionID)
+		}
+		return ss.signingKey
+	}
+
+	return ch.signingKey
+}
+
+// sign signs each response in the message with the key that the connection it is sent on
+// requires.
+func (ss *session) sign(buf []byte, c *connection) {
 	var off uint32
 	var zero [16]byte
 	for {
@@ -216,21 +251,22 @@ func (ss *session) sign(buf []byte) {
 		flags := binary.LittleEndian.Uint32(buf[off+16 : off+20])
 		binary.LittleEndian.PutUint32(buf[off+16:off+20], flags|smb2.FLAGS_SIGNED)
 		copy(buf[off+48:off+64], zero[:])
+		key := ss.signingKeyFor(c, smb2.Header(buf[off:]))
 		var signer hash.Hash
-		switch ss.connection.negotiateDialect {
+		switch c.negotiateDialect {
 		case smb2.SMB_DIALECT_202, smb2.SMB_DIALECT_21:
 			signer = hmac.New(sha256.New, ss.sessionKey)
 		case smb2.SMB_DIALECT_30, smb2.SMB_DIALECT_302:
-			ciph, err := aes.NewCipher(ss.signingKey)
+			ciph, err := aes.NewCipher(key)
 			if err != nil {
 				log.Printf("Error creating cipher for signing: %v", err)
 				return
 			}
 			signer = cmac.New(ciph)
 		case smb2.SMB_DIALECT_311:
-			switch ss.connection.signingAlgorithmID {
+			switch c.signingAlgorithmID {
 			case smb2.AES_CMAC:
-				ciph, err := aes.NewCipher(ss.signingKey)
+				ciph, err := aes.NewCipher(key)
 				if err != nil {
 					log.Printf("Error creating cipher for signing: %v", err)
 					return
@@ -244,13 +280,13 @@ func (ss *session) sign(buf []byte) {
 					nonce[8] |= 2
 				}
 				var err error
-				signer, err = gmac.New(ss.signingKey, nonce)
+				signer, err = gmac.New(key, nonce)
 				if err != nil {
 					log.Printf("Error creating cipher for signing: %v", err)
 					return
 				}
 			default:
-				ciph, err := aes.NewCipher(ss.signingKey)
+				ciph, err := aes.NewCipher(key)
 				if err != nil {
 					log.Printf("Error creating cipher for signing: %v", err)
 					return
