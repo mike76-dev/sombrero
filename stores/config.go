@@ -118,10 +118,11 @@ func (a *BufferAge) UnmarshalYAML(value *yaml.Node) error {
 	if err != nil {
 		return fmt.Errorf("unknown buffer age: %q", s)
 	}
-	if d <= 0 {
-		return fmt.Errorf("buffer age must be positive: %q", s)
+	if d < 0 {
+		return fmt.Errorf("buffer age must not be negative: %q", s)
 	}
 
+	// A zero duration is the zero value, i.e. never.
 	*a = BufferAge(d)
 	return nil
 }

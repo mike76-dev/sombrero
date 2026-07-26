@@ -26,8 +26,9 @@ func TestBufferAgeYAML(t *testing.T) {
 		{yaml: "maxBufferAge: '  24h  '", want: BufferAge(24 * time.Hour)},
 		{yaml: "maxBufferAge: '  never  '", want: 0},
 		{yaml: "appName: Sombrero", want: 0},
+		{yaml: "maxBufferAge: 0", want: 0},
+		{yaml: "maxBufferAge: 0s", want: 0},
 		{yaml: "maxBufferAge: 86400", fail: true},
-		{yaml: "maxBufferAge: 0s", fail: true},
 		{yaml: "maxBufferAge: -1h", fail: true},
 		{yaml: "maxBufferAge: soon", fail: true},
 	}
