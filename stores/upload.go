@@ -111,6 +111,28 @@ func unreferencedSlabs(ctx context.Context, tx pgx.Tx, keys [][]byte) (slabs []t
 	return slabs, nil
 }
 
+// SlabReferenced reports whether any metadata entry references the given
+// slab. Slabs are content-addressed, so the slab that one file's upload
+// produced may equally be referenced by other files of the same content; it
+// must not be unpinned as long as that is the case.
+func (db *Database) SlabReferenced(key types.Hash256) (referenced bool, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT EXISTS (
+				SELECT 1
+				FROM metadata
+				WHERE slab_key = $1
+			)
+		`
+
+		if err := tx.QueryRow(ctx, query, key[:]).Scan(&referenced); err != nil {
+			return fmt.Errorf("failed to check slab references: %w", err)
+		}
+		return nil
+	})
+	return
+}
+
 // CreateUpload creates a new upload entry in the database and returns the generated upload ID.
 func (db *Database) CreateUpload(acc Account, share, path string) (uploadID string, err error) {
 	path = normalizePath(path)

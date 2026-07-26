@@ -707,6 +707,28 @@ func (ic *IndexdClient) Close() error {
 	return ic.backend.Close()
 }
 
+// dropSlabIfUnreferenced unpins the given slab unless a file still references
+// it. A slab whose completion found none of its files left is usually
+// orphaned, but slabs are content-addressed: another file of the same content
+// may share the key, and unpinning it would destroy that file's data. When in
+// doubt, the slab is left pinned, which at worst leaks storage.
+func (ic *IndexdClient) dropSlabIfUnreferenced(ctx context.Context, key types.Hash256) {
+	referenced, err := ic.db.SlabReferenced(key)
+	if err != nil {
+		log.Printf("failed to check references of slab %s, leaving it pinned: %v", key, err)
+		return
+	}
+	if referenced {
+		return
+	}
+
+	if derr := ic.backend.DeleteObject(ctx, key); derr != nil {
+		log.Printf("failed to delete orphaned slab %s after late completion: %v", key, derr)
+	} else if perr := ic.backend.PruneSlabs(ctx); perr != nil {
+		log.Printf("failed to prune slabs after late completion for %s: %v", key, perr)
+	}
+}
+
 // processUpload checks if there is a complete slab and uploads it.
 func (ic *IndexdClient) processUpload(ctx context.Context) error {
 	job, err := ic.db.ClaimUploadJob(ic.share, ic.workgroup, ic.slabSize)
@@ -726,11 +748,7 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 	if err != nil {
 		if errors.Is(err, stores.ErrNotFound) {
 			// The file has likely been deleted.
-			if derr := ic.backend.DeleteObject(ctx, key); derr != nil {
-				log.Printf("failed to delete orphaned uploaded slab %s after late completion: %v", key, derr)
-			} else if perr := ic.backend.PruneSlabs(ctx); perr != nil {
-				log.Printf("failed to prune slabs after late completion for %s: %v", key, perr)
-			}
+			ic.dropSlabIfUnreferenced(ctx, key)
 			return nil
 		}
 
@@ -788,11 +806,7 @@ func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
 	if err != nil {
 		if errors.Is(err, stores.ErrNotFound) {
 			// Every file that went into the slab has been deleted since.
-			if derr := ic.backend.DeleteObject(ctx, key); derr != nil {
-				log.Printf("failed to delete orphaned packed slab %s after late completion: %v", key, derr)
-			} else if perr := ic.backend.PruneSlabs(ctx); perr != nil {
-				log.Printf("failed to prune slabs after late completion for %s: %v", key, perr)
-			}
+			ic.dropSlabIfUnreferenced(ctx, key)
 			return nil
 		}
 

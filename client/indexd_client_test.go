@@ -1919,3 +1919,61 @@ func TestCompleteWithRetry(t *testing.T) {
 		}
 	})
 }
+
+// TestIndexdClient_LateCompletionSharedSlab verifies that a slab whose own
+// files disappeared during the upload is only unpinned when no other file
+// references its key. Slabs are content-addressed, so a duplicate file may
+// legitimately hold the key of an upload whose file is already gone, and
+// unpinning it then would destroy that file's data.
+func TestIndexdClient_LateCompletionSharedSlab(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{})
+	t.Cleanup(func() { _ = c.Close() })
+	ic := c.(*IndexdClient)
+
+	// Upload a full-slab file and wait until its slab key is recorded.
+	content := make([]byte, proto.SectorSize)
+	frand.Read(content)
+	uploadBuffered(t, ctx, c, acc, "a.bin", content)
+
+	var key types.Hash256
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		slabs, err := db.GetMetadata(acc, share.Name, "a.bin", 0, uint64(len(content)))
+		if err == nil && len(slabs) == 1 && slabs[0].Key != (types.Hash256{}) {
+			key = slabs[0].Key
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the slab to be recorded")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A late completion of some other upload that produced the same key has
+	// to leave the slab alone: a.bin references it.
+	ic.dropSlabIfUnreferenced(ctx, key)
+	if n := fb.deleteCount(); n != 0 {
+		t.Fatalf("dropped a slab that a live file references")
+	}
+	mustReadEquals(t, ctx, c, acc, "a.bin", content)
+
+	// A key that no file references is deleted as before.
+	orphan, err := fb.Upload(ctx, bytes.NewReader([]byte("orphaned")), 1, 0)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	ic.dropSlabIfUnreferenced(ctx, orphan)
+	if n := fb.deleteCount(); n != 1 {
+		t.Fatalf("want the orphaned slab deleted, got %d deletions", n)
+	}
+}

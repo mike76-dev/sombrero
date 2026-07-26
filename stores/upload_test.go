@@ -480,6 +480,33 @@ func TestClaimPackedSlabSkipsIneligible(t *testing.T) {
 	}
 }
 
+// TestSlabReferenced verifies the reference check that keeps a late-completed
+// slab pinned while some file of the same content still uses its key.
+func TestSlabReferenced(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, _ := newSlabTestFixture(t, db)
+
+	key := types.Hash256{1}
+	plantObject(t, db, share, acc, "a.txt", key)
+
+	if ref, err := db.SlabReferenced(key); err != nil || !ref {
+		t.Fatalf("want the planted key referenced, got %v, %v", ref, err)
+	}
+	if ref, err := db.SlabReferenced(types.Hash256{2}); err != nil || ref {
+		t.Fatalf("want an unknown key unreferenced, got %v, %v", ref, err)
+	}
+
+	if _, err := db.DeleteFile(acc, share, "a.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	if ref, err := db.SlabReferenced(key); err != nil || ref {
+		t.Fatalf("want the key unreferenced after deletion, got %v, %v", ref, err)
+	}
+}
+
 // TestClaimPackedSlabWorkgroupScope verifies that the pieces of one workgroup
 // never end up in another workgroup's packed slab. The slab is pinned under
 // the claiming connection's indexd app account, which must belong to the
