@@ -27,6 +27,7 @@ type fakeBackend struct {
 	nextID     uint64
 	uploadGate chan struct{}
 	uploadErr  error
+	deleteErr  error
 	uploads    int
 	deletes    int
 }
@@ -61,6 +62,14 @@ func (fb *fakeBackend) failUploads(err error) {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 	fb.uploadErr = err
+}
+
+// failDeletes makes every following object deletion fail with the given
+// error, until it is called again with nil.
+func (fb *fakeBackend) failDeletes(err error) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	fb.deleteErr = err
 }
 
 // uploadAttempts returns how often an upload has been started.
@@ -149,6 +158,9 @@ func (fb *fakeBackend) Download(ctx context.Context, key types.Hash256, offset, 
 func (fb *fakeBackend) DeleteObject(ctx context.Context, key types.Hash256) error {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
+	if fb.deleteErr != nil {
+		return fb.deleteErr
+	}
 	fb.deletes++
 	delete(fb.objects, key)
 	return nil
@@ -1944,20 +1956,7 @@ func TestIndexdClient_LateCompletionSharedSlab(t *testing.T) {
 	content := make([]byte, proto.SectorSize)
 	frand.Read(content)
 	uploadBuffered(t, ctx, c, acc, "a.bin", content)
-
-	var key types.Hash256
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		slabs, err := db.GetMetadata(acc, share.Name, "a.bin", 0, uint64(len(content)))
-		if err == nil && len(slabs) == 1 && slabs[0].Key != (types.Hash256{}) {
-			key = slabs[0].Key
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for the slab to be recorded")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	key := waitForSlabKey(t, db, acc, share.Name, "a.bin", uint64(len(content)))
 
 	// A late completion of some other upload that produced the same key has
 	// to leave the slab alone: a.bin references it.
@@ -1976,4 +1975,83 @@ func TestIndexdClient_LateCompletionSharedSlab(t *testing.T) {
 	if n := fb.deleteCount(); n != 1 {
 		t.Fatalf("want the orphaned slab deleted, got %d deletions", n)
 	}
+}
+
+// waitForSlabKey waits until the file's single slab has been uploaded and
+// recorded, and returns its key.
+func waitForSlabKey(t *testing.T, db *stores.Database, acc stores.Account, share, path string, size uint64) types.Hash256 {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		slabs, err := db.GetMetadata(acc, share, path, 0, size)
+		if err == nil && len(slabs) == 1 && slabs[0].Key != (types.Hash256{}) {
+			return slabs[0].Key
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the slab of %s to be recorded", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestIndexdClient_UnpinRetry verifies that a slab whose unpin could not reach
+// the storage backend stays staged and is unpinned by the periodic retry, and
+// that a staged slab whose key a live file references again is unstaged
+// instead of unpinned.
+func TestIndexdClient_UnpinRetry(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	wgID := workgroupID(t, db, acc)
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{})
+	t.Cleanup(func() { _ = c.Close() })
+	ic := c.(*IndexdClient)
+
+	content := make([]byte, proto.SectorSize)
+	frand.Read(content)
+	uploadBuffered(t, ctx, c, acc, "a.bin", content)
+	waitForSlabKey(t, db, acc, share.Name, "a.bin", uint64(len(content)))
+
+	// The backend is down when the file is deleted: the file is gone, but
+	// its slab stays pinned and staged for retry.
+	fb.failDeletes(errors.New("backend is down"))
+	if err := c.Delete(ctx, acc, "a.bin", false); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	waitForObjects(t, fb, 1)
+	staged, err := db.PendingUnpins(share.Name, wgID)
+	if err != nil || len(staged) != 1 {
+		t.Fatalf("want 1 staged unpin, got %v, %v", staged, err)
+	}
+
+	// Once the backend is back, the periodic retry unpins and confirms.
+	fb.failDeletes(nil)
+	ic.retryPendingUnpins(ctx)
+	waitForObjects(t, fb, 0)
+	if staged, err := db.PendingUnpins(share.Name, wgID); err != nil || len(staged) != 0 {
+		t.Fatalf("want no staged unpins left, got %v, %v", staged, err)
+	}
+
+	// A staged slab whose key a live file references is unstaged untouched.
+	content2 := make([]byte, proto.SectorSize)
+	frand.Read(content2)
+	uploadBuffered(t, ctx, c, acc, "b.bin", content2)
+	key := waitForSlabKey(t, db, acc, share.Name, "b.bin", uint64(len(content2)))
+
+	if err := db.StageUnpin(share.Name, wgID, key); err != nil {
+		t.Fatalf("StageUnpin: %v", err)
+	}
+	ic.retryPendingUnpins(ctx)
+	if staged, err := db.PendingUnpins(share.Name, wgID); err != nil || len(staged) != 0 {
+		t.Fatalf("want the referenced slab unstaged, got %v, %v", staged, err)
+	}
+	mustReadEquals(t, ctx, c, acc, "b.bin", content2)
 }

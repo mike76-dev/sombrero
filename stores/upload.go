@@ -67,25 +67,36 @@ func collectStorage(rows pgx.Rows) (bids []uint64, keys [][]byte, err error) {
 }
 
 // unreferencedSlabs returns those of the given slab keys that no metadata entry
-// references any more. It has to be called after the referencing metadata has
-// been deleted, so that slabs which are still shared with surviving files stay
-// pinned.
-func unreferencedSlabs(ctx context.Context, tx pgx.Tx, keys [][]byte) (slabs []types.Hash256, err error) {
+// references any more, and stages them for unpinning in the same transaction.
+// The staging is what makes the unpin survive a crash or an unreachable storage
+// backend: a slab stays listed until its unpin is confirmed, so it cannot leak.
+// It has to be called after the referencing metadata has been deleted, so that
+// slabs which are still shared with surviving files stay pinned.
+func unreferencedSlabs(ctx context.Context, tx pgx.Tx, share string, workgroup int, keys [][]byte) (slabs []types.Hash256, err error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
 
 	const query = `
-		SELECT k
-		FROM UNNEST($1::BYTEA[]) AS k
-		WHERE NOT EXISTS (
-			SELECT 1
-			FROM metadata m
-			WHERE m.slab_key = k
+		WITH unreferenced AS (
+			SELECT u.k
+			FROM UNNEST($3::BYTEA[]) AS u(k)
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM metadata m
+				WHERE m.slab_key = u.k
+			)
+		),
+		staged AS (
+			INSERT INTO pending_unpins (share_name, workgroup, slab_key)
+			SELECT $1, $2, u.k
+			FROM unreferenced u
+			ON CONFLICT DO NOTHING
 		)
+		SELECT k FROM unreferenced
 	`
 
-	rows, err := tx.Query(ctx, query, keys)
+	rows, err := tx.Query(ctx, query, share, workgroup, keys)
 	if err != nil {
 		return nil, fmt.Errorf("failed to filter unreferenced slabs: %w", err)
 	}
@@ -131,6 +142,84 @@ func (db *Database) SlabReferenced(key types.Hash256) (referenced bool, err erro
 		return nil
 	})
 	return
+}
+
+// StageUnpin lists the given slab for unpinning by the given share and
+// workgroup connection, which is retried until it is confirmed. Staging is
+// idempotent.
+func (db *Database) StageUnpin(share string, workgroup int, key types.Hash256) error {
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			INSERT INTO pending_unpins (share_name, workgroup, slab_key)
+			VALUES ($1, $2, $3)
+			ON CONFLICT DO NOTHING
+		`
+
+		if _, err := tx.Exec(ctx, query, share, workgroup, key[:]); err != nil {
+			return fmt.Errorf("failed to stage unpin: %w", err)
+		}
+		return nil
+	})
+}
+
+// PendingUnpins returns the slabs whose unpinning by the given share and
+// workgroup connection has not been confirmed yet.
+func (db *Database) PendingUnpins(share string, workgroup int) (slabs []types.Hash256, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT slab_key
+			FROM pending_unpins
+			WHERE share_name = $1
+				AND workgroup = $2
+		`
+
+		rows, err := tx.Query(ctx, query, share, workgroup)
+		if err != nil {
+			return fmt.Errorf("failed to list pending unpins: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var raw []byte
+			if err := rows.Scan(&raw); err != nil {
+				return fmt.Errorf("failed to scan slab key: %w", err)
+			}
+			if len(raw) != 32 {
+				return fmt.Errorf("invalid slab key length: %d", len(raw))
+			}
+			var h types.Hash256
+			copy(h[:], raw)
+			slabs = append(slabs, h)
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("failed to iterate pending unpins: %w", err)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
+// UnstageUnpin removes the given slab from the pending unpins, either because
+// it has been unpinned or because its key has become referenced again.
+func (db *Database) UnstageUnpin(share string, workgroup int, key types.Hash256) error {
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			DELETE FROM pending_unpins
+			WHERE share_name = $1
+				AND workgroup = $2
+				AND slab_key = $3
+		`
+
+		if _, err := tx.Exec(ctx, query, share, workgroup, key[:]); err != nil {
+			return fmt.Errorf("failed to unstage unpin: %w", err)
+		}
+		return nil
+	})
 }
 
 // CreateUpload creates a new upload entry in the database and returns the generated upload ID.
@@ -260,7 +349,7 @@ func (db *Database) RemoveUpload(uploadID string) (slabs []types.Hash256, err er
 
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const lookup = `
-			SELECT u.id, u.object_id
+			SELECT u.id, u.object_id, o.share_name, o.workgroup
 			FROM uploads u
 			JOIN objects o ON o.id = u.object_id
 			WHERE u.upload_id = $1
@@ -268,7 +357,9 @@ func (db *Database) RemoveUpload(uploadID string) (slabs []types.Hash256, err er
 		`
 
 		var uid, soid uint64
-		if err := tx.QueryRow(ctx, lookup, id).Scan(&uid, &soid); err != nil {
+		var share string
+		var workgroup int
+		if err := tx.QueryRow(ctx, lookup, id).Scan(&uid, &soid, &share, &workgroup); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
@@ -315,7 +406,7 @@ func (db *Database) RemoveUpload(uploadID string) (slabs []types.Hash256, err er
 
 		// The metadata is gone by now, so any slab that is still referenced
 		// belongs to another file and must stay pinned.
-		slabs, err = unreferencedSlabs(ctx, tx, keys)
+		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
 		return err
 	})
 

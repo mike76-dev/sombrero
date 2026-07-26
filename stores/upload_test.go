@@ -507,6 +507,48 @@ func TestSlabReferenced(t *testing.T) {
 	}
 }
 
+// TestUnpinStaging verifies that the slabs a delete reports are staged for
+// unpinning in the same transaction, and that staging is idempotent and can
+// be confirmed away.
+func TestUnpinStaging(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+
+	key := types.Hash256{1}
+	plantObject(t, db, share, acc, "a.txt", key)
+
+	slabs, err := db.DeleteFile(acc, share, "a.txt")
+	if err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	assertSlabs(t, "DeleteFile", slabs, []types.Hash256{key})
+
+	staged, err := db.PendingUnpins(share, wg)
+	if err != nil {
+		t.Fatalf("PendingUnpins: %v", err)
+	}
+	assertSlabs(t, "PendingUnpins", staged, []types.Hash256{key})
+
+	// Another connection's domain has nothing staged.
+	if staged, err := db.PendingUnpins(share, wg+1); err != nil || len(staged) != 0 {
+		t.Fatalf("want another workgroup's unpins empty, got %v, %v", staged, err)
+	}
+
+	// Staging is idempotent, and confirming removes the entry.
+	if err := db.StageUnpin(share, wg, key); err != nil {
+		t.Fatalf("StageUnpin: %v", err)
+	}
+	if err := db.UnstageUnpin(share, wg, key); err != nil {
+		t.Fatalf("UnstageUnpin: %v", err)
+	}
+	if staged, err := db.PendingUnpins(share, wg); err != nil || len(staged) != 0 {
+		t.Fatalf("want no staged unpins left, got %v, %v", staged, err)
+	}
+}
+
 // TestClaimPackedSlabWorkgroupScope verifies that the pieces of one workgroup
 // never end up in another workgroup's packed slab. The slab is pinned under
 // the claiming connection's indexd app account, which must belong to the

@@ -925,8 +925,15 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 		}
 
 		// The metadata is gone by now, so any slab that is still referenced
-		// belongs to another file and must stay pinned.
-		slabs, err = unreferencedSlabs(ctx, tx, keys)
+		// belongs to another file and must stay pinned. The rest is staged to
+		// be unpinned by the caller's workgroup connection, which is the one
+		// whose app account pinned it.
+		var workgroup int
+		if err := tx.QueryRow(ctx, `SELECT workgroup FROM accounts WHERE id = $1`, acc.ID).Scan(&workgroup); err != nil {
+			return fmt.Errorf("failed to resolve workgroup: %w", err)
+		}
+
+		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
 		return err
 	})
 
@@ -1058,8 +1065,15 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 		}
 
 		// The metadata is gone by now, so any slab that is still referenced
-		// belongs to another file and must stay pinned.
-		slabs, err = unreferencedSlabs(ctx, tx, keys)
+		// belongs to another file and must stay pinned. The rest is staged to
+		// be unpinned by the caller's workgroup connection, which is the one
+		// whose app account pinned it.
+		var workgroup int
+		if err := tx.QueryRow(ctx, `SELECT workgroup FROM accounts WHERE id = $1`, acc.ID).Scan(&workgroup); err != nil {
+			return fmt.Errorf("failed to resolve workgroup: %w", err)
+		}
+
+		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
 		return err
 	})
 

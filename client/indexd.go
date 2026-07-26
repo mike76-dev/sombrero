@@ -551,15 +551,16 @@ func (ic *IndexdClient) AbortUpload(ctx context.Context, path string, uploadID s
 	if err != nil {
 		return fmt.Errorf("couldn't abort upload: %v", err)
 	}
-
-	for _, key := range slabs {
-		if err := ic.backend.DeleteObject(ctx, key); err != nil {
-			return fmt.Errorf("couldn't delete slab: %v", err)
-		}
+	if len(slabs) == 0 {
+		return nil
 	}
 
-	if err := ic.backend.PruneSlabs(ctx); err != nil {
-		return fmt.Errorf("couldn't prune slabs: %v", err)
+	// The slabs are staged in the database, so a failure here only delays
+	// their unpinning until the periodic retry.
+	if ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after aborting upload of %s: %v", path, err)
+		}
 	}
 
 	return nil
@@ -630,14 +631,12 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 		return nil
 	}
 
-	for _, key := range slabs {
-		if err := ic.backend.DeleteObject(ctx, key); err != nil {
-			log.Printf("failed to delete slab %s from %s", key, path)
+	// The slabs are staged in the database, so a failure here only delays
+	// their unpinning until the periodic retry.
+	if ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after deleting %s: %v", path, err)
 		}
-	}
-
-	if err := ic.backend.PruneSlabs(ctx); err != nil {
-		return fmt.Errorf("couldn't prune slabs: %v", err)
 	}
 
 	return nil
@@ -707,6 +706,64 @@ func (ic *IndexdClient) Close() error {
 	return ic.backend.Close()
 }
 
+// unpinSlabs deletes the given slabs, which have been staged as pending
+// unpins, from the storage backend and confirms each successful one, so that
+// only the failed ones stay staged for the periodic retry. It reports whether
+// anything was unpinned, in which case the caller wants to prune.
+func (ic *IndexdClient) unpinSlabs(ctx context.Context, keys []types.Hash256) bool {
+	var dropped bool
+	for _, key := range keys {
+		if err := ic.backend.DeleteObject(ctx, key); err != nil {
+			log.Printf("failed to delete slab %s, leaving it staged for retry: %v", key, err)
+			continue
+		}
+		dropped = true
+		if err := ic.db.UnstageUnpin(ic.share, ic.workgroup, key); err != nil {
+			log.Printf("failed to confirm unpin of slab %s: %v", key, err)
+		}
+	}
+
+	return dropped
+}
+
+// retryPendingUnpins retries the unpins that could not be confirmed earlier,
+// e.g. because the storage backend was unreachable or the process stopped in
+// between. A slab whose key has become referenced again in the meantime — an
+// upload of the same content is assigned the same key — is unstaged instead
+// of unpinned.
+func (ic *IndexdClient) retryPendingUnpins(ctx context.Context) {
+	keys, err := ic.db.PendingUnpins(ic.share, ic.workgroup)
+	if err != nil {
+		log.Printf("failed to list pending unpins: %v", err)
+		return
+	}
+
+	pending := keys[:0]
+	for _, key := range keys {
+		referenced, err := ic.db.SlabReferenced(key)
+		if err != nil {
+			log.Printf("failed to check references of slab %s: %v", key, err)
+			continue
+		}
+		if referenced {
+			if err := ic.db.UnstageUnpin(ic.share, ic.workgroup, key); err != nil {
+				log.Printf("failed to unstage referenced slab %s: %v", key, err)
+			}
+			continue
+		}
+		pending = append(pending, key)
+	}
+
+	if len(pending) == 0 {
+		return
+	}
+	if ic.unpinSlabs(ctx, pending) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after retrying unpins: %v", err)
+		}
+	}
+}
+
 // dropSlabIfUnreferenced unpins the given slab unless a file still references
 // it. A slab whose completion found none of its files left is usually
 // orphaned, but slabs are content-addressed: another file of the same content
@@ -722,10 +779,15 @@ func (ic *IndexdClient) dropSlabIfUnreferenced(ctx context.Context, key types.Ha
 		return
 	}
 
-	if derr := ic.backend.DeleteObject(ctx, key); derr != nil {
-		log.Printf("failed to delete orphaned slab %s after late completion: %v", key, derr)
-	} else if perr := ic.backend.PruneSlabs(ctx); perr != nil {
-		log.Printf("failed to prune slabs after late completion for %s: %v", key, perr)
+	// Staging first makes the unpin survive a failure to reach the backend:
+	// the slab stays listed until the periodic retry confirms it.
+	if err := ic.db.StageUnpin(ic.share, ic.workgroup, key); err != nil {
+		log.Printf("failed to stage unpin of slab %s: %v", key, err)
+	}
+	if ic.unpinSlabs(ctx, []types.Hash256{key}) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after late completion for %s: %v", key, err)
+		}
 	}
 }
 
@@ -876,8 +938,13 @@ func (ic *IndexdClient) packSlabs(closeChan chan struct{}) {
 	}
 }
 
-// cleanupUploadJobs periodically removes upload jobs that can no longer be processed.
+// cleanupUploadJobs periodically removes upload jobs that can no longer be
+// processed and retries unconfirmed unpins. Running once right away picks up
+// the unpins a previous run left unconfirmed.
 func (ic *IndexdClient) cleanupUploadJobs(closeChan chan struct{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
@@ -885,6 +952,7 @@ func (ic *IndexdClient) cleanupUploadJobs(closeChan chan struct{}) {
 		if err := ic.db.CleanupUploadJobs(); err != nil {
 			log.Printf("failed to clean up upload jobs: %v", err)
 		}
+		ic.retryPendingUnpins(ctx)
 
 		select {
 		case <-closeChan:
