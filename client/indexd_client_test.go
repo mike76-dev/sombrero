@@ -15,6 +15,7 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/api/app"
 	"go.sia.tech/indexd/slabs"
+	"lukechampine.com/frand"
 )
 
 type fakeBackend struct {
@@ -22,6 +23,9 @@ type fakeBackend struct {
 	objects    map[types.Hash256][]byte
 	nextID     uint64
 	uploadGate chan struct{}
+	uploadErr  error
+	uploads    int
+	deletes    int
 }
 
 func newFakeBackend() *fakeBackend {
@@ -48,6 +52,28 @@ func (fb *fakeBackend) allowUploads(n int) {
 	}
 }
 
+// failUploads makes every following upload fail with the given error, until it
+// is called again with nil.
+func (fb *fakeBackend) failUploads(err error) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	fb.uploadErr = err
+}
+
+// uploadAttempts returns how often an upload has been started.
+func (fb *fakeBackend) uploadAttempts() int {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.uploads
+}
+
+// deleteCount returns how often an object has been deleted.
+func (fb *fakeBackend) deleteCount() int {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.deletes
+}
+
 func (fb *fakeBackend) nextKey() types.Hash256 {
 	var h types.Hash256
 	h[0] = byte(fb.nextID)
@@ -70,6 +96,10 @@ func (fb *fakeBackend) Account(ctx context.Context) (app.AccountResponse, error)
 }
 
 func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8) (types.Hash256, error) {
+	fb.mu.Lock()
+	fb.uploads++
+	fb.mu.Unlock()
+
 	if fb.uploadGate != nil {
 		select {
 		case <-ctx.Done():
@@ -80,6 +110,10 @@ func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, pari
 
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
+
+	if fb.uploadErr != nil {
+		return types.Hash256{}, fb.uploadErr
+	}
 
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -112,6 +146,7 @@ func (fb *fakeBackend) Download(ctx context.Context, key types.Hash256, offset, 
 func (fb *fakeBackend) DeleteObject(ctx context.Context, key types.Hash256) error {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
+	fb.deletes++
 	delete(fb.objects, key)
 	return nil
 }
@@ -1527,4 +1562,233 @@ func TestIndexdClient_DuplicatePublicDirEntries(t *testing.T) {
 		t.Fatalf("Delete as bob: %v", err)
 	}
 	mustNotFound(t, ctx, c, alice, path, len(content))
+}
+
+// uploadBuffered uploads a file in one part and finalizes it. A file smaller
+// than a slab stays buffered in the database until it is packed.
+func uploadBuffered(t *testing.T, ctx context.Context, c Client, acc stores.Account, path string, data []byte) {
+	t.Helper()
+
+	uploadID, err := c.StartUpload(ctx, acc, path)
+	if err != nil {
+		t.Fatalf("StartUpload(%s): %v", path, err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(data), path, uploadID, 1, 0, uint64(len(data))); err != nil {
+		t.Fatalf("Write(%s): %v", path, err)
+	}
+	if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(%s): %v", path, err)
+	}
+}
+
+// waitForObjects waits until the backend holds the expected number of objects.
+func waitForObjects(t *testing.T, fb *fakeBackend, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		fb.mu.Lock()
+		n := len(fb.objects)
+		fb.mu.Unlock()
+
+		if n == want {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	t.Fatalf("timed out waiting for %d uploaded objects, got %d", want, n)
+}
+
+// TestIndexdClient_PackedSlab verifies that the pieces of several files that
+// are each too small for a slab of their own are uploaded together as one
+// packed slab, that every file still reads back whole, and that the slab is
+// only unpinned once the last of those files is deleted.
+func TestIndexdClient_PackedSlab(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// With a single data shard, three files of this size stay buffered on
+	// their own, while together they exceed one slab.
+	slabSize := uint64(proto.SectorSize)
+	size := slabSize/2 - slabSize/8
+
+	names := []string{"a.bin", "b.bin", "c.bin"}
+	contents := make(map[string][]byte, len(names))
+	for _, name := range names {
+		data := make([]byte, size)
+		frand.Read(data)
+		contents[name] = data
+		uploadBuffered(t, ctx, c, acc, name, data)
+	}
+
+	// The three of them make exactly one packed slab, with the tail of the
+	// last file left over.
+	waitForObjects(t, fb, 1)
+
+	fb.mu.Lock()
+	var packed []byte
+	for _, data := range fb.objects {
+		packed = data
+	}
+	fb.mu.Unlock()
+
+	if uint64(len(packed)) != slabSize {
+		t.Fatalf("want a packed slab of %d bytes, got %d", slabSize, len(packed))
+	}
+
+	// Every file reads back whole, including the one that spans the packed
+	// slab and the buffer holding its remainder.
+	for _, name := range names {
+		mustReadEquals(t, ctx, c, acc, name, contents[name])
+	}
+
+	// Deleting a file that shares the slab must not take the slab with it.
+	for _, name := range names[:2] {
+		if err := c.Delete(ctx, acc, name, false); err != nil {
+			t.Fatalf("Delete(%s): %v", name, err)
+		}
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("want the shared slab to survive, got %d objects", n)
+	}
+	mustReadEquals(t, ctx, c, acc, names[2], contents[names[2]])
+
+	// Once the last file that references it is gone, so is the slab.
+	if err := c.Delete(ctx, acc, names[2], false); err != nil {
+		t.Fatalf("Delete(%s): %v", names[2], err)
+	}
+	waitForObjects(t, fb, 0)
+}
+
+// TestIndexdClient_PackedSlabUploadFailure verifies that a packed slab whose
+// upload fails puts its pieces back in the queue, so that they are packed again
+// once the storage backend recovers.
+func TestIndexdClient_PackedSlabUploadFailure(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	fb.failUploads(errors.New("backend is down"))
+
+	c := newIndexdClient(db, fb, share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	slabSize := uint64(proto.SectorSize)
+	size := slabSize/2 - slabSize/8
+
+	names := []string{"a.bin", "b.bin", "c.bin"}
+	contents := make(map[string][]byte, len(names))
+	for _, name := range names {
+		data := make([]byte, size)
+		frand.Read(data)
+		contents[name] = data
+		uploadBuffered(t, ctx, c, acc, name, data)
+	}
+
+	// Wait for the packer to have tried and failed at least once.
+	deadline := time.Now().Add(10 * time.Second)
+	for fb.uploadAttempts() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the packer to attempt an upload")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The files are readable throughout, straight from their buffers.
+	for _, name := range names {
+		mustReadEquals(t, ctx, c, acc, name, contents[name])
+	}
+
+	fb.failUploads(nil)
+	waitForObjects(t, fb, 1)
+
+	for _, name := range names {
+		mustReadEquals(t, ctx, c, acc, name, contents[name])
+	}
+}
+
+// TestIndexdClient_PackedSlabFilesDeletedDuringUpload verifies that a packed
+// slab whose every file is deleted while it is being uploaded does not stay
+// pinned, since nothing references it by the time it lands.
+func TestIndexdClient_PackedSlabFilesDeletedDuringUpload(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newGatedFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, 1, 0)
+	t.Cleanup(func() { _ = c.Close() })
+
+	slabSize := uint64(proto.SectorSize)
+	size := slabSize/2 - slabSize/8
+
+	names := []string{"a.bin", "b.bin", "c.bin"}
+	for _, name := range names {
+		data := make([]byte, size)
+		frand.Read(data)
+		uploadBuffered(t, ctx, c, acc, name, data)
+	}
+
+	// Hold the packer in the backend, its pieces already claimed.
+	deadline := time.Now().Add(10 * time.Second)
+	for fb.uploadAttempts() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the packer to start an upload")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for _, name := range names {
+		if err := c.Delete(ctx, acc, name, false); err != nil {
+			t.Fatalf("Delete(%s): %v", name, err)
+		}
+	}
+
+	// Let the slab land on a share where none of its files exist any more.
+	fb.allowUploads(1)
+
+	deadline = time.Now().Add(10 * time.Second)
+	for fb.deleteCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the orphaned packed slab to be deleted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("want no objects left, got %d", n)
+	}
 }

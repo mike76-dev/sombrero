@@ -34,6 +34,11 @@ const uploadWorkers = 3
 // the slab size is smaller than the read chunk size (low dataShards).
 const slabDownloadThreads = 4
 
+// packInterval is how often the packer looks for buffered pieces to combine on
+// its own. It only serves as a fallback: an upload that leaves a piece behind
+// signals the packer directly.
+const packInterval = time.Minute
+
 // storageBackend is the minimal interface for `indexd` SDK.
 type storageBackend interface {
 	Account(ctx context.Context) (app.AccountResponse, error)
@@ -205,8 +210,10 @@ type IndexdClient struct {
 	backend      storageBackend
 	dataShards   uint8
 	parityShards uint8
+	slabSize     uint64
 	closeChan    chan struct{}
 	jobsChan     chan struct{}
+	packChan     chan struct{}
 	wg           sync.WaitGroup
 }
 
@@ -228,8 +235,10 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		backend:      backend,
 		dataShards:   dataShards,
 		parityShards: parityShards,
+		slabSize:     uint64(dataShards) * proto.SectorSize,
 		closeChan:    cc,
 		jobsChan:     make(chan struct{}, uploadWorkers),
+		packChan:     make(chan struct{}, 1),
 	}
 
 	// Start background upload threads.
@@ -240,6 +249,15 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 			ic.processUploads(ic.closeChan)
 		}()
 	}
+
+	// Start the background packer. A single one is enough, and more than one
+	// would compete for the same buffered pieces, each ending up with too few
+	// of them to fill a slab.
+	ic.wg.Add(1)
+	go func() {
+		defer ic.wg.Done()
+		ic.packSlabs(ic.closeChan)
+	}()
 
 	// Start background cleanup of stale upload jobs.
 	ic.wg.Add(1)
@@ -499,6 +517,13 @@ func (ic *IndexdClient) FinishUpload(ctx context.Context, path string, uploadID 
 		return fmt.Errorf("couldn't finalize upload: %v", err)
 	}
 
+	// Finalizing is what makes a piece that is left buffered eligible for
+	// packing, so this is the point at which the packer has new work.
+	select {
+	case ic.packChan <- struct{}{}:
+	default:
+	}
+
 	return nil
 }
 
@@ -626,7 +651,7 @@ func (ic *IndexdClient) Close() error {
 
 // processUpload checks if there is a complete slab and uploads it.
 func (ic *IndexdClient) processUpload(ctx context.Context) error {
-	job, err := ic.db.ClaimUploadJob(uint64(ic.dataShards) * proto.SectorSize)
+	job, err := ic.db.ClaimUploadJob(ic.slabSize)
 	if err != nil {
 		return err
 	}
@@ -651,6 +676,103 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// packSlab concatenates the claimed pieces into the slab to upload, cutting the
+// last one short at the slab boundary. The pieces are trimmed in place, so that
+// what is left of each of them is the part that made it into the slab.
+func packSlab(jobs []stores.UploadJob, size uint64) []byte {
+	slab := make([]byte, 0, size)
+	for i := range jobs {
+		if uint64(len(slab)+len(jobs[i].Data)) > size {
+			jobs[i].Data = jobs[i].Data[:size-uint64(len(slab))]
+		}
+		slab = append(slab, jobs[i].Data...)
+	}
+
+	return slab
+}
+
+// processPackedSlab checks if the buffered pieces of several files add up to a
+// slab and, if so, uploads them together as a single packed slab.
+func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
+	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.slabSize)
+	if err != nil {
+		return err
+	}
+
+	key, err := ic.backend.Upload(ctx, bytes.NewReader(packSlab(jobs, ic.slabSize)), ic.dataShards, ic.parityShards)
+	if err != nil {
+		for _, job := range jobs {
+			if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {
+				log.Printf("failed to requeue packed piece %d: %v", job.MetadataID, rerr)
+			}
+		}
+		return fmt.Errorf("couldn't upload packed slab: %v", err)
+	}
+
+	if err := ic.db.CompletePackedSlab(jobs, key); err != nil {
+		if errors.Is(err, stores.ErrNotFound) {
+			// Every file that went into the slab has been deleted since.
+			if derr := ic.backend.DeleteObject(ctx, key); derr != nil {
+				log.Printf("failed to delete orphaned packed slab %s after late completion: %v", key, derr)
+			} else if perr := ic.backend.PruneSlabs(ctx); perr != nil {
+				log.Printf("failed to prune slabs after late completion for %s: %v", key, perr)
+			}
+			return nil
+		}
+		return fmt.Errorf("couldn't complete packed slab: %v", err)
+	}
+
+	return nil
+}
+
+// packSlabs combines the pieces that are left buffered into packed slabs in the
+// background.
+func (ic *IndexdClient) packSlabs(closeChan chan struct{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ticker := time.NewTicker(packInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-closeChan:
+			return
+		default:
+		}
+
+		// A packed slab may leave a remainder behind that, together with
+		// what is still buffered, fills another one, so keep going until
+		// there is nothing left to pack.
+		err := ic.processPackedSlab(ctx)
+		if err == nil {
+			continue
+		}
+
+		if !errors.Is(err, stores.ErrNoUploadJobs) {
+			log.Printf("failed to pack a slab: %v", err)
+
+			// The pieces are back in the queue and the failure is
+			// likely transient, so retry shortly.
+			select {
+			case <-closeChan:
+				return
+			case <-time.After(time.Second):
+			}
+			continue
+		}
+
+		// Nothing to pack: wait until another upload has left a piece
+		// behind, with a periodic fallback in case the signal was missed.
+		select {
+		case <-closeChan:
+			return
+		case <-ic.packChan:
+		case <-ticker.C:
+		}
+	}
 }
 
 // cleanupUploadJobs periodically removes upload jobs that can no longer be processed.
