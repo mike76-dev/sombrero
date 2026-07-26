@@ -2055,3 +2055,57 @@ func TestIndexdClient_UnpinRetry(t *testing.T) {
 	}
 	mustReadEquals(t, ctx, c, acc, "b.bin", content2)
 }
+
+// TestIndexdClient_StrandedPieceRecovery verifies that a piece claimed by a
+// previous incarnation of the process, which died before completing it, is
+// requeued by the janitor and then uploaded normally. The piece is only
+// requeued on the second sweep that sees it stranded, so that a claim that is
+// merely slow is not queued a second time.
+func TestIndexdClient_StrandedPieceRecovery(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+	wgID := workgroupID(t, db, acc)
+
+	// The previous incarnation of the process buffers a full-slab file,
+	// claims it, and dies before completing the upload.
+	content := make([]byte, proto.SectorSize)
+	frand.Read(content)
+	uploadID, err := db.CreateUpload(acc, share.Name, "a.bin")
+	if err != nil {
+		t.Fatalf("CreateUpload: %v", err)
+	}
+	if err := db.AddBufferedSlab(uploadID, 0, content); err != nil {
+		t.Fatalf("AddBufferedSlab: %v", err)
+	}
+	if err := db.FinalizeUpload(uploadID); err != nil {
+		t.Fatalf("FinalizeUpload: %v", err)
+	}
+	if _, err := db.ClaimUploadJob(share.Name, wgID, uint64(proto.SectorSize)); err != nil {
+		t.Fatalf("ClaimUploadJob: %v", err)
+	}
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{})
+	t.Cleanup(func() { _ = c.Close() })
+	ic := c.(*IndexdClient)
+
+	// The first sweep only takes note of the stranded piece.
+	suspects := ic.requeueStrandedPieces(nil)
+	if len(suspects) != 1 {
+		t.Fatalf("want 1 suspect after the first sweep, got %d", len(suspects))
+	}
+	if ids, err := db.StrandedPieces(share.Name, wgID); err != nil || len(ids) != 1 {
+		t.Fatalf("want the piece still stranded after the first sweep, got %v, %v", ids, err)
+	}
+
+	// The second sweep requeues it, and an upload worker takes it from there.
+	ic.requeueStrandedPieces(suspects)
+	waitForSlabKey(t, db, acc, share.Name, "a.bin", uint64(len(content)))
+	mustReadEquals(t, ctx, c, acc, "a.bin", content)
+}

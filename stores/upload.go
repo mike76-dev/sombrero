@@ -748,6 +748,101 @@ func (db *Database) CleanupUploadJobs() error {
 	})
 }
 
+// StrandedPieces returns the metadata entries of the given share and
+// workgroup that reference a buffer but have no entry in the upload queue.
+// This is what a claim leaves behind when the process stops between claiming
+// and completing: nothing would ever pick the piece up again on its own. It
+// is also, briefly, the state of a claim that is still being worked on, so it
+// is up to the caller to tell the two apart.
+func (db *Database) StrandedPieces(share string, workgroup int) (ids []uint64, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT m.id
+			FROM metadata m
+			JOIN objects o ON o.id = m.object_id
+			WHERE o.share_name = $1
+				AND o.workgroup = $2
+				AND m.buffer_id IS NOT NULL
+				AND NOT EXISTS (
+					SELECT 1
+					FROM upload_jobs uj
+					WHERE uj.metadata_id = m.id
+				)
+		`
+
+		rows, err := tx.Query(ctx, query, share, workgroup)
+		if err != nil {
+			return fmt.Errorf("failed to list stranded pieces: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var id uint64
+			if err := rows.Scan(&id); err != nil {
+				return fmt.Errorf("failed to scan metadata ID: %w", err)
+			}
+			ids = append(ids, id)
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("failed to iterate stranded pieces: %w", err)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
+// RequeueStrandedPieces puts the given metadata entries back in the upload
+// queue, so that their pieces are claimed again. An entry that no longer
+// references a buffer, is back in the queue already, or whose upload row
+// cannot be resolved any more is skipped.
+func (db *Database) RequeueStrandedPieces(ids []uint64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	arr := make([]int64, len(ids))
+	for i, id := range ids {
+		arr[i] = int64(id)
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		// A finalized piece has had its upload ID cleared from the metadata,
+		// but the uploads row itself lives on attached to the object, so it
+		// is resolved from there.
+		const query = `
+			WITH resolved AS (
+				SELECT
+					m.id AS metadata_id,
+					COALESCE(m.upload_id, (
+						SELECT u.id
+						FROM uploads u
+						WHERE u.object_id = m.object_id
+						ORDER BY u.id
+						LIMIT 1
+					)) AS upload_id
+				FROM metadata m
+				WHERE m.id = ANY($1::BIGINT[])
+					AND m.buffer_id IS NOT NULL
+			)
+			INSERT INTO upload_jobs (upload_id, metadata_id)
+			SELECT r.upload_id, r.metadata_id
+			FROM resolved r
+			WHERE r.upload_id IS NOT NULL
+			ON CONFLICT (metadata_id) DO NOTHING
+		`
+
+		if _, err := tx.Exec(ctx, query, arr); err != nil {
+			return fmt.Errorf("failed to requeue stranded pieces: %w", err)
+		}
+		return nil
+	})
+}
+
 // CompleteUploadJob marks the given upload job as completed by associating the provided slab key
 // with the corresponding metadata entry and removing the buffer if it is no longer referenced.
 func (db *Database) CompleteUploadJob(metadataID uint64, bufferID uint64, slabKey types.Hash256) error {

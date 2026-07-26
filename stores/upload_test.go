@@ -549,6 +549,55 @@ func TestUnpinStaging(t *testing.T) {
 	}
 }
 
+// TestStrandedPieces verifies that a piece whose claim never completed, e.g.
+// because the process crashed in between, can be found and put back in the
+// queue.
+func TestStrandedPieces(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+	plantBufferedFile(t, db, share, acc, "a.txt", slabSize, false)
+
+	// Nothing is stranded while the piece sits in the queue.
+	if ids, err := db.StrandedPieces(share, wg); err != nil || len(ids) != 0 {
+		t.Fatalf("want nothing stranded with a full queue, got %v, %v", ids, err)
+	}
+
+	// A claim takes the piece out of the queue; the claimant then dies.
+	job, err := db.ClaimUploadJob(share, wg, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimUploadJob: %v", err)
+	}
+
+	ids, err := db.StrandedPieces(share, wg)
+	if err != nil {
+		t.Fatalf("StrandedPieces: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != job.MetadataID {
+		t.Fatalf("want the claimed piece stranded, got %v", ids)
+	}
+
+	// Another workgroup's janitor does not see it.
+	if ids, err := db.StrandedPieces(share, wg+1); err != nil || len(ids) != 0 {
+		t.Fatalf("want nothing stranded for another workgroup, got %v, %v", ids, err)
+	}
+
+	// Requeueing puts it back and is idempotent.
+	for range 2 {
+		if err := db.RequeueStrandedPieces(ids); err != nil {
+			t.Fatalf("RequeueStrandedPieces: %v", err)
+		}
+	}
+	if n := pendingJobs(t, db); n != 1 {
+		t.Fatalf("want the piece back in the queue once, got %d jobs", n)
+	}
+	if ids, err := db.StrandedPieces(share, wg); err != nil || len(ids) != 0 {
+		t.Fatalf("want nothing stranded after the requeue, got %v, %v", ids, err)
+	}
+}
+
 // TestClaimPackedSlabWorkgroupScope verifies that the pieces of one workgroup
 // never end up in another workgroup's packed slab. The slab is pinned under
 // the claiming connection's indexd app account, which must belong to the
