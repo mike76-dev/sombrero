@@ -268,7 +268,7 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 		if err != nil {
 			return err
 		}
-		c := client.NewIndexdClient(db, sdkClient, share.Name, share.DataShards, share.ParityShards, client.PackingOptions{
+		c := client.NewIndexdClient(db, sdkClient, share.Name, wg.ID, share.DataShards, share.ParityShards, client.PackingOptions{
 			MinSize: s.cfg.MinPackedSlabSize,
 			MaxAge:  s.cfg.MaxBufferAge.Duration(),
 		})

@@ -19,13 +19,18 @@ import (
 const sliceLength = 10
 
 // newSlabTestFixture registers a share and an account that owns the objects
-// planted by plantObject.
-func newSlabTestFixture(t *testing.T, db *Database) (Account, string) {
+// planted by plantObject. It returns the account, the share name, and the ID
+// of the account's workgroup, which scopes the upload claims.
+func newSlabTestFixture(t *testing.T, db *Database) (Account, string, int) {
 	t.Helper()
 
 	u := uuid.New()
 	if err := db.AddWorkgroup(Workgroup{UUID: u}); err != nil {
 		t.Fatalf("AddWorkgroup: %v", err)
+	}
+	wg, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
 	}
 
 	if err := db.AddAccount(Account{
@@ -52,7 +57,37 @@ func newSlabTestFixture(t *testing.T, db *Database) (Account, string) {
 		t.Fatalf("RegisterShare: %v", err)
 	}
 
-	return acc, sh.Name
+	return acc, sh.Name, wg.ID
+}
+
+// newForeignAccount registers an account in a workgroup of its own. Its
+// uploads land in the same share as everyone else's, but belong to a
+// different claim domain.
+func newForeignAccount(t *testing.T, db *Database, name string) (Account, int) {
+	t.Helper()
+
+	u := uuid.New()
+	if err := db.AddWorkgroup(Workgroup{UUID: u}); err != nil {
+		t.Fatalf("AddWorkgroup: %v", err)
+	}
+	wg, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup: %v", err)
+	}
+
+	if err := db.AddAccount(Account{
+		Username:  name,
+		Password:  "secret123",
+		Workgroup: u.String(),
+	}); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	acc, err := db.FindAccount(name, u.String())
+	if err != nil {
+		t.Fatalf("FindAccount: %v", err)
+	}
+
+	return acc, wg.ID
 }
 
 // plantObject inserts a visible object whose metadata references the given slab
@@ -213,7 +248,7 @@ func TestDeleteFileSharedSlab(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, _ := newSlabTestFixture(t, db)
 
 	shared := types.Hash256{1}
 	sole := types.Hash256{2}
@@ -244,7 +279,7 @@ func TestDeleteDirectorySharedSlab(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, _ := newSlabTestFixture(t, db)
 
 	if err := db.CreateDirectory(acc, share, "docs", true, false); err != nil {
 		t.Fatalf("CreateDirectory: %v", err)
@@ -281,16 +316,16 @@ func TestClaimPackedSlabIncomplete(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
-	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab on an empty share: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
 	plantBufferedFile(t, db, share, acc, "a.txt", 400, false)
 	plantBufferedFile(t, db, share, acc, "b.txt", 400, false)
 
-	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab below a full slab: want %v, got %v", ErrNoUploadJobs, err)
 	}
 	if n := pendingJobs(t, db); n != 2 {
@@ -306,14 +341,14 @@ func TestClaimPackedSlabFull(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	a := plantBufferedFile(t, db, share, acc, "a.txt", 400, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 400, false)
 	c := plantBufferedFile(t, db, share, acc, "c.txt", 400, false)
 	plantBufferedFile(t, db, share, acc, "d.txt", 400, false)
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -344,7 +379,7 @@ func TestClaimPackedSlabFull(t *testing.T) {
 	}
 
 	// The remaining buffer alone cannot fill a slab.
-	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("second ClaimPackedSlab: want %v, got %v", ErrNoUploadJobs, err)
 	}
 }
@@ -358,7 +393,7 @@ func TestClaimPackedSlabManySmallPieces(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	// 400 pieces of 3 bytes each: filling a slab takes 334 of them, far more
 	// than the 256 rows the claim used to be capped at.
@@ -367,7 +402,7 @@ func TestClaimPackedSlabManySmallPieces(t *testing.T) {
 		plantBufferedFile(t, db, share, acc, fmt.Sprintf("tiny%03d.txt", i), 3, false)
 	}
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -387,7 +422,7 @@ func TestClaimPackedSlabManySmallPieces(t *testing.T) {
 	if n := pendingJobs(t, db); n != pieces-len(jobs) {
 		t.Fatalf("want %d jobs left in the queue, got %d", pieces-len(jobs), n)
 	}
-	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("second ClaimPackedSlab: want %v, got %v", ErrNoUploadJobs, err)
 	}
 }
@@ -400,7 +435,7 @@ func TestClaimPackedSlabSkipsIneligible(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	other := Share{
 		Name:         "othershare",
@@ -418,7 +453,7 @@ func TestClaimPackedSlabSkipsIneligible(t *testing.T) {
 	plantBufferedFile(t, db, share, acc, "whole.txt", slabSize, false)
 	plantBufferedFile(t, db, other.Name, acc, "elsewhere.txt", 600, false)
 
-	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab with only ineligible buffers: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
@@ -428,7 +463,7 @@ func TestClaimPackedSlabSkipsIneligible(t *testing.T) {
 	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -445,6 +480,71 @@ func TestClaimPackedSlabSkipsIneligible(t *testing.T) {
 	}
 }
 
+// TestClaimPackedSlabWorkgroupScope verifies that the pieces of one workgroup
+// never end up in another workgroup's packed slab. The slab is pinned under
+// the claiming connection's indexd app account, which must belong to the
+// workgroup that owns the files.
+func TestClaimPackedSlabWorkgroupScope(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+	bob, bobWG := newForeignAccount(t, db, "bob")
+
+	// The pieces of the two workgroups are interleaved in the same share.
+	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
+	b := plantBufferedFile(t, db, share, bob, "b.txt", 600, false)
+	c := plantBufferedFile(t, db, share, acc, "c.txt", 600, false)
+	d := plantBufferedFile(t, db, share, bob, "d.txt", 600, false)
+
+	claim := func(workgroup int, want []byte) {
+		t.Helper()
+
+		jobs, err := db.ClaimPackedSlab(share, workgroup, slabSize, 0, 0)
+		if err != nil {
+			t.Fatalf("ClaimPackedSlab(workgroup %d): %v", workgroup, err)
+		}
+		packed := make([]byte, 0, slabSize)
+		for _, job := range jobs {
+			packed = append(packed, job.Data...)
+		}
+		if !bytes.Equal(packed, want) {
+			t.Fatalf("workgroup %d claimed data of another workgroup", workgroup)
+		}
+	}
+
+	claim(wg, append(append([]byte{}, a...), c...))
+	claim(bobWG, append(append([]byte{}, b...), d...))
+}
+
+// TestClaimUploadJobScope verifies that a full-slab job is only claimable by
+// the connection of its own share and workgroup, which is the one whose app
+// account has to pin the data with the right redundancy.
+func TestClaimUploadJobScope(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+	data := plantBufferedFile(t, db, share, acc, "full.bin", slabSize, false)
+
+	if _, err := db.ClaimUploadJob("othershare", wg, slabSize); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("claim for another share: want %v, got %v", ErrNoUploadJobs, err)
+	}
+	if _, err := db.ClaimUploadJob(share, wg+1, slabSize); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("claim for another workgroup: want %v, got %v", ErrNoUploadJobs, err)
+	}
+
+	job, err := db.ClaimUploadJob(share, wg, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimUploadJob: %v", err)
+	}
+	if !bytes.Equal(job.Data, data) {
+		t.Fatalf("claimed job carries unexpected data")
+	}
+}
+
 // TestClaimPackedSlabRequeue verifies that a claimed batch can be put back,
 // which is what happens when the upload of a packed slab fails.
 func TestClaimPackedSlabRequeue(t *testing.T) {
@@ -452,12 +552,12 @@ func TestClaimPackedSlabRequeue(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
 	plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -475,7 +575,7 @@ func TestClaimPackedSlabRequeue(t *testing.T) {
 		t.Fatalf("want %d jobs back in the queue, got %d", len(jobs), n)
 	}
 
-	again, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	again, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab after requeue: %v", err)
 	}
@@ -538,7 +638,7 @@ func TestCompletePackedSlab(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	// The three buffers add up to exactly one slab, so nothing is split.
 	want := map[string][]byte{
@@ -547,7 +647,7 @@ func TestCompletePackedSlab(t *testing.T) {
 		"c.txt": plantBufferedFile(t, db, share, acc, "c.txt", 400, false),
 	}
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -584,12 +684,12 @@ func TestCompletePackedSlabSplit(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -620,7 +720,7 @@ func TestCompletePackedSlabSplit(t *testing.T) {
 	}
 
 	// The remainder alone is not enough for another slab.
-	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab after the split: want %v, got %v", ErrNoUploadJobs, err)
 	}
 }
@@ -633,12 +733,12 @@ func TestCompletePackedSlabDeletedFile(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	plantBufferedFile(t, db, share, acc, "a.txt", 500, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 500, false)
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -662,7 +762,7 @@ func TestCompletePackedSlabDeletedFile(t *testing.T) {
 	plantBufferedFile(t, db, share, acc, "c.txt", 500, false)
 	plantBufferedFile(t, db, share, acc, "d.txt", 500, false)
 
-	jobs, err = db.ClaimPackedSlab(share, slabSize, 0, 0)
+	jobs, err = db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -688,12 +788,12 @@ func TestCompletePackedSlabRetry(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -746,23 +846,23 @@ func TestClaimPackedSlabAgeTrigger(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	a := plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
 	backdateJobs(t, db, 48*time.Hour)
 
 	// However long it has been waiting, without an age it waits on.
-	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab without an age: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
 	// Not old enough yet.
-	if _, err := db.ClaimPackedSlab(share, slabSize, 0, 72*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 72*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab below the age: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 24*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab past the age: %v", err)
 	}
@@ -792,13 +892,13 @@ func TestClaimPackedSlabMinSize(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
 	backdateJobs(t, db, 48*time.Hour)
 
 	// Old enough, but not yet worth uploading.
-	if _, err := db.ClaimPackedSlab(share, slabSize, 500, 24*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 500, 24*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab below the minimum size: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
@@ -806,7 +906,7 @@ func TestClaimPackedSlabMinSize(t *testing.T) {
 	plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
 	backdateJobs(t, db, 48*time.Hour)
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 500, 24*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 500, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab past the minimum size: %v", err)
 	}
@@ -823,14 +923,14 @@ func TestClaimPackedSlabAgePrefersFullSlab(t *testing.T) {
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
-	acc, share := newSlabTestFixture(t, db)
+	acc, share, wg := newSlabTestFixture(t, db)
 
 	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt"} {
 		plantBufferedFile(t, db, share, acc, name, 400, false)
 	}
 	backdateJobs(t, db, 48*time.Hour)
 
-	jobs, err := db.ClaimPackedSlab(share, slabSize, 0, 24*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}

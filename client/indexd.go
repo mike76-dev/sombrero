@@ -228,8 +228,14 @@ func (b *sdkBackend) Close() error {
 }
 
 // IndexdClient implements a Client for interacting with indexd.
+//
+// A client serves one (workgroup, share) connection and is authenticated as
+// that workgroup's indexd app. Its background workers therefore only claim
+// the jobs of its own workgroup and share: data claimed by any other client
+// would be pinned under an account its owners do not control.
 type IndexdClient struct {
 	share        string
+	workgroup    int
 	db           *stores.Database
 	backend      storageBackend
 	dataShards   uint8
@@ -257,20 +263,22 @@ type PackingOptions struct {
 	MaxAge time.Duration
 }
 
-// NewIndexdClient returns an initialized IndexdClient.
-func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, dataShards, parityShards uint8, packing PackingOptions) Client {
+// NewIndexdClient returns an initialized IndexdClient serving the given
+// workgroup's connection to the share.
+func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions) Client {
 	backend := &sdkBackend{
 		sdk:      sdkClient,
 		objCache: make(map[types.Hash256]sdk.Object),
 	}
-	return newIndexdClient(db, backend, share, dataShards, parityShards, packing)
+	return newIndexdClient(db, backend, share, workgroup, dataShards, parityShards, packing)
 }
 
 // newIndexdClient allows using a mock SDK for testing.
-func newIndexdClient(db *stores.Database, backend storageBackend, share string, dataShards, parityShards uint8, packing PackingOptions) Client {
+func newIndexdClient(db *stores.Database, backend storageBackend, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions) Client {
 	cc := make(chan struct{})
 	ic := &IndexdClient{
 		share:        share,
+		workgroup:    workgroup,
 		db:           db,
 		backend:      backend,
 		dataShards:   dataShards,
@@ -299,7 +307,8 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		}()
 	}
 
-	// Start the background packer. A single one is enough, and more than one
+	// Start the background packer. The claims are scoped to this client's
+	// workgroup and share, so this is the only packer for them: a second one
 	// would compete for the same buffered pieces, each ending up with too few
 	// of them to fill a slab.
 	ic.wg.Add(1)
@@ -700,7 +709,7 @@ func (ic *IndexdClient) Close() error {
 
 // processUpload checks if there is a complete slab and uploads it.
 func (ic *IndexdClient) processUpload(ctx context.Context) error {
-	job, err := ic.db.ClaimUploadJob(ic.slabSize)
+	job, err := ic.db.ClaimUploadJob(ic.share, ic.workgroup, ic.slabSize)
 	if err != nil {
 		return err
 	}
@@ -758,7 +767,7 @@ func packSlab(jobs []stores.UploadJob, size uint64) []byte {
 // processPackedSlab checks if the buffered pieces of several files add up to a
 // slab and, if so, uploads them together as a single packed slab.
 func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
-	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.slabSize, ic.minPackSize, ic.maxBufferAge)
+	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.workgroup, ic.slabSize, ic.minPackSize, ic.maxBufferAge)
 	if err != nil {
 		return err
 	}

@@ -362,9 +362,16 @@ func (db *Database) AddBufferedSlab(uploadID string, offset uint64, data []byte)
 	})
 }
 
-// ClaimUploadJob retrieves and locks the next pending upload job for processing.
-func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
+// ClaimUploadJob retrieves and locks the next pending upload job of the given
+// share and workgroup for processing. The claim is scoped that narrowly
+// because each (workgroup, share) connection uploads under its own indexd app
+// account with its own redundancy settings; a job claimed by any other
+// connection would pin the data under the wrong account.
+func (db *Database) ClaimUploadJob(share string, workgroup int, minSize uint64) (job UploadJob, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		// Only the queue entry is locked, so that the claim does not collide
+		// with unrelated work on the objects and their metadata. Deleting the
+		// entry is what makes the claim exclusive.
 		const query = `
 			WITH picked AS (
 				SELECT
@@ -374,9 +381,12 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 				FROM upload_jobs uj
 				JOIN metadata m ON m.id = uj.metadata_id
 				JOIN buffers b ON b.id = m.buffer_id
-				WHERE m.data_length >= $1
+				JOIN objects o ON o.id = m.object_id
+				WHERE o.share_name = $1
+					AND o.workgroup = $2
+					AND m.data_length >= $3
 				ORDER BY uj.created_at
-				FOR UPDATE SKIP LOCKED
+				FOR UPDATE OF uj SKIP LOCKED
 				LIMIT 1
 			),
 			deleted AS (
@@ -401,7 +411,7 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 		`
 
 		var data []byte
-		err := tx.QueryRow(ctx, query, minSize).Scan(
+		err := tx.QueryRow(ctx, query, share, workgroup, minSize).Scan(
 			&job.ID,
 			&job.UploadID,
 			&job.MetadataID,
@@ -430,10 +440,12 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 }
 
 // ClaimPackedSlab claims the buffers that together fill one slab of the given
-// share, so that they can be uploaded as a single packed slab. The buffers are
-// returned in the order in which they are to be concatenated, and the last one
-// commonly overshoots the slab boundary; it is up to the caller to only use as
-// much of it as fits.
+// share and workgroup, so that they can be uploaded as a single packed slab.
+// The claim is scoped to one workgroup because the slab is pinned under the
+// claiming connection's indexd app account, and files of another workgroup
+// must not end up owned by this one. The buffers are returned in the order in
+// which they are to be concatenated, and the last one commonly overshoots the
+// slab boundary; it is up to the caller to only use as much of it as fits.
 //
 // Only buffers belonging to finalized uploads are eligible. A buffer whose
 // upload is still in flight may yet be abandoned or replaced, which would leave
@@ -447,7 +459,7 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 //
 // ErrNoUploadJobs is returned when neither applies, in which case nothing is
 // claimed.
-func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxAge time.Duration) (jobs []UploadJob, err error) {
+func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSize uint64, maxAge time.Duration) (jobs []UploadJob, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		// A running total cannot be computed over a locking select, so the
 		// candidate prefix is cut at the slab boundary without locking first.
@@ -475,14 +487,15 @@ func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxA
 				JOIN metadata m ON m.id = uj.metadata_id
 				JOIN objects o ON o.id = m.object_id
 				WHERE o.share_name = $1
+					AND o.workgroup = $2
 					AND m.buffer_id IS NOT NULL
 					AND m.upload_id IS NULL
-					AND m.data_length < $2::BIGINT
+					AND m.data_length < $3::BIGINT
 			),
 			cutoff AS (
 				SELECT c.id
 				FROM candidate c
-				WHERE c.total - c.data_length < $2::BIGINT
+				WHERE c.total - c.data_length < $3::BIGINT
 			),
 			locked AS (
 				SELECT
@@ -500,7 +513,7 @@ func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxA
 				JOIN metadata m ON m.id = uj.metadata_id
 				WHERE m.buffer_id IS NOT NULL
 					AND m.upload_id IS NULL
-					AND m.data_length < $2::BIGINT
+					AND m.data_length < $3::BIGINT
 				FOR UPDATE OF uj SKIP LOCKED
 			),
 			running AS (
@@ -521,13 +534,13 @@ func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxA
 				SELECT r.*
 				FROM running r
 				CROSS JOIN available a
-				WHERE r.total - r.data_length < $2::BIGINT
+				WHERE r.total - r.data_length < $3::BIGINT
 					AND (
-						a.total >= $2::BIGINT
+						a.total >= $3::BIGINT
 						OR (
-							$3::DOUBLE PRECISION > 0
-							AND a.total >= $4::BIGINT
-							AND a.oldest <= NOW() - MAKE_INTERVAL(secs => $3::DOUBLE PRECISION)
+							$4::DOUBLE PRECISION > 0
+							AND a.total >= $5::BIGINT
+							AND a.oldest <= NOW() - MAKE_INTERVAL(secs => $4::DOUBLE PRECISION)
 						)
 					)
 			),
@@ -554,7 +567,7 @@ func (db *Database) ClaimPackedSlab(share string, slabSize, minSize uint64, maxA
 			ORDER BY p.object_id, p.obj_offset, p.id
 		`
 
-		rows, err := tx.Query(ctx, query, share, int64(slabSize), maxAge.Seconds(), int64(minSize))
+		rows, err := tx.Query(ctx, query, share, workgroup, int64(slabSize), maxAge.Seconds(), int64(minSize))
 		if err != nil {
 			return fmt.Errorf("failed to claim packed slab: %w", err)
 		}
