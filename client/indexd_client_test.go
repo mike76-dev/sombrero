@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1790,5 +1793,63 @@ func TestIndexdClient_PackedSlabFilesDeletedDuringUpload(t *testing.T) {
 	fb.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("want no objects left, got %d", n)
+	}
+}
+
+// syncBuffer collects log output written from several goroutines.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestIndexdClient_PackingOptionsWarning verifies that a minimum size which the
+// leftover data can never reach without filling a slab first is reported, since
+// it leaves the configured age with nothing to trigger on.
+func TestIndexdClient_PackingOptionsWarning(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	newTestShare(t, db, "testshare")
+	slabSize := uint64(proto.SectorSize)
+
+	tests := []struct {
+		name    string
+		packing PackingOptions
+		warn    bool
+	}{
+		{name: "default", packing: PackingOptions{}},
+		{name: "usable minimum", packing: PackingOptions{MinSize: slabSize / 2, MaxAge: time.Hour}},
+		{name: "minimum without an age", packing: PackingOptions{MinSize: slabSize * 2}},
+		{name: "minimum at the slab size", packing: PackingOptions{MinSize: slabSize, MaxAge: time.Hour}, warn: true},
+		{name: "minimum past the slab size", packing: PackingOptions{MinSize: slabSize * 2, MaxAge: time.Hour}, warn: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out syncBuffer
+			log.SetOutput(&out)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+			c := newIndexdClient(db, newFakeBackend(), "testshare", 1, 0, tc.packing)
+			_ = c.Close()
+
+			if got := strings.Contains(out.String(), "will never upload anything"); got != tc.warn {
+				t.Fatalf("want warning %v, got %q", tc.warn, out.String())
+			}
+		})
 	}
 }
