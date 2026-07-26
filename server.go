@@ -43,6 +43,7 @@ type server struct {
 	encryptData                 bool
 	compressionSupported        bool
 	chainedCompressionSupported bool
+	isMultiChannelCapable       bool
 
 	// Auxiliary fields.
 	listener        net.Listener

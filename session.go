@@ -56,6 +56,7 @@ type session struct {
 	decryptionKey             []byte
 	applicationKey            []byte
 	preauthIntegrityHashValue []byte
+	channelList               map[string]*channel
 
 	mu sync.Mutex
 }
@@ -75,6 +76,7 @@ func (s *server) registerSession(connection *connection, req smb2.SessionSetupRe
 			idleTime:         time.Now(),
 			openTable:        make(map[uint64]*open),
 			treeConnectTable: make(map[uint32]*treeConnect),
+			channelList:      make(map[string]*channel),
 		}
 		connection.mu.Lock()
 		connection.sessionTable[ss.sessionID] = ss

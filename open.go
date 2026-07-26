@@ -53,20 +53,23 @@ type upload struct {
 type open struct {
 	// The handle is what uniquely identifies the file within a share.
 	// It is deterministically derived from the path of the object.
-	handle                     uint64
-	fileID                     uint64
-	durableFileID              uint64
-	session                    *session
-	treeConnect                *treeConnect
-	connection                 *connection
-	grantedAccess              uint32
-	pathName                   string
-	resumeKey                  []byte
-	fileName                   string
-	createOptions              uint32
-	fileAttributes             uint32
-	createGuid                 [16]byte
-	applicationInstanceVersion [16]byte
+	handle                          uint64
+	fileID                          uint64
+	durableFileID                   uint64
+	session                         *session
+	treeConnect                     *treeConnect
+	connection                      *connection
+	grantedAccess                   uint32
+	pathName                        string
+	resumeKey                       []byte
+	fileName                        string
+	createOptions                   uint32
+	fileAttributes                  uint32
+	createGuid                      [16]byte
+	applicationInstanceVersion      [16]byte
+	channelSequence                 uint16
+	outstandingRequestCount         uint32
+	outstandingPreviousRequestCount uint32
 
 	created      time.Time
 	lastModified time.Time
