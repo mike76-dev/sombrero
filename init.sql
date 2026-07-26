@@ -158,3 +158,12 @@ CREATE TABLE upload_jobs (
     metadata_id BIGINT NOT NULL UNIQUE REFERENCES metadata(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE pending_unpins (
+    share_name TEXT NOT NULL,
+    workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
+    slab_key BYTEA NOT NULL,
+    CONSTRAINT pending_unpins_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
+    CONSTRAINT pending_unpins_unique UNIQUE (share_name, workgroup, slab_key),
+    CONSTRAINT pending_unpins_key_length CHECK (octet_length(slab_key) = 32)
+);

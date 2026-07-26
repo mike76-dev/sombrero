@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/api/app"
 	"go.sia.tech/indexd/slabs"
+	"lukechampine.com/frand"
 )
 
 type fakeBackend struct {
@@ -22,6 +26,10 @@ type fakeBackend struct {
 	objects    map[types.Hash256][]byte
 	nextID     uint64
 	uploadGate chan struct{}
+	uploadErr  error
+	deleteErr  error
+	uploads    int
+	deletes    int
 }
 
 func newFakeBackend() *fakeBackend {
@@ -48,6 +56,36 @@ func (fb *fakeBackend) allowUploads(n int) {
 	}
 }
 
+// failUploads makes every following upload fail with the given error, until it
+// is called again with nil.
+func (fb *fakeBackend) failUploads(err error) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	fb.uploadErr = err
+}
+
+// failDeletes makes every following object deletion fail with the given
+// error, until it is called again with nil.
+func (fb *fakeBackend) failDeletes(err error) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	fb.deleteErr = err
+}
+
+// uploadAttempts returns how often an upload has been started.
+func (fb *fakeBackend) uploadAttempts() int {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.uploads
+}
+
+// deleteCount returns how often an object has been deleted.
+func (fb *fakeBackend) deleteCount() int {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.deletes
+}
+
 func (fb *fakeBackend) nextKey() types.Hash256 {
 	var h types.Hash256
 	h[0] = byte(fb.nextID)
@@ -70,6 +108,10 @@ func (fb *fakeBackend) Account(ctx context.Context) (app.AccountResponse, error)
 }
 
 func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8) (types.Hash256, error) {
+	fb.mu.Lock()
+	fb.uploads++
+	fb.mu.Unlock()
+
 	if fb.uploadGate != nil {
 		select {
 		case <-ctx.Done():
@@ -80,6 +122,10 @@ func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, pari
 
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
+
+	if fb.uploadErr != nil {
+		return types.Hash256{}, fb.uploadErr
+	}
 
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -112,6 +158,10 @@ func (fb *fakeBackend) Download(ctx context.Context, key types.Hash256, offset, 
 func (fb *fakeBackend) DeleteObject(ctx context.Context, key types.Hash256) error {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
+	if fb.deleteErr != nil {
+		return fb.deleteErr
+	}
+	fb.deletes++
 	delete(fb.objects, key)
 	return nil
 }
@@ -149,7 +199,7 @@ func TestIndexdClient_FileLifecycle(t *testing.T) {
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := []byte("hello world")
@@ -448,7 +498,7 @@ func TestIndexdClient_RenameDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, 1, 0)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := makeLargeMixedContent()
@@ -503,7 +553,7 @@ func TestIndexdClient_RangedReads(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, 1, 0)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := makeLargeMixedContent()
@@ -577,7 +627,7 @@ func TestIndexdClient_DeleteDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, 1, 0)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := makeLargeMixedContent()
@@ -632,7 +682,7 @@ func TestIndexdClient_RenameDirectoryDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, 1, 0)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	dir := "docs"
@@ -698,7 +748,7 @@ func TestIndexdClient_OverwriteFileDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, 1, 0)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	origContent := []byte("old content")
@@ -833,6 +883,22 @@ func newTestAccountInWorkgroup(t *testing.T, db *stores.Database, username, pass
 	return got
 }
 
+// workgroupID returns the numeric ID of the account's workgroup, which the
+// client under test is bound to for claiming upload jobs.
+func workgroupID(t *testing.T, db *stores.Database, acc stores.Account) int {
+	t.Helper()
+
+	u, err := uuid.Parse(acc.Workgroup)
+	if err != nil {
+		t.Fatalf("parse workgroup UUID %q: %v", acc.Workgroup, err)
+	}
+	wg, err := db.FindWorkgroup(u)
+	if err != nil {
+		t.Fatalf("FindWorkgroup(%s): %v", u, err)
+	}
+	return wg.ID
+}
+
 func mustNotFound(t *testing.T, ctx context.Context, c Client, acc stores.Account, path string, size int) {
 	t.Helper()
 
@@ -861,7 +927,7 @@ func TestIndexdClient_CrossWorkgroupIsolation(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := []byte("alice's secret data")
@@ -900,7 +966,7 @@ func TestIndexdClient_WithinWorkgroupPrivacy(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := []byte("alice's private content")
@@ -960,7 +1026,7 @@ func TestIndexdClient_WithinWorkgroupPublicDirectory(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// Create a public directory directly via the store. This workgroup has no PublicDirs
@@ -1027,7 +1093,7 @@ func TestIndexdClient_MakeDirectoryAutoPublic(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// "shared" is in PublicDirs so MakeDirectory must create a non-private directory.
@@ -1091,7 +1157,7 @@ func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
 		grantFullAccess(t, db, share, alice)
 		grantFullAccess(t, db, share, bob)
 
-		c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 		t.Cleanup(func() { _ = c.Close() })
 
 		// "SHARED" should match "shared" in PublicDirs when case-insensitive.
@@ -1122,7 +1188,7 @@ func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
 		grantFullAccess(t, db, share, alice)
 		grantFullAccess(t, db, share, bob)
 
-		c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 		t.Cleanup(func() { _ = c.Close() })
 
 		// "SHARED" must not match "shared" in PublicDirs when case-sensitive.
@@ -1164,7 +1230,7 @@ func TestIndexdClient_PublicDirCrossWorkgroupIsolation(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
@@ -1224,7 +1290,7 @@ func TestIndexdClient_ReadOnlyPublicDir(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "readonly"); err != nil {
@@ -1290,7 +1356,7 @@ func TestIndexdClient_RewritablePublicDir(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
@@ -1338,7 +1404,7 @@ func TestIndexdClient_OverwriteOwnFile(t *testing.T) {
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	path := "file.txt"
@@ -1379,7 +1445,7 @@ func TestIndexdClient_UpdateWorkgroupRestampsDirectories(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// The workgroup has no public folders yet, so the directory starts private.
@@ -1447,7 +1513,7 @@ func TestIndexdClient_RenamePublicDirMovesAllContents(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// Alice sets up a public folder holding one of her files and a read-only
@@ -1494,7 +1560,7 @@ func TestIndexdClient_DuplicatePublicDirEntries(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, 1, 0)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "dup"); err != nil {
@@ -1527,4 +1593,754 @@ func TestIndexdClient_DuplicatePublicDirEntries(t *testing.T) {
 		t.Fatalf("Delete as bob: %v", err)
 	}
 	mustNotFound(t, ctx, c, alice, path, len(content))
+}
+
+// uploadBuffered uploads a file in one part and finalizes it. A file smaller
+// than a slab stays buffered in the database until it is packed.
+func uploadBuffered(t *testing.T, ctx context.Context, c Client, acc stores.Account, path string, data []byte) {
+	t.Helper()
+
+	uploadID, err := c.StartUpload(ctx, acc, path)
+	if err != nil {
+		t.Fatalf("StartUpload(%s): %v", path, err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(data), path, uploadID, 1, 0, uint64(len(data))); err != nil {
+		t.Fatalf("Write(%s): %v", path, err)
+	}
+	if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(%s): %v", path, err)
+	}
+}
+
+// waitForObjects waits until the backend holds the expected number of objects.
+func waitForObjects(t *testing.T, fb *fakeBackend, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		fb.mu.Lock()
+		n := len(fb.objects)
+		fb.mu.Unlock()
+
+		if n == want {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	t.Fatalf("timed out waiting for %d uploaded objects, got %d", want, n)
+}
+
+// TestIndexdClient_PackedSlab verifies that the pieces of several files that
+// are each too small for a slab of their own are uploaded together as one
+// packed slab, that every file still reads back whole, and that the slab is
+// only unpinned once the last of those files is deleted.
+func TestIndexdClient_PackedSlab(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// With a single data shard, three files of this size stay buffered on
+	// their own, while together they exceed one slab.
+	slabSize := uint64(proto.SectorSize)
+	size := slabSize/2 - slabSize/8
+
+	names := []string{"a.bin", "b.bin", "c.bin"}
+	contents := make(map[string][]byte, len(names))
+	for _, name := range names {
+		data := make([]byte, size)
+		frand.Read(data)
+		contents[name] = data
+		uploadBuffered(t, ctx, c, acc, name, data)
+	}
+
+	// The three of them make exactly one packed slab, with the tail of the
+	// last file left over.
+	waitForObjects(t, fb, 1)
+
+	fb.mu.Lock()
+	var packed []byte
+	for _, data := range fb.objects {
+		packed = data
+	}
+	fb.mu.Unlock()
+
+	if uint64(len(packed)) != slabSize {
+		t.Fatalf("want a packed slab of %d bytes, got %d", slabSize, len(packed))
+	}
+
+	// Every file reads back whole, including the one that spans the packed
+	// slab and the buffer holding its remainder.
+	for _, name := range names {
+		mustReadEquals(t, ctx, c, acc, name, contents[name])
+	}
+
+	// Deleting a file that shares the slab must not take the slab with it.
+	for _, name := range names[:2] {
+		if err := c.Delete(ctx, acc, name, false); err != nil {
+			t.Fatalf("Delete(%s): %v", name, err)
+		}
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("want the shared slab to survive, got %d objects", n)
+	}
+	mustReadEquals(t, ctx, c, acc, names[2], contents[names[2]])
+
+	// Once the last file that references it is gone, so is the slab.
+	if err := c.Delete(ctx, acc, names[2], false); err != nil {
+		t.Fatalf("Delete(%s): %v", names[2], err)
+	}
+	waitForObjects(t, fb, 0)
+}
+
+// TestIndexdClient_PackedSlabRangedReads verifies that partial reads of files
+// that share a packed slab return the right bytes. Their slices start at a
+// non-zero offset within the slab, so a ranged read has to clip on top of that
+// base rather than from the start of the slab.
+func TestIndexdClient_PackedSlabRangedReads(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// The same layout as TestIndexdClient_PackedSlab: three equal files, of
+	// which the first two fit into the slab whole, while the third is split
+	// between the slab and a buffer holding its tail.
+	slabSize := uint64(proto.SectorSize)
+	size := slabSize/2 - slabSize/8
+	inSlab := slabSize - 2*size // the part of the third file that made it into the slab
+
+	names := []string{"a.bin", "b.bin", "c.bin"}
+	contents := make(map[string][]byte, len(names))
+	for _, name := range names {
+		data := make([]byte, size)
+		frand.Read(data)
+		contents[name] = data
+		uploadBuffered(t, ctx, c, acc, name, data)
+	}
+
+	waitForObjects(t, fb, 1)
+
+	// Wait until the metadata points at the uploaded slab, otherwise the reads
+	// below would still be served from the buffers.
+	waitForMixedState(t, db, acc, share.Name, "a.bin", 1, 0)
+	waitForMixedState(t, db, acc, share.Name, "b.bin", 1, 0)
+	waitForMixedState(t, db, acc, share.Name, "c.bin", 1, 1)
+
+	// Make sure the packing came out as expected, so that the ranges below
+	// really do read from the middle of the slab.
+	if slices := mustGetMetadata(t, db, acc, share.Name, "b.bin", size); slices[0].Offset == 0 {
+		t.Fatal("b.bin should start at a non-zero offset within the packed slab")
+	}
+	if slices := mustGetMetadata(t, db, acc, share.Name, "c.bin", size); len(slices) != 2 || slices[0].Length != inSlab {
+		t.Fatalf("c.bin should be split into %d slab bytes and a buffered tail, got %d slices", inSlab, len(slices))
+	}
+
+	ranges := []struct {
+		path           string
+		offset, length uint64
+	}{
+		// The first file starts at the very beginning of the slab.
+		{"a.bin", 0, size},
+		{"a.bin", 0, 1},
+		{"a.bin", 100, 1000},
+		{"a.bin", size - 1, 1},
+
+		// The second one sits in the middle of the slab, so every read has to
+		// start from its own base offset.
+		{"b.bin", 0, size},
+		{"b.bin", 1, size - 2},
+		{"b.bin", 0, 1},
+		{"b.bin", size / 3, size / 3},
+		{"b.bin", size - 1, 1},
+
+		// The third one is split between the end of the slab and the buffer
+		// holding its tail.
+		{"c.bin", 0, size},
+		{"c.bin", 10, inSlab - 20},
+		{"c.bin", inSlab - 100, 200},
+		{"c.bin", inSlab, size - inSlab},
+		{"c.bin", inSlab + 5, 100},
+		{"c.bin", size - 1, 1},
+	}
+
+	for _, r := range ranges {
+		mustReadRange(t, ctx, c, acc, r.path, contents[r.path], r.offset, r.length)
+	}
+
+	// The same ranges must still hold once the other files that share the slab
+	// are gone and only the third one keeps it pinned.
+	for _, name := range names[:2] {
+		if err := c.Delete(ctx, acc, name, false); err != nil {
+			t.Fatalf("Delete(%s): %v", name, err)
+		}
+	}
+
+	for _, r := range ranges {
+		if r.path != "c.bin" {
+			continue
+		}
+		mustReadRange(t, ctx, c, acc, r.path, contents[r.path], r.offset, r.length)
+	}
+}
+
+func mustGetMetadata(t *testing.T, db *stores.Database, acc stores.Account, share, path string, size uint64) []stores.SlabSlice {
+	t.Helper()
+
+	slices, err := db.GetMetadata(acc, share, path, 0, size)
+	if err != nil {
+		t.Fatalf("GetMetadata(%s): %v", path, err)
+	}
+	if len(slices) == 0 {
+		t.Fatalf("GetMetadata(%s): no slices", path)
+	}
+
+	return slices
+}
+
+// TestIndexdClient_PackedSlabUploadFailure verifies that a packed slab whose
+// upload fails puts its pieces back in the queue, so that they are packed again
+// once the storage backend recovers.
+func TestIndexdClient_PackedSlabUploadFailure(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	fb.failUploads(errors.New("backend is down"))
+
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	slabSize := uint64(proto.SectorSize)
+	size := slabSize/2 - slabSize/8
+
+	names := []string{"a.bin", "b.bin", "c.bin"}
+	contents := make(map[string][]byte, len(names))
+	for _, name := range names {
+		data := make([]byte, size)
+		frand.Read(data)
+		contents[name] = data
+		uploadBuffered(t, ctx, c, acc, name, data)
+	}
+
+	// Wait for the packer to have tried and failed at least once.
+	deadline := time.Now().Add(10 * time.Second)
+	for fb.uploadAttempts() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the packer to attempt an upload")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The files are readable throughout, straight from their buffers.
+	for _, name := range names {
+		mustReadEquals(t, ctx, c, acc, name, contents[name])
+	}
+
+	fb.failUploads(nil)
+	waitForObjects(t, fb, 1)
+
+	for _, name := range names {
+		mustReadEquals(t, ctx, c, acc, name, contents[name])
+	}
+}
+
+// startStuckUpload brings up a client whose backend blocks in the middle of an
+// upload, and returns once a worker is in there. Closing such a client is what
+// the two tests below are about, so none of them registers a cleanup that
+// closes it: a Close that never returns would hang the whole test binary,
+// which is the very failure being tested. A leaked worker costs nothing.
+func startStuckUpload(t *testing.T, ctx context.Context, db *stores.Database, acc stores.Account, share, path string) (Client, *fakeBackend, []byte) {
+	t.Helper()
+
+	fb := newGatedFakeBackend()
+	c := newIndexdClient(db, fb, share, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+
+	// A full slab is uploaded as it is, without waiting to be packed.
+	content := make([]byte, proto.SectorSize)
+	frand.Read(content)
+	uploadBuffered(t, ctx, c, acc, path, content)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for fb.uploadAttempts() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the upload to start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	return c, fb, content
+}
+
+// mustClose closes the client in the background and fails if it does not return
+// within the given time.
+func mustClose(t *testing.T, c Client, within time.Duration) {
+	t.Helper()
+
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(within):
+		t.Fatalf("Close did not return within %s", within)
+	}
+}
+
+// TestIndexdClient_CloseDrainsUpload verifies that closing a client lets an
+// upload that is already in flight finish, so that the slab it is carrying is
+// recorded rather than left behind unpinned.
+func TestIndexdClient_CloseDrainsUpload(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	c, fb, content := startStuckUpload(t, ctx, db, acc, share.Name, "big.bin")
+
+	// Let the upload through just after the shutdown has begun, well within
+	// the drain window. Close has to wait for it rather than cancel it.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		fb.allowUploads(1)
+	}()
+
+	mustClose(t, c, 10*time.Second)
+
+	slices := mustGetMetadata(t, db, acc, share.Name, "big.bin", uint64(len(content)))
+	if len(slices) != 1 || slices[0].Key == (types.Hash256{}) {
+		t.Fatalf("want the drained upload recorded as one slab, got %d slice(s)", len(slices))
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("want 1 uploaded object, got %d", n)
+	}
+}
+
+// TestIndexdClient_CloseCancelsStuckUpload verifies that an upload that does not
+// come back within the drain window does not hold up the shutdown: it is
+// cancelled, and the piece it was carrying goes back into the queue for the
+// next run to pick up.
+func TestIndexdClient_CloseCancelsStuckUpload(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	c, fb, content := startStuckUpload(t, ctx, db, acc, share.Name, "big.bin")
+
+	// The gate is never opened, so only the cancellation can end the upload.
+	// The drain window is shortened to keep the test quick; the client is not
+	// serving anyone else by this point, so nothing else observes it.
+	c.(*IndexdClient).drainTimeout = 200 * time.Millisecond
+
+	mustClose(t, c, 10*time.Second)
+
+	// The cancelled upload left the file in its buffer rather than losing it,
+	// so a later run can upload it again.
+	slices := mustGetMetadata(t, db, acc, share.Name, "big.bin", uint64(len(content)))
+	for _, s := range slices {
+		if s.Key != (types.Hash256{}) {
+			t.Fatal("the cancelled upload should not have been recorded as a slab")
+		}
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("want no uploaded objects, got %d", n)
+	}
+}
+
+// TestIndexdClient_PackedSlabFilesDeletedDuringUpload verifies that a packed
+// slab whose every file is deleted while it is being uploaded does not stay
+// pinned, since nothing references it by the time it lands.
+func TestIndexdClient_PackedSlabFilesDeletedDuringUpload(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newGatedFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	slabSize := uint64(proto.SectorSize)
+	size := slabSize/2 - slabSize/8
+
+	names := []string{"a.bin", "b.bin", "c.bin"}
+	for _, name := range names {
+		data := make([]byte, size)
+		frand.Read(data)
+		uploadBuffered(t, ctx, c, acc, name, data)
+	}
+
+	// Hold the packer in the backend, its pieces already claimed.
+	deadline := time.Now().Add(10 * time.Second)
+	for fb.uploadAttempts() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the packer to start an upload")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for _, name := range names {
+		if err := c.Delete(ctx, acc, name, false); err != nil {
+			t.Fatalf("Delete(%s): %v", name, err)
+		}
+	}
+
+	// Let the slab land on a share where none of its files exist any more.
+	fb.allowUploads(1)
+
+	deadline = time.Now().Add(10 * time.Second)
+	for fb.deleteCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the orphaned packed slab to be deleted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	fb.mu.Lock()
+	n := len(fb.objects)
+	fb.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("want no objects left, got %d", n)
+	}
+}
+
+// syncBuffer collects log output written from several goroutines.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestIndexdClient_PackingOptionsWarning verifies that a minimum size which the
+// leftover data can never reach without filling a slab first is reported, since
+// it leaves the configured age with nothing to trigger on.
+func TestIndexdClient_PackingOptionsWarning(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	newTestShare(t, db, "testshare")
+	slabSize := uint64(proto.SectorSize)
+
+	tests := []struct {
+		name    string
+		packing PackingOptions
+		warn    bool
+	}{
+		{name: "default", packing: PackingOptions{}},
+		{name: "usable minimum", packing: PackingOptions{MinSize: slabSize / 2, MaxAge: time.Hour}},
+		{name: "minimum without an age", packing: PackingOptions{MinSize: slabSize * 2}},
+		{name: "minimum at the slab size", packing: PackingOptions{MinSize: slabSize, MaxAge: time.Hour}, warn: true},
+		{name: "minimum past the slab size", packing: PackingOptions{MinSize: slabSize * 2, MaxAge: time.Hour}, warn: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out syncBuffer
+			log.SetOutput(&out)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+			c := newIndexdClient(db, newFakeBackend(), "testshare", 1, 1, 0, tc.packing, false)
+			_ = c.Close()
+
+			if got := strings.Contains(out.String(), "will never upload anything"); got != tc.warn {
+				t.Fatalf("want warning %v, got %q", tc.warn, out.String())
+			}
+		})
+	}
+}
+
+// TestCompleteWithRetry verifies that recording an uploaded slab is retried on
+// transient failures, while a definite ErrNotFound is returned right away. A
+// batch that fell out of the queue at claim time depends on this to not be
+// abandoned over a database hiccup.
+func TestCompleteWithRetry(t *testing.T) {
+	t.Run("first try", func(t *testing.T) {
+		var calls int
+		if err := completeWithRetry(func() error {
+			calls++
+			return nil
+		}); err != nil || calls != 1 {
+			t.Fatalf("want success after 1 call, got err %v after %d calls", err, calls)
+		}
+	})
+
+	t.Run("not found is definite", func(t *testing.T) {
+		var calls int
+		if err := completeWithRetry(func() error {
+			calls++
+			return stores.ErrNotFound
+		}); !errors.Is(err, stores.ErrNotFound) || calls != 1 {
+			t.Fatalf("want ErrNotFound after 1 call, got err %v after %d calls", err, calls)
+		}
+	})
+
+	t.Run("transient failure", func(t *testing.T) {
+		var calls int
+		if err := completeWithRetry(func() error {
+			calls++
+			if calls == 1 {
+				return errors.New("hiccup")
+			}
+			return nil
+		}); err != nil || calls != 2 {
+			t.Fatalf("want success after 2 calls, got err %v after %d calls", err, calls)
+		}
+	})
+
+	t.Run("persistent failure", func(t *testing.T) {
+		fail := errors.New("database is down")
+		var calls int
+		if err := completeWithRetry(func() error {
+			calls++
+			return fail
+		}); !errors.Is(err, fail) || calls != completionAttempts {
+			t.Fatalf("want %v after %d calls, got err %v after %d calls", fail, completionAttempts, err, calls)
+		}
+	})
+}
+
+// TestIndexdClient_LateCompletionSharedSlab verifies that a slab whose own
+// files disappeared during the upload is only unpinned when no other file
+// references its key. Slabs are content-addressed, so a duplicate file may
+// legitimately hold the key of an upload whose file is already gone, and
+// unpinning it then would destroy that file's data.
+func TestIndexdClient_LateCompletionSharedSlab(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+	ic := c.(*IndexdClient)
+
+	// Upload a full-slab file and wait until its slab key is recorded.
+	content := make([]byte, proto.SectorSize)
+	frand.Read(content)
+	uploadBuffered(t, ctx, c, acc, "a.bin", content)
+	key := waitForSlabKey(t, db, acc, share.Name, "a.bin", uint64(len(content)))
+
+	// A late completion of some other upload that produced the same key has
+	// to leave the slab alone: a.bin references it.
+	ic.dropSlabIfUnreferenced(ctx, key)
+	if n := fb.deleteCount(); n != 0 {
+		t.Fatalf("dropped a slab that a live file references")
+	}
+	mustReadEquals(t, ctx, c, acc, "a.bin", content)
+
+	// A key that no file references is deleted as before.
+	orphan, err := fb.Upload(ctx, bytes.NewReader([]byte("orphaned")), 1, 0)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	ic.dropSlabIfUnreferenced(ctx, orphan)
+	if n := fb.deleteCount(); n != 1 {
+		t.Fatalf("want the orphaned slab deleted, got %d deletions", n)
+	}
+}
+
+// waitForSlabKey waits until the file's single slab has been uploaded and
+// recorded, and returns its key.
+func waitForSlabKey(t *testing.T, db *stores.Database, acc stores.Account, share, path string, size uint64) types.Hash256 {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		slabs, err := db.GetMetadata(acc, share, path, 0, size)
+		if err == nil && len(slabs) == 1 && slabs[0].Key != (types.Hash256{}) {
+			return slabs[0].Key
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the slab of %s to be recorded", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestIndexdClient_UnpinRetry verifies that a slab whose unpin could not reach
+// the storage backend stays staged and is unpinned by the periodic retry, and
+// that a staged slab whose key a live file references again is unstaged
+// instead of unpinned.
+func TestIndexdClient_UnpinRetry(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	wgID := workgroupID(t, db, acc)
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+	ic := c.(*IndexdClient)
+
+	content := make([]byte, proto.SectorSize)
+	frand.Read(content)
+	uploadBuffered(t, ctx, c, acc, "a.bin", content)
+	waitForSlabKey(t, db, acc, share.Name, "a.bin", uint64(len(content)))
+
+	// The backend is down when the file is deleted: the file is gone, but
+	// its slab stays pinned and staged for retry.
+	fb.failDeletes(errors.New("backend is down"))
+	if err := c.Delete(ctx, acc, "a.bin", false); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	waitForObjects(t, fb, 1)
+	staged, err := db.PendingUnpins(share.Name, wgID)
+	if err != nil || len(staged) != 1 {
+		t.Fatalf("want 1 staged unpin, got %v, %v", staged, err)
+	}
+
+	// Once the backend is back, the periodic retry unpins and confirms.
+	fb.failDeletes(nil)
+	ic.retryPendingUnpins(ctx)
+	waitForObjects(t, fb, 0)
+	if staged, err := db.PendingUnpins(share.Name, wgID); err != nil || len(staged) != 0 {
+		t.Fatalf("want no staged unpins left, got %v, %v", staged, err)
+	}
+
+	// A staged slab whose key a live file references is unstaged untouched.
+	content2 := make([]byte, proto.SectorSize)
+	frand.Read(content2)
+	uploadBuffered(t, ctx, c, acc, "b.bin", content2)
+	key := waitForSlabKey(t, db, acc, share.Name, "b.bin", uint64(len(content2)))
+
+	if err := db.StageUnpin(share.Name, wgID, key); err != nil {
+		t.Fatalf("StageUnpin: %v", err)
+	}
+	ic.retryPendingUnpins(ctx)
+	if staged, err := db.PendingUnpins(share.Name, wgID); err != nil || len(staged) != 0 {
+		t.Fatalf("want the referenced slab unstaged, got %v, %v", staged, err)
+	}
+	mustReadEquals(t, ctx, c, acc, "b.bin", content2)
+}
+
+// TestIndexdClient_StrandedPieceRecovery verifies that a piece claimed by a
+// previous incarnation of the process, which died before completing it, is
+// requeued by the janitor and then uploaded normally. The piece is only
+// requeued on the second sweep that sees it stranded, so that a claim that is
+// merely slow is not queued a second time.
+func TestIndexdClient_StrandedPieceRecovery(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+	wgID := workgroupID(t, db, acc)
+
+	// The previous incarnation of the process buffers a full-slab file,
+	// claims it, and dies before completing the upload.
+	content := make([]byte, proto.SectorSize)
+	frand.Read(content)
+	uploadID, err := db.CreateUpload(acc, share.Name, "a.bin")
+	if err != nil {
+		t.Fatalf("CreateUpload: %v", err)
+	}
+	if err := db.AddBufferedSlab(uploadID, 0, content); err != nil {
+		t.Fatalf("AddBufferedSlab: %v", err)
+	}
+	if err := db.FinalizeUpload(uploadID); err != nil {
+		t.Fatalf("FinalizeUpload: %v", err)
+	}
+	if _, err := db.ClaimUploadJob(share.Name, wgID, uint64(proto.SectorSize)); err != nil {
+		t.Fatalf("ClaimUploadJob: %v", err)
+	}
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+	ic := c.(*IndexdClient)
+
+	// The first sweep only takes note of the stranded piece.
+	suspects := ic.requeueStrandedPieces(nil)
+	if len(suspects) != 1 {
+		t.Fatalf("want 1 suspect after the first sweep, got %d", len(suspects))
+	}
+	if ids, err := db.StrandedPieces(share.Name, wgID); err != nil || len(ids) != 1 {
+		t.Fatalf("want the piece still stranded after the first sweep, got %v, %v", ids, err)
+	}
+
+	// The second sweep requeues it, and an upload worker takes it from there.
+	ic.requeueStrandedPieces(suspects)
+	waitForSlabKey(t, db, acc, share.Name, "a.bin", uint64(len(content)))
+	mustReadEquals(t, ctx, c, acc, "a.bin", content)
 }

@@ -34,6 +34,42 @@ const uploadWorkers = 3
 // the slab size is smaller than the read chunk size (low dataShards).
 const slabDownloadThreads = 4
 
+// packInterval is how often the packer looks for buffered pieces to combine on
+// its own. It only serves as a fallback: an upload that leaves a piece behind
+// signals the packer directly.
+const packInterval = time.Minute
+
+// shutdownDrainTimeout is how long Close lets the background workers finish
+// what they already have in flight before cutting them off. A backend call that
+// is cut short after it has done its work leaves a slab behind — uploaded but
+// never pinned — so shutdown gives it a window to come back on its own. The
+// cancellation that follows is what guarantees that Close returns at all.
+const shutdownDrainTimeout = 30 * time.Second
+
+// completionAttempts and completionRetryDelay bound the retries of recording
+// an uploaded slab in the database. By that point the slab has been paid for
+// and the claimed pieces are no longer in the queue, so completion is worth a
+// few attempts before the pieces are put back.
+const (
+	completionAttempts   = 3
+	completionRetryDelay = time.Second
+)
+
+// completeWithRetry retries the given completion on failures, so that a batch
+// whose slab has already been uploaded is not abandoned over a database
+// hiccup. ErrNotFound is not retried: it is a definite answer, not a failure.
+func completeWithRetry(complete func() error) (err error) {
+	for i := range completionAttempts {
+		if i > 0 {
+			time.Sleep(completionRetryDelay)
+		}
+		if err = complete(); err == nil || errors.Is(err, stores.ErrNotFound) {
+			return err
+		}
+	}
+	return err
+}
+
 // storageBackend is the minimal interface for `indexd` SDK.
 type storageBackend interface {
 	Account(ctx context.Context) (app.AccountResponse, error)
@@ -199,37 +235,122 @@ func (b *sdkBackend) Close() error {
 }
 
 // IndexdClient implements a Client for interacting with indexd.
+//
+// A client serves one (workgroup, share) connection and is authenticated as
+// that workgroup's indexd app. Its background workers therefore only claim
+// the jobs of its own workgroup and share: data claimed by any other client
+// would be pinned under an account its owners do not control.
 type IndexdClient struct {
 	share        string
+	workgroup    int
 	db           *stores.Database
 	backend      storageBackend
 	dataShards   uint8
 	parityShards uint8
-	closeChan    chan struct{}
+	slabSize     uint64
+	minPackSize  uint64
+	maxBufferAge time.Duration
+	debug        bool
+
+	// Shutdown happens in two stages. Close closes drainChan, on which the
+	// background loops stop taking on new work, and cancels ctx once they
+	// have had shutdownDrainTimeout to finish what is still in flight. A
+	// backend call aborted by that cancellation fails like any other, so the
+	// piece it was uploading is requeued rather than lost.
+	ctx          context.Context
+	cancel       context.CancelFunc
+	drainChan    chan struct{}
+	drainTimeout time.Duration
+	closeOnce    sync.Once
 	jobsChan     chan struct{}
+	packChan     chan struct{}
 	wg           sync.WaitGroup
+
+	// claimed holds the metadata IDs of the pieces this client has claimed
+	// and not yet completed or requeued, so that the janitor for stranded
+	// pieces does not mistake work in progress for a leftover of a crash.
+	claimedMu sync.Mutex
+	claimed   map[uint64]struct{}
 }
 
-// NewIndexdClient returns an initialized IndexdClient.
-func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, dataShards, parityShards uint8) Client {
+// markClaimed records the given pieces as being worked on.
+func (ic *IndexdClient) markClaimed(ids ...uint64) {
+	ic.claimedMu.Lock()
+	defer ic.claimedMu.Unlock()
+	for _, id := range ids {
+		ic.claimed[id] = struct{}{}
+	}
+}
+
+// unmarkClaimed removes the given pieces from the work in progress.
+func (ic *IndexdClient) unmarkClaimed(ids ...uint64) {
+	ic.claimedMu.Lock()
+	defer ic.claimedMu.Unlock()
+	for _, id := range ids {
+		delete(ic.claimed, id)
+	}
+}
+
+// isClaimed reports whether the piece is being worked on right now.
+func (ic *IndexdClient) isClaimed(id uint64) bool {
+	ic.claimedMu.Lock()
+	defer ic.claimedMu.Unlock()
+	_, ok := ic.claimed[id]
+	return ok
+}
+
+// PackingOptions describes when the data that does not fill a slab is uploaded
+// anyway, instead of waiting to be packed together with the data of other
+// files. The zero value keeps it waiting for as long as that takes, which is
+// what makes every uploaded slab a full one.
+type PackingOptions struct {
+	// MinSize is the least amount of leftover data, in bytes, that an
+	// incomplete slab is uploaded with. Zero puts no lower bound on it.
+	MinSize uint64
+
+	// MaxAge is how long the leftover data may wait. Zero means forever, in
+	// which case MinSize has no effect either.
+	MaxAge time.Duration
+}
+
+// NewIndexdClient returns an initialized IndexdClient serving the given
+// workgroup's connection to the share.
+func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, debug bool) Client {
 	backend := &sdkBackend{
 		sdk:      sdkClient,
 		objCache: make(map[types.Hash256]sdk.Object),
 	}
-	return newIndexdClient(db, backend, share, dataShards, parityShards)
+	return newIndexdClient(db, backend, share, workgroup, dataShards, parityShards, packing, debug)
 }
 
 // newIndexdClient allows using a mock SDK for testing.
-func newIndexdClient(db *stores.Database, backend storageBackend, share string, dataShards, parityShards uint8) Client {
-	cc := make(chan struct{})
+func newIndexdClient(db *stores.Database, backend storageBackend, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, debug bool) Client {
+	ctx, cancel := context.WithCancel(context.Background())
 	ic := &IndexdClient{
 		share:        share,
+		workgroup:    workgroup,
 		db:           db,
 		backend:      backend,
 		dataShards:   dataShards,
 		parityShards: parityShards,
-		closeChan:    cc,
+		slabSize:     uint64(dataShards) * proto.SectorSize,
+		minPackSize:  packing.MinSize,
+		maxBufferAge: packing.MaxAge,
+		debug:        debug,
+		ctx:          ctx,
+		cancel:       cancel,
+		drainChan:    make(chan struct{}),
+		drainTimeout: shutdownDrainTimeout,
 		jobsChan:     make(chan struct{}, uploadWorkers),
+		packChan:     make(chan struct{}, 1),
+		claimed:      make(map[uint64]struct{}),
+	}
+
+	// Leftover data that reaches the slab size is uploaded as a full slab
+	// before it can ever age, so a minimum at or above that size leaves the
+	// age with nothing left to trigger on.
+	if ic.maxBufferAge > 0 && ic.minPackSize >= ic.slabSize {
+		log.Printf("share %s: minPackedSlabSize of %d is not below the slab size of %d, so maxBufferAge of %s will never upload anything", share, ic.minPackSize, ic.slabSize, ic.maxBufferAge)
 	}
 
 	// Start background upload threads.
@@ -237,15 +358,25 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		ic.wg.Add(1)
 		go func() {
 			defer ic.wg.Done()
-			ic.processUploads(ic.closeChan)
+			ic.processUploads(ic.ctx)
 		}()
 	}
+
+	// Start the background packer. The claims are scoped to this client's
+	// workgroup and share, so this is the only packer for them: a second one
+	// would compete for the same buffered pieces, each ending up with too few
+	// of them to fill a slab.
+	ic.wg.Add(1)
+	go func() {
+		defer ic.wg.Done()
+		ic.packSlabs(ic.ctx)
+	}()
 
 	// Start background cleanup of stale upload jobs.
 	ic.wg.Add(1)
 	go func() {
 		defer ic.wg.Done()
-		ic.cleanupUploadJobs(ic.closeChan)
+		ic.cleanupUploadJobs(ic.ctx)
 	}()
 
 	return ic
@@ -475,15 +606,16 @@ func (ic *IndexdClient) AbortUpload(ctx context.Context, path string, uploadID s
 	if err != nil {
 		return fmt.Errorf("couldn't abort upload: %v", err)
 	}
-
-	for _, key := range slabs {
-		if err := ic.backend.DeleteObject(ctx, key); err != nil {
-			return fmt.Errorf("couldn't delete slab: %v", err)
-		}
+	if len(slabs) == 0 {
+		return nil
 	}
 
-	if err := ic.backend.PruneSlabs(ctx); err != nil {
-		return fmt.Errorf("couldn't prune slabs: %v", err)
+	// The slabs are staged in the database, so a failure here only delays
+	// their unpinning until the periodic retry.
+	if ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after aborting upload of %s: %v", path, err)
+		}
 	}
 
 	return nil
@@ -497,6 +629,13 @@ func (ic *IndexdClient) FinishUpload(ctx context.Context, path string, uploadID 
 
 	if err := ic.db.FinalizeUpload(uploadID); err != nil {
 		return fmt.Errorf("couldn't finalize upload: %v", err)
+	}
+
+	// Finalizing is what makes a piece that is left buffered eligible for
+	// packing, so this is the point at which the packer has new work.
+	select {
+	case ic.packChan <- struct{}{}:
+	default:
 	}
 
 	return nil
@@ -529,28 +668,33 @@ func (ic *IndexdClient) Write(ctx context.Context, r io.Reader, path string, upl
 	return
 }
 
-// Delete deletes a file or a directory.
+// Delete deletes a file or a directory. Only the slabs that are left
+// unreferenced by the deletion are unpinned; a slab shared with a surviving
+// file stays in place.
 func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path string, batch bool) (err error) {
-	slabs, err := ic.db.ListSlabs(acc, ic.share, path)
+	var slabs []types.Hash256
+	if batch {
+		slabs, err = ic.db.DeleteDirectory(acc, ic.share, path)
+	} else {
+		slabs, err = ic.db.DeleteFile(acc, ic.share, path)
+	}
 	if err != nil {
 		return err
 	}
 
-	for _, key := range slabs {
-		if err := ic.backend.DeleteObject(ctx, key); err != nil {
-			log.Printf("failed to delete slab %s from %s", key, path)
+	if len(slabs) == 0 {
+		return nil
+	}
+
+	// The slabs are staged in the database, so a failure here only delays
+	// their unpinning until the periodic retry.
+	if ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after deleting %s: %v", path, err)
 		}
 	}
 
-	if err := ic.backend.PruneSlabs(ctx); err != nil {
-		return fmt.Errorf("couldn't prune slabs: %v", err)
-	}
-
-	if batch {
-		return ic.db.DeleteDirectory(acc, ic.share, path)
-	}
-
-	return ic.db.DeleteFile(acc, ic.share, path)
+	return nil
 }
 
 // MakeDirectory creates a new directory in the specified path.
@@ -610,19 +754,173 @@ func (ic *IndexdClient) DeleteAll(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the client and releases all resources.
+// Close closes the client and releases all resources. The background workers
+// are first asked to stop taking on new work and given shutdownDrainTimeout to
+// finish what they still have in flight; whatever is left running by then is
+// cancelled, so that Close always returns.
 func (ic *IndexdClient) Close() error {
-	close(ic.closeChan)
-	ic.wg.Wait()
+	ic.closeOnce.Do(func() { close(ic.drainChan) })
+
+	drained := make(chan struct{})
+	go func() {
+		ic.wg.Wait()
+		close(drained)
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(ic.drainTimeout):
+		ic.cancel()
+		<-drained
+	}
+
+	// Also releases the context of a shutdown that drained in time.
+	ic.cancel()
+
 	return ic.backend.Close()
+}
+
+// unpinSlabs deletes the given slabs, which have been staged as pending
+// unpins, from the storage backend and confirms each successful one, so that
+// only the failed ones stay staged for the periodic retry. It reports whether
+// anything was unpinned, in which case the caller wants to prune.
+func (ic *IndexdClient) unpinSlabs(ctx context.Context, keys []types.Hash256) bool {
+	var dropped bool
+	for _, key := range keys {
+		if err := ic.backend.DeleteObject(ctx, key); err != nil {
+			log.Printf("failed to delete slab %s, leaving it staged for retry: %v", key, err)
+			continue
+		}
+		dropped = true
+		if err := ic.db.UnstageUnpin(ic.share, ic.workgroup, key); err != nil {
+			log.Printf("failed to confirm unpin of slab %s: %v", key, err)
+		}
+	}
+
+	return dropped
+}
+
+// retryPendingUnpins retries the unpins that could not be confirmed earlier,
+// e.g. because the storage backend was unreachable or the process stopped in
+// between. A slab whose key has become referenced again in the meantime — an
+// upload of the same content is assigned the same key — is unstaged instead
+// of unpinned.
+func (ic *IndexdClient) retryPendingUnpins(ctx context.Context) {
+	keys, err := ic.db.PendingUnpins(ic.share, ic.workgroup)
+	if err != nil {
+		log.Printf("failed to list pending unpins: %v", err)
+		return
+	}
+
+	pending := keys[:0]
+	for _, key := range keys {
+		referenced, err := ic.db.SlabReferenced(key)
+		if err != nil {
+			log.Printf("failed to check references of slab %s: %v", key, err)
+			continue
+		}
+		if referenced {
+			if err := ic.db.UnstageUnpin(ic.share, ic.workgroup, key); err != nil {
+				log.Printf("failed to unstage referenced slab %s: %v", key, err)
+			}
+			continue
+		}
+		pending = append(pending, key)
+	}
+
+	if len(pending) == 0 {
+		return
+	}
+	if ic.unpinSlabs(ctx, pending) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after retrying unpins: %v", err)
+		}
+	}
+}
+
+// requeueStrandedPieces requeues the pieces whose claim never completed,
+// which is what a process stop between claiming and completing leaves behind.
+// suspects carries the pieces that were already stranded on the previous
+// sweep, and only those are requeued: a claim that is merely slow gets a full
+// sweep interval to finish, and the pieces this client is working on right
+// now are skipped outright. It returns the suspects for the next sweep.
+func (ic *IndexdClient) requeueStrandedPieces(suspects map[uint64]struct{}) map[uint64]struct{} {
+	ids, err := ic.db.StrandedPieces(ic.share, ic.workgroup)
+	if err != nil {
+		log.Printf("failed to list stranded pieces: %v", err)
+		return suspects
+	}
+
+	next := make(map[uint64]struct{}, len(ids))
+	var confirmed []uint64
+	for _, id := range ids {
+		if ic.isClaimed(id) {
+			continue
+		}
+		next[id] = struct{}{}
+		if _, ok := suspects[id]; ok {
+			confirmed = append(confirmed, id)
+		}
+	}
+
+	if len(confirmed) == 0 {
+		return next
+	}
+
+	if err := ic.db.RequeueStrandedPieces(confirmed); err != nil {
+		log.Printf("failed to requeue stranded pieces: %v", err)
+		return next
+	}
+	log.Printf("share %s: requeued %d stranded pieces", ic.share, len(confirmed))
+
+	// The requeued pieces are new work for the workers and the packer.
+	select {
+	case ic.jobsChan <- struct{}{}:
+	default:
+	}
+	select {
+	case ic.packChan <- struct{}{}:
+	default:
+	}
+
+	return next
+}
+
+// dropSlabIfUnreferenced unpins the given slab unless a file still references
+// it. A slab whose completion found none of its files left is usually
+// orphaned, but slabs are content-addressed: another file of the same content
+// may share the key, and unpinning it would destroy that file's data. When in
+// doubt, the slab is left pinned, which at worst leaks storage.
+func (ic *IndexdClient) dropSlabIfUnreferenced(ctx context.Context, key types.Hash256) {
+	referenced, err := ic.db.SlabReferenced(key)
+	if err != nil {
+		log.Printf("failed to check references of slab %s, leaving it pinned: %v", key, err)
+		return
+	}
+	if referenced {
+		return
+	}
+
+	// Staging first makes the unpin survive a failure to reach the backend:
+	// the slab stays listed until the periodic retry confirms it.
+	if err := ic.db.StageUnpin(ic.share, ic.workgroup, key); err != nil {
+		log.Printf("failed to stage unpin of slab %s: %v", key, err)
+	}
+	if ic.unpinSlabs(ctx, []types.Hash256{key}) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after late completion for %s: %v", key, err)
+		}
+	}
 }
 
 // processUpload checks if there is a complete slab and uploads it.
 func (ic *IndexdClient) processUpload(ctx context.Context) error {
-	job, err := ic.db.ClaimUploadJob(uint64(ic.dataShards) * proto.SectorSize)
+	job, err := ic.db.ClaimUploadJob(ic.share, ic.workgroup, ic.slabSize)
 	if err != nil {
 		return err
 	}
+	ic.markClaimed(job.MetadataID)
+	defer ic.unmarkClaimed(job.MetadataID)
 
 	key, err := ic.backend.Upload(ctx, bytes.NewReader(job.Data), ic.dataShards, ic.parityShards)
 	if err != nil {
@@ -630,34 +928,197 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 		return fmt.Errorf("couldn't upload slab: %v", err)
 	}
 
-	if err := ic.db.CompleteUploadJob(job.MetadataID, job.BufferID, key); err != nil {
+	err = completeWithRetry(func() error {
+		return ic.db.CompleteUploadJob(job.MetadataID, job.BufferID, key)
+	})
+	if err != nil {
 		if errors.Is(err, stores.ErrNotFound) {
 			// The file has likely been deleted.
-			if derr := ic.backend.DeleteObject(ctx, key); derr != nil {
-				log.Printf("failed to delete orphaned uploaded slab %s after late completion: %v", key, derr)
-			} else if perr := ic.backend.PruneSlabs(ctx); perr != nil {
-				log.Printf("failed to prune slabs after late completion for %s: %v", key, perr)
-			}
+			ic.dropSlabIfUnreferenced(ctx, key)
 			return nil
 		}
-		return fmt.Errorf("couldn't complete upload job: %v", err)
+
+		// The claim is already out of the queue, so leaving the completion
+		// unrecorded would strand the buffer; requeue it instead. The slab is
+		// left pinned, because the failure may have been an ambiguous commit
+		// that did record it, and deleting it then would lose file data. If
+		// it truly went unrecorded, the requeued buffer uploads the same
+		// content again, which yields the same key.
+		if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {
+			log.Printf("failed to requeue piece %d of unrecorded slab %s: %v", job.MetadataID, key, rerr)
+		}
+		return fmt.Errorf("couldn't complete upload job for slab %s: %v", key, err)
 	}
 
 	return nil
 }
 
-// cleanupUploadJobs periodically removes upload jobs that can no longer be processed.
-func (ic *IndexdClient) cleanupUploadJobs(closeChan chan struct{}) {
+// packSlab concatenates the claimed pieces into the slab to upload, cutting the
+// last one short at the slab boundary. The pieces are trimmed in place, so that
+// what is left of each of them is the part that made it into the slab.
+func packSlab(jobs []stores.UploadJob, size uint64) []byte {
+	slab := make([]byte, 0, size)
+	for i := range jobs {
+		if uint64(len(slab)+len(jobs[i].Data)) > size {
+			jobs[i].Data = jobs[i].Data[:size-uint64(len(slab))]
+		}
+		slab = append(slab, jobs[i].Data...)
+	}
+
+	return slab
+}
+
+// logPackedSlab reports which pieces went into the slab about to be uploaded,
+// in the order in which they are laid out in it. The pieces are already trimmed
+// to what fitted, so this is what the slab is made of, not what was claimed.
+func (ic *IndexdClient) logPackedSlab(jobs []stores.UploadJob, size int) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "share %s, workgroup %d: packing %d piece(s) into a slab of %d out of %d bytes", ic.share, ic.workgroup, len(jobs), size, ic.slabSize)
+
+	var offset uint64
+	for _, job := range jobs {
+		taken := uint64(len(job.Data))
+		fmt.Fprintf(&b, "\n\tobject %d, metadata %d, buffer %d: %d bytes at slab offset %d", job.ObjectID, job.MetadataID, job.BufferID, taken, offset)
+		if taken < job.DataLength {
+			fmt.Fprintf(&b, " (split, %d bytes left for the next slab)", job.DataLength-taken)
+		}
+		offset += taken
+	}
+
+	log.Println(b.String())
+}
+
+// processPackedSlab checks if the buffered pieces of several files add up to a
+// slab and, if so, uploads them together as a single packed slab.
+func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
+	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.workgroup, ic.slabSize, ic.minPackSize, ic.maxBufferAge)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		ic.markClaimed(job.MetadataID)
+	}
+	defer func() {
+		for _, job := range jobs {
+			ic.unmarkClaimed(job.MetadataID)
+		}
+	}()
+
+	slab := packSlab(jobs, ic.slabSize)
+	if ic.debug {
+		ic.logPackedSlab(jobs, len(slab))
+	}
+
+	key, err := ic.backend.Upload(ctx, bytes.NewReader(slab), ic.dataShards, ic.parityShards)
+	if err != nil {
+		for _, job := range jobs {
+			if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {
+				log.Printf("failed to requeue packed piece %d: %v", job.MetadataID, rerr)
+			}
+		}
+		return fmt.Errorf("couldn't upload packed slab: %v", err)
+	}
+
+	err = completeWithRetry(func() error {
+		return ic.db.CompletePackedSlab(jobs, key)
+	})
+	if err != nil {
+		if errors.Is(err, stores.ErrNotFound) {
+			// Every file that went into the slab has been deleted since.
+			ic.dropSlabIfUnreferenced(ctx, key)
+			return nil
+		}
+
+		// The claim is already out of the queue, so leaving the completion
+		// unrecorded would strand the pieces; requeue them instead. The slab
+		// is left pinned, because the failure may have been an ambiguous
+		// commit that did record it, and deleting it then would lose file
+		// data. If it truly went unrecorded, the repacked pieces usually form
+		// the identical slab again; at worst this one stays behind
+		// unreferenced, under the key named below.
+		for _, job := range jobs {
+			if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {
+				log.Printf("failed to requeue piece %d of unrecorded packed slab %s: %v", job.MetadataID, key, rerr)
+			}
+		}
+		return fmt.Errorf("couldn't complete packed slab %s: %v", key, err)
+	}
+
+	if ic.debug {
+		log.Printf("share %s, workgroup %d: uploaded packed slab %s of %d bytes from %d piece(s)", ic.share, ic.workgroup, key, len(slab), len(jobs))
+	}
+
+	return nil
+}
+
+// packSlabs combines the pieces that are left buffered into packed slabs in the
+// background.
+func (ic *IndexdClient) packSlabs(ctx context.Context) {
+	ticker := time.NewTicker(packInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ic.drainChan:
+			return
+		default:
+		}
+
+		// A packed slab may leave a remainder behind that, together with
+		// what is still buffered, fills another one, so keep going until
+		// there is nothing left to pack.
+		err := ic.processPackedSlab(ctx)
+		if err == nil {
+			continue
+		}
+
+		if !errors.Is(err, stores.ErrNoUploadJobs) {
+			// A slab cut short by Close is not a failure worth
+			// reporting; its pieces are back in the queue.
+			if ctx.Err() != nil {
+				return
+			}
+
+			log.Printf("failed to pack a slab: %v", err)
+
+			// The pieces are back in the queue and the failure is
+			// likely transient, so retry shortly.
+			select {
+			case <-ic.drainChan:
+				return
+			case <-time.After(time.Second):
+			}
+			continue
+		}
+
+		// Nothing to pack: wait until another upload has left a piece
+		// behind, with a periodic fallback in case the signal was missed.
+		select {
+		case <-ic.drainChan:
+			return
+		case <-ic.packChan:
+		case <-ticker.C:
+		}
+	}
+}
+
+// cleanupUploadJobs periodically removes upload jobs that can no longer be
+// processed, retries unconfirmed unpins, and requeues stranded pieces.
+// Running once right away picks up what a previous run left behind.
+func (ic *IndexdClient) cleanupUploadJobs(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
+	var suspects map[uint64]struct{}
 	for {
 		if err := ic.db.CleanupUploadJobs(); err != nil {
 			log.Printf("failed to clean up upload jobs: %v", err)
 		}
+		ic.retryPendingUnpins(ctx)
+		suspects = ic.requeueStrandedPieces(suspects)
 
 		select {
-		case <-closeChan:
+		case <-ic.drainChan:
 			return
 		case <-ticker.C:
 		}
@@ -665,13 +1126,10 @@ func (ic *IndexdClient) cleanupUploadJobs(closeChan chan struct{}) {
 }
 
 // processUploads runs the upload jobs in the background.
-func (ic *IndexdClient) processUploads(closeChan chan struct{}) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (ic *IndexdClient) processUploads(ctx context.Context) {
 	for {
 		select {
-		case <-closeChan:
+		case <-ic.drainChan:
 			return
 		default:
 		}
@@ -685,7 +1143,7 @@ func (ic *IndexdClient) processUploads(closeChan chan struct{}) {
 			// Wait until a new job is signaled, with a periodic fallback
 			// poll in case the signal was missed.
 			select {
-			case <-closeChan:
+			case <-ic.drainChan:
 				return
 			case <-ic.jobsChan:
 			case <-time.After(time.Second):
@@ -693,10 +1151,15 @@ func (ic *IndexdClient) processUploads(closeChan chan struct{}) {
 			continue
 		}
 
+		// A job cut short by Close is not a failure worth reporting.
+		if ctx.Err() != nil {
+			return
+		}
+
 		log.Printf("failed to run upload job: %v", err)
 
 		select {
-		case <-closeChan:
+		case <-ic.drainChan:
 			return
 		case <-time.After(time.Second):
 		}

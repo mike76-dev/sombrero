@@ -101,6 +101,10 @@ indexd:
   logoURL: https://raw.githubusercontent.com/mike76-dev/sombrero/master/logo.png # URL of the app logo, can be left as it is
   serviceURL: https://github.com/mike76-dev/sombrero                             # URL of the app itself, can be left as it is (Sombrero has no service page)
   seedPhrase: ''                                                                 # if omitted, the server will generate a new seed phrase and put it here
+  maxBufferAge: never                                                            # optional: how long the data that does not fill a slab may wait to be packed
+                                                                                 # with the data of other files; if omitted, it waits indefinitely
+  minPackedSlabSize: 0                                                           # optional: the least amount of leftover data, in bytes, that an incomplete slab
+                                                                                 # is uploaded with once it has reached maxBufferAge; if omitted, any amount is uploaded
 ```
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash
@@ -169,6 +173,8 @@ To grant an account access to the share, run:
 ```Bash
 curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/share/shared-indexd/policy?username=test&workgroup=8303eeb8-f30e-4607-9eb7-875df2c5bd52&read=true&write=true&delete=true&execute=true"
 ```
+## Upload Packing
+A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Both config fields are optional: setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, while `minPackedSlabSize` (for example, `1048576`) holds that upload back until the leftover data of a share is worth a slab. On its own, `minPackedSlabSize` has no effect.
 ## Shared Folders
 It is now possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup. Only working on `indexd` shares.
 

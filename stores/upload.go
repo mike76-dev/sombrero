@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"go.sia.tech/core/types"
@@ -35,6 +36,191 @@ type UploadJob struct {
 
 // ErrNoUploadJobs is returned when there are no pending upload jobs available for processing.
 var ErrNoUploadJobs = errors.New("no upload jobs available")
+
+// collectStorage scans pairs of buffer IDs and slab keys, as returned by the
+// queries that gather the storage referenced by a set of metadata entries.
+// Exactly one of the two is set in any given row.
+func collectStorage(rows pgx.Rows) (bids []uint64, keys [][]byte, err error) {
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			bid *uint64
+			key []byte
+		)
+		if err := rows.Scan(&bid, &key); err != nil {
+			return nil, nil, fmt.Errorf("failed to scan storage reference: %w", err)
+		}
+		if bid != nil {
+			bids = append(bids, *bid)
+		}
+		if key != nil {
+			keys = append(keys, key)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("failed to iterate storage references: %w", err)
+	}
+
+	return bids, keys, nil
+}
+
+// unreferencedSlabs returns those of the given slab keys that no metadata entry
+// references any more, and stages them for unpinning in the same transaction.
+// The staging is what makes the unpin survive a crash or an unreachable storage
+// backend: a slab stays listed until its unpin is confirmed, so it cannot leak.
+// It has to be called after the referencing metadata has been deleted, so that
+// slabs which are still shared with surviving files stay pinned.
+func unreferencedSlabs(ctx context.Context, tx pgx.Tx, share string, workgroup int, keys [][]byte) (slabs []types.Hash256, err error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	const query = `
+		WITH unreferenced AS (
+			SELECT u.k
+			FROM UNNEST($3::BYTEA[]) AS u(k)
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM metadata m
+				WHERE m.slab_key = u.k
+			)
+		),
+		staged AS (
+			INSERT INTO pending_unpins (share_name, workgroup, slab_key)
+			SELECT $1, $2, u.k
+			FROM unreferenced u
+			ON CONFLICT DO NOTHING
+		)
+		SELECT k FROM unreferenced
+	`
+
+	rows, err := tx.Query(ctx, query, share, workgroup, keys)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter unreferenced slabs: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("failed to scan slab key: %w", err)
+		}
+		if len(raw) != 32 {
+			return nil, fmt.Errorf("invalid slab key length: %d", len(raw))
+		}
+		var h types.Hash256
+		copy(h[:], raw)
+		slabs = append(slabs, h)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate slab keys: %w", err)
+	}
+
+	return slabs, nil
+}
+
+// SlabReferenced reports whether any metadata entry references the given
+// slab. Slabs are content-addressed, so the slab that one file's upload
+// produced may equally be referenced by other files of the same content; it
+// must not be unpinned as long as that is the case.
+func (db *Database) SlabReferenced(key types.Hash256) (referenced bool, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT EXISTS (
+				SELECT 1
+				FROM metadata
+				WHERE slab_key = $1
+			)
+		`
+
+		if err := tx.QueryRow(ctx, query, key[:]).Scan(&referenced); err != nil {
+			return fmt.Errorf("failed to check slab references: %w", err)
+		}
+		return nil
+	})
+	return
+}
+
+// StageUnpin lists the given slab for unpinning by the given share and
+// workgroup connection, which is retried until it is confirmed. Staging is
+// idempotent.
+func (db *Database) StageUnpin(share string, workgroup int, key types.Hash256) error {
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			INSERT INTO pending_unpins (share_name, workgroup, slab_key)
+			VALUES ($1, $2, $3)
+			ON CONFLICT DO NOTHING
+		`
+
+		if _, err := tx.Exec(ctx, query, share, workgroup, key[:]); err != nil {
+			return fmt.Errorf("failed to stage unpin: %w", err)
+		}
+		return nil
+	})
+}
+
+// PendingUnpins returns the slabs whose unpinning by the given share and
+// workgroup connection has not been confirmed yet.
+func (db *Database) PendingUnpins(share string, workgroup int) (slabs []types.Hash256, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT slab_key
+			FROM pending_unpins
+			WHERE share_name = $1
+				AND workgroup = $2
+		`
+
+		rows, err := tx.Query(ctx, query, share, workgroup)
+		if err != nil {
+			return fmt.Errorf("failed to list pending unpins: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var raw []byte
+			if err := rows.Scan(&raw); err != nil {
+				return fmt.Errorf("failed to scan slab key: %w", err)
+			}
+			if len(raw) != 32 {
+				return fmt.Errorf("invalid slab key length: %d", len(raw))
+			}
+			var h types.Hash256
+			copy(h[:], raw)
+			slabs = append(slabs, h)
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("failed to iterate pending unpins: %w", err)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
+// UnstageUnpin removes the given slab from the pending unpins, either because
+// it has been unpinned or because its key has become referenced again.
+func (db *Database) UnstageUnpin(share string, workgroup int, key types.Hash256) error {
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			DELETE FROM pending_unpins
+			WHERE share_name = $1
+				AND workgroup = $2
+				AND slab_key = $3
+		`
+
+		if _, err := tx.Exec(ctx, query, share, workgroup, key[:]); err != nil {
+			return fmt.Errorf("failed to unstage unpin: %w", err)
+		}
+		return nil
+	})
+}
 
 // CreateUpload creates a new upload entry in the database and returns the generated upload ID.
 func (db *Database) CreateUpload(acc Account, share, path string) (uploadID string, err error) {
@@ -163,7 +349,7 @@ func (db *Database) RemoveUpload(uploadID string) (slabs []types.Hash256, err er
 
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const lookup = `
-			SELECT u.id, u.object_id
+			SELECT u.id, u.object_id, o.share_name, o.workgroup
 			FROM uploads u
 			JOIN objects o ON o.id = u.object_id
 			WHERE u.upload_id = $1
@@ -171,70 +357,30 @@ func (db *Database) RemoveUpload(uploadID string) (slabs []types.Hash256, err er
 		`
 
 		var uid, soid uint64
-		if err := tx.QueryRow(ctx, lookup, id).Scan(&uid, &soid); err != nil {
+		var share string
+		var workgroup int
+		if err := tx.QueryRow(ctx, lookup, id).Scan(&uid, &soid, &share, &workgroup); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
 			return fmt.Errorf("failed to lookup upload: %w", err)
 		}
 
-		const collectBuffers = `
-			SELECT DISTINCT m.buffer_id
+		const collectStorageQuery = `
+			SELECT DISTINCT m.buffer_id, m.slab_key
 			FROM metadata m
 			WHERE m.object_id = $1
-				AND m.buffer_id IS NOT NULL
 		`
 
-		rows, err := tx.Query(ctx, collectBuffers, soid)
+		rows, err := tx.Query(ctx, collectStorageQuery, soid)
 		if err != nil {
-			return fmt.Errorf("failed to collect buffers: %w", err)
+			return fmt.Errorf("failed to collect storage: %w", err)
 		}
-		var bids []uint64
-		for rows.Next() {
-			var bid uint64
-			if err := rows.Scan(&bid); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan buffer ID: %w", err)
-			}
-			bids = append(bids, bid)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate buffer IDs: %w", err)
-		}
-		rows.Close()
 
-		const collectSlabs = `
-			SELECT DISTINCT m.slab_key
-			FROM metadata m
-			WHERE m.object_id = $1
-				AND m.slab_key IS NOT NULL
-			ORDER BY m.slab_key
-		`
-
-		rows, err = tx.Query(ctx, collectSlabs, soid)
+		bids, keys, err := collectStorage(rows)
 		if err != nil {
-			return fmt.Errorf("failed to collect slab keys: %w", err)
+			return err
 		}
-		for rows.Next() {
-			var raw []byte
-			if err := rows.Scan(&raw); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan slab key: %w", err)
-			}
-			if len(raw) != 32 {
-				rows.Close()
-				return fmt.Errorf("invalid slab key length: %d", len(raw))
-			}
-			var h types.Hash256
-			copy(h[:], raw)
-			slabs = append(slabs, h)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate slab keys: %w", err)
-		}
-		rows.Close()
 
 		if _, err := tx.Exec(ctx, `DELETE FROM uploads WHERE id = $1`, uid); err != nil {
 			return fmt.Errorf("failed to delete upload: %w", err)
@@ -258,9 +404,15 @@ func (db *Database) RemoveUpload(uploadID string) (slabs []types.Hash256, err er
 			}
 		}
 
-		return nil
+		// The metadata is gone by now, so any slab that is still referenced
+		// belongs to another file and must stay pinned.
+		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
+		return err
 	})
 
+	if err != nil {
+		return nil, err
+	}
 	return
 }
 
@@ -323,9 +475,16 @@ func (db *Database) AddBufferedSlab(uploadID string, offset uint64, data []byte)
 	})
 }
 
-// ClaimUploadJob retrieves and locks the next pending upload job for processing.
-func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
+// ClaimUploadJob retrieves and locks the next pending upload job of the given
+// share and workgroup for processing. The claim is scoped that narrowly
+// because each (workgroup, share) connection uploads under its own indexd app
+// account with its own redundancy settings; a job claimed by any other
+// connection would pin the data under the wrong account.
+func (db *Database) ClaimUploadJob(share string, workgroup int, minSize uint64) (job UploadJob, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		// Only the queue entry is locked, so that the claim does not collide
+		// with unrelated work on the objects and their metadata. Deleting the
+		// entry is what makes the claim exclusive.
 		const query = `
 			WITH picked AS (
 				SELECT
@@ -335,9 +494,12 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 				FROM upload_jobs uj
 				JOIN metadata m ON m.id = uj.metadata_id
 				JOIN buffers b ON b.id = m.buffer_id
-				WHERE m.data_length >= $1
+				JOIN objects o ON o.id = m.object_id
+				WHERE o.share_name = $1
+					AND o.workgroup = $2
+					AND m.data_length >= $3
 				ORDER BY uj.created_at
-				FOR UPDATE SKIP LOCKED
+				FOR UPDATE OF uj SKIP LOCKED
 				LIMIT 1
 			),
 			deleted AS (
@@ -362,7 +524,7 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 		`
 
 		var data []byte
-		err := tx.QueryRow(ctx, query, minSize).Scan(
+		err := tx.QueryRow(ctx, query, share, workgroup, minSize).Scan(
 			&job.ID,
 			&job.UploadID,
 			&job.MetadataID,
@@ -390,6 +552,181 @@ func (db *Database) ClaimUploadJob(minSize uint64) (job UploadJob, err error) {
 	return
 }
 
+// ClaimPackedSlab claims the buffers that together fill one slab of the given
+// share and workgroup, so that they can be uploaded as a single packed slab.
+// The claim is scoped to one workgroup because the slab is pinned under the
+// claiming connection's indexd app account, and files of another workgroup
+// must not end up owned by this one. The buffers are returned in the order in
+// which they are to be concatenated, and the last one commonly overshoots the
+// slab boundary; it is up to the caller to only use as much of it as fits.
+//
+// Only buffers belonging to finalized uploads are eligible. A buffer whose
+// upload is still in flight may yet be abandoned or replaced, which would leave
+// the data of an aborted upload sitting in a slab that has already been paid
+// for.
+//
+// A positive maxAge also claims buffers that fall short of a slab, once the
+// oldest of them has been waiting that long and they amount to at least minSize
+// bytes. Such a claim fills the slab only partly, which costs as much as a full
+// one, so with maxAge left at zero the buffers wait for as long as it takes.
+// The age is measured from the creation of a buffer's upload, so it is not
+// reset when a failed claim requeues the buffer, and the remainder that a
+// split leaves behind keeps the age of the upload it came from.
+//
+// ErrNoUploadJobs is returned when neither applies, in which case nothing is
+// claimed.
+func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSize uint64, maxAge time.Duration) (jobs []UploadJob, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		// A running total cannot be computed over a locking select, so the
+		// candidate prefix is cut at the slab boundary without locking first.
+		// The rows are then locked and the claim conditions re-checked over
+		// what was actually locked, so a row snatched away by a concurrent
+		// claim in between only shrinks this one below the slab size, in
+		// which case nothing is claimed. Cutting by size rather than by row
+		// count keeps a claim to one slab's worth of data no matter how many
+		// small pieces it takes to get there.
+		//
+		// Only the queue entries are locked, so that the claim does not
+		// collide with unrelated work on the objects and their metadata.
+		//
+		// A buffer that already fills a slab on its own is left to
+		// ClaimUploadJob, which makes the two claims disjoint.
+		const query = `
+			WITH candidate AS (
+				SELECT
+					uj.id,
+					m.data_length,
+					SUM(m.data_length) OVER (
+						ORDER BY m.object_id, m.obj_offset, uj.id
+					) AS total
+				FROM upload_jobs uj
+				JOIN metadata m ON m.id = uj.metadata_id
+				JOIN objects o ON o.id = m.object_id
+				WHERE o.share_name = $1
+					AND o.workgroup = $2
+					AND m.buffer_id IS NOT NULL
+					AND m.upload_id IS NULL
+					AND m.data_length < $3::BIGINT
+			),
+			cutoff AS (
+				SELECT c.id
+				FROM candidate c
+				WHERE c.total - c.data_length < $3::BIGINT
+			),
+			locked AS (
+				SELECT
+					uj.id,
+					uj.upload_id,
+					uj.metadata_id,
+					u.created_at,
+					m.object_id,
+					m.buffer_id,
+					m.obj_offset,
+					m.data_offset,
+					m.data_length
+				FROM upload_jobs uj
+				JOIN cutoff c ON c.id = uj.id
+				JOIN uploads u ON u.id = uj.upload_id
+				JOIN metadata m ON m.id = uj.metadata_id
+				WHERE m.buffer_id IS NOT NULL
+					AND m.upload_id IS NULL
+					AND m.data_length < $3::BIGINT
+				FOR UPDATE OF uj SKIP LOCKED
+			),
+			running AS (
+				SELECT
+					l.*,
+					SUM(l.data_length) OVER (
+						ORDER BY l.object_id, l.obj_offset, l.id
+					) AS total
+				FROM locked l
+			),
+			available AS (
+				SELECT
+					COALESCE(SUM(data_length), 0) AS total,
+					MIN(created_at) AS oldest
+				FROM locked
+			),
+			picked AS (
+				SELECT r.*
+				FROM running r
+				CROSS JOIN available a
+				WHERE r.total - r.data_length < $3::BIGINT
+					AND (
+						a.total >= $3::BIGINT
+						OR (
+							$4::DOUBLE PRECISION > 0
+							AND a.total >= $5::BIGINT
+							AND a.oldest <= NOW() - MAKE_INTERVAL(secs => $4::DOUBLE PRECISION)
+						)
+					)
+			),
+			-- Data-modifying CTEs always run to completion, so the claimed
+			-- entries leave the queue whether or not this is read below.
+			deleted AS (
+				DELETE FROM upload_jobs uj
+				USING picked p
+				WHERE uj.id = p.id
+				RETURNING uj.id
+			)
+			SELECT
+				p.id,
+				p.upload_id,
+				p.metadata_id,
+				p.object_id,
+				p.buffer_id,
+				p.obj_offset,
+				p.data_offset,
+				p.data_length,
+				SUBSTRING(b.data FROM p.data_offset::INT + 1 FOR p.data_length::INT)
+			FROM picked p
+			JOIN buffers b ON b.id = p.buffer_id
+			ORDER BY p.object_id, p.obj_offset, p.id
+		`
+
+		rows, err := tx.Query(ctx, query, share, workgroup, int64(slabSize), maxAge.Seconds(), int64(minSize))
+		if err != nil {
+			return fmt.Errorf("failed to claim packed slab: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var job UploadJob
+			if err := rows.Scan(
+				&job.ID,
+				&job.UploadID,
+				&job.MetadataID,
+				&job.ObjectID,
+				&job.BufferID,
+				&job.ObjOffset,
+				&job.DataOffset,
+				&job.DataLength,
+				&job.Data,
+			); err != nil {
+				return fmt.Errorf("failed to scan packed slab item: %w", err)
+			}
+			if uint64(len(job.Data)) != job.DataLength {
+				return fmt.Errorf("buffer slice out of bounds: offset %d, length %d, slice size %d", job.DataOffset, job.DataLength, len(job.Data))
+			}
+			jobs = append(jobs, job)
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("failed to iterate packed slab items: %w", err)
+		}
+
+		if len(jobs) == 0 {
+			return ErrNoUploadJobs
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
 // CleanupUploadJobs removes upload jobs whose metadata no longer references a buffer,
 // e.g. after a requeued job was completed by another worker.
 func (db *Database) CleanupUploadJobs() error {
@@ -406,6 +743,101 @@ func (db *Database) CleanupUploadJobs() error {
 
 		if _, err := tx.Exec(ctx, query); err != nil {
 			return fmt.Errorf("failed to clean up stale upload jobs: %w", err)
+		}
+		return nil
+	})
+}
+
+// StrandedPieces returns the metadata entries of the given share and
+// workgroup that reference a buffer but have no entry in the upload queue.
+// This is what a claim leaves behind when the process stops between claiming
+// and completing: nothing would ever pick the piece up again on its own. It
+// is also, briefly, the state of a claim that is still being worked on, so it
+// is up to the caller to tell the two apart.
+func (db *Database) StrandedPieces(share string, workgroup int) (ids []uint64, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT m.id
+			FROM metadata m
+			JOIN objects o ON o.id = m.object_id
+			WHERE o.share_name = $1
+				AND o.workgroup = $2
+				AND m.buffer_id IS NOT NULL
+				AND NOT EXISTS (
+					SELECT 1
+					FROM upload_jobs uj
+					WHERE uj.metadata_id = m.id
+				)
+		`
+
+		rows, err := tx.Query(ctx, query, share, workgroup)
+		if err != nil {
+			return fmt.Errorf("failed to list stranded pieces: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var id uint64
+			if err := rows.Scan(&id); err != nil {
+				return fmt.Errorf("failed to scan metadata ID: %w", err)
+			}
+			ids = append(ids, id)
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("failed to iterate stranded pieces: %w", err)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
+// RequeueStrandedPieces puts the given metadata entries back in the upload
+// queue, so that their pieces are claimed again. An entry that no longer
+// references a buffer, is back in the queue already, or whose upload row
+// cannot be resolved any more is skipped.
+func (db *Database) RequeueStrandedPieces(ids []uint64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	arr := make([]int64, len(ids))
+	for i, id := range ids {
+		arr[i] = int64(id)
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		// A finalized piece has had its upload ID cleared from the metadata,
+		// but the uploads row itself lives on attached to the object, so it
+		// is resolved from there.
+		const query = `
+			WITH resolved AS (
+				SELECT
+					m.id AS metadata_id,
+					COALESCE(m.upload_id, (
+						SELECT u.id
+						FROM uploads u
+						WHERE u.object_id = m.object_id
+						ORDER BY u.id
+						LIMIT 1
+					)) AS upload_id
+				FROM metadata m
+				WHERE m.id = ANY($1::BIGINT[])
+					AND m.buffer_id IS NOT NULL
+			)
+			INSERT INTO upload_jobs (upload_id, metadata_id)
+			SELECT r.upload_id, r.metadata_id
+			FROM resolved r
+			WHERE r.upload_id IS NOT NULL
+			ON CONFLICT (metadata_id) DO NOTHING
+		`
+
+		if _, err := tx.Exec(ctx, query, arr); err != nil {
+			return fmt.Errorf("failed to requeue stranded pieces: %w", err)
 		}
 		return nil
 	})
@@ -475,6 +907,196 @@ func (db *Database) CompleteUploadJob(metadataID uint64, bufferID uint64, slabKe
 			return fmt.Errorf("failed to delete orphaned buffer: %w", err)
 		}
 
+		return nil
+	})
+}
+
+// packedItemDone reports whether the metadata entry has already been completed
+// with the given slab key, which is the case when a batch is retried after it
+// had partly gone through. An entry that has disappeared is reported as not
+// done, so that a slab none of whose items survived can be unpinned.
+func packedItemDone(ctx context.Context, tx pgx.Tx, metadataID uint64, slabKey types.Hash256) (bool, error) {
+	const query = `
+		SELECT buffer_id, slab_key
+		FROM metadata
+		WHERE id = $1
+	`
+
+	var (
+		bid *uint64
+		raw []byte
+	)
+
+	if err := tx.QueryRow(ctx, query, metadataID).Scan(&bid, &raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to verify metadata state: %w", err)
+	}
+
+	if bid != nil {
+		return false, fmt.Errorf("metadata %d references an unexpected buffer", metadataID)
+	}
+	if len(raw) != len(slabKey) {
+		return false, fmt.Errorf("invalid slab key length: %d", len(raw))
+	}
+
+	var existing types.Hash256
+	copy(existing[:], raw)
+	if existing != slabKey {
+		return false, fmt.Errorf("metadata %d already completed with different slab key", metadataID)
+	}
+
+	return true, nil
+}
+
+// splitPackedItem moves the part of the item's buffer that did not fit into the
+// slab into a buffer of its own and queues it, so that it becomes the head of
+// the next packed slab. The remainder is copied inside the database, which
+// keeps the bytes that did make it into the slab from lingering there.
+func splitPackedItem(ctx context.Context, tx pgx.Tx, job UploadJob, taken uint64) error {
+	// The entry stays free of an upload ID: only buffers of finalized
+	// uploads are packed, and the remainder of one is no different.
+	const query = `
+		WITH remainder AS (
+			INSERT INTO buffers (share_name, data)
+			SELECT
+				b.share_name,
+				SUBSTRING(b.data FROM $2::INT + 1 FOR $3::INT)
+			FROM buffers b
+			WHERE b.id = $1
+			RETURNING id
+		),
+		entry AS (
+			INSERT INTO metadata (
+				object_id,
+				obj_offset,
+				buffer_id,
+				data_offset,
+				data_length
+			)
+			SELECT $4, $5, r.id, 0, $3
+			FROM remainder r
+			RETURNING id
+		)
+		INSERT INTO upload_jobs (upload_id, metadata_id)
+		SELECT $6, e.id
+		FROM entry e
+	`
+
+	rest := job.DataLength - taken
+	tag, err := tx.Exec(
+		ctx,
+		query,
+		job.BufferID,
+		int64(job.DataOffset+taken),
+		int64(rest),
+		job.ObjectID,
+		int64(job.ObjOffset+taken),
+		job.UploadID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to split buffer %d: %w", job.BufferID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("failed to split buffer %d: buffer is gone", job.BufferID)
+	}
+
+	return nil
+}
+
+// CompletePackedSlab marks a batch of buffers as uploaded under the given slab
+// key. The items are laid out in the slab in the order in which they are
+// passed, each one at the offset that follows the previous one.
+//
+// The data of the last item may have been trimmed by the caller to what fitted
+// into the slab, in which case the remainder is moved into a buffer of its own
+// and queued for the next packed slab.
+//
+// Items whose metadata has meanwhile disappeared, e.g. because the file was
+// deleted while the slab was being uploaded, are skipped. ErrNotFound is only
+// returned when nothing of the batch is left, which is the one case where the
+// caller may unpin the slab it has just uploaded.
+func (db *Database) CompletePackedSlab(jobs []UploadJob, slabKey types.Hash256) error {
+	if len(jobs) == 0 {
+		return errors.New("cannot complete an empty packed slab")
+	}
+
+	for i, job := range jobs {
+		taken := uint64(len(job.Data))
+		if taken == 0 || taken > job.DataLength {
+			return fmt.Errorf("item %d takes %d of %d buffered bytes", i, taken, job.DataLength)
+		}
+		if taken < job.DataLength && i != len(jobs)-1 {
+			return fmt.Errorf("item %d is split, but only the last item of a packed slab may be", i)
+		}
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		var completed, offset uint64
+		for _, job := range jobs {
+			taken := uint64(len(job.Data))
+
+			// The length only changes for a split item, for which it
+			// shrinks to the part that made it into the slab.
+			const updateQuery = `
+				UPDATE metadata
+				SET
+					slab_key = $3,
+					data_offset = $4,
+					data_length = $5,
+					buffer_id = NULL,
+					upload_id = NULL
+				WHERE id = $1
+					AND buffer_id = $2
+			`
+
+			tag, err := tx.Exec(ctx, updateQuery, job.MetadataID, job.BufferID, slabKey[:], int64(offset), int64(taken))
+			if err != nil {
+				return fmt.Errorf("failed to update metadata: %w", err)
+			}
+
+			offset += taken
+
+			if tag.RowsAffected() == 0 {
+				// Either the entry is gone or this batch has already been
+				// completed, in which case its remainder was queued then.
+				done, err := packedItemDone(ctx, tx, job.MetadataID, slabKey)
+				if err != nil {
+					return err
+				}
+				if done {
+					completed++
+				}
+				continue
+			}
+
+			completed++
+
+			if taken < job.DataLength {
+				if err := splitPackedItem(ctx, tx, job, taken); err != nil {
+					return err
+				}
+			}
+
+			const deleteQuery = `
+				DELETE FROM buffers b
+				WHERE b.id = $1
+					AND NOT EXISTS (
+						SELECT 1
+						FROM metadata m
+						WHERE m.buffer_id = b.id
+					)
+			`
+
+			if _, err := tx.Exec(ctx, deleteQuery, job.BufferID); err != nil {
+				return fmt.Errorf("failed to delete orphaned buffer: %w", err)
+			}
+		}
+
+		if completed == 0 {
+			return ErrNotFound
+		}
 		return nil
 	})
 }
@@ -704,118 +1326,6 @@ func (db *Database) FinalizeUpload(uploadID string) error {
 
 		return nil
 	})
-}
-
-// ListSlabs retrieves the slab keys of all files at or down the specified path.
-func (db *Database) ListSlabs(acc Account, share, path string) (slabs []types.Hash256, err error) {
-	path = normalizePath(path)
-
-	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const query = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $3
-			),
-			target_file AS (
-				SELECT o.id, o.full_path
-				FROM objects o
-				JOIN accounts owner ON owner.id = o.account
-				LEFT JOIN directories od
-					ON od.share_name = o.share_name
-					AND od.id = o.directory_id
-				CROSS JOIN caller c
-				WHERE o.share_name = $1
-					AND o.full_path = $2
-					AND o.temporary = FALSE
-					AND (
-						o.account = c.id
-						OR (
-							od.private = FALSE
-							AND owner.workgroup = c.workgroup
-						)
-					)
-			),
-			target_dir AS (
-				SELECT d.id, d.full_path
-				FROM directories d
-				JOIN accounts owner ON owner.id = d.account
-				CROSS JOIN caller c
-				WHERE d.share_name = $1
-					AND d.full_path = $2
-					AND (
-						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
-					)
-			),
-			visible_objects AS (
-				SELECT o.id
-				FROM objects o
-				JOIN target_file tf ON tf.id = o.id
-
-				UNION
-
-				SELECT o.id
-				FROM objects o
-				JOIN accounts owner ON owner.id = o.account
-				LEFT JOIN directories od
-					ON od.share_name = o.share_name
-					AND od.id = o.directory_id
-				JOIN target_dir td ON TRUE
-				CROSS JOIN caller c
-				WHERE o.share_name = $1
-					AND o.full_path LIKE td.full_path || '/%%'
-					AND o.temporary = FALSE
-					AND (
-						o.account = c.id
-						OR (
-							od.private = FALSE
-							AND owner.workgroup = c.workgroup
-						)
-					)
-			),
-			target_exists AS (
-				SELECT EXISTS (SELECT 1 FROM target_file)
-					OR EXISTS (SELECT 1 FROM target_dir) AS found
-			)
-			SELECT
-				te.found,
-				(
-					SELECT COALESCE(
-						ARRAY_AGG(DISTINCT m.slab_key),
-						'{}'::bytea[]
-					)
-					FROM visible_objects vo
-					JOIN metadata m ON m.object_id = vo.id
-					WHERE m.slab_key IS NOT NULL
-				) AS slab_keys
-			FROM target_exists te
-
-		`
-
-		var found bool
-		var rawKeys [][]byte
-
-		if err := tx.QueryRow(ctx, query, share, path, acc.ID).Scan(&found, &rawKeys); err != nil {
-			return err
-		}
-		if !found {
-			return ErrNotFound
-		}
-
-		slabs = make([]types.Hash256, 0, len(rawKeys))
-		for _, b := range rawKeys {
-			if len(b) != 32 {
-				return fmt.Errorf("invalid slab key length: %d", len(b))
-			}
-			var h types.Hash256
-			copy(h[:], b)
-			slabs = append(slabs, h)
-		}
-		return nil
-	})
-
-	return
 }
 
 // GetMetadata retrieves the metadata of the file at the specified path that
