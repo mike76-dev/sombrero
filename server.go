@@ -127,17 +127,6 @@ func (s *server) newConnection(conn net.Conn) *connection {
 func (s *server) closeConnection(c *connection) {
 	s.mu.Lock()
 	delete(s.connectionList, c.clientName)
-
-	// Close associated contexts and channels.
-	for _, op := range s.globalOpenTable {
-		if op.connection == c {
-			op.mu.Lock()
-			if op.cancel != nil {
-				op.cancel()
-			}
-			op.mu.Unlock()
-		}
-	}
 	s.mu.Unlock()
 
 	// The connection is no longer a channel of any of the sessions it carried.
@@ -153,6 +142,31 @@ func (s *server) closeConnection(c *connection) {
 
 	for _, ss := range sessions {
 		ss.unbindChannel(c)
+	}
+
+	// A session that still has a channel left carries on over it, and so do its opens. Only
+	// the opens of a session that has just lost its last channel are abandoned. In the
+	// dialects without channels the list is always empty, so every session the connection
+	// carried loses its opens, which is the only outcome those dialects allow.
+	for _, ss := range sessions {
+		ss.mu.Lock()
+		if len(ss.channelList) > 0 {
+			ss.mu.Unlock()
+			continue
+		}
+		opens := make([]*open, 0, len(ss.openTable))
+		for _, op := range ss.openTable {
+			opens = append(opens, op)
+		}
+		ss.mu.Unlock()
+
+		for _, op := range opens {
+			op.mu.Lock()
+			if op.cancel != nil {
+				op.cancel()
+			}
+			op.mu.Unlock()
+		}
 	}
 
 	c.conn.Close()

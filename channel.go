@@ -78,6 +78,47 @@ func (ss *session) channel(c *connection) *channel {
 	return ch
 }
 
+// selectConnection returns the connection to send a message about the open over. In the SMB
+// 3.x dialect family the session may be served by several channels and the message may go
+// over any of them, so the one the client is waiting on is preferred, and another live one
+// is taken if that channel has gone away. The dialects without channels have nothing to
+// choose from: the message goes over the connection the open was established on.
+func (op *open) selectConnection(preferred *connection) *connection {
+	ss := op.session
+	if !smb2.Is3X(ss.connection.negotiateDialect) {
+		return op.connection
+	}
+
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	// The channel list is keyed by the name of the connection, but a name may be reused by
+	// a later connection, so the connection itself decides whether the channel matches.
+	isChannel := func(c *connection) bool {
+		ch, found := ss.channelList[c.clientName]
+		return found && ch.connection == c
+	}
+
+	if preferred != nil && isChannel(preferred) {
+		return preferred
+	}
+
+	// The connection the open belongs to is the next best thing: it keeps the choice stable
+	// for as long as that channel lives.
+	if isChannel(op.connection) {
+		return op.connection
+	}
+
+	for _, ch := range ss.channelList {
+		return ch.connection
+	}
+
+	// The session has no channels left. There is nothing to send over, but the caller is
+	// given the connection of the open rather than nothing at all, so that the send fails
+	// on a closed connection instead of a nil pointer.
+	return op.connection
+}
+
 // preauthSession represents a PreauthSession object. While a session is being bound to a
 // new connection, the preauthentication integrity hash of the exchange cannot be kept in
 // the session itself, because several connections may be binding to it at the same time

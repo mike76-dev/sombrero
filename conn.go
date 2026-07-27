@@ -2056,7 +2056,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		c.mu.Unlock()
 
 		// Start a thread to monitor the directory for changes.
-		go op.checkForChanges(cnr, acc, ch)
+		go op.checkForChanges(cnr, c, acc, ch)
 
 		// Send an interim response.
 		resp := smb2.NewErrorResponse(cnr, smb2.STATUS_PENDING, 0, nil)

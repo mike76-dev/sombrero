@@ -251,6 +251,13 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 	op.maxCacheSize = readCacheSize(op.chunkSize)
 	op.cond = sync.NewCond(&op.mu)
 
+	// The open starts off at the channel sequence the client created it with, so that the
+	// requests that follow can be told apart from the ones that were issued before a
+	// reconnect. The dialects without channels have no such field.
+	if smb2.Is3X(ss.connection.negotiateDialect) {
+		op.channelSequence = cr.Header().ChannelSequence()
+	}
+
 	if isDir {
 		op.fileAttributes |= smb2.FILE_ATTRIBUTE_DIRECTORY
 		op.fileAttributes = op.fileAttributes &^ smb2.FILE_ATTRIBUTE_NORMAL
@@ -515,7 +522,7 @@ func (op *open) newLSAFrame(ctx ntlm.SecurityContext) *rpc.Frame {
 
 // checkForChanges monitors if any significant changes have occurred in the specified directory.
 // Significant changes include: file names, sizes, modify times, or contents.
-func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, acc stores.Account, stopChan chan struct{}) {
+func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc stores.Account, stopChan chan struct{}) {
 	ois, err := op.treeConnect.client.List(op.ctx, acc, op.pathName)
 	if err != nil {
 		return
@@ -594,11 +601,14 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, acc stores.Account
 			resp := &smb2.ChangeNotifyResponse{}
 			resp.FromRequest(req)
 			resp.Header().SetStatus(smb2.STATUS_NOTIFY_ENUM_DIR)
-			op.connection.releaseOpen(&req.Request)
-			op.connection.server.writeResponse(op.connection, op.session, resp)
-			op.connection.mu.Lock()
-			delete(op.connection.stopChans, req.CancelRequestID())
-			op.connection.mu.Unlock()
+			// The bookkeeping of the request belongs to the connection it arrived on, but
+			// the response itself may travel over any channel of the session.
+			c.releaseOpen(&req.Request)
+			conn := op.selectConnection(c)
+			conn.server.writeResponse(conn, op.session, resp)
+			c.mu.Lock()
+			delete(c.stopChans, req.CancelRequestID())
+			c.mu.Unlock()
 			return
 		}
 	}
