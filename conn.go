@@ -1628,6 +1628,21 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					} else {
 						resp = smb2.NewErrorResponse(ir, smb2.STATUS_FILE_CLOSED, 0, nil)
 					}
+				} else if ir.CtlCode() == smb2.FSCTL_QUERY_NETWORK_INTERFACE_INFO {
+					// The interfaces are only worth listing to a client that is able to
+					// open a channel to them. The condition is the one the multi-channel
+					// capability is advertised under, so that the two cannot disagree.
+					info := smb2.NetworkInterfaceInfo(networkInterfaces())
+					if !smb2.Is3X(c.negotiateDialect) || !c.server.isMultiChannelCapable || len(info) == 0 {
+						resp = smb2.NewErrorResponse(ir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
+					} else if uint32(len(info)) > ir.MaxOutputResponse() {
+						resp = smb2.NewErrorResponse(ir, smb2.STATUS_BUFFER_TOO_SMALL, 0, nil)
+					} else {
+						r := &smb2.IoctlResponse{}
+						r.FromRequest(ir)
+						r.Generate(ir.CtlCode(), smb2.DummyFileID, 0, info)
+						resp = r
+					}
 				} else if ir.CtlCode() == smb2.FSCTL_DFS_GET_REFERRALS || ir.CtlCode() == smb2.FSCTL_DFS_GET_REFERRALS_EX {
 					resp = smb2.NewErrorResponse(ir, smb2.STATUS_INVALID_DEVICE_REQUEST, 0, nil)
 				} else {
