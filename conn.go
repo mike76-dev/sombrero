@@ -61,6 +61,7 @@ type connection struct {
 	serverSecurityMode         uint16
 	preauthIntegrityHashID     uint16
 	preauthIntegrityHashValue  []byte
+	preauthSessionTable        map[uint64]*preauthSession
 	cipherID                   uint16
 	clientDialects             []uint16
 	compressionIDs             []uint16
@@ -236,6 +237,14 @@ func (c *connection) acceptRequest(msg []byte) error {
 			c.mu.Lock()
 			ss, found = c.sessionTable[req.Header().SessionID()]
 			c.mu.Unlock()
+			if !found && isSessionBinding(req) {
+				// A request that binds a session to this connection is signed with the
+				// signing key of that session, which is only reachable through the global
+				// table: the session doesn't belong to this connection yet.
+				c.server.mu.Lock()
+				ss, found = c.server.globalSessionTable[req.Header().SessionID()]
+				c.server.mu.Unlock()
+			}
 		}
 
 		var rejectStatus uint32
@@ -488,6 +497,24 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		if smb2.Is3X(c.negotiateDialect) && c.server.encryptData && c.clientCapabilities&smb2.GLOBAL_CAP_ENCRYPTION == 0 {
 			resp := smb2.NewErrorResponse(ssr, smb2.STATUS_ACCESS_DENIED, 0, nil)
 			return resp, nil, nil
+		}
+
+		if isSessionBinding(req) {
+			// The client wants to add this connection to an existing session as another
+			// channel. Only a connection that negotiated a dialect with channels on a server
+			// that offers them can carry one.
+			if !smb2.Is3X(c.negotiateDialect) || !c.server.isMultiChannelCapable {
+				resp := smb2.NewErrorResponse(ssr, smb2.STATUS_REQUEST_NOT_ACCEPTED, 0, nil)
+				return resp, nil, nil
+			}
+
+			bss, status := c.prepareBinding(ssr)
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(ssr, status, 0, nil)
+				return resp, nil, nil
+			}
+
+			return c.bindSession(bss, ssr)
 		}
 
 		// Find a session or create a new one.

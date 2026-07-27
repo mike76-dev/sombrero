@@ -229,12 +229,13 @@ func (ss *session) signingKeyFor(c *connection, header smb2.Header) []byte {
 	}
 
 	ch := ss.channel(c)
-	if ch == nil {
-		// The connection isn't bound to the session, which shouldn't happen for a valid
-		// session. Fall back to the session key, so that the client at least has a chance
-		// of accepting the response.
+	if ch == nil || len(ch.signingKey) == 0 {
+		// Either the connection isn't bound to the session, or the channel it is bound to
+		// hasn't been given a key yet. Neither should happen for a valid session. Fall back
+		// to the signing key of the session, so that a well-formed response goes out rather
+		// than one that claims to be signed but isn't.
 		if c.server.debug {
-			log.Printf("Connection %s is not a channel of session %d", c.clientName, ss.sessionID)
+			log.Printf("Connection %s has no signing key for session %d", c.clientName, ss.sessionID)
 		}
 		return ss.signingKey
 	}

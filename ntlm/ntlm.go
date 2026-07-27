@@ -2,6 +2,7 @@
 package ntlm
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rc4"
@@ -63,6 +64,16 @@ const (
 	NtLmChallenge    = 0x00000002
 	NtLmAuthenticate = 0x00000003
 )
+
+// IsAuthenticate reports whether the message is an NTLM AUTHENTICATE message, which is what
+// the client sends in the second leg of the authentication exchange.
+func IsAuthenticate(msg []byte) bool {
+	if len(msg) < 12 || !bytes.Equal(msg[:8], signature) {
+		return false
+	}
+
+	return binary.LittleEndian.Uint32(msg[8:12]) == NtLmAuthenticate
+}
 
 const (
 	NTLMSSP_NEGOTIATE_UNICODE = 1 << iota

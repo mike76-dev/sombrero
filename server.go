@@ -92,6 +92,7 @@ func (s *server) newConnection(conn net.Conn) *connection {
 		pendingResponses:      make(map[uint64]smb2.GenericResponse),
 		requestOpens:          make(map[uint64]*open),
 		sessionTable:          make(map[uint64]*session),
+		preauthSessionTable:   make(map[uint64]*preauthSession),
 		conn:                  conn,
 		negotiateDialect:      smb2.SMB_DIALECT_UNKNOWN,
 		dialect:               "Unknown",
@@ -194,6 +195,14 @@ func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResp
 		} else { // Otherwise, wipe the signature(s)
 			wipeSignatures(buf)
 		}
+	}
+
+	// The preauthentication integrity hash of a binding exchange covers the interim response
+	// exactly as it goes on the wire, signature included, so it can only be updated once the
+	// message is complete. There is no such hash outside of a binding exchange, which makes
+	// this a no-op for an ordinary session setup.
+	if resp.Header().Command() == smb2.SMB2_SESSION_SETUP && resp.Header().Status() == smb2.STATUS_MORE_PROCESSING_REQUIRED {
+		c.updatePreauthHash(resp.Header().SessionID(), buf)
 	}
 
 	c.writeChan <- buf
