@@ -2694,39 +2694,24 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		}
 	}
 
-	// The provided request is an SMB2_CANCEL request; we need to find the target request.
-	var target *smb2.Request
-	c.mu.Lock()
-	if cr.Header().IsFlagSet(smb2.FLAGS_ASYNC_COMMAND) {
-		target, found = c.asyncCommandList[cr.Header().AsyncID()]
-	} else {
-		mid := cr.Header().MessageID()
-		for _, r := range c.asyncCommandList {
-			if r == nil {
-				continue
-			}
-			if r.Header().MessageID() == mid {
-				target = r
-				found = true
-				break
-			}
-		}
-	}
-	c.mu.Unlock()
-
-	if !found || target == nil {
+	// The provided request is an SMB2_CANCEL request; we need to find the target request
+	// and the connection that carries it, which need not be this one.
+	target, owner := c.findCancelTarget(cr, ss)
+	if target == nil {
 		return nil
 	}
 
-	// If we are cancelling an SMB2_WRITE request, we should abort the upload.
-	if target.Header().Command() == smb2.SMB2_WRITE {
+	// If we are cancelling an SMB2_WRITE request, we should abort the upload. An unsigned
+	// cancel is not required to name a session that still exists, so the open can only be
+	// looked up when one was found.
+	if target.Header().Command() == smb2.SMB2_WRITE && ss != nil {
 		wr := smb2.WriteRequest{Request: *target}
 		var op *open
 		id := wr.FileID()
 		fid := binary.LittleEndian.Uint64(id[:8])
 		dfid := binary.LittleEndian.Uint64(id[8:16])
 		ss.mu.Lock()
-		op, found = ss.openTable[fid]
+		op, found := ss.openTable[fid]
 		ss.mu.Unlock()
 		if found && op.durableFileID == dfid {
 			op.cancelUpload()
@@ -2745,20 +2730,70 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		resp.Header().SetAsyncID(target.Header().AsyncID())
 	}
 
-	c.releaseOpen(target)
-	c.server.writeResponse(c, ss, resp)
+	// The request is answered and cleaned up on the connection that carries it, which is
+	// where its outstanding request count, its entry in the async command list and its stop
+	// channel all live.
+	owner.releaseOpen(target)
+	owner.server.writeResponse(owner, ss, resp)
 
-	c.mu.Lock()
-	delete(c.asyncCommandList, target.Header().AsyncID())
+	owner.mu.Lock()
+	delete(owner.asyncCommandList, target.Header().AsyncID())
 
-	ch, ok := c.stopChans[target.CancelRequestID()]
+	ch, ok := owner.stopChans[target.CancelRequestID()]
 	if ok {
 		close(ch)
-		delete(c.stopChans, target.CancelRequestID())
+		delete(owner.stopChans, target.CancelRequestID())
 	}
-	c.mu.Unlock()
+	owner.mu.Unlock()
 
 	return nil
+}
+
+// findCancelTarget locates the request that the cancel refers to, together with the
+// connection that carries it. An asynchronous request is found by its AsyncId, which is
+// unique across the server, so every channel of the session is searched: a client is free
+// to cancel over a channel other than the one the request was sent on. A synchronous one is
+// found by its MessageId, which only means anything inside the command sequence window of a
+// single connection, so that search never leaves the connection the cancel arrived on.
+func (c *connection) findCancelTarget(cr smb2.CancelRequest, ss *session) (*smb2.Request, *connection) {
+	if !cr.Header().IsFlagSet(smb2.FLAGS_ASYNC_COMMAND) {
+		mid := cr.Header().MessageID()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		for _, r := range c.asyncCommandList {
+			if r != nil && r.Header().MessageID() == mid {
+				return r, c
+			}
+		}
+
+		return nil, nil
+	}
+
+	// The connection the cancel arrived on is searched first: it is the one that carries the
+	// request in all but the unusual case.
+	connections := []*connection{c}
+	if ss != nil && smb2.Is3X(c.negotiateDialect) {
+		ss.mu.Lock()
+		for _, ch := range ss.channelList {
+			if ch.connection != c {
+				connections = append(connections, ch.connection)
+			}
+		}
+		ss.mu.Unlock()
+	}
+
+	aid := cr.Header().AsyncID()
+	for _, conn := range connections {
+		conn.mu.Lock()
+		r, found := conn.asyncCommandList[aid]
+		conn.mu.Unlock()
+		if found && r != nil {
+			return r, conn
+		}
+	}
+
+	return nil, nil
 }
 
 // isStale returns true if the connection hasn't been used for a certain amount of time.
