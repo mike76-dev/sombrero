@@ -113,8 +113,8 @@ func (s *server) registerSession(connection *connection, req smb2.SessionSetupRe
 }
 
 // deregisterSession destroys the Session object and closes all associated tree connections.
-func (s *server) deregisterSession(connection *connection, sid uint64) (*session, error) {
-	ss, found := connection.sessionTable[sid]
+func (s *server) deregisterSession(conn *connection, sid uint64) (*session, error) {
+	ss, found := conn.sessionTable[sid]
 	if !found {
 		return nil, errSessionNotFound
 	}
@@ -132,9 +132,26 @@ func (s *server) deregisterSession(connection *connection, sid uint64) (*session
 		ss.closeTreeConnect(tid)
 	}
 
-	connection.mu.Lock()
-	delete(connection.sessionTable, sid)
-	connection.mu.Unlock()
+	// The session may be served by more than one connection, so it has to go from all of
+	// them, not only from the one that the request arrived on. The channels are collected
+	// first and cleared out, so that none of the connection locks is taken while the lock
+	// of the session is held.
+	ss.mu.Lock()
+	connections := make([]*connection, 0, len(ss.channelList)+1)
+	for _, ch := range ss.channelList {
+		connections = append(connections, ch.connection)
+	}
+	ss.channelList = make(map[string]*channel)
+	ss.mu.Unlock()
+
+	// The dialects without channels leave the list empty, and the connection the request
+	// came in on is the only one to clear. Clearing it twice does no harm.
+	connections = append(connections, conn)
+	for _, c := range connections {
+		c.mu.Lock()
+		delete(c.sessionTable, sid)
+		c.mu.Unlock()
+	}
 
 	s.mu.Lock()
 	delete(s.globalSessionTable, sid)
