@@ -144,28 +144,18 @@ func (s *server) closeConnection(c *connection) {
 		ss.unbindChannel(c)
 	}
 
-	// A session that still has a channel left carries on over it, and so do its opens. Only
-	// the opens of a session that has just lost its last channel are abandoned. In the
-	// dialects without channels the list is always empty, so every session the connection
-	// carried loses its opens, which is the only outcome those dialects allow.
+	// A session that still has a channel left carries on over it. One that has just lost its
+	// last channel is destroyed: nothing can reach it any more, so its opens, its tree
+	// connects and the session itself all go. In the dialects without channels the list is
+	// always empty, so every session the connection carried is destroyed with it, which is
+	// the only outcome those dialects allow.
 	for _, ss := range sessions {
 		ss.mu.Lock()
-		if len(ss.channelList) > 0 {
-			ss.mu.Unlock()
-			continue
-		}
-		opens := make([]*open, 0, len(ss.openTable))
-		for _, op := range ss.openTable {
-			opens = append(opens, op)
-		}
+		empty := len(ss.channelList) == 0
 		ss.mu.Unlock()
 
-		for _, op := range opens {
-			op.mu.Lock()
-			if op.cancel != nil {
-				op.cancel()
-			}
-			op.mu.Unlock()
+		if empty {
+			s.deregisterSession(c, ss.sessionID)
 		}
 	}
 
