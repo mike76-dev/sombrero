@@ -79,6 +79,14 @@ type open struct {
 	durableTimeout time.Duration
 	disconnectTime time.Time
 
+	// An open may hold an opportunistic lock, which lets the client cache the file locally
+	// on the promise that nobody else gets at it without the client being told first.
+	// oplockBreak is open while the client is being told, and is closed once it has answered,
+	// once the wait has run out, or once the open has died; whoever wants the file waits on it.
+	oplockLevel uint8
+	oplockState int
+	oplockBreak chan struct{}
+
 	created      time.Time
 	lastModified time.Time
 
@@ -313,6 +321,10 @@ func (s *server) closeOpen(op *open, persist bool) {
 	if !persist {
 		op.cancel()
 	}
+
+	// An open that goes away takes its oplock with it, and releases whoever was waiting for
+	// the break it was in the middle of.
+	op.releaseOplock()
 
 	op.treeConnect.mu.Lock()
 	op.treeConnect.openCount--

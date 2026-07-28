@@ -208,13 +208,14 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 // closeTreeConnect destroys the TreeConnect object by removing any references to it.
 func (ss *session) closeTreeConnect(tid uint32) error {
 	ss.mu.Lock()
-	defer ss.mu.Unlock()
 
 	tc, ok := ss.treeConnectTable[tid]
 	if !ok {
+		ss.mu.Unlock()
 		return errNoTreeConnect
 	}
 
+	var closed []*open
 	for fid, op := range ss.openTable {
 		if op.treeConnect == tc {
 			delete(ss.openTable, fid)
@@ -224,6 +225,7 @@ func (ss *session) closeTreeConnect(tid uint32) error {
 			delete(ss.connection.server.globalOpenTable, op.durableFileID)
 			ss.connection.server.mu.Unlock()
 			op.cancel()
+			closed = append(closed, op)
 		}
 	}
 
@@ -232,6 +234,14 @@ func (ss *session) closeTreeConnect(tid uint32) error {
 	tc.share.mu.Unlock()
 
 	delete(ss.treeConnectTable, tid)
+	ss.mu.Unlock()
+
+	// The oplocks are given up outside the lock of the session: releasing one takes the lock
+	// of the open, and picking a channel to break an oplock over takes the two in the other
+	// order.
+	for _, op := range closed {
+		op.releaseOplock()
+	}
 
 	return nil
 }

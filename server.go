@@ -47,8 +47,13 @@ type server struct {
 	isMultiChannelCapable       bool
 
 	// Auxiliary fields.
-	listener        net.Listener
-	mu              sync.Mutex
+	listener net.Listener
+	mu       sync.Mutex
+
+	// oplockMu guards the granting of oplocks. An oplock is only granted to an open that has
+	// its file to itself, and only this lock keeps two creates racing for the same file from
+	// both finding it free. It is never held while a break is waited for.
+	oplockMu        sync.Mutex
 	connectionCount map[string]int
 	store           stores.Store
 	debug           bool
@@ -172,8 +177,8 @@ func (s *server) closeConnection(c *connection) {
 	c.once.Do(func() { close(c.closeChan) })
 }
 
-// writeResponse encodes the response and adds it to the sending queue.
-func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResponse) {
+// encodeResponse encodes the response and applies whatever protection the session calls for.
+func (s *server) encodeResponse(c *connection, ss *session, resp smb2.GenericResponse) []byte {
 	wipeSignatures := func(msg []byte) {
 		var off uint32
 		var zero [16]byte
@@ -210,6 +215,13 @@ func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResp
 		}
 	}
 
+	return buf
+}
+
+// writeResponse encodes the response and adds it to the sending queue.
+func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResponse) {
+	buf := s.encodeResponse(c, ss, resp)
+
 	// The preauthentication integrity hash of a binding exchange covers the interim response
 	// exactly as it goes on the wire, signature included, so it can only be updated once the
 	// message is complete. There is no such hash outside of a binding exchange, which makes
@@ -223,6 +235,36 @@ func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResp
 	s.mu.Lock()
 	s.stats.BytesSent += uint64(len(buf))
 	s.mu.Unlock()
+}
+
+// trySendResponse is writeResponse for a message the server sends on its own initiative rather
+// than in reply to a request. It reports whether the message was handed over for sending, and
+// gives up instead of waiting forever when the connection has already gone: nothing drains the
+// sending queue of a connection whose sender has stopped.
+func (s *server) trySendResponse(c *connection, ss *session, resp smb2.GenericResponse) bool {
+	// A connection that is already gone is given up on before anything is queued for it: the
+	// two cases of the select below are picked between at random whenever both are ready, so
+	// a message would otherwise stand a chance of being queued for a connection that will
+	// never send it.
+	select {
+	case <-c.closeChan:
+		return false
+	default:
+	}
+
+	buf := s.encodeResponse(c, ss, resp)
+
+	select {
+	case c.writeChan <- buf:
+	case <-c.closeChan:
+		return false
+	}
+
+	s.mu.Lock()
+	s.stats.BytesSent += uint64(len(buf))
+	s.mu.Unlock()
+
+	return true
 }
 
 // enumShares generates a NetShareInfo Type 1 structure for each available share.

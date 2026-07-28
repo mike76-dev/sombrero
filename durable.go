@@ -57,6 +57,14 @@ func (ss *session) orphanDurableOpens() int {
 	}
 	ss.mu.Unlock()
 
+	// The oplock goes with the connection. A client that cannot be reached cannot be told to
+	// give the file up, so it must not be left believing it still has it to itself; and the
+	// open, still counted among those on the file, keeps anybody else from being granted one
+	// until it is either reclaimed or swept.
+	for _, op := range orphaned {
+		op.releaseOplock()
+	}
+
 	now := time.Now()
 	for _, op := range orphaned {
 		op.mu.Lock()

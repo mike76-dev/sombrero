@@ -854,268 +854,106 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		co = co &^ smb2.FILE_OPEN_FOR_FREE_SPACE_QUERY
 		cr.SetCreateOptions(co)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		var info client.ObjectInfo
-		var result uint32
-		var restored bool
-		var op *open
-		if tc.share.name == "ipc$" { // A named pipe is being created
-			switch strings.ToLower(path) {
-			case "srvsvc", "lsarpc", "mdssvc":
-				info = client.ObjectInfo{
-					Key: path,
-				}
-				result = smb2.FILE_OPENED
-			default: // Other named pipes are not supported
-				cancel()
-				c.server.mu.Lock()
-				c.server.stats.PermErrors++
-				c.server.mu.Unlock()
-				resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
-				return resp, ss, nil
-			}
-		} else {
-			access := grantAccess(cr, tc, ss)
-			if !access { // The user has insufficient access rights
-				cancel()
-				resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
-				c.server.mu.Lock()
-				c.server.stats.PermErrors++
-				c.server.mu.Unlock()
-				return resp, ss, nil
-			}
-
-			info, err = tc.client.Object(ctx, acc, path)
-			if err != nil && errors.Is(err, context.DeadlineExceeded) {
-				cancel()
-				resp := smb2.NewErrorResponse(cr, smb2.STATUS_IO_TIMEOUT, 0, nil)
-				return resp, ss, nil
-			}
-
-			switch cr.CreateDisposition() {
-			case smb2.FILE_SUPERSEDE:
-				if err != nil {
-					tc.mu.Lock()
-					op, restored = tc.persistedOpens[path]
-					tc.mu.Unlock()
-					if !restored {
-						info = client.ObjectInfo{
-							Key:        "/" + path,
-							CreatedAt:  time.Now(),
-							ModifiedAt: time.Now(),
-						}
-						result = smb2.FILE_CREATED
-					} else {
-						result = smb2.FILE_SUPERSEDED
-					}
-				} else {
-					result = smb2.FILE_SUPERSEDED
-				}
-			case smb2.FILE_OPEN:
-				if err != nil {
-					tc.mu.Lock()
-					op, restored = tc.persistedOpens[path]
-					tc.mu.Unlock()
-					if !restored {
-						cancel()
-						resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
-						return resp, ss, nil
-					} else {
-						result = smb2.FILE_OPENED
-					}
-				} else {
-					result = smb2.FILE_OPENED
-				}
-			case smb2.FILE_CREATE:
-				if err != nil {
-					info = client.ObjectInfo{
-						Key:        "/" + path,
-						CreatedAt:  time.Now(),
-						ModifiedAt: time.Now(),
-					}
-					result = smb2.FILE_CREATED
-					if cr.CreateOptions()&smb2.FILE_DIRECTORY_FILE > 0 { // Make a new directory
-						info.Key += "/"
-						if err := tc.client.MakeDirectory(ctx, acc, path); err != nil {
-							cancel()
-							if errors.Is(err, stores.ErrDirectoryExists) {
-								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
-								return resp, ss, nil
-							} else {
-								log.Printf("Couldn't create directory %s: %v\n", path, err)
-								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
-								return resp, ss, nil
-							}
-						}
-					}
-				} else {
-					cancel()
-					resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
-					return resp, ss, nil
-				}
-			case smb2.FILE_OPEN_IF:
-				if err != nil {
-					tc.mu.Lock()
-					op, restored = tc.persistedOpens[path]
-					tc.mu.Unlock()
-					if !restored {
-						info = client.ObjectInfo{
-							Key:        "/" + path,
-							CreatedAt:  time.Now(),
-							ModifiedAt: time.Now(),
-						}
-						result = smb2.FILE_CREATED
-						if cr.CreateOptions()&smb2.FILE_DIRECTORY_FILE > 0 { // Make a new directory
-							info.Key += "/"
-							if err := tc.client.MakeDirectory(ctx, acc, path); err != nil {
-								cancel()
-								if errors.Is(err, stores.ErrDirectoryExists) {
-									resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
-									return resp, ss, nil
-								} else {
-									log.Printf("Couldn't create directory %s: %v\n", path, err)
-									resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
-									return resp, ss, nil
-								}
-							}
-						}
-					} else {
-						result = smb2.FILE_OPENED
-					}
-				} else {
-					result = smb2.FILE_OPENED
-				}
-			case smb2.FILE_OVERWRITE:
-				if err != nil {
-					tc.mu.Lock()
-					op, restored = tc.persistedOpens[path]
-					tc.mu.Unlock()
-					if !restored {
-						cancel()
-						resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
-						return resp, ss, nil
-					} else {
-						result = smb2.FILE_OVERWRITTEN
-					}
-				} else {
-					result = smb2.FILE_OVERWRITTEN
-				}
-			case smb2.FILE_OVERWRITE_IF:
-				if err != nil {
-					tc.mu.Lock()
-					op, restored = tc.persistedOpens[path]
-					tc.mu.Unlock()
-					if !restored {
-						info = client.ObjectInfo{
-							Key:        "/" + path,
-							CreatedAt:  time.Now(),
-							ModifiedAt: time.Now(),
-						}
-						result = smb2.FILE_CREATED
-						if cr.CreateOptions()&smb2.FILE_DIRECTORY_FILE > 0 { // Make a new directory
-							info.Key += "/"
-							if err := tc.client.MakeDirectory(ctx, acc, path); err != nil {
-								cancel()
-								if errors.Is(err, stores.ErrDirectoryExists) {
-									resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
-									return resp, ss, nil
-								} else {
-									log.Printf("Couldn't create directory %s: %v\n", path, err)
-									resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
-									return resp, ss, nil
-								}
-							}
-						}
-					} else {
-						result = smb2.FILE_OVERWRITTEN
-					}
-				} else {
-					result = smb2.FILE_OVERWRITTEN
-				}
-			}
+		// The access rights are settled before anybody's oplock is disturbed. A client that
+		// may not have the file has no business making whoever holds it give it up, and a
+		// create that is going to be refused has nothing to wait for. The desired access is
+		// read after the adjustment above, which is what decides it in the marginal cases.
+		if tc.share.name != "ipc$" && !grantAccess(cr, tc, ss) {
+			c.server.mu.Lock()
+			c.server.stats.PermErrors++
+			c.server.mu.Unlock()
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
+			return resp, ss, nil
 		}
 
-		if restored { // This file has already been "created", "restore" it
-			cancel()
-			c.server.restoreOpen(op, c)
-		} else {
-			op = ss.registerOpen(cr, c, tc, info, ctx, cancel)
-			if op == nil {
-				cancel()
-				resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
-				return resp, ss, nil
+		// Whoever holds an oplock on this file has to give it up before the create may look at
+		// the file at all, because the holder may be sitting on writes it has not sent yet.
+		if !c.server.hasOplockHolders(tc.share, path, nil) {
+			return c.createFile(req, cr, ss, tc, acc, contexts, path), ss, nil
+		}
+
+		// Waiting for the acknowledgment cannot happen here: a connection serves its requests
+		// one at a time, and the acknowledgment being waited for may be on its way in over this
+		// very connection. The create is answered with an interim response and finished on a
+		// goroutine of its own.
+		aid := make([]byte, 8)
+		frand.Read(aid)
+		asyncID := binary.LittleEndian.Uint64(aid)
+		c.mu.Lock()
+		c.asyncCommandList[asyncID] = req
+		c.mu.Unlock()
+
+		go func() {
+			c.server.breakOplocksOn(tc.share, path, nil)
+
+			resp := c.createFile(req, cr, ss, tc, acc, contexts, path)
+
+			// The final response of an asynchronous command must carry the async flag and ID
+			// in all cases, including errors.
+			resp.Header().SetAsyncID(asyncID)
+			resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+
+			c.mu.Lock()
+			delete(c.requestList, resp.Header().MessageID())
+			delete(c.asyncCommandList, asyncID)
+			c.mu.Unlock()
+
+			c.releaseOpen(req)
+			c.server.writeResponse(c, ss, resp)
+		}()
+
+		resp := smb2.NewErrorResponse(cr, smb2.STATUS_PENDING, 0, nil)
+		resp.Header().SetAsyncID(asyncID)
+		resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+		resp.Header().ClearFlag(smb2.FLAGS_RELATED_OPERATIONS)
+		resp.Header().ClearFlag(smb2.FLAGS_SIGNED)
+		resp.Header()[len(resp.Header())-1] = 0x21
+
+		return resp, ss, nil
+
+	case smb2.SMB2_OPLOCK_BREAK:
+		obr := smb2.OplockBreakRequest{Request: *req}
+		if err := obr.Validate(c.supportsMultiCredit); err != nil {
+			if errors.Is(err, smb2.ErrWrongFormat) {
+				// A lease break acknowledgment, told apart by its structure size. The server
+				// grants no leases, so there is nothing it could be acknowledging.
+				resp := smb2.NewErrorResponse(obr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+				return resp, nil, nil
 			}
+			log.Println("Invalid SMB2_OPLOCK_BREAK request:", err)
+			return nil, nil, err
 		}
 
-		op.mu.Lock()
-		attr := op.fileAttributes
-		op.mu.Unlock()
-		if result == smb2.FILE_CREATED && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 { // Persist the file for any future requests
-			tc.mu.Lock()
-			tc.persistedOpens[path] = op
-			tc.mu.Unlock()
+		c.mu.Lock()
+		ss, found := c.sessionTable[obr.Header().SessionID()]
+		c.mu.Unlock()
+
+		if !found {
+			resp := smb2.NewErrorResponse(obr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
+			return resp, nil, nil
 		}
 
-		if result == smb2.FILE_SUPERSEDED || result == smb2.FILE_OVERWRITTEN {
-			op.mu.Lock()
-			op.size = 0
-			op.allocated = 0
-			op.lastModified = time.Now()
-			op.mu.Unlock()
+		ss.mu.Lock()
+		ss.idleTime = time.Now()
+		ss.mu.Unlock()
+
+		id := obr.FileID()
+		op, status := c.findOpen(ss, id, req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(obr, status, 0, nil)
+			return resp, ss, nil
 		}
 
-		respContexts := make(map[uint32][]byte)
-		for id, ctx := range contexts {
-			switch id {
-			case smb2.CREATE_EA_BUFFER: // renterd doesn't support extended file attributes, so why should we?
-				resp := smb2.NewErrorResponse(cr, smb2.STATUS_EAS_NOT_SUPPORTED, 0, nil)
-				return resp, ss, nil
-			case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
-				respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, op.lastModified, op.grantedAccess)
-			case smb2.CREATE_QUERY_ON_DISK_ID:
-				respContexts[id] = smb2.HandleCreateQueryOnDiskID(op.handle, tc.volumeID)
-			case smb2.CREATE_ALLOCATION_SIZE: // The file is about to be uploaded, we just got its size
-				op.mu.Lock()
-				op.allocated = binary.LittleEndian.Uint64(ctx)
-				op.mu.Unlock()
-			case smb2.SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2:
-				// The handle is to survive the loss of the connection. A directory has no
-				// work in progress worth preserving, and a named pipe has nothing to go
-				// back to, so only files are granted durability.
-				dh, ok := smb2.ParseDurableHandleRequestV2(ctx)
-				if !ok || tc.share.name == "ipc$" {
-					break
-				}
-				op.mu.Lock()
-				isDir := op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
-				op.mu.Unlock()
-				if isDir {
-					break
-				}
-				respContexts[id] = smb2.HandleCreateDurableHandleRequestV2(op.grantDurability(dh))
-			}
+		if status := op.acknowledgeOplockBreak(obr.OplockLevel()); status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(obr, status, 0, nil)
+			return resp, ss, nil
 		}
 
-		resp := &smb2.CreateResponse{}
-		resp.FromRequest(cr)
-		op.mu.Lock()
-		resp.Generate(
-			smb2.OPLOCK_LEVEL_NONE,
-			result,
-			op.size,
-			op.allocated,
-			op.lastModified,
-			op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
-			op.fileID,
-			op.durableFileID,
-			respContexts,
-		)
-		op.mu.Unlock()
-
-		gid := req.GroupID()
-		if gid > 0 {
-			resp.SetOpenID(op.id())
-		}
+		// The oplock is always given up in full, whatever level the client offered to keep, so
+		// that is what the response tells it that it has left.
+		resp := &smb2.OplockBreakResponse{}
+		resp.FromRequest(obr)
+		resp.Generate(smb2.OPLOCK_LEVEL_NONE, id)
 
 		return resp, ss, nil
 
@@ -2886,4 +2724,273 @@ func (c *connection) isStale() bool {
 	}
 
 	return true
+}
+
+// createFile carries out an SMB2_CREATE request that has passed its preliminary checks.
+// It is kept apart from the dispatcher because a create that has to revoke somebody else's
+// oplock first can only finish once the break is over, which is too long to keep the
+// connection waiting, so it runs on a goroutine of its own.
+func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *session, tc *treeConnect, acc stores.Account, contexts map[uint32][]byte, path string) smb2.GenericResponse {
+	ctx, cancel := context.WithCancel(context.Background())
+	var info client.ObjectInfo
+	var result uint32
+	var restored bool
+	var op *open
+	var err error
+	if tc.share.name == "ipc$" { // A named pipe is being created
+		switch strings.ToLower(path) {
+		case "srvsvc", "lsarpc", "mdssvc":
+			info = client.ObjectInfo{
+				Key: path,
+			}
+			result = smb2.FILE_OPENED
+		default: // Other named pipes are not supported
+			cancel()
+			c.server.mu.Lock()
+			c.server.stats.PermErrors++
+			c.server.mu.Unlock()
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
+			return resp
+		}
+	} else {
+		info, err = tc.client.Object(ctx, acc, path)
+		if err != nil && errors.Is(err, context.DeadlineExceeded) {
+			cancel()
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_IO_TIMEOUT, 0, nil)
+			return resp
+		}
+
+		switch cr.CreateDisposition() {
+		case smb2.FILE_SUPERSEDE:
+			if err != nil {
+				tc.mu.Lock()
+				op, restored = tc.persistedOpens[path]
+				tc.mu.Unlock()
+				if !restored {
+					info = client.ObjectInfo{
+						Key:        "/" + path,
+						CreatedAt:  time.Now(),
+						ModifiedAt: time.Now(),
+					}
+					result = smb2.FILE_CREATED
+				} else {
+					result = smb2.FILE_SUPERSEDED
+				}
+			} else {
+				result = smb2.FILE_SUPERSEDED
+			}
+		case smb2.FILE_OPEN:
+			if err != nil {
+				tc.mu.Lock()
+				op, restored = tc.persistedOpens[path]
+				tc.mu.Unlock()
+				if !restored {
+					cancel()
+					resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+					return resp
+				} else {
+					result = smb2.FILE_OPENED
+				}
+			} else {
+				result = smb2.FILE_OPENED
+			}
+		case smb2.FILE_CREATE:
+			if err != nil {
+				info = client.ObjectInfo{
+					Key:        "/" + path,
+					CreatedAt:  time.Now(),
+					ModifiedAt: time.Now(),
+				}
+				result = smb2.FILE_CREATED
+				if cr.CreateOptions()&smb2.FILE_DIRECTORY_FILE > 0 { // Make a new directory
+					info.Key += "/"
+					if err := tc.client.MakeDirectory(ctx, acc, path); err != nil {
+						cancel()
+						if errors.Is(err, stores.ErrDirectoryExists) {
+							resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
+							return resp
+						} else {
+							log.Printf("Couldn't create directory %s: %v\n", path, err)
+							resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+							return resp
+						}
+					}
+				}
+			} else {
+				cancel()
+				resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
+				return resp
+			}
+		case smb2.FILE_OPEN_IF:
+			if err != nil {
+				tc.mu.Lock()
+				op, restored = tc.persistedOpens[path]
+				tc.mu.Unlock()
+				if !restored {
+					info = client.ObjectInfo{
+						Key:        "/" + path,
+						CreatedAt:  time.Now(),
+						ModifiedAt: time.Now(),
+					}
+					result = smb2.FILE_CREATED
+					if cr.CreateOptions()&smb2.FILE_DIRECTORY_FILE > 0 { // Make a new directory
+						info.Key += "/"
+						if err := tc.client.MakeDirectory(ctx, acc, path); err != nil {
+							cancel()
+							if errors.Is(err, stores.ErrDirectoryExists) {
+								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
+								return resp
+							} else {
+								log.Printf("Couldn't create directory %s: %v\n", path, err)
+								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+								return resp
+							}
+						}
+					}
+				} else {
+					result = smb2.FILE_OPENED
+				}
+			} else {
+				result = smb2.FILE_OPENED
+			}
+		case smb2.FILE_OVERWRITE:
+			if err != nil {
+				tc.mu.Lock()
+				op, restored = tc.persistedOpens[path]
+				tc.mu.Unlock()
+				if !restored {
+					cancel()
+					resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+					return resp
+				} else {
+					result = smb2.FILE_OVERWRITTEN
+				}
+			} else {
+				result = smb2.FILE_OVERWRITTEN
+			}
+		case smb2.FILE_OVERWRITE_IF:
+			if err != nil {
+				tc.mu.Lock()
+				op, restored = tc.persistedOpens[path]
+				tc.mu.Unlock()
+				if !restored {
+					info = client.ObjectInfo{
+						Key:        "/" + path,
+						CreatedAt:  time.Now(),
+						ModifiedAt: time.Now(),
+					}
+					result = smb2.FILE_CREATED
+					if cr.CreateOptions()&smb2.FILE_DIRECTORY_FILE > 0 { // Make a new directory
+						info.Key += "/"
+						if err := tc.client.MakeDirectory(ctx, acc, path); err != nil {
+							cancel()
+							if errors.Is(err, stores.ErrDirectoryExists) {
+								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
+								return resp
+							} else {
+								log.Printf("Couldn't create directory %s: %v\n", path, err)
+								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+								return resp
+							}
+						}
+					}
+				} else {
+					result = smb2.FILE_OVERWRITTEN
+				}
+			} else {
+				result = smb2.FILE_OVERWRITTEN
+			}
+		}
+	}
+
+	if restored { // This file has already been "created", "restore" it
+		cancel()
+		c.server.restoreOpen(op, c)
+	} else {
+		op = ss.registerOpen(cr, c, tc, info, ctx, cancel)
+		if op == nil {
+			cancel()
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp
+		}
+	}
+
+	op.mu.Lock()
+	attr := op.fileAttributes
+	op.mu.Unlock()
+	if result == smb2.FILE_CREATED && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 { // Persist the file for any future requests
+		tc.mu.Lock()
+		tc.persistedOpens[path] = op
+		tc.mu.Unlock()
+	}
+
+	if result == smb2.FILE_SUPERSEDED || result == smb2.FILE_OVERWRITTEN {
+		op.mu.Lock()
+		op.size = 0
+		op.allocated = 0
+		op.lastModified = time.Now()
+		op.mu.Unlock()
+	}
+
+	// The oplock is decided last, once the open exists and counts among those on the file.
+	// Whatever the client asked for, the level it is told about is the level it gets.
+	oplockLevel := uint8(smb2.OPLOCK_LEVEL_NONE)
+	if oplockEligible(cr.RequestedOplockLevel(), tc, attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0) {
+		oplockLevel = c.server.grantOplock(op, cr.RequestedOplockLevel(), tc, path)
+	}
+
+	respContexts := make(map[uint32][]byte)
+	for id, ctx := range contexts {
+		switch id {
+		case smb2.CREATE_EA_BUFFER: // renterd doesn't support extended file attributes, so why should we?
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_EAS_NOT_SUPPORTED, 0, nil)
+			return resp
+		case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
+			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, op.lastModified, op.grantedAccess)
+		case smb2.CREATE_QUERY_ON_DISK_ID:
+			respContexts[id] = smb2.HandleCreateQueryOnDiskID(op.handle, tc.volumeID)
+		case smb2.CREATE_ALLOCATION_SIZE: // The file is about to be uploaded, we just got its size
+			op.mu.Lock()
+			op.allocated = binary.LittleEndian.Uint64(ctx)
+			op.mu.Unlock()
+		case smb2.SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2:
+			// The handle is to survive the loss of the connection. A directory has no
+			// work in progress worth preserving, and a named pipe has nothing to go
+			// back to, so only files are granted durability.
+			dh, ok := smb2.ParseDurableHandleRequestV2(ctx)
+			if !ok || tc.share.name == "ipc$" {
+				break
+			}
+			op.mu.Lock()
+			isDir := op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
+			op.mu.Unlock()
+			if isDir {
+				break
+			}
+			respContexts[id] = smb2.HandleCreateDurableHandleRequestV2(op.grantDurability(dh))
+		}
+	}
+
+	resp := &smb2.CreateResponse{}
+	resp.FromRequest(cr)
+	op.mu.Lock()
+	resp.Generate(
+		oplockLevel,
+		result,
+		op.size,
+		op.allocated,
+		op.lastModified,
+		op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
+		op.fileID,
+		op.durableFileID,
+		respContexts,
+	)
+	op.mu.Unlock()
+
+	gid := req.GroupID()
+	if gid > 0 {
+		resp.SetOpenID(op.id())
+	}
+
+	return resp
 }

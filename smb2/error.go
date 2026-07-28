@@ -38,9 +38,11 @@ const (
 	STATUS_NETWORK_ACCESS_DENIED                 = 0xc00000ca
 	STATUS_BAD_NETWORK_NAME                      = 0xc00000cc
 	STATUS_REQUEST_NOT_ACCEPTED                  = 0xc00000d0
+	STATUS_INVALID_OPLOCK_PROTOCOL               = 0xc00000e3
 	STATUS_DIRECTORY_NOT_EMPTY                   = 0xc0000101
 	STATUS_CANCELLED                             = 0xc0000120
 	STATUS_FILE_CLOSED                           = 0xc0000128
+	STATUS_INVALID_DEVICE_STATE                  = 0xc0000184
 	STATUS_USER_SESSION_DELETED                  = 0xc0000203
 	STATUS_NOT_FOUND                             = 0xc0000225
 	STATUS_DUPLICATE_OBJECTID                    = 0xc000022a
