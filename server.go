@@ -197,13 +197,13 @@ func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResp
 			if resp.MayCompress() {
 				buf = c.compress(buf)
 			}
-			buf = ss.encrypt(buf)
+			buf = ss.encrypt(buf, c)
 		} else if resp.Header().Command() != smb2.SMB2_SESSION_SETUP && ss.encryptData {
 			wipeSignatures(buf)
 			if resp.MayCompress() {
 				buf = c.compress(buf)
 			}
-			buf = ss.encrypt(buf)
+			buf = ss.encrypt(buf, c)
 		} else if resp.Header().Command() == smb2.SMB2_SESSION_SETUP || resp.Header().IsFlagSet(smb2.FLAGS_SIGNED) {
 			ss.sign(buf, c)
 		} else { // Otherwise, wipe the signature(s)

@@ -145,7 +145,7 @@ func (c *connection) acceptRequest(msg []byte) error {
 		if ss.isAnonymous || ss.isGuest {
 			return errAccessDenied
 		}
-		msg = ss.decrypt(msg)
+		msg = ss.decrypt(msg, c)
 		if uint32(len(msg)) != size {
 			return smb2.ErrWrongLength
 		}

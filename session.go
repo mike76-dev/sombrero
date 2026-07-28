@@ -32,6 +32,7 @@ const (
 var (
 	errSessionNotFound = errors.New("session not found")
 	errNoSigningKey    = errors.New("no signing key available")
+	errNoCipher        = errors.New("no cipher negotiated")
 )
 
 // session represents a Session object.
@@ -426,25 +427,35 @@ func (ss *session) validateRequest(req *smb2.Request, c *connection) error {
 	return nil
 }
 
-// encrypt uses the encryption key to encrypt the SMB message.
-func (ss *session) encrypt(buf []byte) []byte {
-	ciph, err := aes.NewCipher(ss.encryptionKey)
+// aead returns the cipher that protects the traffic of the session over the given
+// connection, keyed with the key provided. The keys belong to the session and are shared by
+// all of its channels, but the algorithm is negotiated by each connection separately, so a
+// message has to be protected with the cipher of the channel it travels over rather than
+// with the one the session was established under.
+func (ss *session) aead(key []byte, c *connection) (cipher.AEAD, error) {
+	ciph, err := aes.NewCipher(key)
 	if err != nil {
-		log.Printf("Error creating cipher for encryption: %v", err)
-		return nil
+		return nil, err
 	}
-	var encrypter cipher.AEAD
-	switch ss.connection.negotiateDialect {
+
+	switch c.negotiateDialect {
 	case smb2.SMB_DIALECT_30, smb2.SMB_DIALECT_302:
-		encrypter, err = ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
+		return ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
 	case smb2.SMB_DIALECT_311:
-		switch ss.connection.cipherID {
+		switch c.cipherID {
 		case smb2.AES_128_CCM:
-			encrypter, err = ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
+			return ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
 		case smb2.AES_128_GCM:
-			encrypter, err = cipher.NewGCMWithNonceSize(ciph, 12)
+			return cipher.NewGCMWithNonceSize(ciph, 12)
 		}
 	}
+
+	return nil, errNoCipher
+}
+
+// encrypt uses the encryption key to encrypt the SMB message.
+func (ss *session) encrypt(buf []byte, c *connection) []byte {
+	encrypter, err := ss.aead(ss.encryptionKey, c)
 	if err != nil {
 		log.Printf("Error creating encrypter: %v", err)
 		return nil
@@ -464,25 +475,9 @@ func (ss *session) encrypt(buf []byte) []byte {
 }
 
 // decrypt uses the decryption key to decrypt the SMB message.
-func (ss *session) decrypt(buf []byte) []byte {
+func (ss *session) decrypt(buf []byte, c *connection) []byte {
 	input := append(buf[smb2.SMB2TransformHeaderSize:], smb2.Header(buf).EncryptionSignature()...)
-	ciph, err := aes.NewCipher(ss.decryptionKey)
-	if err != nil {
-		log.Printf("Error creating cipher for decryption: %v", err)
-		return nil
-	}
-	var decrypter cipher.AEAD
-	switch ss.connection.negotiateDialect {
-	case smb2.SMB_DIALECT_30, smb2.SMB_DIALECT_302:
-		decrypter, err = ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
-	case smb2.SMB_DIALECT_311:
-		switch ss.connection.cipherID {
-		case smb2.AES_128_CCM:
-			decrypter, err = ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
-		case smb2.AES_128_GCM:
-			decrypter, err = cipher.NewGCMWithNonceSize(ciph, 12)
-		}
-	}
+	decrypter, err := ss.aead(ss.decryptionKey, c)
 	if err != nil {
 		log.Printf("Error creating decrypter: %v", err)
 		return nil
