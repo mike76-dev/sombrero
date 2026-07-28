@@ -84,11 +84,18 @@ func (ss *session) channel(c *connection) *channel {
 // is taken if that channel has gone away. The dialects without channels have nothing to
 // choose from: the message goes over the connection the open was established on.
 func (op *open) selectConnection(preferred *connection) *connection {
-	ss := op.session
-	if !smb2.Is3X(ss.connection.negotiateDialect) {
-		return op.connection
+	// The connection of the open is read before the session is locked, and the copy is used
+	// from there on: the open may be handed to another connection while this runs, and the
+	// two locks must never be held at the same time.
+	op.mu.Lock()
+	own := op.connection
+	op.mu.Unlock()
+
+	if !smb2.Is3X(own.negotiateDialect) {
+		return own
 	}
 
+	ss := op.session
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 
@@ -105,8 +112,8 @@ func (op *open) selectConnection(preferred *connection) *connection {
 
 	// The connection the open belongs to is the next best thing: it keeps the choice stable
 	// for as long as that channel lives.
-	if isChannel(op.connection) {
-		return op.connection
+	if isChannel(own) {
+		return own
 	}
 
 	for _, ch := range ss.channelList {
@@ -116,7 +123,7 @@ func (op *open) selectConnection(preferred *connection) *connection {
 	// The session has no channels left. There is nothing to send over, but the caller is
 	// given the connection of the open rather than nothing at all, so that the send fails
 	// on a closed connection instead of a nil pointer.
-	return op.connection
+	return own
 }
 
 // preauthSession represents a PreauthSession object. While a session is being bound to a

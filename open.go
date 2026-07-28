@@ -201,7 +201,7 @@ func grantAccess(cr smb2.CreateRequest, tc *treeConnect, ss *session) bool {
 }
 
 // registerOpen creates a new Open object and registers it with the server.
-func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info client.ObjectInfo, ctx context.Context, cancel context.CancelFunc) *open {
+func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeConnect, info client.ObjectInfo, ctx context.Context, cancel context.CancelFunc) *open {
 	h, _ := blake2b.New256(nil)
 	h.Write([]byte(info.Key))
 	id := h.Sum(nil)
@@ -226,7 +226,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 		fileID:         binary.LittleEndian.Uint64(fid[:8]),
 		durableFileID:  binary.LittleEndian.Uint64(fid[8:]),
 		session:        ss,
-		connection:     ss.connection,
+		connection:     c,
 		treeConnect:    tc,
 		grantedAccess:  access,
 		fileName:       filename,
@@ -254,7 +254,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 	// The open starts off at the channel sequence the client created it with, so that the
 	// requests that follow can be told apart from the ones that were issued before a
 	// reconnect. The dialects without channels have no such field.
-	if smb2.Is3X(ss.connection.negotiateDialect) {
+	if smb2.Is3X(c.negotiateDialect) {
 		op.channelSequence = cr.Header().ChannelSequence()
 	}
 
@@ -267,10 +267,10 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 	ss.openTable[op.fileID] = op
 	ss.mu.Unlock()
 
-	ss.connection.server.mu.Lock()
-	ss.connection.server.globalOpenTable[op.durableFileID] = op
-	ss.connection.server.stats.FOpens++
-	ss.connection.server.mu.Unlock()
+	c.server.mu.Lock()
+	c.server.globalOpenTable[op.durableFileID] = op
+	c.server.stats.FOpens++
+	c.server.mu.Unlock()
 
 	tc.mu.Lock()
 	tc.openCount++
@@ -280,14 +280,20 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, tc *treeConnect, info cli
 }
 
 // restoreOpen is invoked when a file created earlier during the session is mentioned again.
-func (s *server) restoreOpen(op *open) {
+func (s *server) restoreOpen(op *open, c *connection) {
+	// The open is established anew, this time over the connection that asked for it, which
+	// need not be the one that created it in the first place.
+	op.mu.Lock()
+	op.connection = c
+	op.mu.Unlock()
+
 	op.session.mu.Lock()
 	op.session.openTable[op.fileID] = op
 	op.session.mu.Unlock()
 
-	op.connection.server.mu.Lock()
-	op.connection.server.globalOpenTable[op.durableFileID] = op
-	op.connection.server.mu.Unlock()
+	s.mu.Lock()
+	s.globalOpenTable[op.durableFileID] = op
+	s.mu.Unlock()
 
 	op.treeConnect.mu.Lock()
 	op.treeConnect.openCount++

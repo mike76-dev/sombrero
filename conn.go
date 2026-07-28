@@ -1000,9 +1000,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		if restored { // This file has already been "created", "restore" it
 			cancel()
-			c.server.restoreOpen(op)
+			c.server.restoreOpen(op, c)
 		} else {
-			op = ss.registerOpen(cr, tc, info, ctx, cancel)
+			op = ss.registerOpen(cr, c, tc, info, ctx, cancel)
 			if op == nil {
 				cancel()
 				resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
