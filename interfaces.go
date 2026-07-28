@@ -15,6 +15,45 @@ import (
 // disclose, which is the usual case for virtual and wireless adapters.
 const defaultLinkSpeed = 1_000_000_000
 
+// virtualInterfacePrefixes lists the names of the interfaces that are never offered to a
+// client as a channel. They belong to containers, virtual machines and tunnels, which sit on
+// networks of their own: a client is generally not on any of them, and an address it cannot
+// reach costs it a connection attempt that stalls until it times out.
+//
+// The bridge that a virtual machine host carries its own address on is commonly called br0,
+// so only the br- prefix that Docker gives its user-defined networks is listed, rather than
+// br as a whole.
+var virtualInterfacePrefixes = []string{
+	"br-",       // Docker user-defined bridges
+	"cali",      // Calico
+	"cni",       // Kubernetes CNI
+	"docker",    // Docker default bridge
+	"flannel",   // Flannel
+	"tailscale", // Tailscale
+	"tap",       // Tunnel adapters
+	"tun",
+	"veth",    // Container ends of the virtual Ethernet pairs
+	"vboxnet", // VirtualBox
+	"virbr",   // libvirt bridges
+	"vmnet",   // VMware
+	"vnet",    // libvirt guest adapters
+	"wg",      // WireGuard
+	"zt",      // ZeroTier
+}
+
+// isVirtualInterface reports whether the interface belongs to a container, a virtual machine
+// or a tunnel, rather than to a network that the clients of the server are on.
+func isVirtualInterface(name string) bool {
+	name = strings.ToLower(name)
+	for _, prefix := range virtualInterfacePrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // networkInterfaces lists the interfaces that the server can be reached at. The server
 // listens on every address of the machine, so every interface that is up and carries a
 // routable address is a possible channel and is offered to the client as one.
@@ -28,6 +67,9 @@ func networkInterfaces() []smb2.NetworkInterface {
 	var result []smb2.NetworkInterface
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if isVirtualInterface(iface.Name) {
 			continue
 		}
 
