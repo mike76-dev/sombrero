@@ -60,7 +60,7 @@ type Store interface {
 type ServerStats struct {
 	Start      time.Time `json:"start"`      // The time the server started
 	FOpens     uint32    `json:"fOpens"`     // The number of total opens
-	SOpens     uint32    `json:"sOpens"`     // The number of sessions established
+	SOpens     uint32    `json:"sOpens"`     // The number of sessions currently established
 	PwErrors   uint32    `json:"pwErrors"`   // The number of password violations
 	PermErrors uint32    `json:"permErrors"` // The number of access permission errors
 	BytesSent  uint64    `json:"bytesSent"`  // The total number of bytes sent

@@ -218,8 +218,10 @@ func (ss *session) closeTreeConnect(tid uint32) error {
 	for fid, op := range ss.openTable {
 		if op.treeConnect == tc {
 			delete(ss.openTable, fid)
+			// The global table is keyed by the durable ID, not by the one the open table
+			// of the session uses.
 			ss.connection.server.mu.Lock()
-			delete(ss.connection.server.globalOpenTable, fid)
+			delete(ss.connection.server.globalOpenTable, op.durableFileID)
 			ss.connection.server.mu.Unlock()
 			op.cancel()
 		}

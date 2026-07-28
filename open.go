@@ -71,6 +71,14 @@ type open struct {
 	outstandingRequestCount         uint32
 	outstandingPreviousRequestCount uint32
 
+	// A durable open survives the loss of the connection it was created on: it is kept
+	// aside for durableTimeout after disconnectTime, so that the client may reclaim it by
+	// presenting the same createGuid instead of starting the work over. disconnectTime is
+	// zero for as long as the open is attached to a session.
+	isDurable      bool
+	durableTimeout time.Duration
+	disconnectTime time.Time
+
 	created      time.Time
 	lastModified time.Time
 

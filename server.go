@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -73,6 +74,9 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool,
 		ctx:                ctx,
 	}
 	s.stats.Start = time.Now()
+
+	go s.reapDurableOpens()
+
 	return s
 }
 
@@ -155,6 +159,11 @@ func (s *server) closeConnection(c *connection) {
 		ss.mu.Unlock()
 
 		if empty {
+			// A durable open is what the client asked to keep across exactly this kind of
+			// loss, so it is set aside before the session is torn down around it.
+			if n := ss.orphanDurableOpens(); n > 0 && s.debug {
+				log.Printf("Keeping %d durable handle(s) of session %d for reclaiming", n, ss.sessionID)
+			}
 			s.deregisterSession(c, ss.sessionID)
 		}
 	}

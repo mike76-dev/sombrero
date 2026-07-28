@@ -794,6 +794,43 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// A reconnect claims a handle that already exists, so it is answered from the open
+		// that was kept aside rather than by resolving the path and going to the backend.
+		if ctx, found := contexts[smb2.SMB2_CREATE_DURABLE_HANDLE_RECONNECT_V2]; found {
+			rec, ok := smb2.ParseDurableHandleReconnectV2(ctx)
+			if !ok {
+				resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+				return resp, ss, nil
+			}
+
+			op := c.reclaimDurableOpen(rec, ss, tc)
+			if op == nil {
+				// Nothing to reclaim: the handle is gone, or it never belonged to this
+				// client. The client is expected to open the file from scratch.
+				resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+				return resp, ss, nil
+			}
+
+			resp := &smb2.CreateResponse{}
+			resp.FromRequest(cr)
+			op.mu.Lock()
+			resp.Generate(
+				smb2.OPLOCK_LEVEL_NONE,
+				smb2.FILE_OPENED,
+				op.size,
+				op.allocated,
+				op.lastModified,
+				op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
+				op.fileID,
+				op.durableFileID,
+				nil,
+			)
+			op.mu.Unlock()
+			req.SetOpenID(op.id())
+
+			return resp, ss, nil
+		}
+
 		path := strings.ReplaceAll(cr.Filename(), "\\", "/")
 		if strings.HasPrefix(path, ".") { // Hidden files of any sort are not supported
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_NOT_SUPPORTED, 0, nil)
@@ -1041,6 +1078,21 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				op.mu.Lock()
 				op.allocated = binary.LittleEndian.Uint64(ctx)
 				op.mu.Unlock()
+			case smb2.SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2:
+				// The handle is to survive the loss of the connection. A directory has no
+				// work in progress worth preserving, and a named pipe has nothing to go
+				// back to, so only files are granted durability.
+				dh, ok := smb2.ParseDurableHandleRequestV2(ctx)
+				if !ok || tc.share.name == "ipc$" {
+					break
+				}
+				op.mu.Lock()
+				isDir := op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
+				op.mu.Unlock()
+				if isDir {
+					break
+				}
+				respContexts[id] = smb2.HandleCreateDurableHandleRequestV2(op.grantDurability(dh))
 			}
 		}
 
