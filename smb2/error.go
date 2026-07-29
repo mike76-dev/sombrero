@@ -17,6 +17,7 @@ const (
 	STATUS_NOTIFY_ENUM_DIR                       = 0x0000010c
 	STATUS_BUFFER_OVERFLOW                       = 0x80000005
 	STATUS_NO_MORE_FILES                         = 0x80000006
+	STATUS_UNSUCCESSFUL                          = 0xc0000001
 	STATUS_INFO_LENGTH_MISMATCH                  = 0xc0000004
 	STATUS_INVALID_HANDLE                        = 0xc0000008
 	STATUS_INVALID_PARAMETER                     = 0xc000000d

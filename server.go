@@ -37,6 +37,7 @@ type server struct {
 	shareList                   map[string]*share
 	globalOpenTable             map[uint64]*open
 	globalSessionTable          map[uint64]*session
+	globalLeaseTableList        map[[16]byte]*leaseTable
 	connectionList              map[string]*connection
 	serverGuid                  [16]byte
 	serverCapabilities          uint32
@@ -50,10 +51,10 @@ type server struct {
 	listener net.Listener
 	mu       sync.Mutex
 
-	// oplockMu guards the granting of oplocks. An oplock is only granted to an open that has
-	// its file to itself, and only this lock keeps two creates racing for the same file from
-	// both finding it free. It is never held while a break is waited for.
-	oplockMu        sync.Mutex
+	// cachingMu guards the granting of oplocks and leases. Either is only promised to an open
+	// that has its file to itself, and only this lock keeps two creates racing for the same
+	// file from both finding it free. It is never held while a break is waited for.
+	cachingMu       sync.Mutex
 	connectionCount map[string]int
 	store           stores.Store
 	debug           bool
@@ -64,19 +65,20 @@ type server struct {
 // newServer returns an initialized SMB server.
 func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool, cfg stores.IndexdConfig) *server {
 	s := &server{
-		enabled:            true,
-		serverGuid:         uuid.New(),
-		shareList:          make(map[string]*share),
-		connectionList:     make(map[string]*connection),
-		globalOpenTable:    make(map[uint64]*open),
-		globalSessionTable: make(map[uint64]*session),
-		globalClientTable:  make(map[[16]byte]*smbClient),
-		listener:           l,
-		connectionCount:    make(map[string]int),
-		store:              db,
-		debug:              debug,
-		cfg:                cfg,
-		ctx:                ctx,
+		enabled:              true,
+		serverGuid:           uuid.New(),
+		shareList:            make(map[string]*share),
+		connectionList:       make(map[string]*connection),
+		globalOpenTable:      make(map[uint64]*open),
+		globalSessionTable:   make(map[uint64]*session),
+		globalClientTable:    make(map[[16]byte]*smbClient),
+		globalLeaseTableList: make(map[[16]byte]*leaseTable),
+		listener:             l,
+		connectionCount:      make(map[string]int),
+		store:                db,
+		debug:                debug,
+		cfg:                  cfg,
+		ctx:                  ctx,
 	}
 	s.stats.Start = time.Now()
 

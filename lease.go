@@ -1,0 +1,397 @@
+package main
+
+import (
+	"log"
+	"sync"
+	"time"
+
+	"github.com/mike76-dev/sombrero/smb2"
+)
+
+// leaseBreakTimeout is how long the server waits for a client to acknowledge that it has cut
+// its lease back. Whoever wants the file carries on once it runs out, as with an oplock.
+const leaseBreakTimeout = 35 * time.Second
+
+// lease is a Lease object: the promise the server makes to one client about one file. Unlike
+// an oplock, which belongs to a single open, a lease is shared by every open the client has on
+// the file under the same key, and none of those opens breaks the others.
+type lease struct {
+	leaseKey   [16]byte
+	clientGuid [16]byte
+	fileName   string
+	version    int
+
+	state        uint32
+	breakToState uint32
+	breaking     bool
+	epoch        uint16
+
+	// opens are the opens sharing the lease, keyed by durable file ID. The lease is worth
+	// nothing once the last of them is gone.
+	opens map[uint64]*open
+
+	// breakDone is open while the client is being told to cut the lease back, and is closed
+	// once it has answered, the wait has run out, or the last open has gone.
+	breakDone chan struct{}
+
+	mu sync.Mutex
+}
+
+// leaseTable is the set of leases held by one client, keyed by the lease key the client chose.
+type leaseTable struct {
+	leases map[[16]byte]*lease
+	mu     sync.Mutex
+}
+
+// leaseGrantable reports whether a lease state is one the server is willing to promise.
+//
+// Only the states that include write caching are granted. A lease without it is the shared
+// read promise: several clients may hold one at once, and it has to be broken whenever any of
+// them writes. The server breaks on a create alone, so a client left holding one would go on
+// serving reads from a cache that has gone stale.
+func leaseGrantable(requested uint32) bool {
+	return requested&smb2.SMB2_LEASE_WRITE_CACHING > 0
+}
+
+// leaseTableFor returns the lease table of the client, making one if this is the first lease it
+// has asked for.
+func (s *server) leaseTableFor(guid [16]byte) *leaseTable {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	lt, found := s.globalLeaseTableList[guid]
+	if !found {
+		lt = &leaseTable{leases: make(map[[16]byte]*lease)}
+		s.globalLeaseTableList[guid] = lt
+	}
+
+	return lt
+}
+
+// findLease returns the lease the client holds under the given key, if it holds one.
+func (s *server) findLease(guid, key [16]byte) *lease {
+	s.mu.Lock()
+	lt, found := s.globalLeaseTableList[guid]
+	s.mu.Unlock()
+
+	if !found {
+		return nil
+	}
+
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+
+	return lt.leases[key]
+}
+
+// leaseFor returns the lease the client holds under the key it named, making one if it holds
+// none yet. It returns false if the key is already in use for another file, which is the one
+// thing a client is not allowed to do with a lease key.
+func (s *server) leaseFor(guid [16]byte, req smb2.LeaseRequest, path string) (*lease, bool) {
+	lt := s.leaseTableFor(guid)
+
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+
+	l, found := lt.leases[req.LeaseKey]
+	if found {
+		l.mu.Lock()
+		matches := l.fileName == path
+		l.mu.Unlock()
+
+		return l, matches
+	}
+
+	l = &lease{
+		leaseKey:   req.LeaseKey,
+		clientGuid: guid,
+		fileName:   path,
+		version:    req.Version,
+		epoch:      1,
+		opens:      make(map[uint64]*open),
+	}
+	lt.leases[req.LeaseKey] = l
+
+	return l, true
+}
+
+// join adds the open to the lease, and hands the open its share of it.
+func (l *lease) join(op *open, state uint32) {
+	l.mu.Lock()
+	l.state = state
+	l.opens[op.durableFileID] = op
+	l.mu.Unlock()
+
+	op.mu.Lock()
+	op.lease = l
+	op.mu.Unlock()
+}
+
+// leaveLease takes the open out of the lease it shared. A lease that has lost its last open is
+// worth nothing and gives up whatever it promised, releasing anybody waiting on a break of it.
+func (op *open) leaveLease() {
+	op.mu.Lock()
+	l := op.lease
+	op.lease = nil
+	op.mu.Unlock()
+
+	if l == nil {
+		return
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	delete(l.opens, op.durableFileID)
+	if len(l.opens) > 0 {
+		return
+	}
+
+	l.state = smb2.SMB2_LEASE_NONE
+	if l.breaking {
+		l.breaking = false
+		close(l.breakDone)
+		l.breakDone = nil
+	}
+}
+
+// releaseCaching takes away whatever the open was allowed to cache, be it an oplock of its own
+// or a share of a lease, and releases anybody waiting for either to be given up.
+func (op *open) releaseCaching() {
+	op.releaseOplock()
+	op.leaveLease()
+}
+
+// currentEpoch returns the epoch of the lease, which the client uses to tell a stale lease
+// state change from a fresh one.
+func (l *lease) currentEpoch() uint16 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.epoch
+}
+
+// leaseRequest returns the lease the client is asking for with this create, or nil if it is
+// asking for none. A lease context means nothing unless the client says it wants a lease, and
+// only a client that named a GUID at negotiate time can hold one.
+func (c *connection) leaseRequest(cr smb2.CreateRequest, contexts map[uint32][]byte) *smb2.LeaseRequest {
+	if cr.RequestedOplockLevel() != smb2.OPLOCK_LEVEL_LEASE || len(c.clientGuid) != 16 {
+		return nil
+	}
+
+	ctx, found := contexts[smb2.CREATE_REQUEST_LEASE]
+	if !found {
+		return nil
+	}
+
+	lr, ok := smb2.ParseLeaseRequest(ctx)
+	if !ok {
+		return nil
+	}
+
+	return &lr
+}
+
+// startBreak moves the lease to being cut back to the given state, and hands back the channel
+// that is closed once the break is over, together with whether this call is the one that
+// started it: a break already in flight is waited for rather than sent twice.
+func (l *lease) startBreak(to uint32) (chan struct{}, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.state == smb2.SMB2_LEASE_NONE || l.state == to {
+		return nil, false
+	}
+	if l.breaking {
+		return l.breakDone, false
+	}
+
+	l.breaking = true
+	l.breakToState = to
+	l.epoch++
+	l.breakDone = make(chan struct{})
+
+	return l.breakDone, true
+}
+
+// completeBreak ends a break that is in flight and releases whoever was waiting for it. Only
+// the first call has any effect: the acknowledgment of the client, the expiry of the wait and
+// the departure of the last open all race to end the same break.
+func (l *lease) completeBreak(state uint32) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.breaking {
+		return false
+	}
+
+	l.state = state
+	l.breaking = false
+	close(l.breakDone)
+	l.breakDone = nil
+
+	return true
+}
+
+// clientConnections lists the connections a client is reachable over. A lease belongs to the
+// client rather than to any one of its sessions, so a break may travel over any of them.
+func (s *server) clientConnections(guid [16]byte) []*connection {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var conns []*connection
+	for _, c := range s.connectionList {
+		if len(c.clientGuid) == 16 && [16]byte(c.clientGuid) == guid {
+			conns = append(conns, c)
+		}
+	}
+
+	return conns
+}
+
+// sendLeaseBreak tells the client to cut its lease back, and starts the clock on the
+// acknowledgment. A client that cannot be reached on any of its connections loses the lease
+// straight away: it cannot be caching on the strength of a promise the server has no way of
+// withdrawing.
+func (s *server) sendLeaseBreak(l *lease) {
+	l.mu.Lock()
+	key, guid := l.leaseKey, l.clientGuid
+	current, to, epoch := l.state, l.breakToState, l.epoch
+	path := l.fileName
+	opens := make([]*open, 0, len(l.opens))
+	for _, op := range l.opens {
+		opens = append(opens, op)
+	}
+	l.mu.Unlock()
+
+	// The session is only needed to encrypt the message where the client asked for encryption;
+	// the notification itself names no session at all.
+	var ss *session
+	for _, op := range opens {
+		op.mu.Lock()
+		ss = op.session
+		op.mu.Unlock()
+		if ss != nil {
+			break
+		}
+	}
+
+	// A lease that keeps nothing back has nothing left to acknowledge with, so the client is
+	// told and the break is over. Anything else has to be confirmed before it takes effect.
+	ackRequired := current != smb2.SMB2_LEASE_READ_CACHING
+	notification := smb2.NewLeaseBreakNotification(key, current, to, epoch, ackRequired)
+
+	var sent bool
+	for _, conn := range s.clientConnections(guid) {
+		if s.trySendResponse(conn, ss, notification) {
+			sent = true
+			break
+		}
+	}
+
+	if !sent {
+		if s.debug {
+			log.Printf("Lease break on %s could not be delivered, revoking it", path)
+		}
+		l.completeBreak(smb2.SMB2_LEASE_NONE)
+		return
+	}
+
+	if !ackRequired {
+		l.completeBreak(to)
+		return
+	}
+
+	time.AfterFunc(leaseBreakTimeout, func() {
+		if l.completeBreak(smb2.SMB2_LEASE_NONE) && s.debug {
+			log.Printf("Lease break on %s was not acknowledged in time", path)
+		}
+	})
+}
+
+// grantLease gives the open the lease its client asked for, and returns the state granted. A
+// lease is only granted when every other open on the file is one of the client's own under the
+// same key, which is what makes a create by anybody else the only thing that can conflict with
+// it.
+//
+// As with an oplock, the decision and the granting happen under the one lock, so that two
+// creates racing for the same file cannot both come out of it holding a promise. If the file
+// turns out to have been opened elsewhere, nothing is granted and whoever holds a promise on it
+// has to give it up.
+func (s *server) grantLease(op *open, l *lease, requested uint32, tc *treeConnect, path string) uint32 {
+	s.cachingMu.Lock()
+
+	others := s.opensOn(tc.share, path, op)
+	if len(opensOutside(others, l)) == 0 {
+		granted := requested & (smb2.SMB2_LEASE_READ_CACHING | smb2.SMB2_LEASE_HANDLE_CACHING | smb2.SMB2_LEASE_WRITE_CACHING)
+		l.join(op, granted)
+		s.cachingMu.Unlock()
+
+		return granted
+	}
+
+	oplocks, leases := holdersIn(others, l)
+	_, notify := startBreaks(oplocks)
+	_, leaseNotify := startLeaseBreaks(leases)
+	s.cachingMu.Unlock()
+
+	// The break is not waited for here: this runs on the goroutine that serves the connection,
+	// and a promise made this late was made while the file stood free, so its holder cannot be
+	// sitting on anything the create should have seen.
+	go func() {
+		for _, other := range notify {
+			s.sendOplockBreak(other)
+		}
+		for _, other := range leaseNotify {
+			s.sendLeaseBreak(other)
+		}
+	}()
+
+	return smb2.SMB2_LEASE_NONE
+}
+
+// startLeaseBreaks cuts every lease back to nothing, and returns what it takes to finish the
+// job: the channels to wait on, and the leases that still have to be told. s.cachingMu must be
+// held, so that the leases cannot change hands while they are collected.
+func startLeaseBreaks(leases []*lease) (waits []chan struct{}, notify []*lease) {
+	for _, l := range leases {
+		ch, started := l.startBreak(smb2.SMB2_LEASE_NONE)
+		if ch == nil {
+			continue
+		}
+		waits = append(waits, ch)
+		if started {
+			notify = append(notify, l)
+		}
+	}
+
+	return
+}
+
+// acknowledgeLeaseBreak takes the answer of a client to a break that is in flight and returns
+// the status to reply with, together with the state the client is left holding.
+func (s *server) acknowledgeLeaseBreak(guid, key [16]byte, state uint32) (uint32, uint32) {
+	l := s.findLease(guid, key)
+	if l == nil {
+		return smb2.STATUS_OBJECT_NAME_NOT_FOUND, smb2.SMB2_LEASE_NONE
+	}
+
+	l.mu.Lock()
+	breaking := l.breaking
+	to := l.breakToState
+	l.mu.Unlock()
+
+	// Nothing is being broken, so the acknowledgment answers a break that never happened.
+	if !breaking {
+		return smb2.STATUS_UNSUCCESSFUL, smb2.SMB2_LEASE_NONE
+	}
+
+	// The client may only keep what it was told it could keep.
+	if state&^to != 0 {
+		return smb2.STATUS_REQUEST_NOT_ACCEPTED, smb2.SMB2_LEASE_NONE
+	}
+
+	l.completeBreak(state)
+
+	return smb2.STATUS_OK, state
+}

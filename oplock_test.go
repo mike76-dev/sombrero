@@ -322,7 +322,7 @@ func TestBreakOplocksOn(t *testing.T) {
 
 		done := make(chan struct{})
 		go func() {
-			s.breakOplocksOn(sh, "dir/file", nil)
+			s.breakHoldersOn(sh, "dir/file", nil, nil)
 			close(done)
 		}()
 
@@ -353,7 +353,7 @@ func TestBreakOplocksOn(t *testing.T) {
 
 		done := make(chan struct{})
 		go func() {
-			s.breakOplocksOn(sh, "dir/file", nil)
+			s.breakHoldersOn(sh, "dir/file", nil, nil)
 			close(done)
 		}()
 
@@ -376,11 +376,11 @@ func TestBreakOplocksOn(t *testing.T) {
 
 		op, _, sent := newOplockOpen(t, s, sh, "dir/file")
 
-		if s.hasOplockHolders(sh, "dir/file", nil) {
+		if s.hasHoldersOn(sh, "dir/file", nil, nil) {
 			t.Error("a file nobody holds an oplock on was reported as held")
 		}
 
-		s.breakOplocksOn(sh, "dir/file", nil)
+		s.breakHoldersOn(sh, "dir/file", nil, nil)
 
 		select {
 		case <-sent:
@@ -405,7 +405,7 @@ func TestReleaseOplockFreesWaiters(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.breakOplocksOn(sh, "dir/file", nil)
+		s.breakHoldersOn(sh, "dir/file", nil, nil)
 		close(done)
 	}()
 
@@ -422,7 +422,7 @@ func TestReleaseOplockFreesWaiters(t *testing.T) {
 		t.Fatal("the wait outlived the open it was waiting for")
 	}
 
-	if s.hasOplockHolders(sh, "dir/file", nil) {
+	if s.hasHoldersOn(sh, "dir/file", nil, nil) {
 		t.Error("the oplock survived the open that held it")
 	}
 }

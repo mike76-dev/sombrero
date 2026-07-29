@@ -152,7 +152,7 @@ func TestIntegrationAccessDeniedLeavesOplockAlone(t *testing.T) {
 	}
 	alice.quiet(200*time.Millisecond, "a client with no access to the file broke the oplock on it")
 
-	if !h.srv.hasOplockHolders(h.share, "dir/file", nil) {
+	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil) {
 		t.Error("the oplock was given up although the create that would have broken it was refused")
 	}
 }

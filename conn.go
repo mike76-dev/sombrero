@@ -866,10 +866,19 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
-		// Whoever holds an oplock on this file has to give it up before the create may look at
-		// the file at all, because the holder may be sitting on writes it has not sent yet.
-		if !c.server.hasOplockHolders(tc.share, path, nil) {
-			return c.createFile(req, cr, ss, tc, acc, contexts, path), ss, nil
+		// A lease the client already holds on this file is not something the create has to
+		// break: every open that client has under the same key shares it.
+		lr := c.leaseRequest(cr, contexts)
+		var own *lease
+		if lr != nil {
+			own = c.server.findLease([16]byte(c.clientGuid), lr.LeaseKey)
+		}
+
+		// Whoever else holds an oplock or a lease on this file has to give it up before the
+		// create may look at the file at all, because the holder may be sitting on writes it
+		// has not sent yet.
+		if !c.server.hasHoldersOn(tc.share, path, nil, own) {
+			return c.createFile(req, cr, ss, tc, acc, contexts, path, lr), ss, nil
 		}
 
 		// Waiting for the acknowledgment cannot happen here: a connection serves its requests
@@ -884,9 +893,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		c.mu.Unlock()
 
 		go func() {
-			c.server.breakOplocksOn(tc.share, path, nil)
+			c.server.breakHoldersOn(tc.share, path, nil, own)
 
-			resp := c.createFile(req, cr, ss, tc, acc, contexts, path)
+			resp := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
 
 			// The final response of an asynchronous command must carry the async flag and ID
 			// in all cases, including errors.
@@ -912,11 +921,46 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		return resp, ss, nil
 
 	case smb2.SMB2_OPLOCK_BREAK:
+		// The oplock and the lease acknowledgment share this command and are told apart by
+		// their structure size alone.
+		lbr := smb2.LeaseBreakRequest{Request: *req}
+		if lbr.Validate(c.supportsMultiCredit) == nil {
+			c.mu.Lock()
+			ss, found := c.sessionTable[lbr.Header().SessionID()]
+			c.mu.Unlock()
+
+			if !found {
+				resp := smb2.NewErrorResponse(lbr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
+				return resp, nil, nil
+			}
+
+			ss.mu.Lock()
+			ss.idleTime = time.Now()
+			ss.mu.Unlock()
+
+			if len(c.clientGuid) != 16 {
+				resp := smb2.NewErrorResponse(lbr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+				return resp, ss, nil
+			}
+
+			status, left := c.server.acknowledgeLeaseBreak([16]byte(c.clientGuid), lbr.LeaseKey(), lbr.LeaseState())
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(lbr, status, 0, nil)
+				return resp, ss, nil
+			}
+
+			resp := &smb2.LeaseBreakResponse{}
+			resp.FromRequest(lbr)
+			resp.Generate(lbr.LeaseKey(), left)
+
+			return resp, ss, nil
+		}
+
 		obr := smb2.OplockBreakRequest{Request: *req}
 		if err := obr.Validate(c.supportsMultiCredit); err != nil {
 			if errors.Is(err, smb2.ErrWrongFormat) {
-				// A lease break acknowledgment, told apart by its structure size. The server
-				// grants no leases, so there is nothing it could be acknowledging.
+				// Neither acknowledgment: the structure size belongs to nothing the server
+				// ever sends a break for.
 				resp := smb2.NewErrorResponse(obr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 				return resp, nil, nil
 			}
@@ -2730,7 +2774,19 @@ func (c *connection) isStale() bool {
 // It is kept apart from the dispatcher because a create that has to revoke somebody else's
 // oplock first can only finish once the break is over, which is too long to keep the
 // connection waiting, so it runs on a goroutine of its own.
-func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *session, tc *treeConnect, acc stores.Account, contexts map[uint32][]byte, path string) smb2.GenericResponse {
+func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *session, tc *treeConnect, acc stores.Account, contexts map[uint32][]byte, path string, lr *smb2.LeaseRequest) smb2.GenericResponse {
+	// A lease key is bound to the file it was first used for. Naming the same key on another
+	// file is the one thing a client may not do with one, and is settled before the open is
+	// made, so that a refusal leaves nothing behind.
+	var own *lease
+	if lr != nil {
+		l, matches := c.server.leaseFor([16]byte(c.clientGuid), *lr, path)
+		if !matches {
+			return smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+		}
+		own = l
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	var info client.ObjectInfo
 	var result uint32
@@ -2932,13 +2988,6 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		op.mu.Unlock()
 	}
 
-	// The oplock is decided last, once the open exists and counts among those on the file.
-	// Whatever the client asked for, the level it is told about is the level it gets.
-	oplockLevel := uint8(smb2.OPLOCK_LEVEL_NONE)
-	if oplockEligible(cr.RequestedOplockLevel(), tc, attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0) {
-		oplockLevel = c.server.grantOplock(op, cr.RequestedOplockLevel(), tc, path)
-	}
-
 	respContexts := make(map[uint32][]byte)
 	for id, ctx := range contexts {
 		switch id {
@@ -2969,6 +3018,30 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			}
 			respContexts[id] = smb2.HandleCreateDurableHandleRequestV2(op.grantDurability(dh))
 		}
+	}
+
+	// What the client may cache is decided last, once the open exists and counts among those on
+	// the file. Whatever was asked for, the level the client is told about is the level it gets.
+	oplockLevel := uint8(smb2.OPLOCK_LEVEL_NONE)
+	isDir := attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
+	switch {
+	case own != nil:
+		// A directory can only be cached through a lease that the change notifications keep
+		// honest, and a named pipe has nothing behind it worth caching at all.
+		granted := uint32(smb2.SMB2_LEASE_NONE)
+		if leaseGrantable(lr.LeaseState) && tc.share.name != "ipc$" && !isDir {
+			granted = c.server.grantLease(op, own, lr.LeaseState, tc, path)
+		}
+		if granted != smb2.SMB2_LEASE_NONE {
+			oplockLevel = smb2.OPLOCK_LEVEL_LEASE
+		}
+
+		// A client that asked for a lease is answered either way, so that it learns it was
+		// given nothing rather than being left to guess.
+		respContexts[smb2.CREATE_REQUEST_LEASE] = smb2.HandleCreateRequestLease(*lr, granted, own.currentEpoch())
+
+	case oplockEligible(cr.RequestedOplockLevel(), tc, isDir):
+		oplockLevel = c.server.grantOplock(op, cr.RequestedOplockLevel(), tc, path)
 	}
 
 	resp := &smb2.CreateResponse{}

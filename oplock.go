@@ -173,7 +173,7 @@ func (s *server) sendOplockBreak(op *open) {
 
 // startBreaks moves every open that holds an oplock to breaking, and returns what it takes to
 // finish the job: the channels to wait on, and the opens that still have to be told.
-// s.oplockMu must be held, so that the opens cannot change hands while they are collected.
+// s.cachingMu must be held, so that the opens cannot change hands while they are collected.
 func startBreaks(opens []*open) (waits []chan struct{}, notify []*open) {
 	for _, op := range opens {
 		ch, started := op.startOplockBreak()
@@ -189,39 +189,104 @@ func startBreaks(opens []*open) (waits []chan struct{}, notify []*open) {
 	return
 }
 
-// breakOplocksOn revokes every oplock held on a file and waits until the clients holding them
+// holdersIn sorts the opens of a file into what has to give before anybody else may touch it:
+// the opens holding an oplock of their own, and the leases held on the file. Anything belonging
+// to the lease named as own is left out, because a client never breaks its own lease.
+//
+// An open holds either an oplock or a share of a lease, never both, so the two are gathered
+// apart and each lease is named once however many opens it covers.
+func holdersIn(opens []*open, own *lease) (oplocks []*open, leases []*lease) {
+	seen := make(map[*lease]struct{})
+	for _, op := range opens {
+		op.mu.Lock()
+		l := op.lease
+		held := op.oplockState != smb2.OplockNone
+		op.mu.Unlock()
+
+		if l != nil {
+			_, found := seen[l]
+			if l == own || found {
+				continue
+			}
+
+			// A lease that has already been given up promises nothing, however many opens are
+			// still attached to it. Only one that still holds something, or is in the middle of
+			// letting go of it, stands in anybody's way.
+			l.mu.Lock()
+			active := l.state != smb2.SMB2_LEASE_NONE || l.breaking
+			l.mu.Unlock()
+
+			if active {
+				seen[l] = struct{}{}
+				leases = append(leases, l)
+			}
+			continue
+		}
+
+		if held {
+			oplocks = append(oplocks, op)
+		}
+	}
+
+	return
+}
+
+// holdersOn is holdersIn over the opens of a file.
+func (s *server) holdersOn(sh *share, path string, except *open, own *lease) ([]*open, []*lease) {
+	return holdersIn(s.opensOn(sh, path, except), own)
+}
+
+// opensOutside returns the opens that do not belong to the given lease. A lease may be granted
+// while the client that asks for it already has the file open under the same lease, but not
+// while anybody else has.
+func opensOutside(opens []*open, own *lease) []*open {
+	var outside []*open
+	for _, op := range opens {
+		op.mu.Lock()
+		mine := own != nil && op.lease == own
+		op.mu.Unlock()
+		if !mine {
+			outside = append(outside, op)
+		}
+	}
+
+	return outside
+}
+
+// breakHoldersOn revokes every promise made on a file and waits until the clients holding them
 // have answered. It is what a create has to do before it may look at a file: the holder of an
-// exclusive oplock may be sitting on writes it has not sent yet.
+// exclusive oplock or a write-caching lease may be sitting on writes it has not sent yet.
 //
 // It must not be called from the goroutine that serves a connection. The wait lasts as long as
 // the acknowledgment timer, and the acknowledgment it is waiting for may be on its way in over
 // that very connection.
-func (s *server) breakOplocksOn(sh *share, path string, except *open) {
-	s.oplockMu.Lock()
-	waits, notify := startBreaks(s.opensOn(sh, path, except))
-	s.oplockMu.Unlock()
+func (s *server) breakHoldersOn(sh *share, path string, except *open, own *lease) {
+	s.cachingMu.Lock()
+	oplocks, leases := s.holdersOn(sh, path, except, own)
+	waits, notify := startBreaks(oplocks)
+	leaseWaits, leaseNotify := startLeaseBreaks(leases)
+	s.cachingMu.Unlock()
 
 	for _, op := range notify {
 		s.sendOplockBreak(op)
 	}
+	for _, l := range leaseNotify {
+		s.sendLeaseBreak(l)
+	}
+
 	for _, ch := range waits {
+		<-ch
+	}
+	for _, ch := range leaseWaits {
 		<-ch
 	}
 }
 
-// hasOplockHolders reports whether anybody holds, or is in the middle of giving up, an oplock
-// on a file. It is what tells a create whether it has to go asynchronous.
-func (s *server) hasOplockHolders(sh *share, path string, except *open) bool {
-	for _, op := range s.opensOn(sh, path, except) {
-		op.mu.Lock()
-		held := op.oplockState != smb2.OplockNone
-		op.mu.Unlock()
-		if held {
-			return true
-		}
-	}
-
-	return false
+// hasHoldersOn reports whether anybody holds, or is in the middle of giving up, an oplock or a
+// lease on a file. It is what tells a create whether it has to go asynchronous.
+func (s *server) hasHoldersOn(sh *share, path string, except *open, own *lease) bool {
+	oplocks, leases := s.holdersOn(sh, path, except, own)
+	return len(oplocks) > 0 || len(leases) > 0
 }
 
 // grantOplock gives the open the oplock it asked for, and returns the level granted. An
@@ -233,7 +298,7 @@ func (s *server) hasOplockHolders(sh *share, path string, except *open) bool {
 // opened elsewhere while this create was under way, nothing is granted, and whoever was
 // granted an oplock before this open appeared has to give it up.
 func (s *server) grantOplock(op *open, requested uint8, tc *treeConnect, path string) uint8 {
-	s.oplockMu.Lock()
+	s.cachingMu.Lock()
 
 	others := s.opensOn(tc.share, path, op)
 	if len(others) == 0 {
@@ -247,7 +312,7 @@ func (s *server) grantOplock(op *open, requested uint8, tc *treeConnect, path st
 			op.oplockState = smb2.OplockHeld
 		}
 		op.mu.Unlock()
-		s.oplockMu.Unlock()
+		s.cachingMu.Unlock()
 
 		if granted {
 			return requested
@@ -256,16 +321,21 @@ func (s *server) grantOplock(op *open, requested uint8, tc *treeConnect, path st
 		return smb2.OPLOCK_LEVEL_NONE
 	}
 
-	_, notify := startBreaks(others)
-	s.oplockMu.Unlock()
+	oplocks, leases := holdersIn(others, nil)
+	_, notify := startBreaks(oplocks)
+	_, leaseNotify := startLeaseBreaks(leases)
+	s.cachingMu.Unlock()
 
 	// The breaks are sent without waiting for them. This runs on the goroutine that serves the
-	// connection, which must not be held up; and an oplock granted this late was granted while
-	// the file stood free, so its holder cannot be sitting on anything the create should have
-	// seen. All that matters is that the holder is told, which starting the break does.
+	// connection, which must not be held up; and a promise made this late was made while the
+	// file stood free, so its holder cannot be sitting on anything the create should have seen.
+	// All that matters is that the holder is told, which starting the break does.
 	go func() {
 		for _, other := range notify {
 			s.sendOplockBreak(other)
+		}
+		for _, other := range leaseNotify {
+			s.sendLeaseBreak(other)
 		}
 	}()
 

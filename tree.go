@@ -240,7 +240,7 @@ func (ss *session) closeTreeConnect(tid uint32) error {
 	// of the open, and picking a channel to break an oplock over takes the two in the other
 	// order.
 	for _, op := range closed {
-		op.releaseOplock()
+		op.releaseCaching()
 	}
 
 	return nil

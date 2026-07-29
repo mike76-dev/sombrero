@@ -87,6 +87,12 @@ type open struct {
 	oplockState int
 	oplockBreak chan struct{}
 
+	// An open may instead share a lease, which promises the same thing to the client that
+	// holds it rather than to this open alone: every open that client has on the file under
+	// the same key shares the lease, and none of them breaks the others. An open holds either
+	// an oplock or a lease, never both.
+	lease *lease
+
 	created      time.Time
 	lastModified time.Time
 
@@ -324,7 +330,7 @@ func (s *server) closeOpen(op *open, persist bool) {
 
 	// An open that goes away takes its oplock with it, and releases whoever was waiting for
 	// the break it was in the middle of.
-	op.releaseOplock()
+	op.releaseCaching()
 
 	op.treeConnect.mu.Lock()
 	op.treeConnect.openCount--

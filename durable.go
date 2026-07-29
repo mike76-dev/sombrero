@@ -62,7 +62,7 @@ func (ss *session) orphanDurableOpens() int {
 	// open, still counted among those on the file, keeps anybody else from being granted one
 	// until it is either reclaimed or swept.
 	for _, op := range orphaned {
-		op.releaseOplock()
+		op.releaseCaching()
 	}
 
 	now := time.Now()
