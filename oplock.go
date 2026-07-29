@@ -15,17 +15,45 @@ const oplockBreakTimeout = 35 * time.Second
 // oplockEligible reports whether an oplock may be granted for the level asked for, leaving
 // aside who else has the file open.
 //
-// Only the exclusive levels are ever granted. A level II oplock would have to be broken
-// whenever anybody writes to the file, and the server breaks oplocks on a create alone, so
-// granting one would leave the client caching reads that have gone stale.
+// The levels are ordered by how much they promise, and the constants are ordered with them,
+// so a level may be compared against another to see which gives the client more.
 func oplockEligible(requested uint8, tc *treeConnect, isDir bool) bool {
-	if requested != smb2.OPLOCK_LEVEL_EXCLUSIVE && requested != smb2.OPLOCK_LEVEL_BATCH {
+	switch requested {
+	case smb2.OPLOCK_LEVEL_II, smb2.OPLOCK_LEVEL_EXCLUSIVE, smb2.OPLOCK_LEVEL_BATCH:
+	default:
 		return false
 	}
 
 	// A named pipe has nothing behind it worth caching, and a directory can only be cached
-	// through a lease, which the server does not grant either.
+	// through a lease, which the server does not grant.
 	return tc.share.name != "ipc$" && !isDir
+}
+
+// oplockBreakTarget returns the level an oplock is to be cut back to. An open that only wants
+// to read the file needs the write cache of the holder gone and no more; anything that changes
+// the file needs the read cache gone as well.
+func oplockBreakTarget(sharedOK bool) uint8 {
+	if sharedOK {
+		return smb2.OPLOCK_LEVEL_II
+	}
+
+	return smb2.OPLOCK_LEVEL_NONE
+}
+
+// createChangesFile reports whether the create itself changes the file it opens, by emptying it
+// or by marking it to be deleted.
+//
+// Asking to be allowed to write does not count. A client that opens a file for writing has not
+// written anything yet, and the read caches the other clients have built up are still good; it
+// is the write, the rename or the truncation that makes them wrong, and each of those breaks
+// them when it happens.
+func createChangesFile(cr smb2.CreateRequest) bool {
+	switch cr.CreateDisposition() {
+	case smb2.FILE_SUPERSEDE, smb2.FILE_OVERWRITE, smb2.FILE_OVERWRITE_IF:
+		return true
+	}
+
+	return cr.CreateOptions()&smb2.FILE_DELETE_ON_CLOSE > 0
 }
 
 // opensOn collects the opens of a file, other than the one given. The global table is copied
@@ -57,30 +85,42 @@ func (s *server) opensOn(sh *share, path string, except *open) []*open {
 // startOplockBreak moves an open from holding its oplock to giving it up. It returns the
 // channel that is closed once the break is over, and whether this call is the one that started
 // it: a break that is already in flight is waited for rather than sent twice.
-func (op *open) startOplockBreak() (chan struct{}, bool) {
+func (op *open) startOplockBreak(to uint8) (chan struct{}, bool) {
 	op.mu.Lock()
 	defer op.mu.Unlock()
 
 	switch op.oplockState {
 	case smb2.OplockHeld:
+		// A level that promises as much as the one already held takes nothing away, so there
+		// is nothing to tell the client about.
+		if to >= op.oplockLevel {
+			return nil, false
+		}
+
 		op.oplockState = smb2.OplockBreaking
+		op.oplockBreakTo = to
 		op.oplockBreak = make(chan struct{})
 		return op.oplockBreak, true
+
 	case smb2.OplockBreaking:
-		return op.oplockBreak, false
+		if to >= op.oplockBreakTo {
+			return op.oplockBreak, false
+		}
+
+		// A second conflict wants the oplock cut back further than the break already in flight,
+		// so the client is told again and answering the first one is no longer good enough.
+		op.oplockBreakTo = to
+		return op.oplockBreak, true
 	}
 
 	return nil, false
 }
 
-// completeOplockBreak ends a break that is in flight and releases whoever was waiting for it.
-// Only the first call has any effect: the acknowledgment of the client, the expiry of the
-// timer and the death of the open all race to end the same break.
-//
-// The oplock is always given up in full. A client is allowed to answer a break by dropping to
-// level II, but the server grants no level II oplocks and would never break one on a write, so
-// leaving the client with one would leave it caching reads that can go stale.
-func (op *open) completeOplockBreak() bool {
+// completeOplockBreak ends a break that is in flight, leaving the client holding the level
+// given, and releases whoever was waiting for it. Only the first call has any effect: the
+// acknowledgment of the client, the expiry of the timer and the death of the open all race to
+// end the same break.
+func (op *open) completeOplockBreak(level uint8) bool {
 	op.mu.Lock()
 	defer op.mu.Unlock()
 
@@ -88,8 +128,13 @@ func (op *open) completeOplockBreak() bool {
 		return false
 	}
 
-	op.oplockLevel = smb2.OPLOCK_LEVEL_NONE
-	op.oplockState = smb2.OplockNone
+	op.oplockLevel = level
+	if level == smb2.OPLOCK_LEVEL_NONE {
+		op.oplockState = smb2.OplockNone
+	} else {
+		op.oplockState = smb2.OplockHeld
+	}
+
 	close(op.oplockBreak)
 	op.oplockBreak = nil
 
@@ -142,11 +187,11 @@ func (s *server) sendOplockBreak(op *open) {
 	ss := op.session
 	path := op.pathName
 	fid := op.id()
+	to := op.oplockBreakTo
+	held := op.oplockLevel
 	op.mu.Unlock()
 
-	// The break never names a level the client could keep. Batch is not a level a break may
-	// ask for at all, whichever level the oplock was granted at.
-	notification := smb2.NewOplockBreakNotification(smb2.OPLOCK_LEVEL_NONE, fid, ss.sessionID)
+	notification := smb2.NewOplockBreakNotification(to, fid, ss.sessionID)
 
 	var sent bool
 	for _, conn := range op.breakConnections() {
@@ -160,12 +205,21 @@ func (s *server) sendOplockBreak(op *open) {
 		if s.debug {
 			log.Printf("Oplock break on %s could not be delivered, revoking it", path)
 		}
-		op.completeOplockBreak()
+		op.completeOplockBreak(smb2.OPLOCK_LEVEL_NONE)
+		return
+	}
+
+	// A client holding a level II oplock has nothing to answer with: the only level below it is
+	// none, so there is no question how the transition was made and the break is over as soon
+	// as the client has been told.
+	if held == smb2.OPLOCK_LEVEL_II {
+		op.completeOplockBreak(smb2.OPLOCK_LEVEL_NONE)
 		return
 	}
 
 	time.AfterFunc(oplockBreakTimeout, func() {
-		if op.completeOplockBreak() && s.debug {
+		// A client that never answered keeps nothing: the file has been waiting on it.
+		if op.completeOplockBreak(smb2.OPLOCK_LEVEL_NONE) && s.debug {
 			log.Printf("Oplock break on %s was not acknowledged in time", path)
 		}
 	})
@@ -174,9 +228,9 @@ func (s *server) sendOplockBreak(op *open) {
 // startBreaks moves every open that holds an oplock to breaking, and returns what it takes to
 // finish the job: the channels to wait on, and the opens that still have to be told.
 // s.cachingMu must be held, so that the opens cannot change hands while they are collected.
-func startBreaks(opens []*open) (waits []chan struct{}, notify []*open) {
+func startBreaks(opens []*open, to uint8) (waits []chan struct{}, notify []*open) {
 	for _, op := range opens {
-		ch, started := op.startOplockBreak()
+		ch, started := op.startOplockBreak(to)
 		if ch == nil {
 			continue
 		}
@@ -253,19 +307,43 @@ func opensOutside(opens []*open, own *lease) []*open {
 	return outside
 }
 
-// breakHoldersOn revokes every promise made on a file and waits until the clients holding them
-// have answered. It is what a create has to do before it may look at a file: the holder of an
+// exclusiveHeld reports whether anything among these holders promises more than a read cache.
+// Nothing exclusive may be promised while one stands, and nothing at all while one is being
+// given up.
+func exclusiveHeld(oplocks []*open, leases []*lease) bool {
+	for _, op := range oplocks {
+		op.mu.Lock()
+		exclusive := op.oplockLevel > smb2.OPLOCK_LEVEL_II || op.oplockState == smb2.OplockBreaking
+		op.mu.Unlock()
+		if exclusive {
+			return true
+		}
+	}
+
+	for _, l := range leases {
+		l.mu.Lock()
+		exclusive := l.state&smb2.SMB2_LEASE_WRITE_CACHING > 0 || l.breaking
+		l.mu.Unlock()
+		if exclusive {
+			return true
+		}
+	}
+
+	return false
+}
+
+// breakHoldersOn cuts back every promise made on a file and waits for the clients that owe an
+// answer. It is what a create has to do before it may look at a file: the holder of an
 // exclusive oplock or a write-caching lease may be sitting on writes it has not sent yet.
+//
+// sharedOK says the create only wants to read, in which case the holders keep their read
+// caches and give up only what lets them write.
 //
 // It must not be called from the goroutine that serves a connection. The wait lasts as long as
 // the acknowledgment timer, and the acknowledgment it is waiting for may be on its way in over
 // that very connection.
-func (s *server) breakHoldersOn(sh *share, path string, except *open, own *lease) {
-	s.cachingMu.Lock()
-	oplocks, leases := s.holdersOn(sh, path, except, own)
-	waits, notify := startBreaks(oplocks)
-	leaseWaits, leaseNotify := startLeaseBreaks(leases)
-	s.cachingMu.Unlock()
+func (s *server) breakHoldersOn(sh *share, path string, except *open, own *lease, sharedOK bool) {
+	waits, notify, leaseNotify := s.startHolderBreaks(sh, path, except, own, sharedOK)
 
 	for _, op := range notify {
 		s.sendOplockBreak(op)
@@ -273,20 +351,93 @@ func (s *server) breakHoldersOn(sh *share, path string, except *open, own *lease
 	for _, l := range leaseNotify {
 		s.sendLeaseBreak(l)
 	}
-
 	for _, ch := range waits {
-		<-ch
-	}
-	for _, ch := range leaseWaits {
 		<-ch
 	}
 }
 
+// startHolderBreaks cuts back every promise on a file and returns what it takes to finish the
+// job: the channels to wait on, and the holders that still have to be told.
+func (s *server) startHolderBreaks(sh *share, path string, except *open, own *lease, sharedOK bool) (waits []chan struct{}, notify []*open, leaseNotify []*lease) {
+	s.cachingMu.Lock()
+	defer s.cachingMu.Unlock()
+
+	oplocks, leases := s.holdersOn(sh, path, except, own)
+	waits, notify = startBreaks(oplocks, oplockBreakTarget(sharedOK))
+	leaseWaits, leaseNotify := startLeaseBreaks(leases, sharedOK)
+
+	return append(waits, leaseWaits...), notify, leaseNotify
+}
+
+// tellHoldersOn cuts back the promises on a file without waiting for anybody. It is what an
+// operation does when nothing it found has to be acknowledged, and it must be used wherever the
+// goroutine serving a connection would otherwise be held up.
+func (s *server) tellHoldersOn(sh *share, path string, except *open, own *lease, sharedOK bool) {
+	_, notify, leaseNotify := s.startHolderBreaks(sh, path, except, own, sharedOK)
+	if len(notify) == 0 && len(leaseNotify) == 0 {
+		return
+	}
+
+	go func() {
+		for _, op := range notify {
+			s.sendOplockBreak(op)
+		}
+		for _, l := range leaseNotify {
+			s.sendLeaseBreak(l)
+		}
+	}()
+}
+
+// needsBreakWait reports whether a create would have to wait for a break before it may look at
+// the file. Only a promise that has to be acknowledged is worth waiting for: a read cache has
+// no level below it to argue about, so its holder is told and that is the end of it.
+func (s *server) needsBreakWait(sh *share, path string, except *open, own *lease, sharedOK bool) bool {
+	oplocks, leases := s.holdersOn(sh, path, except, own)
+
+	to := oplockBreakTarget(sharedOK)
+	for _, op := range oplocks {
+		op.mu.Lock()
+		wait := op.oplockLevel > smb2.OPLOCK_LEVEL_II && to < op.oplockLevel
+		op.mu.Unlock()
+		if wait {
+			return true
+		}
+	}
+
+	for _, l := range leases {
+		l.mu.Lock()
+		wait := l.state != smb2.SMB2_LEASE_READ_CACHING && l.state&^leaseBreakTarget(l.state, sharedOK) != 0
+		l.mu.Unlock()
+		if wait {
+			return true
+		}
+	}
+
+	return false
+}
+
 // hasHoldersOn reports whether anybody holds, or is in the middle of giving up, an oplock or a
-// lease on a file. It is what tells a create whether it has to go asynchronous.
+// lease on a file.
 func (s *server) hasHoldersOn(sh *share, path string, except *open, own *lease) bool {
 	oplocks, leases := s.holdersOn(sh, path, except, own)
 	return len(oplocks) > 0 || len(leases) > 0
+}
+
+// breakForChange cuts back every promise on a file that would let a client go on serving data
+// the change about to be made has rendered stale. It is what a write, a truncation, a rename or
+// a delete has to do.
+//
+// The breaks are not waited for. A read cache has nothing to acknowledge with, and an exclusive
+// promise cannot be standing while the open making the change exists, so there is nothing here
+// worth holding up the connection for.
+func (s *server) breakForChange(op *open) {
+	op.mu.Lock()
+	sh := op.treeConnect.share
+	path := op.pathName
+	own := op.lease
+	op.mu.Unlock()
+
+	s.tellHoldersOn(sh, path, op, own, false)
 }
 
 // grantOplock gives the open the oplock it asked for, and returns the level granted. An
@@ -300,30 +451,43 @@ func (s *server) hasHoldersOn(sh *share, path string, except *open, own *lease) 
 func (s *server) grantOplock(op *open, requested uint8, tc *treeConnect, path string) uint8 {
 	s.cachingMu.Lock()
 
-	others := s.opensOn(tc.share, path, op)
-	if len(others) == 0 {
-		// An open that is in the middle of giving up an oplock is left alone. Handing it a new
-		// one would put it back into holding without ending the break, and whoever was waiting
-		// for that break would wait for a channel that is never closed.
-		op.mu.Lock()
-		granted := op.oplockState == smb2.OplockNone
-		if granted {
-			op.oplockLevel = requested
-			op.oplockState = smb2.OplockHeld
-		}
-		op.mu.Unlock()
+	// An open in the middle of giving up an oplock is left alone. Handing it a new one would
+	// put it back into holding without ending the break, and whoever was waiting for that
+	// break would wait for a channel that is never closed.
+	op.mu.Lock()
+	busy := op.oplockState != smb2.OplockNone
+	op.mu.Unlock()
+	if busy {
 		s.cachingMu.Unlock()
-
-		if granted {
-			return requested
-		}
-
 		return smb2.OPLOCK_LEVEL_NONE
 	}
 
+	others := s.opensOn(tc.share, path, op)
 	oplocks, leases := holdersIn(others, nil)
-	_, notify := startBreaks(oplocks)
-	_, leaseNotify := startLeaseBreaks(leases)
+
+	// The file is free, so it may be promised in full. Otherwise nothing exclusive can be
+	// promised, but a read cache still can, as long as nobody else is holding more than one.
+	granted := requested
+	if len(others) > 0 {
+		if exclusiveHeld(oplocks, leases) {
+			granted = smb2.OPLOCK_LEVEL_NONE
+		} else {
+			granted = smb2.OPLOCK_LEVEL_II
+		}
+	}
+
+	if granted != smb2.OPLOCK_LEVEL_NONE {
+		op.mu.Lock()
+		op.oplockLevel = granted
+		op.oplockState = smb2.OplockHeld
+		op.mu.Unlock()
+		s.cachingMu.Unlock()
+
+		return granted
+	}
+
+	_, notify := startBreaks(oplocks, smb2.OPLOCK_LEVEL_NONE)
+	_, leaseNotify := startLeaseBreaks(leases, false)
 	s.cachingMu.Unlock()
 
 	// The breaks are sent without waiting for them. This runs on the goroutine that serves the
@@ -344,21 +508,22 @@ func (s *server) grantOplock(op *open, requested uint8, tc *treeConnect, path st
 
 // acknowledgeOplockBreak takes the answer of a client to a break that is in flight and returns
 // the status to reply with.
-func (op *open) acknowledgeOplockBreak(level uint8) uint32 {
+func (op *open) acknowledgeOplockBreak(level uint8) (uint32, uint8) {
 	op.mu.Lock()
 	state := op.oplockState
 	held := op.oplockLevel
+	to := op.oplockBreakTo
 	op.mu.Unlock()
 
 	// Nothing is being broken, so there is nothing to acknowledge.
 	if state != smb2.OplockBreaking {
-		return smb2.STATUS_INVALID_DEVICE_STATE
+		return smb2.STATUS_INVALID_DEVICE_STATE, smb2.OPLOCK_LEVEL_NONE
 	}
 
-	// A lease is never granted, so it can never be given up either.
+	// A lease is never held through an oplock, so it can never be given up as one.
 	if level == smb2.OPLOCK_LEVEL_LEASE {
-		op.completeOplockBreak()
-		return smb2.STATUS_INVALID_PARAMETER
+		op.completeOplockBreak(smb2.OPLOCK_LEVEL_NONE)
+		return smb2.STATUS_INVALID_PARAMETER, smb2.OPLOCK_LEVEL_NONE
 	}
 
 	// A client may only answer with a level below the one it held.
@@ -372,11 +537,19 @@ func (op *open) acknowledgeOplockBreak(level uint8) uint32 {
 		valid = level == smb2.OPLOCK_LEVEL_NONE
 	}
 
-	op.completeOplockBreak()
-
 	if !valid {
-		return smb2.STATUS_INVALID_OPLOCK_PROTOCOL
+		op.completeOplockBreak(smb2.OPLOCK_LEVEL_NONE)
+		return smb2.STATUS_INVALID_OPLOCK_PROTOCOL, smb2.OPLOCK_LEVEL_NONE
 	}
 
-	return smb2.STATUS_OK
+	// A conflict that arrived while the break was in flight may have cut the oplock back
+	// further than the client is answering about. The break stands, and the client is expected
+	// to answer the notification that named the lower level.
+	if level > to {
+		return smb2.STATUS_REQUEST_NOT_ACCEPTED, smb2.OPLOCK_LEVEL_NONE
+	}
+
+	op.completeOplockBreak(level)
+
+	return smb2.STATUS_OK, level
 }

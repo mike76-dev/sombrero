@@ -890,15 +890,20 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		// Whoever else holds an oplock or a lease on this file has to give it up before the
 		// create may look at the file at all, because the holder may be sitting on writes it
-		// has not sent yet.
-		if !c.server.hasHoldersOn(tc.share, path, nil, own) {
+		// has not sent yet. A create that only means to read the file lets the holders keep
+		// their read caches; one that means to change it does not.
+		sharedOK := !createChangesFile(cr)
+
+		// Only a promise that has to be acknowledged is worth waiting for, and the waiting
+		// cannot happen here: a connection serves its requests one at a time, and the
+		// acknowledgment being waited for may be on its way in over this very connection. A
+		// read cache has no level below it to argue about, so its holder is simply told.
+		if !c.server.needsBreakWait(tc.share, path, nil, own, sharedOK) {
+			c.server.tellHoldersOn(tc.share, path, nil, own, sharedOK)
 			return c.createFile(req, cr, ss, tc, acc, contexts, path, lr), ss, nil
 		}
 
-		// Waiting for the acknowledgment cannot happen here: a connection serves its requests
-		// one at a time, and the acknowledgment being waited for may be on its way in over this
-		// very connection. The create is answered with an interim response and finished on a
-		// goroutine of its own.
+		// The create is answered with an interim response and finished on a goroutine of its own.
 		aid := make([]byte, 8)
 		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
@@ -907,7 +912,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		c.mu.Unlock()
 
 		go func() {
-			c.server.breakHoldersOn(tc.share, path, nil, own)
+			c.server.breakHoldersOn(tc.share, path, nil, own, sharedOK)
 
 			resp := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
 
@@ -1002,16 +1007,16 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
-		if status := op.acknowledgeOplockBreak(obr.OplockLevel()); status != smb2.STATUS_OK {
+		status, left := op.acknowledgeOplockBreak(obr.OplockLevel())
+		if status != smb2.STATUS_OK {
 			resp := smb2.NewErrorResponse(obr, status, 0, nil)
 			return resp, ss, nil
 		}
 
-		// The oplock is always given up in full, whatever level the client offered to keep, so
-		// that is what the response tells it that it has left.
+		// The response tells the client what it is left holding.
 		resp := &smb2.OplockBreakResponse{}
 		resp.FromRequest(obr)
-		resp.Generate(smb2.OPLOCK_LEVEL_NONE, id)
+		resp.Generate(left, id)
 
 		return resp, ss, nil
 
@@ -1392,6 +1397,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			resp := smb2.NewErrorResponse(wr, smb2.STATUS_ACCESS_DENIED, 0, nil)
 			return resp, ss, nil
 		}
+
+		// Whatever anybody else has cached of this file is about to be out of date. This comes
+		// after the access check: a write that is going to be refused changes nothing, and has
+		// no business emptying anybody's cache.
+		c.server.breakForChange(op)
 
 		// A special case: some clients use the SRVSVC named pipe for writing requests to it
 		// and reading responses from it. Usually, an SMB2_IOCTL request serves this purpose.
@@ -2227,6 +2237,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		ga := op.grantedAccess
 		path := op.pathName
 		op.mu.Unlock()
+
+		// Renaming, deleting or resizing the file leaves whatever anybody else has cached of it
+		// out of date, and the handle they may be holding open pointing at the wrong thing. An
+		// open with no way of changing the file cannot be about to do any of that.
+		if ga&(smb2.FILE_WRITE_DATA|smb2.FILE_WRITE_ATTRIBUTES|smb2.DELETE) > 0 {
+			c.server.breakForChange(op)
+		}
 
 		switch sir.InfoType() {
 		case smb2.INFO_FILE:

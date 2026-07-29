@@ -91,9 +91,10 @@ type open struct {
 	// on the promise that nobody else gets at it without the client being told first.
 	// oplockBreak is open while the client is being told, and is closed once it has answered,
 	// once the wait has run out, or once the open has died; whoever wants the file waits on it.
-	oplockLevel uint8
-	oplockState int
-	oplockBreak chan struct{}
+	oplockLevel   uint8
+	oplockState   int
+	oplockBreakTo uint8
+	oplockBreak   chan struct{}
 
 	// An open may instead share a lease, which promises the same thing to the client that
 	// holds it rather than to this open alone: every open that client has on the file under

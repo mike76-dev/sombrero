@@ -43,14 +43,24 @@ type leaseTable struct {
 	mu     sync.Mutex
 }
 
+// leaseStates is every bit a lease may be made of.
+const leaseStates = smb2.SMB2_LEASE_READ_CACHING | smb2.SMB2_LEASE_HANDLE_CACHING |
+	smb2.SMB2_LEASE_WRITE_CACHING
+
 // leaseGrantable reports whether a lease state is one the server is willing to promise.
-//
-// Only the states that include write caching are granted. A lease without it is the shared
-// read promise: several clients may hold one at once, and it has to be broken whenever any of
-// them writes. The server breaks on a create alone, so a client left holding one would go on
-// serving reads from a cache that has gone stale.
 func leaseGrantable(requested uint32) bool {
-	return requested&smb2.SMB2_LEASE_WRITE_CACHING > 0
+	return requested&leaseStates != 0
+}
+
+// leaseBreakTarget returns the state a lease is to be cut back to. An open that only wants to
+// read the file needs the write cache of the holder gone and no more; anything that changes the
+// file needs everything gone, because the holder may be caching both the data and the handle.
+func leaseBreakTarget(current uint32, sharedOK bool) uint32 {
+	if sharedOK {
+		return current &^ smb2.SMB2_LEASE_WRITE_CACHING
+	}
+
+	return smb2.SMB2_LEASE_NONE
 }
 
 // leaseTableFor returns the lease table of the client, making one if this is the first lease it
@@ -207,7 +217,9 @@ func (l *lease) startBreak(to uint32) (chan struct{}, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.state == smb2.SMB2_LEASE_NONE || l.state == to {
+	// A state that keeps everything the lease already holds takes nothing away, so there is
+	// nothing to tell the client about.
+	if l.state == smb2.SMB2_LEASE_NONE || l.state&^to == 0 {
 		return nil, false
 	}
 	if l.breaking {
@@ -330,17 +342,29 @@ func (s *server) grantLease(op *open, l *lease, requested uint32, tc *treeConnec
 	s.cachingMu.Lock()
 
 	others := s.opensOn(tc.share, path, op)
-	if len(opensOutside(others, l)) == 0 {
-		granted := requested & (smb2.SMB2_LEASE_READ_CACHING | smb2.SMB2_LEASE_HANDLE_CACHING | smb2.SMB2_LEASE_WRITE_CACHING)
+	oplocks, leases := holdersIn(others, l)
+
+	// The file is the client's own, so it may be promised in full. Otherwise nothing that lets
+	// the client write can be promised, but a read cache still can, as long as nobody else is
+	// holding more than one.
+	granted := requested & leaseStates
+	if len(opensOutside(others, l)) > 0 {
+		if exclusiveHeld(oplocks, leases) {
+			granted = smb2.SMB2_LEASE_NONE
+		} else {
+			granted &^= smb2.SMB2_LEASE_WRITE_CACHING
+		}
+	}
+
+	if granted != smb2.SMB2_LEASE_NONE {
 		l.join(op, granted)
 		s.cachingMu.Unlock()
 
 		return granted
 	}
 
-	oplocks, leases := holdersIn(others, l)
-	_, notify := startBreaks(oplocks)
-	_, leaseNotify := startLeaseBreaks(leases)
+	_, notify := startBreaks(oplocks, smb2.OPLOCK_LEVEL_NONE)
+	_, leaseNotify := startLeaseBreaks(leases, false)
 	s.cachingMu.Unlock()
 
 	// The break is not waited for here: this runs on the goroutine that serves the connection,
@@ -361,9 +385,9 @@ func (s *server) grantLease(op *open, l *lease, requested uint32, tc *treeConnec
 // startLeaseBreaks cuts every lease back to nothing, and returns what it takes to finish the
 // job: the channels to wait on, and the leases that still have to be told. s.cachingMu must be
 // held, so that the leases cannot change hands while they are collected.
-func startLeaseBreaks(leases []*lease) (waits []chan struct{}, notify []*lease) {
+func startLeaseBreaks(leases []*lease, sharedOK bool) (waits []chan struct{}, notify []*lease) {
 	for _, l := range leases {
-		ch, started := l.startBreak(smb2.SMB2_LEASE_NONE)
+		ch, started := l.startBreak(leaseBreakTarget(l.stateNow(), sharedOK))
 		if ch == nil {
 			continue
 		}

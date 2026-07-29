@@ -187,6 +187,14 @@ func (h *smbTest) restrictTo(users ...string) {
 	}
 }
 
+const (
+	// writeAccess is what a client asks for when it means to change the file, and readAccess
+	// when it only means to look at it. Which of the two a create asks for is what decides
+	// whether the read caches of the other clients survive it.
+	writeAccess = smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA
+	readAccess  = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES
+)
+
 // smbTestClients counts the clients built across a test binary, so that each gets a name and a
 // session of its own: the channel list of a session is keyed by the name of the connection.
 var smbTestClients int
@@ -227,6 +235,11 @@ func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
 		clientGuid:       guid[:],
 		clientName:       fmt.Sprintf("%s-%d", user, smbTestClients),
 		negotiateDialect: smb2.SMB_DIALECT_311,
+		// A real connection settles these at negotiate time; without them every read and write
+		// is longer than the server is willing to handle.
+		maxTransactSize:  smb2.MaxTransactSize,
+		maxReadSize:      smb2.MaxReadSize,
+		maxWriteSize:     smb2.MaxWriteSize,
 		writeChan:        sent,
 		closeChan:        make(chan struct{}),
 		sessionTable:     make(map[uint64]*session),
@@ -314,8 +327,14 @@ func (cl *testClient) createErr(name string, oplock uint8, disposition uint32) (
 
 // createWith is createErr carrying create contexts.
 func (cl *testClient) createWith(name string, oplock uint8, disposition uint32, contexts []byte) ([]byte, error) {
+	return cl.createAccessing(name, oplock, disposition, writeAccess, contexts)
+}
+
+// createAccessing is createWith asking for a particular access. A create that asks for nothing
+// it could change the file with lets the other clients keep their read caches.
+func (cl *testClient) createAccessing(name string, oplock uint8, disposition, access uint32, contexts []byte) ([]byte, error) {
 	cl.mid++
-	resp, err := cl.send(createRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, name, oplock, disposition, contexts))
+	resp, err := cl.send(createRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, name, oplock, disposition, access, contexts))
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +368,38 @@ func (cl *testClient) ackLeaseBreak(key [16]byte, state uint32) ([]byte, error) 
 	}
 
 	return resp.Encode(), nil
+}
+
+// createReading opens a file for reading only, asking for the given oplock.
+func (cl *testClient) createReading(name string, oplock uint8) (buf []byte, async bool) {
+	cl.h.t.Helper()
+
+	resp, err := cl.createAccessing(name, oplock, smb2.FILE_OPEN, readAccess, nil)
+	if err != nil {
+		cl.h.t.Fatalf("read-only create of %s: %v", name, err)
+	}
+
+	if smb2.Header(resp).Status() != smb2.STATUS_PENDING {
+		return resp, false
+	}
+
+	return cl.recv(20 * time.Second), true
+}
+
+// createLeasedReading opens a file for reading only, asking for a lease.
+func (cl *testClient) createLeasedReading(name string, key [16]byte, state uint32) (buf []byte, async bool) {
+	cl.h.t.Helper()
+
+	resp, err := cl.createAccessing(name, smb2.OPLOCK_LEVEL_LEASE, smb2.FILE_OPEN, readAccess, leaseContext(key, state, 2))
+	if err != nil {
+		cl.h.t.Fatalf("leased read-only create of %s: %v", name, err)
+	}
+
+	if smb2.Header(resp).Status() != smb2.STATUS_PENDING {
+		return resp, false
+	}
+
+	return cl.recv(20 * time.Second), true
 }
 
 // ackBreak answers a break notification, giving up the oplock down to the given level.
@@ -400,7 +451,7 @@ func (cl *testClient) quiet(grace time.Duration, what string) {
 
 // createRequest builds the bytes of an SMB2_CREATE request, carrying the given create contexts
 // if there are any.
-func createRequest(mid, sid uint64, tid uint32, name string, oplock uint8, disposition uint32, contexts []byte) []byte {
+func createRequest(mid, sid uint64, tid uint32, name string, oplock uint8, disposition, access uint32, contexts []byte) []byte {
 	encoded := utils.EncodeStringToBytes(name)
 
 	// The name follows the fixed part of the request, which is what puts it at the eight-byte
@@ -418,7 +469,7 @@ func createRequest(mid, sid uint64, tid uint32, name string, oplock uint8, dispo
 	body := msg[smb2.SMB2HeaderSize:]
 	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2CreateRequestStructureSize)
 	body[3] = oplock
-	binary.LittleEndian.PutUint32(body[24:28], smb2.FILE_READ_DATA|smb2.FILE_WRITE_DATA)
+	binary.LittleEndian.PutUint32(body[24:28], access)
 	binary.LittleEndian.PutUint32(body[36:40], disposition)
 	binary.LittleEndian.PutUint16(body[44:46], uint16(nameOff))
 	binary.LittleEndian.PutUint16(body[46:48], uint16(len(encoded)))
@@ -523,7 +574,7 @@ func (cl *testClient) createDurableFor(name string, createGuid [16]byte, replay 
 
 	cl.mid++
 	msg := createRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, name,
-		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, durableContext(createGuid, timeout))
+		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, durableContext(createGuid, timeout))
 	if replay {
 		smb2.Header(msg).SetFlag(smb2.FLAGS_REPLAY_OPERATION)
 	}
@@ -587,6 +638,44 @@ func oplockBreakAck(mid, sid uint64, tid uint32, fid []byte, level uint8) []byte
 	return msg
 }
 
+// writeRequest builds the bytes of an SMB2_WRITE request.
+func writeRequest(mid, sid uint64, tid uint32, fid []byte, offset uint64, data []byte) []byte {
+	// The data follows the fixed part of the request, at an eight-byte boundary.
+	dataOff := smb2.SMB2HeaderSize + smb2.SMB2WriteRequestMinSize
+
+	msg := make([]byte, dataOff)
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_WRITE)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetTreeID(tid)
+	h.SetCreditCharge(1)
+
+	body := msg[smb2.SMB2HeaderSize:]
+	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2WriteRequestStructureSize)
+	binary.LittleEndian.PutUint16(body[2:4], uint16(dataOff))
+	binary.LittleEndian.PutUint32(body[4:8], uint32(len(data)))
+	binary.LittleEndian.PutUint64(body[8:16], offset)
+	copy(body[16:32], fid)
+
+	return append(msg, data...)
+}
+
+// write sends data through a handle.
+func (cl *testClient) write(fid []byte, offset uint64, data []byte) ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(writeRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, offset, data))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Header().Status() != smb2.STATUS_PENDING {
+		return resp.Encode(), nil
+	}
+
+	return cl.recv(20 * time.Second), nil
+}
+
 // closeRequest builds the bytes of an SMB2_CLOSE request.
 func closeRequest(mid, sid uint64, tid uint32, fid []byte) []byte {
 	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2CloseRequestMinSize)
@@ -602,6 +691,12 @@ func closeRequest(mid, sid uint64, tid uint32, fid []byte) []byte {
 	copy(body[8:24], fid)
 
 	return msg
+}
+
+// openIDOf returns the key under which the global open table holds the open a create response
+// names: the durable half of the file ID.
+func openIDOf(fid []byte) uint64 {
+	return binary.LittleEndian.Uint64(fid[8:16])
 }
 
 // createdOplockLevel returns the oplock level of an SMB2_CREATE response.

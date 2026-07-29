@@ -250,23 +250,30 @@ func TestIntegrationLeaseGranted(t *testing.T) {
 	}
 }
 
-func TestIntegrationLeaseNeedsWriteCaching(t *testing.T) {
+func TestIntegrationLeaseStatesGranted(t *testing.T) {
 	h := newSMBTest(t)
 	h.files.put("dir/file", 1024)
+	h.files.put("dir/other", 1024)
 
 	alice := h.dial("alice")
 
-	// Read and handle caching without write caching is the shared promise: several clients may
-	// hold it at once and it has to be broken on every write, which the server does not do.
+	// Read and handle caching without write caching is the shared promise, and is granted on
+	// its own terms: several clients may hold one at once.
 	buf, _ := alice.createLeased("dir/file", aliceKey, rh, 2, smb2.FILE_OPEN)
-
-	if level := createdOplockLevel(buf); level != smb2.OPLOCK_LEVEL_NONE {
-		t.Errorf("OplockLevel = %#x, want none", level)
+	if level := createdOplockLevel(buf); level != smb2.OPLOCK_LEVEL_LEASE {
+		t.Errorf("OplockLevel = %#x, want %#x", level, smb2.OPLOCK_LEVEL_LEASE)
+	}
+	if state, _ := createdLeaseState(buf); state != rh {
+		t.Errorf("LeaseState = %#x, want %#x", state, rh)
 	}
 
-	// The client is still answered, so that it learns it was given nothing rather than being
-	// left to guess from the absence of a context.
-	state, found := createdLeaseState(buf)
+	// A client that asks for nothing gets nothing, and is told so rather than being left to
+	// guess from the absence of a context.
+	empty, _ := alice.createLeased("dir/other", bobKey, smb2.SMB2_LEASE_NONE, 2, smb2.FILE_OPEN)
+	if level := createdOplockLevel(empty); level != smb2.OPLOCK_LEVEL_NONE {
+		t.Errorf("OplockLevel = %#x, want none", level)
+	}
+	state, found := createdLeaseState(empty)
 	if !found {
 		t.Fatal("a client that asked for a lease was given no answer about one")
 	}
@@ -319,6 +326,8 @@ func TestIntegrationAnotherClientBreaksLease(t *testing.T) {
 
 	bob := h.dial("bob")
 
+	// Bob opens the file to overwrite it, which is a create that changes the file by itself, so
+	// alice has to give up the whole lease rather than come down to a read cache.
 	type answer struct {
 		note []byte
 		resp []byte
@@ -337,7 +346,7 @@ func TestIntegrationAnotherClientBreaksLease(t *testing.T) {
 		answered <- a
 	}()
 
-	buf, async := bob.createLeased("dir/file", bobKey, rwh, 2, smb2.FILE_OPEN)
+	buf, async := bob.createLeased("dir/file", bobKey, rwh, 2, smb2.FILE_OVERWRITE)
 
 	a := <-answered
 	if a.note == nil {
@@ -374,16 +383,17 @@ func TestIntegrationAnotherClientBreaksLease(t *testing.T) {
 		t.Errorf("the acknowledgment was refused with %#x", status)
 	}
 
-	// Bob's create could not be answered until the break was over, and gets no lease of its
-	// own: alice still has the file open.
+	// Bob's create could not be answered until the break was over. He asked for the full lease
+	// and cannot have the write cache, because alice still has the file open, but with nobody
+	// holding one he keeps the read and handle caches.
 	if !async {
 		t.Error("bob's create was answered without waiting for the break")
 	}
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
 		t.Fatalf("bob's create failed with %#x", status)
 	}
-	if state, _ := createdLeaseState(buf); state != smb2.SMB2_LEASE_NONE {
-		t.Errorf("bob was granted %#x while alice had the file open, want none", state)
+	if state, _ := createdLeaseState(buf); state != rh {
+		t.Errorf("bob was granted %#x while alice had the file open, want %#x", state, rh)
 	}
 }
 
@@ -421,8 +431,8 @@ func TestIntegrationLeaseAndOplockBreakEachOther(t *testing.T) {
 	if !async {
 		t.Error("bob's create was answered without waiting for the lease break")
 	}
-	if level := createdOplockLevel(buf); level != smb2.OPLOCK_LEVEL_NONE {
-		t.Errorf("bob was granted %#x while alice had the file open, want none", level)
+	if level := createdOplockLevel(buf); level != smb2.OPLOCK_LEVEL_II {
+		t.Errorf("bob was granted %#x while alice had the file open, want level II", level)
 	}
 }
 

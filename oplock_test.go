@@ -100,12 +100,8 @@ func TestOplockEligible(t *testing.T) {
 	}{
 		{name: "a batch oplock on a file", requested: smb2.OPLOCK_LEVEL_BATCH, tc: files, want: true},
 		{name: "an exclusive oplock on a file", requested: smb2.OPLOCK_LEVEL_EXCLUSIVE, tc: files, want: true},
-		{
-			// Level II would have to be broken whenever anybody writes, and the server only
-			// breaks on a create, so granting one would leave stale data cached.
-			name: "level II is never granted", requested: smb2.OPLOCK_LEVEL_II, tc: files, want: false,
-		},
-		{name: "a lease is never granted", requested: smb2.OPLOCK_LEVEL_LEASE, tc: files, want: false},
+		{name: "a level II oplock on a file", requested: smb2.OPLOCK_LEVEL_II, tc: files, want: true},
+		{name: "a lease is not an oplock level", requested: smb2.OPLOCK_LEVEL_LEASE, tc: files, want: false},
 		{name: "asking for nothing gets nothing", requested: smb2.OPLOCK_LEVEL_NONE, tc: files, want: false},
 		{name: "a named pipe has nothing to cache", requested: smb2.OPLOCK_LEVEL_BATCH, tc: pipes, want: false},
 		{name: "a directory is only ever leased", requested: smb2.OPLOCK_LEVEL_BATCH, tc: files, isDir: true, want: false},
@@ -204,7 +200,7 @@ func TestGrantOplock(t *testing.T) {
 		// holding, or the break would never end and whoever waits for it would wait forever.
 		op, _, _ := newOplockOpen(t, s, sh, "dir/file")
 		s.grantOplock(op, smb2.OPLOCK_LEVEL_BATCH, op.treeConnect, "dir/file")
-		wait, _ := op.startOplockBreak()
+		wait, _ := op.startOplockBreak(smb2.OPLOCK_LEVEL_NONE)
 
 		if got := s.grantOplock(op, smb2.OPLOCK_LEVEL_BATCH, op.treeConnect, "dir/file"); got != smb2.OPLOCK_LEVEL_NONE {
 			t.Errorf("granted %#x to an open that is breaking, want none", got)
@@ -217,7 +213,7 @@ func TestGrantOplock(t *testing.T) {
 			t.Fatalf("the open is in state %d, want breaking", state)
 		}
 
-		op.completeOplockBreak()
+		op.completeOplockBreak(smb2.OPLOCK_LEVEL_NONE)
 		select {
 		case <-wait:
 		case <-time.After(5 * time.Second):
@@ -252,28 +248,35 @@ func TestAcknowledgeOplockBreak(t *testing.T) {
 		held     uint8
 		breaking bool
 
-		// What the client answers with.
+		// What the break asked the client to come down to, and what it answers with.
+		to  uint8
 		ack uint8
 
 		want uint32
 	}{
-		{name: "a batch oplock given up entirely", held: smb2.OPLOCK_LEVEL_BATCH, breaking: true, ack: smb2.OPLOCK_LEVEL_NONE, want: smb2.STATUS_OK},
-		{name: "a batch oplock dropped to level II", held: smb2.OPLOCK_LEVEL_BATCH, breaking: true, ack: smb2.OPLOCK_LEVEL_II, want: smb2.STATUS_OK},
-		{name: "a batch oplock dropped to exclusive", held: smb2.OPLOCK_LEVEL_BATCH, breaking: true, ack: smb2.OPLOCK_LEVEL_EXCLUSIVE, want: smb2.STATUS_OK},
-		{name: "an exclusive oplock given up entirely", held: smb2.OPLOCK_LEVEL_EXCLUSIVE, breaking: true, ack: smb2.OPLOCK_LEVEL_NONE, want: smb2.STATUS_OK},
+		{name: "a batch oplock given up entirely", held: smb2.OPLOCK_LEVEL_BATCH, breaking: true, to: smb2.OPLOCK_LEVEL_NONE, ack: smb2.OPLOCK_LEVEL_NONE, want: smb2.STATUS_OK},
+		{name: "a batch oplock dropped to level II", held: smb2.OPLOCK_LEVEL_BATCH, breaking: true, to: smb2.OPLOCK_LEVEL_II, ack: smb2.OPLOCK_LEVEL_II, want: smb2.STATUS_OK},
+		{name: "a batch oplock dropped to exclusive", held: smb2.OPLOCK_LEVEL_BATCH, breaking: true, to: smb2.OPLOCK_LEVEL_EXCLUSIVE, ack: smb2.OPLOCK_LEVEL_EXCLUSIVE, want: smb2.STATUS_OK},
+		{name: "an exclusive oplock given up entirely", held: smb2.OPLOCK_LEVEL_EXCLUSIVE, breaking: true, to: smb2.OPLOCK_LEVEL_NONE, ack: smb2.OPLOCK_LEVEL_NONE, want: smb2.STATUS_OK},
 		{
 			// Exclusive is not below exclusive: a client may only answer with a lower level.
 			name: "an exclusive oplock cannot be kept", held: smb2.OPLOCK_LEVEL_EXCLUSIVE, breaking: true,
-			ack: smb2.OPLOCK_LEVEL_EXCLUSIVE, want: smb2.STATUS_INVALID_OPLOCK_PROTOCOL,
+			to: smb2.OPLOCK_LEVEL_NONE, ack: smb2.OPLOCK_LEVEL_EXCLUSIVE, want: smb2.STATUS_INVALID_OPLOCK_PROTOCOL,
+		},
+		{
+			// A second conflict cut the oplock back further while the break was in flight, so
+			// answering the first notification is no longer good enough.
+			name: "keeping more than the break asked for", held: smb2.OPLOCK_LEVEL_BATCH, breaking: true,
+			to: smb2.OPLOCK_LEVEL_NONE, ack: smb2.OPLOCK_LEVEL_II, want: smb2.STATUS_REQUEST_NOT_ACCEPTED,
 		},
 		{
 			name: "a lease is never held and so never given up", held: smb2.OPLOCK_LEVEL_BATCH, breaking: true,
-			ack: smb2.OPLOCK_LEVEL_LEASE, want: smb2.STATUS_INVALID_PARAMETER,
+			to: smb2.OPLOCK_LEVEL_NONE, ack: smb2.OPLOCK_LEVEL_LEASE, want: smb2.STATUS_INVALID_PARAMETER,
 		},
 		{
 			// Nothing was broken, so the acknowledgment answers a break that never happened.
 			name: "an unsolicited acknowledgment", held: smb2.OPLOCK_LEVEL_BATCH, breaking: false,
-			ack: smb2.OPLOCK_LEVEL_NONE, want: smb2.STATUS_INVALID_DEVICE_STATE,
+			to: smb2.OPLOCK_LEVEL_NONE, ack: smb2.OPLOCK_LEVEL_NONE, want: smb2.STATUS_INVALID_DEVICE_STATE,
 		},
 	}
 
@@ -284,10 +287,11 @@ func TestAcknowledgeOplockBreak(t *testing.T) {
 
 			var wait chan struct{}
 			if test.breaking {
-				wait, _ = op.startOplockBreak()
+				wait, _ = op.startOplockBreak(test.to)
 			}
 
-			if got := op.acknowledgeOplockBreak(test.ack); got != test.want {
+			got, _ := op.acknowledgeOplockBreak(test.ack)
+			if got != test.want {
 				t.Errorf("status = %#x, want %#x", got, test.want)
 			}
 
@@ -302,19 +306,33 @@ func TestAcknowledgeOplockBreak(t *testing.T) {
 				return
 			}
 
-			// However the client answered, and whether or not the answer was accepted, the
-			// oplock is given up in full: the server grants no level below exclusive, so there
-			// is no level it could leave the client with.
+			// An answer that was refused for keeping too much leaves the break standing: the
+			// client is expected to answer the notification that named the lower level.
+			if test.want == smb2.STATUS_REQUEST_NOT_ACCEPTED {
+				op.mu.Lock()
+				defer op.mu.Unlock()
+				if op.oplockState != smb2.OplockBreaking {
+					t.Error("a refused acknowledgment ended the break anyway")
+				}
+				return
+			}
+
 			select {
 			case <-wait:
 			case <-time.After(5 * time.Second):
 				t.Fatal("whoever was waiting for the break was never released")
 			}
 
+			// The client keeps what the break offered and it accepted, and nothing more.
+			left := uint8(smb2.OPLOCK_LEVEL_NONE)
+			if test.want == smb2.STATUS_OK {
+				left = test.ack
+			}
+
 			op.mu.Lock()
 			defer op.mu.Unlock()
-			if op.oplockState != smb2.OplockNone || op.oplockLevel != smb2.OPLOCK_LEVEL_NONE {
-				t.Errorf("level = %#x, state = %d, want none and none", op.oplockLevel, op.oplockState)
+			if op.oplockLevel != left {
+				t.Errorf("level = %#x, want %#x", op.oplockLevel, left)
 			}
 			if op.oplockBreak != nil {
 				t.Error("the break outlived its acknowledgment")
@@ -340,7 +358,7 @@ func TestBreakOplocksOn(t *testing.T) {
 
 		done := make(chan struct{})
 		go func() {
-			s.breakHoldersOn(sh, "dir/file", nil, nil)
+			s.breakHoldersOn(sh, "dir/file", nil, nil, false)
 			close(done)
 		}()
 
@@ -371,7 +389,7 @@ func TestBreakOplocksOn(t *testing.T) {
 
 		done := make(chan struct{})
 		go func() {
-			s.breakHoldersOn(sh, "dir/file", nil, nil)
+			s.breakHoldersOn(sh, "dir/file", nil, nil, false)
 			close(done)
 		}()
 
@@ -398,7 +416,7 @@ func TestBreakOplocksOn(t *testing.T) {
 			t.Error("a file nobody holds an oplock on was reported as held")
 		}
 
-		s.breakHoldersOn(sh, "dir/file", nil, nil)
+		s.breakHoldersOn(sh, "dir/file", nil, nil, false)
 
 		select {
 		case <-sent:
@@ -423,7 +441,7 @@ func TestReleaseOplockFreesWaiters(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.breakHoldersOn(sh, "dir/file", nil, nil)
+		s.breakHoldersOn(sh, "dir/file", nil, nil, false)
 		close(done)
 	}()
 

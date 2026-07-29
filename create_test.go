@@ -59,6 +59,9 @@ func TestIntegrationSecondCreateBreaksOplock(t *testing.T) {
 
 	bob := h.dial("bob")
 
+	// Bob opens the file to overwrite it, which is a create that changes the file by itself, so
+	// alice has to give up everything rather than come down to a read cache.
+	//
 	// Alice answers her break as soon as she is told, which is what lets bob's create through.
 	// She has to do it from a goroutine of her own: bob's create does not come back until she
 	// has, which is the whole point of the exercise.
@@ -80,7 +83,7 @@ func TestIntegrationSecondCreateBreaksOplock(t *testing.T) {
 		answered <- a
 	}()
 
-	buf, async := bob.create("dir/file", smb2.OPLOCK_LEVEL_BATCH, smb2.FILE_OPEN)
+	buf, async := bob.create("dir/file", smb2.OPLOCK_LEVEL_BATCH, smb2.FILE_OVERWRITE)
 
 	a := <-answered
 	if a.note == nil {
@@ -112,16 +115,17 @@ func TestIntegrationSecondCreateBreaksOplock(t *testing.T) {
 		t.Errorf("alice was left holding %#x after the break, want none", level)
 	}
 
-	// Bob's create could not be answered until the break was over, and gets no oplock of its
-	// own: alice still has the file open.
+	// Bob's create could not be answered until the break was over. He asked for a batch oplock
+	// and cannot have one, because alice still has the file open, but with nobody holding more
+	// than a read cache he is given one of those.
 	if !async {
 		t.Error("bob's create was answered without waiting for the break")
 	}
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
 		t.Fatalf("bob's create failed with %#x", status)
 	}
-	if level := createdOplockLevel(buf); level != smb2.OPLOCK_LEVEL_NONE {
-		t.Errorf("bob was granted %#x while alice had the file open, want none", level)
+	if level := createdOplockLevel(buf); level != smb2.OPLOCK_LEVEL_II {
+		t.Errorf("bob was granted %#x while alice had the file open, want level II", level)
 	}
 }
 

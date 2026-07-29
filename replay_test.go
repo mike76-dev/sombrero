@@ -182,7 +182,7 @@ func TestIntegrationReclaimAndRequestTogetherAreRefused(t *testing.T) {
 
 	alice.mid++
 	resp, err := alice.send(createRequest(alice.mid, alice.ss.sessionID, alice.tc.treeID,
-		"dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, both))
+		"dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, both))
 	if err != nil {
 		t.Fatalf("the create was not answered: %v", err)
 	}
