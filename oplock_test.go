@@ -23,8 +23,15 @@ func newOplockOpen(t *testing.T, s *server, sh *share, path string) (*open, *con
 
 	oplockTestClient++
 	sent := make(chan []byte, 8)
+
+	// Each fake client gets a GUID of its own, so that the lease paths, which key everything
+	// off it, tell them apart.
+	var guid [16]byte
+	guid[0] = byte(oplockTestClient)
+
 	c := &connection{
 		server:           s,
+		clientGuid:       guid[:],
 		clientName:       fmt.Sprintf("client-%d", oplockTestClient),
 		negotiateDialect: smb2.SMB_DIALECT_311,
 		writeChan:        sent,
@@ -51,8 +58,19 @@ func newOplockOpen(t *testing.T, s *server, sh *share, path string) (*open, *con
 
 	ss.openTable[op.fileID] = op
 	s.globalOpenTable[op.durableFileID] = op
+	s.connectionList[c.clientName] = c
 
 	return op, c, sent
+}
+
+// newCachingServer builds a server with the tables the oplock and lease paths reach for, and
+// nothing else.
+func newCachingServer() *server {
+	return &server{
+		globalOpenTable:      make(map[uint64]*open),
+		globalLeaseTableList: make(map[[16]byte]*leaseTable),
+		connectionList:       make(map[string]*connection),
+	}
 }
 
 // recvBreak takes the break notification the server sent to a client, failing the test if none
@@ -105,7 +123,7 @@ func TestOplockEligible(t *testing.T) {
 func TestOpensOn(t *testing.T) {
 	sh := &share{name: "files"}
 	other := &share{name: "other"}
-	s := &server{globalOpenTable: make(map[uint64]*open)}
+	s := newCachingServer()
 
 	op, _, _ := newOplockOpen(t, s, sh, "dir/file")
 	same, _, _ := newOplockOpen(t, s, sh, "dir/file")
@@ -131,7 +149,7 @@ func TestOpensOn(t *testing.T) {
 func TestGrantOplock(t *testing.T) {
 	t.Run("an open that has the file to itself is granted what it asked for", func(t *testing.T) {
 		sh := &share{name: "files"}
-		s := &server{globalOpenTable: make(map[uint64]*open)}
+		s := newCachingServer()
 		op, _, _ := newOplockOpen(t, s, sh, "dir/file")
 
 		if got := s.grantOplock(op, smb2.OPLOCK_LEVEL_BATCH, op.treeConnect, "dir/file"); got != smb2.OPLOCK_LEVEL_BATCH {
@@ -147,7 +165,7 @@ func TestGrantOplock(t *testing.T) {
 
 	t.Run("an open that finds company gets nothing and breaks whoever holds one", func(t *testing.T) {
 		sh := &share{name: "files"}
-		s := &server{globalOpenTable: make(map[uint64]*open)}
+		s := newCachingServer()
 
 		holder, _, sent := newOplockOpen(t, s, sh, "dir/file")
 		s.grantOplock(holder, smb2.OPLOCK_LEVEL_BATCH, holder.treeConnect, "dir/file")
@@ -179,7 +197,7 @@ func TestGrantOplock(t *testing.T) {
 
 	t.Run("an open in the middle of a break is not handed a new oplock", func(t *testing.T) {
 		sh := &share{name: "files"}
-		s := &server{globalOpenTable: make(map[uint64]*open)}
+		s := newCachingServer()
 
 		// A file that was created earlier in the session is opened again while the break on it
 		// is still outstanding: the same open comes back, and it must not be put back into
@@ -209,7 +227,7 @@ func TestGrantOplock(t *testing.T) {
 
 	t.Run("opens on different files do not disturb each other", func(t *testing.T) {
 		sh := &share{name: "files"}
-		s := &server{globalOpenTable: make(map[uint64]*open)}
+		s := newCachingServer()
 
 		first, _, sent := newOplockOpen(t, s, sh, "dir/file")
 		s.grantOplock(first, smb2.OPLOCK_LEVEL_BATCH, first.treeConnect, "dir/file")
@@ -308,7 +326,7 @@ func TestAcknowledgeOplockBreak(t *testing.T) {
 func TestBreakOplocksOn(t *testing.T) {
 	t.Run("a break the client answers", func(t *testing.T) {
 		sh := &share{name: "files"}
-		s := &server{globalOpenTable: make(map[uint64]*open)}
+		s := newCachingServer()
 
 		holder, _, sent := newOplockOpen(t, s, sh, "dir/file")
 		s.grantOplock(holder, smb2.OPLOCK_LEVEL_BATCH, holder.treeConnect, "dir/file")
@@ -341,7 +359,7 @@ func TestBreakOplocksOn(t *testing.T) {
 
 	t.Run("a client that cannot be reached loses the oplock at once", func(t *testing.T) {
 		sh := &share{name: "files"}
-		s := &server{globalOpenTable: make(map[uint64]*open)}
+		s := newCachingServer()
 
 		holder, c, _ := newOplockOpen(t, s, sh, "dir/file")
 		s.grantOplock(holder, smb2.OPLOCK_LEVEL_BATCH, holder.treeConnect, "dir/file")
@@ -372,7 +390,7 @@ func TestBreakOplocksOn(t *testing.T) {
 
 	t.Run("nothing to break returns without a word to anybody", func(t *testing.T) {
 		sh := &share{name: "files"}
-		s := &server{globalOpenTable: make(map[uint64]*open)}
+		s := newCachingServer()
 
 		op, _, sent := newOplockOpen(t, s, sh, "dir/file")
 
@@ -398,7 +416,7 @@ func TestBreakOplocksOn(t *testing.T) {
 
 func TestReleaseOplockFreesWaiters(t *testing.T) {
 	sh := &share{name: "files"}
-	s := &server{globalOpenTable: make(map[uint64]*open)}
+	s := newCachingServer()
 
 	holder, _, sent := newOplockOpen(t, s, sh, "dir/file")
 	s.grantOplock(holder, smb2.OPLOCK_LEVEL_BATCH, holder.treeConnect, "dir/file")

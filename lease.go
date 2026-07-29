@@ -162,6 +162,14 @@ func (op *open) releaseCaching() {
 	op.leaveLease()
 }
 
+// stateNow returns what the lease currently promises.
+func (l *lease) stateNow() uint32 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.state
+}
+
 // currentEpoch returns the epoch of the lease, which the client uses to tell a stale lease
 // state change from a fresh one.
 func (l *lease) currentEpoch() uint16 {
