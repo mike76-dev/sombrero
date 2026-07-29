@@ -79,6 +79,14 @@ type open struct {
 	durableTimeout time.Duration
 	disconnectTime time.Time
 
+	// A create that was answered may never have reached the client, so the client is allowed
+	// to send it again marked as a replay. Until the handle is used for anything, the open the
+	// first attempt made can still answer the second one, which is what keeps a retry from
+	// quietly opening the file twice. clientGuid is kept because the open outlives the
+	// connection it was made on.
+	clientGuid       [16]byte
+	isReplayEligible bool
+
 	// An open may hold an opportunistic lock, which lets the client cache the file locally
 	// on the promise that nobody else gets at it without the client being told first.
 	// oplockBreak is open while the client is being told, and is closed once it has answered,
@@ -272,6 +280,12 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 	}
 	op.maxCacheSize = readCacheSize(op.chunkSize)
 	op.cond = sync.NewCond(&op.mu)
+
+	// The open remembers which client made it, because it may outlive the connection it was
+	// made on and a replay may arrive over another one.
+	if len(c.clientGuid) == 16 {
+		op.clientGuid = [16]byte(c.clientGuid)
+	}
 
 	// The open starts off at the channel sequence the client created it with, so that the
 	// requests that follow can be told apart from the ones that were issued before a

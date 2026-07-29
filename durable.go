@@ -43,6 +43,171 @@ func (op *open) grantDurability(req smb2.DurableHandleRequestV2) uint32 {
 	return uint32(timeout / time.Millisecond)
 }
 
+// markReplayEligible records that the create which made this open may still be replayed. Only
+// a file on a disk share that was actually opened for something is worth replaying; a directory
+// or a handle with no access to speak of has nothing a second attempt could lose.
+func (op *open) markReplayEligible(tc *treeConnect) {
+	if tc.share.name == "ipc$" {
+		return
+	}
+
+	const useful = smb2.FILE_READ_DATA | smb2.FILE_EXECUTE | smb2.FILE_WRITE_DATA |
+		smb2.FILE_APPEND_DATA | smb2.DELETE
+
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
+	if op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 && op.grantedAccess&useful > 0 {
+		op.isReplayEligible = true
+	}
+}
+
+// clearReplayEligible records that the handle has been used, which is the point at which the
+// create that made it can no longer be replayed: a second copy of that create would now be
+// asking for something the client has already moved on from.
+func (op *open) clearReplayEligible() {
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
+	op.isReplayEligible = false
+}
+
+// findReplayableOpen returns the open that a create bearing this GUID already made, if the
+// client may still replay that create.
+func (s *server) findReplayableOpen(clientGuid, createGuid [16]byte) *open {
+	s.mu.Lock()
+	candidates := make([]*open, 0, len(s.globalOpenTable))
+	for _, op := range s.globalOpenTable {
+		candidates = append(candidates, op)
+	}
+	s.mu.Unlock()
+
+	for _, op := range candidates {
+		op.mu.Lock()
+		match := op.isReplayEligible && op.createGuid == createGuid && op.clientGuid == clientGuid
+		op.mu.Unlock()
+		if match {
+			return op
+		}
+	}
+
+	return nil
+}
+
+// replayCreate answers a create that carries the create GUID of one the server has already made
+// an open for. A client whose answer never came back reissues the same create marked as a
+// replay, and gets the open the first attempt made instead of a second one on the same file.
+//
+// It returns false if this create is not about an open that already exists, in which case it is
+// an ordinary create and is carried out as one.
+func (c *connection) replayCreate(cr smb2.CreateRequest, ss *session, tc *treeConnect, contexts map[uint32][]byte, lr *smb2.LeaseRequest) (smb2.GenericResponse, bool) {
+	if len(c.clientGuid) != 16 {
+		return nil, false
+	}
+
+	ctx, found := contexts[smb2.SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2]
+	if !found {
+		return nil, false
+	}
+
+	dh, ok := smb2.ParseDurableHandleRequestV2(ctx)
+	if !ok {
+		return nil, false
+	}
+
+	op := c.server.findReplayableOpen([16]byte(c.clientGuid), dh.CreateGuid)
+	if op == nil {
+		return nil, false
+	}
+
+	// The same GUID without the replay flag is not a retry but a client reusing a GUID it
+	// still owes an open for.
+	if !cr.Header().IsFlagSet(smb2.FLAGS_REPLAY_OPERATION) {
+		return smb2.NewErrorResponse(cr, smb2.STATUS_DUPLICATE_OBJECTID, 0, nil), true
+	}
+
+	op.mu.Lock()
+	owner := op.session
+	held := op.lease
+	op.mu.Unlock()
+
+	// The handle goes back to the user who made it and to nobody else, and a client that held
+	// a lease on it has to name the same lease key it named the first time.
+	if !strings.EqualFold(owner.userName, ss.userName) || !strings.EqualFold(owner.workgroup, ss.workgroup) {
+		return smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil), true
+	}
+	if held != nil && (lr == nil || held.leaseKey != lr.LeaseKey) {
+		return smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil), true
+	}
+
+	// A replay belongs to the session the open was made on. The same user on another session
+	// is a different client as far as the handle is concerned.
+	if owner.sessionID != ss.sessionID {
+		return smb2.NewErrorResponse(cr, smb2.STATUS_DUPLICATE_OBJECTID, 0, nil), true
+	}
+
+	// The replay may well have arrived over another channel, which then becomes the connection
+	// of the open.
+	op.mu.Lock()
+	op.connection = c
+	op.mu.Unlock()
+
+	return c.replayResponse(op, cr, tc, contexts, lr), true
+}
+
+// replayResponse builds the answer to a replayed create out of the open the first attempt made.
+func (c *connection) replayResponse(op *open, cr smb2.CreateRequest, tc *treeConnect, contexts map[uint32][]byte, lr *smb2.LeaseRequest) smb2.GenericResponse {
+	op.mu.Lock()
+	size, allocated := op.size, op.allocated
+	modified := op.lastModified
+	attr := op.fileAttributes
+	access := op.grantedAccess
+	handle := op.handle
+	fileID, durableFileID := op.fileID, op.durableFileID
+	timeout := uint32(op.durableTimeout / time.Millisecond)
+	oplockLevel := op.oplockLevel
+	held := op.lease
+	op.mu.Unlock()
+
+	respContexts := make(map[uint32][]byte)
+	for id, ctx := range contexts {
+		switch id {
+		case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
+			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, modified, access)
+		case smb2.CREATE_QUERY_ON_DISK_ID:
+			respContexts[id] = smb2.HandleCreateQueryOnDiskID(handle, tc.volumeID)
+		case smb2.SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2:
+			// The timeout is the one the open is being kept for, not a fresh grant: the clock
+			// started with the create that is being replayed.
+			respContexts[id] = smb2.HandleCreateDurableHandleRequestV2(timeout)
+		}
+	}
+
+	if held != nil {
+		oplockLevel = smb2.OPLOCK_LEVEL_LEASE
+		respContexts[smb2.CREATE_REQUEST_LEASE] = smb2.HandleCreateRequestLease(*lr, held.stateNow(), held.currentEpoch())
+	}
+
+	resp := &smb2.CreateResponse{}
+	resp.FromRequest(cr)
+
+	// The open already existed, so the file was opened rather than made, whatever the create
+	// being replayed did the first time round.
+	resp.Generate(
+		oplockLevel,
+		smb2.FILE_OPENED,
+		size,
+		allocated,
+		modified,
+		attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
+		fileID,
+		durableFileID,
+		respContexts,
+	)
+
+	return resp
+}
+
 // orphanDurableOpens detaches the durable opens of the session from it and leaves them in
 // the global open table for the client to reclaim. They are removed from the open table of
 // the session, so that tearing the session down afterwards leaves them alone.

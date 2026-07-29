@@ -387,7 +387,18 @@ func (s *server) acknowledgeLeaseBreak(guid, key [16]byte, state uint32) (uint32
 	l.mu.Lock()
 	breaking := l.breaking
 	to := l.breakToState
+	opens := make([]*open, 0, len(l.opens))
+	for _, op := range l.opens {
+		opens = append(opens, op)
+	}
 	l.mu.Unlock()
+
+	// Answering a break counts as using the handles the lease covers, so the creates that made
+	// them can no longer be replayed. A lease break arrives without a FileId, so this is the
+	// one path that does not go past findOpen.
+	for _, op := range opens {
+		op.clearReplayEligible()
+	}
 
 	// Nothing is being broken, so the acknowledgment answers a break that never happened.
 	if !breaking {

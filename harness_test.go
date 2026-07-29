@@ -249,12 +249,15 @@ func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
 	}
 
 	tc := &treeConnect{
-		treeID:         1,
-		session:        ss,
-		share:          h.share,
-		client:         h.files,
-		maxUploadSize:  64 << 20,
-		maximalAccess:  smb2.GENERIC_ALL,
+		treeID:        1,
+		session:       ss,
+		share:         h.share,
+		client:        h.files,
+		maxUploadSize: 64 << 20,
+		// The share security of a real tree connect holds concrete access bits, not the
+		// generic rights, and the replay rules are written in terms of the concrete ones.
+		maximalAccess: smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA |
+			smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE,
 		persistedOpens: make(map[string]*open),
 	}
 
@@ -436,14 +439,8 @@ func createRequest(mid, sid uint64, tid uint32, name string, oplock uint8, dispo
 	return append(msg, contexts...)
 }
 
-// leaseContext formats an SMB2_CREATE_REQUEST_LEASE create context of the given version, ready
-// to be handed to createRequest.
-func leaseContext(key [16]byte, state uint32, version int) []byte {
-	size := 32
-	if version == 2 {
-		size = 52
-	}
-
+// createContext frames the data of a create context under the given name.
+func createContext(name uint32, data []byte) []byte {
 	//        SMB2_CREATE_CONTEXT
 	//   0-4: Next
 	//   4-6: NameOffset
@@ -452,17 +449,106 @@ func leaseContext(key [16]byte, state uint32, version int) []byte {
 	// 12-16: DataLength
 	// 16-20: Name
 	//   24-: Data
-	ctx := make([]byte, 24+size)
+	ctx := make([]byte, 24+len(data))
 	binary.LittleEndian.PutUint16(ctx[4:6], 16)
 	binary.LittleEndian.PutUint16(ctx[6:8], 4)
 	binary.LittleEndian.PutUint16(ctx[10:12], 24)
-	binary.LittleEndian.PutUint32(ctx[12:16], uint32(size))
-	binary.BigEndian.PutUint32(ctx[16:20], smb2.CREATE_REQUEST_LEASE)
-
-	copy(ctx[24:40], key[:])
-	binary.LittleEndian.PutUint32(ctx[40:44], state)
+	binary.LittleEndian.PutUint32(ctx[12:16], uint32(len(data)))
+	binary.BigEndian.PutUint32(ctx[16:20], name)
+	copy(ctx[24:], data)
 
 	return ctx
+}
+
+// chainContexts links create contexts so that they travel in one request. Every context but the
+// last points at the one after it.
+func chainContexts(contexts ...[]byte) []byte {
+	var buf []byte
+	for i, ctx := range contexts {
+		if i < len(contexts)-1 {
+			binary.LittleEndian.PutUint32(ctx[:4], uint32(len(ctx)))
+		}
+		buf = append(buf, ctx...)
+	}
+
+	return buf
+}
+
+// leaseContext formats an SMB2_CREATE_REQUEST_LEASE create context of the given version, ready
+// to be handed to createRequest.
+func leaseContext(key [16]byte, state uint32, version int) []byte {
+	size := 32
+	if version == 2 {
+		size = 52
+	}
+
+	data := make([]byte, size)
+	copy(data[:16], key[:])
+	binary.LittleEndian.PutUint32(data[16:20], state)
+
+	return createContext(smb2.CREATE_REQUEST_LEASE, data)
+}
+
+// durableContext formats an SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2 create context, ready to be
+// handed to createRequest.
+func durableContext(createGuid [16]byte, timeout uint32) []byte {
+	data := make([]byte, 32)
+	binary.LittleEndian.PutUint32(data[0:4], timeout)
+	copy(data[16:32], createGuid[:])
+
+	return createContext(smb2.SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2, data)
+}
+
+// reconnectContext formats an SMB2_CREATE_DURABLE_HANDLE_RECONNECT_V2 create context.
+func reconnectContext(fileID, durableID uint64, createGuid [16]byte) []byte {
+	data := make([]byte, 36)
+	binary.LittleEndian.PutUint64(data[0:8], fileID)
+	binary.LittleEndian.PutUint64(data[8:16], durableID)
+	copy(data[16:32], createGuid[:])
+
+	return createContext(smb2.SMB2_CREATE_DURABLE_HANDLE_RECONNECT_V2, data)
+}
+
+// createDurable opens a file asking for a durable handle. Marking the request as a replay is
+// what a client does when it never got an answer to the first attempt.
+func (cl *testClient) createDurable(name string, createGuid [16]byte, replay bool) (buf []byte, async bool) {
+	cl.h.t.Helper()
+
+	return cl.createDurableFor(name, createGuid, replay, 30_000)
+}
+
+// createDurableFor is createDurable asking for a particular timeout, in milliseconds.
+func (cl *testClient) createDurableFor(name string, createGuid [16]byte, replay bool, timeout uint32) (buf []byte, async bool) {
+	cl.h.t.Helper()
+
+	cl.mid++
+	msg := createRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, name,
+		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, durableContext(createGuid, timeout))
+	if replay {
+		smb2.Header(msg).SetFlag(smb2.FLAGS_REPLAY_OPERATION)
+	}
+
+	resp, err := cl.send(msg)
+	if err != nil {
+		cl.h.t.Fatalf("durable create of %s: %v", name, err)
+	}
+
+	if resp.Header().Status() != smb2.STATUS_PENDING {
+		return resp.Encode(), false
+	}
+
+	return cl.recv(20 * time.Second), true
+}
+
+// createdDurableTimeout returns the timeout granted by a create response, and whether the
+// response carried a durable handle context at all.
+func createdDurableTimeout(buf []byte) (uint32, bool) {
+	data, found := createdContext(buf, smb2.SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2)
+	if !found || len(data) < 4 {
+		return 0, false
+	}
+
+	return binary.LittleEndian.Uint32(data[:4]), true
 }
 
 // leaseBreakAck builds the bytes of a lease break acknowledgment.
@@ -557,13 +643,12 @@ func brokenLeaseStates(buf []byte) (current, granted uint32, ackRequired bool) {
 	return
 }
 
-// createdLeaseState returns the lease state named by the create response, and whether the
-// response carried a lease context at all.
-func createdLeaseState(buf []byte) (uint32, bool) {
+// createdContext returns the data of the named create context in a create response.
+func createdContext(buf []byte, want uint32) ([]byte, bool) {
 	off := binary.LittleEndian.Uint32(buf[smb2.SMB2HeaderSize+80 : smb2.SMB2HeaderSize+84])
 	length := binary.LittleEndian.Uint32(buf[smb2.SMB2HeaderSize+84 : smb2.SMB2HeaderSize+88])
 	if off == 0 || length == 0 {
-		return 0, false
+		return nil, false
 	}
 
 	for off+16 <= uint32(len(buf)) {
@@ -572,9 +657,8 @@ func createdLeaseState(buf []byte) (uint32, bool) {
 		dataOff := uint32(binary.LittleEndian.Uint16(buf[off+10 : off+12]))
 		dataLen := binary.LittleEndian.Uint32(buf[off+12 : off+16])
 
-		name := binary.BigEndian.Uint32(buf[off+nameOff : off+nameOff+4])
-		if name == smb2.CREATE_REQUEST_LEASE && dataLen >= 20 {
-			return binary.LittleEndian.Uint32(buf[off+dataOff+16 : off+dataOff+20]), true
+		if name := binary.BigEndian.Uint32(buf[off+nameOff : off+nameOff+4]); name == want {
+			return buf[off+dataOff : off+dataOff+dataLen], true
 		}
 
 		if next == 0 {
@@ -583,5 +667,16 @@ func createdLeaseState(buf []byte) (uint32, bool) {
 		off += next
 	}
 
-	return 0, false
+	return nil, false
+}
+
+// createdLeaseState returns the lease state named by the create response, and whether the
+// response carried a lease context at all.
+func createdLeaseState(buf []byte) (uint32, bool) {
+	data, found := createdContext(buf, smb2.CREATE_REQUEST_LEASE)
+	if !found || len(data) < 20 {
+		return 0, false
+	}
+
+	return binary.LittleEndian.Uint32(data[16:20]), true
 }

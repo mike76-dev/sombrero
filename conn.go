@@ -797,6 +797,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// A reconnect claims a handle that already exists, so it is answered from the open
 		// that was kept aside rather than by resolving the path and going to the backend.
 		if ctx, found := contexts[smb2.SMB2_CREATE_DURABLE_HANDLE_RECONNECT_V2]; found {
+			// Claiming a handle and asking for a new one at the same time is a contradiction.
+			if _, both := contexts[smb2.SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2]; both {
+				resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+				return resp, ss, nil
+			}
+
 			rec, ok := smb2.ParseDurableHandleReconnectV2(ctx)
 			if !ok {
 				resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
@@ -869,6 +875,14 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// A lease the client already holds on this file is not something the create has to
 		// break: every open that client has under the same key shares it.
 		lr := c.leaseRequest(cr, contexts)
+
+		// A create bearing the GUID of one that has already been answered is either a replay of
+		// it, which is answered from the open the first attempt made, or a client reusing a GUID
+		// it should not. Either way the file is never opened a second time.
+		if resp, handled := c.replayCreate(cr, ss, tc, contexts, lr); handled {
+			return resp, ss, nil
+		}
+
 		var own *lease
 		if lr != nil {
 			own = c.server.findLease([16]byte(c.clientGuid), lr.LeaseKey)
@@ -2498,6 +2512,10 @@ func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open,
 		return nil, smb2.STATUS_FILE_CLOSED
 	}
 
+	// Using the handle is what ends the window in which the create that made it may be
+	// replayed: this is every command that takes a FileId, so it is the one place to say so.
+	op.clearReplayEligible()
+
 	return op, c.verifyChannelSequence(op, req)
 }
 
@@ -3017,6 +3035,10 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 				break
 			}
 			respContexts[id] = smb2.HandleCreateDurableHandleRequestV2(op.grantDurability(dh))
+
+			// A create that was granted durability is one the client may replay if the answer
+			// never reaches it, so the open is left able to answer for it until it is used.
+			op.markReplayEligible(tc)
 		}
 	}
 
