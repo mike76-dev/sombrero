@@ -23,35 +23,35 @@ var testUUID = uuid.MustParse("12345678-1234-1234-1234-123456789abc")
 
 // mockStore implements Store with optional per-method overrides.
 type mockStore struct {
-	isBanned         func(string) (bool, string, error)
-	banHost          func(string, string) error
-	unbanHost        func(string) error
-	clearBans        func() error
-	getAccountByID   func(int) (stores.Account, error)
-	findAccount      func(string, string) (stores.Account, error)
-	addAccount       func(stores.Account) error
-	hasAccount       func(string, string) (bool, error)
-	removeAccount    func(string, string) error
-	findAccounts     func(string) ([]stores.Account, error)
-	removeAccounts   func(string) error
-	addWorkgroup          func(stores.Workgroup) error
-	updateWorkgroup       func(stores.Workgroup) error
-	findWorkgroup         func(uuid.UUID) (stores.Workgroup, error)
-	findWorkgroupByName   func(string) (stores.Workgroup, error)
-	getWorkgroups         func() ([]stores.Workgroup, error)
-	removeWorkgroup       func(stores.Workgroup) error
-	getAccessRights  func(stores.Share, stores.Account) (stores.AccessRights, error)
-	setAccessRights  func(stores.AccessRights) error
-	removeAccess     func(stores.Share, stores.Account) error
-	clearAccess      func(stores.Account) error
-	registerShare    func(stores.Share) error
-	unregisterShare  func(string) error
-	getShare         func(string) (stores.Share, error)
-	getShares        func(stores.Account) ([]stores.Share, error)
-	getAllShares     func() ([]stores.Share, error)
-	getAccounts      func(stores.Share) ([]stores.AccessRights, error)
-	addConnection    func(stores.Workgroup, stores.Share, types.PrivateKey) error
-	removeConnection func(stores.Workgroup, stores.Share) error
+	isBanned            func(string) (bool, string, error)
+	banHost             func(string, string) error
+	unbanHost           func(string) error
+	clearBans           func() error
+	getAccountByID      func(int) (stores.Account, error)
+	findAccount         func(string, string) (stores.Account, error)
+	addAccount          func(stores.Account) error
+	hasAccount          func(string, string) (bool, error)
+	removeAccount       func(string, string) error
+	findAccounts        func(string) ([]stores.Account, error)
+	removeAccounts      func(string) error
+	addWorkgroup        func(stores.Workgroup) error
+	updateWorkgroup     func(stores.Workgroup) error
+	findWorkgroup       func(uuid.UUID) (stores.Workgroup, error)
+	findWorkgroupByName func(string) (stores.Workgroup, error)
+	getWorkgroups       func() ([]stores.Workgroup, error)
+	removeWorkgroup     func(stores.Workgroup) error
+	getAccessRights     func(stores.Share, stores.Account) (stores.AccessRights, error)
+	setAccessRights     func(stores.AccessRights) error
+	removeAccess        func(stores.Share, stores.Account) error
+	clearAccess         func(stores.Account) error
+	registerShare       func(stores.Share) error
+	unregisterShare     func(string) error
+	getShare            func(string) (stores.Share, error)
+	getShares           func(stores.Account) ([]stores.Share, error)
+	getAllShares        func() ([]stores.Share, error)
+	getAccounts         func(stores.Share) ([]stores.AccessRights, error)
+	addConnection       func(stores.Workgroup, stores.Share, types.PrivateKey) error
+	removeConnection    func(stores.Workgroup, stores.Share) error
 }
 
 func (m *mockStore) IsBanned(h string) (bool, string, error) {
