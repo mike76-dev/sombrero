@@ -236,6 +236,7 @@ func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
 	// What a negotiate would have settled.
 	c.clientGuid = guid[:]
 	c.negotiateDialect = smb2.SMB_DIALECT_311
+	c.dialect = dialectName(c.negotiateDialect)
 
 	// Nothing is draining the connection here, so what the server sends is queued for the test to
 	// read rather than handed to a sending goroutine.
@@ -265,6 +266,14 @@ func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
 	h.srv.mu.Unlock()
 
 	return &testClient{h: h, conn: c, ss: ss, tc: tc, sent: sent}
+}
+
+// speaking puts the client on a dialect other than the 3.1.1 it is dialled with, for the rules
+// that are worded per dialect.
+func (cl *testClient) speaking(dialect uint16) *testClient {
+	cl.conn.negotiateDialect = dialect
+	cl.conn.dialect = dialectName(dialect)
+	return cl
 }
 
 // send hands a message to the dispatcher the way the reading loop would. It reports an error
@@ -620,11 +629,15 @@ func oplockBreakAck(mid, sid uint64, tid uint32, fid []byte, level uint8) []byte
 	return msg
 }
 
-// writeRequest builds the bytes of an SMB2_WRITE request.
+// writeRequest builds the bytes of an SMB2_WRITE request, with the data straight after the fixed
+// part of the request, at an eight-byte boundary.
 func writeRequest(mid, sid uint64, tid uint32, fid []byte, offset uint64, data []byte) []byte {
-	// The data follows the fixed part of the request, at an eight-byte boundary.
-	dataOff := smb2.SMB2HeaderSize + smb2.SMB2WriteRequestMinSize
+	return writeRequestAt(mid, sid, tid, fid, offset, data, smb2.SMB2HeaderSize+smb2.SMB2WriteRequestMinSize)
+}
 
+// writeRequestAt is writeRequest with the data placed at the given offset from the start of the
+// header, with whatever padding that takes.
+func writeRequestAt(mid, sid uint64, tid uint32, fid []byte, offset uint64, data []byte, dataOff int) []byte {
 	msg := make([]byte, dataOff)
 	h := smb2.NewHeader(msg)
 	h.SetCommand(smb2.SMB2_WRITE)
@@ -641,6 +654,81 @@ func writeRequest(mid, sid uint64, tid uint32, fid []byte, offset uint64, data [
 	copy(body[16:32], fid)
 
 	return append(msg, data...)
+}
+
+// readRequest builds the bytes of an SMB2_READ request.
+func readRequest(mid, sid uint64, tid uint32, fid []byte, offset uint64, length uint32) []byte {
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2ReadRequestMinSize)
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_READ)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetTreeID(tid)
+	h.SetCreditCharge(1)
+
+	body := msg[smb2.SMB2HeaderSize:]
+	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2ReadRequestStructureSize)
+	binary.LittleEndian.PutUint32(body[4:8], length)
+	binary.LittleEndian.PutUint64(body[8:16], offset)
+	copy(body[16:32], fid)
+
+	return msg
+}
+
+// readOver reads through a handle, naming the given channel. A channel other than none asks for
+// the data to travel over RDMA rather than in the response.
+//
+// The field sits after MinimumCount in a read but in its place in a write, so the two are not
+// interchangeable however alike the requests look.
+func (cl *testClient) readOver(fid []byte, length uint32, channel uint32) ([]byte, error) {
+	cl.mid++
+	msg := readRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, 0, length)
+	binary.LittleEndian.PutUint32(msg[smb2.SMB2HeaderSize+36:smb2.SMB2HeaderSize+40], channel)
+
+	resp, err := cl.send(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Header().Status() != smb2.STATUS_PENDING {
+		return resp.Encode(), nil
+	}
+
+	return cl.recv(20 * time.Second), nil
+}
+
+// writeOver sends data through a handle, naming the given channel.
+func (cl *testClient) writeOver(fid []byte, data []byte, channel uint32) ([]byte, error) {
+	cl.mid++
+	msg := writeRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, 0, data)
+	binary.LittleEndian.PutUint32(msg[smb2.SMB2HeaderSize+32:smb2.SMB2HeaderSize+36], channel)
+
+	resp, err := cl.send(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Header().Status() != smb2.STATUS_PENDING {
+		return resp.Encode(), nil
+	}
+
+	return cl.recv(20 * time.Second), nil
+}
+
+// writeFrom sends data through a handle, placing it at the given offset from the start of the
+// header rather than straight after the fixed part of the request.
+func (cl *testClient) writeFrom(fid []byte, data []byte, dataOff int) ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(writeRequestAt(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, 0, data, dataOff))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Header().Status() != smb2.STATUS_PENDING {
+		return resp.Encode(), nil
+	}
+
+	return cl.recv(20 * time.Second), nil
 }
 
 // write sends data through a handle.

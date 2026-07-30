@@ -296,6 +296,41 @@ func (c *connection) acceptRequest(msg []byte) error {
 	return nil
 }
 
+// dialectName is how a negotiated dialect is written down: the spelling the spec uses when a
+// rule names a dialect, and the one the connection reports.
+func dialectName(dialect uint16) string {
+	switch dialect {
+	case smb2.SMB_DIALECT_202:
+		return "2.0.2"
+	case smb2.SMB_DIALECT_21:
+		return "2.1"
+	case smb2.SMB_DIALECT_30:
+		return "3.0"
+	case smb2.SMB_DIALECT_302:
+		return "3.0.2"
+	case smb2.SMB_DIALECT_311:
+		return "3.1.1"
+	default:
+		return "Unknown"
+	}
+}
+
+// refusesChannel reports whether the Channel field of an SMB2_READ or SMB2_WRITE request names
+// something this server cannot do, so that the request has to be failed with
+// STATUS_INVALID_PARAMETER (3.3.5.12, 3.3.5.13).
+//
+// Before the 3.x dialects the field is reserved: the client sets it to zero and the server is to
+// ignore whatever arrives, so nothing is refused there. From 3.0 on, every value other than NONE
+// asks for the payload to be carried over RDMA rather than in the request, and each of them is
+// refused here for the same reason - this server speaks no SMB Direct, which the spec counts as
+// the underlying connection not being RDMA. An unrecognized value fails by the same rule.
+//
+// Left unchecked, the request would look like an ordinary one with nothing in its buffer: a read
+// would answer with the wrong data and a write would report having stored bytes it never saw.
+func (c *connection) refusesChannel(channel uint32) bool {
+	return smb2.Is3X(c.negotiateDialect) && channel != smb2.SMB2_CHANNEL_NONE
+}
+
 // processRequest processes the request depending on its Command field and genertates a response.
 func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *session, error) {
 	if req.Header().IsSmb() && req.Header().LegacyCommand() == smb2.SMB_COM_NEGOTIATE {
@@ -357,17 +392,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		c.clientGuid = nr.ClientGuid()
 		c.clientSecurityMode = nr.SecurityMode()
 		c.negotiateDialect = nr.MaxCommonDialect()
-		switch c.negotiateDialect {
-		case smb2.SMB_DIALECT_202:
-			c.dialect = "2.0.2"
-		case smb2.SMB_DIALECT_21:
-			c.dialect = "2.1"
-		case smb2.SMB_DIALECT_30:
-			c.dialect = "3.0"
-		case smb2.SMB_DIALECT_302:
-			c.dialect = "3.0.2"
-		case smb2.SMB_DIALECT_311:
-			c.dialect = "3.1.1"
+		c.dialect = dialectName(c.negotiateDialect)
+		if c.negotiateDialect == smb2.SMB_DIALECT_311 {
 			c.clientDialects = nr.Dialects()
 			c.serverCapabilities = c.serverCapabilities &^ smb2.GLOBAL_CAP_ENCRYPTION
 		}
@@ -1193,6 +1219,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		if c.refusesChannel(rr.Channel()) {
+			resp := smb2.NewErrorResponse(rr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp, ss, nil
+		}
+
 		// A special case: some clients use the SRVSVC named pipe for writing requests to it
 		// and reading responses from it. Usually, an SMB2_IOCTL request serves this purpose.
 		if strings.ToLower(name) == "srvsvc" {
@@ -1384,6 +1415,20 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				resp := smb2.NewErrorResponse(wr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 				return resp, ss, nil
 			}
+		}
+
+		// These have to come before the hidden file is shrugged off below, or a write the server
+		// cannot carry out is answered as though it had been.
+		if c.refusesChannel(wr.Channel()) {
+			resp := smb2.NewErrorResponse(wr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp, ss, nil
+		}
+
+		// Past this point the data travels in the request itself, so it has to start somewhere
+		// the request can reasonably have put it (3.3.5.13).
+		if wr.DataOffset() > smb2.MaxWriteDataOffset {
+			resp := smb2.NewErrorResponse(wr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp, ss, nil
 		}
 
 		if name != "" && name[0] == '.' { // Ignore SMB2_WRITE requests to any hidden file (whose name starts with a dot)

@@ -16,6 +16,18 @@ const (
 	READFLAG_REQUEST_COMPRESSED = 0x02
 )
 
+const (
+	// Channel values of an SMB2_READ or SMB2_WRITE request. Everything but NONE names an RDMA
+	// transfer, where the data does not travel in the request at all: the channel information
+	// describes a buffer on the client that the server reaches over SMB Direct.
+	//
+	// Before the 3.x dialects the field is reserved, and is to be ignored rather than checked.
+	SMB2_CHANNEL_NONE               = 0x00000000
+	SMB2_CHANNEL_RDMA_V1            = 0x00000001
+	SMB2_CHANNEL_RDMA_V1_INVALIDATE = 0x00000002
+	SMB2_CHANNEL_RDMA_TRANSFORM     = 0x00000003
+)
+
 // ReadRequest represents an SMB2_READ request.
 type ReadRequest struct {
 	Request
@@ -81,6 +93,11 @@ func (rr ReadRequest) FileID() []byte {
 // MinimumCount returns the MinimumCount field of the SMB2_READ request.
 func (rr ReadRequest) MinimumCount() uint32 {
 	return binary.LittleEndian.Uint32(rr.data[SMB2HeaderSize+32 : SMB2HeaderSize+36])
+}
+
+// Channel returns the Channel field of the SMB2_READ request.
+func (rr ReadRequest) Channel() uint32 {
+	return binary.LittleEndian.Uint32(rr.data[SMB2HeaderSize+36 : SMB2HeaderSize+40])
 }
 
 // ReadResponse represents an SMB2_READ response.

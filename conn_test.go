@@ -163,3 +163,23 @@ func TestVerifyChannelSequenceSkippedForOldDialects(t *testing.T) {
 		t.Error("the request was remembered, but it wasn't counted")
 	}
 }
+
+// TestDialectName pins the spelling of each dialect. The name is not decoration: several rules
+// are written as a comparison against it, so a wrong string here silently turns a per-dialect
+// check off.
+func TestDialectName(t *testing.T) {
+	names := map[uint16]string{
+		smb2.SMB_DIALECT_202:     "2.0.2",
+		smb2.SMB_DIALECT_21:      "2.1",
+		smb2.SMB_DIALECT_30:      "3.0",
+		smb2.SMB_DIALECT_302:     "3.0.2",
+		smb2.SMB_DIALECT_311:     "3.1.1",
+		smb2.SMB_DIALECT_UNKNOWN: "Unknown",
+	}
+
+	for dialect, want := range names {
+		if got := dialectName(dialect); got != want {
+			t.Errorf("dialectName(%#x) = %q, want %q", dialect, got, want)
+		}
+	}
+}
