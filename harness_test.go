@@ -308,6 +308,45 @@ func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
 	return &testClient{h: h, conn: c, ss: ss, tc: tc, sent: sent}
 }
 
+// addChannel binds a second connection to the session of the client, the way a client that has
+// bound another channel to a session it already holds would. The session and everything opened
+// over it are shared between the two: what comes back is another way to reach the same client,
+// not another client.
+func (cl *testClient) addChannel() *testClient {
+	cl.h.t.Helper()
+
+	smbTestClients++
+
+	c := cl.h.newTestConnection(fmt.Sprintf("%s-alt-%d", cl.conn.clientName, smbTestClients))
+	c.clientGuid = cl.conn.clientGuid
+	c.negotiateDialect = cl.conn.negotiateDialect
+	c.dialect = cl.conn.dialect
+
+	sent := make(chan []byte, 16)
+	c.writeChan = sent
+
+	c.mu.Lock()
+	c.sessionTable[cl.ss.sessionID] = cl.ss
+	c.mu.Unlock()
+
+	cl.ss.mu.Lock()
+	cl.ss.channelList[c.clientName] = &channel{connection: c}
+	cl.ss.mu.Unlock()
+
+	cl.h.srv.mu.Lock()
+	cl.h.srv.connectionList[c.clientName] = c
+	cl.h.srv.mu.Unlock()
+
+	return &testClient{h: cl.h, conn: c, ss: cl.ss, tc: cl.tc, sent: sent}
+}
+
+// goesAway kills the transport under the connection without taking it out of the session. It is
+// the state a connection is in between the client disappearing and the server noticing: still a
+// channel of the session, and no use for sending anything.
+func (cl *testClient) goesAway() {
+	cl.conn.once.Do(func() { close(cl.conn.closeChan) })
+}
+
 // speaking puts the client on a dialect other than the 3.1.1 it is dialled with, for the rules
 // that are worded per dialect.
 func (cl *testClient) speaking(dialect uint16) *testClient {
