@@ -62,8 +62,13 @@ type server struct {
 	ctx             context.Context
 }
 
-// newServer returns an initialized SMB server.
-func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool, cfg stores.IndexdConfig) *server {
+// newServerState returns a server with its tables in place and nothing running behind it: no
+// listener, and no sweep of the durable opens.
+//
+// It is the half of newServer that the tests share, and the reason to put a new table here
+// rather than in the caller. A table created only in newServer is nil in every test, and the
+// test that first reaches it fails somewhere far from the omission.
+func newServerState(ctx context.Context, db stores.Store, debug bool, cfg stores.IndexdConfig) *server {
 	s := &server{
 		enabled:              true,
 		serverGuid:           uuid.New(),
@@ -73,7 +78,6 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool,
 		globalSessionTable:   make(map[uint64]*session),
 		globalClientTable:    make(map[[16]byte]*smbClient),
 		globalLeaseTableList: make(map[[16]byte]*leaseTable),
-		listener:             l,
 		connectionCount:      make(map[string]int),
 		store:                db,
 		debug:                debug,
@@ -81,6 +85,14 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool,
 		ctx:                  ctx,
 	}
 	s.stats.Start = time.Now()
+
+	return s
+}
+
+// newServer returns an initialized SMB server, listening and reaping.
+func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool, cfg stores.IndexdConfig) *server {
+	s := newServerState(ctx, db, debug, cfg)
+	s.listener = l
 
 	go s.reapDurableOpens()
 
@@ -94,8 +106,12 @@ func (s *server) Stats() api.ServerStats {
 	return s.stats
 }
 
-// newConnection creates a new Connection object.
-func (s *server) newConnection(conn net.Conn) *connection {
+// newConnectionState returns a Connection object as it stands before a negotiate, with its
+// tables in place. Nothing is reading or writing it yet, and the server does not know about it.
+//
+// It is the half of newConnection that the tests share; the same reasoning applies as for
+// newServerState.
+func (s *server) newConnectionState(clientName string) *connection {
 	c := &connection{
 		commandSequenceWindow: make(map[uint64]struct{}),
 		requestList:           make(map[uint64]*smb2.Request),
@@ -104,10 +120,9 @@ func (s *server) newConnection(conn net.Conn) *connection {
 		requestOpens:          make(map[uint64]*open),
 		sessionTable:          make(map[uint64]*session),
 		preauthSessionTable:   make(map[uint64]*preauthSession),
-		conn:                  conn,
 		negotiateDialect:      smb2.SMB_DIALECT_UNKNOWN,
 		dialect:               "Unknown",
-		clientName:            conn.RemoteAddr().String(),
+		clientName:            clientName,
 		creationTime:          time.Now(),
 		maxTransactSize:       smb2.MaxTransactSize,
 		maxReadSize:           smb2.MaxReadSize,
@@ -120,9 +135,16 @@ func (s *server) newConnection(conn net.Conn) *connection {
 		stopChans:             make(map[uint64]chan struct{}),
 	}
 
-	c.mu.Lock()
+	// The first request a client may send is the one that opens the window.
 	c.commandSequenceWindow[0] = struct{}{}
-	c.mu.Unlock()
+
+	return c
+}
+
+// newConnection creates a new Connection object over a transport and starts serving it.
+func (s *server) newConnection(conn net.Conn) *connection {
+	c := s.newConnectionState(conn.RemoteAddr().String())
+	c.conn = conn
 
 	s.mu.Lock()
 	s.connectionList[c.clientName] = c

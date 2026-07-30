@@ -63,6 +63,22 @@ type session struct {
 	mu sync.Mutex
 }
 
+// newSessionState returns a Session object as it stands at the start of a session setup, with
+// its tables in place and nobody authenticated yet. It is the half of registerSession the tests
+// share; the same reasoning applies as for newServerState.
+func newSessionState(sid uint64, c *connection) *session {
+	return &session{
+		sessionID:        sid,
+		connection:       c,
+		state:            sessionInProgress,
+		creationTime:     time.Now(),
+		idleTime:         time.Now(),
+		openTable:        make(map[uint64]*open),
+		treeConnectTable: make(map[uint32]*treeConnect),
+		channelList:      make(map[string]*channel),
+	}
+}
+
 // registerSession creates a new Session object and registers it with the SMB server.
 func (s *server) registerSession(connection *connection, req smb2.SessionSetupRequest) (*session, bool, error) {
 	var ss *session
@@ -70,16 +86,7 @@ func (s *server) registerSession(connection *connection, req smb2.SessionSetupRe
 	if req.Header().SessionID() == 0 { // A new session
 		sid := make([]byte, 8)
 		frand.Read(sid)
-		ss = &session{
-			sessionID:        binary.LittleEndian.Uint64(sid),
-			connection:       connection,
-			state:            sessionInProgress,
-			creationTime:     time.Now(),
-			idleTime:         time.Now(),
-			openTable:        make(map[uint64]*open),
-			treeConnectTable: make(map[uint32]*treeConnect),
-			channelList:      make(map[string]*channel),
-		}
+		ss = newSessionState(binary.LittleEndian.Uint64(sid), connection)
 		connection.mu.Lock()
 		connection.sessionTable[ss.sessionID] = ss
 		connection.mu.Unlock()

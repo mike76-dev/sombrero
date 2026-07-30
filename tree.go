@@ -64,6 +64,20 @@ func extractShareName(path string) string {
 	return strings.ToLower(path[pos+1:])
 }
 
+// newTreeConnectState returns a TreeConnect object with its tables in place, but with no object
+// store behind it yet. It is the half of newTreeConnect the tests share; the same reasoning
+// applies as for newServerState.
+func newTreeConnectState(tid uint32, ss *session, sh *share, access uint32) *treeConnect {
+	return &treeConnect{
+		treeID:         tid,
+		session:        ss,
+		share:          sh,
+		creationTime:   time.Now(),
+		maximalAccess:  access,
+		persistedOpens: make(map[string]*open),
+	}
+}
+
 // newTreeConnect creates a new TreeConnect object and attaches it to the session.
 func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, error) {
 	name := extractShareName(path)
@@ -185,18 +199,11 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 	var id [4]byte
 	frand.Read(id[:])
 
-	tc := &treeConnect{
-		treeID:         binary.LittleEndian.Uint32(id[:]),
-		session:        ss,
-		share:          sh,
-		creationTime:   time.Now(),
-		maximalAccess:  access,
-		client:         cl,
-		maxUploadSize:  maxUploadSize,
-		createdAt:      createdAt,
-		volumeID:       volumeID,
-		persistedOpens: make(map[string]*open),
-	}
+	tc := newTreeConnectState(binary.LittleEndian.Uint32(id[:]), ss, sh, access)
+	tc.client = cl
+	tc.maxUploadSize = maxUploadSize
+	tc.createdAt = createdAt
+	tc.volumeID = volumeID
 
 	ss.mu.Lock()
 	ss.treeConnectTable[tc.treeID] = tc

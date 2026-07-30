@@ -160,16 +160,14 @@ func newSMBTest(t *testing.T) *smbTest {
 		workgroup: wg.String(),
 	}
 
-	h.srv = &server{
-		shareList:          map[string]*share{h.share.name: h.share},
-		globalOpenTable:    make(map[uint64]*open),
-		globalSessionTable: make(map[uint64]*session),
-		connectionList:     make(map[string]*connection),
-		connectionCount:    make(map[string]int),
-		globalClientTable:  make(map[[16]byte]*smbClient),
-		store:              store,
-	}
-	h.srv.globalLeaseTableList = make(map[[16]byte]*leaseTable)
+	// The server is built the way the real one is, so that a table added to it reaches the tests
+	// without anybody remembering to add it here. Only the listener and the reaping of durable
+	// opens are left out, neither of which the tests go through.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	h.srv = newServerState(ctx, store, false, stores.IndexdConfig{})
+	h.srv.shareList[h.share.name] = h.share
 
 	return h
 }
@@ -182,8 +180,7 @@ func (h *smbTest) restrictTo(users ...string) {
 	for _, user := range users {
 		key := h.workgroup + "/" + user
 		h.share.connectSecurity[key] = struct{}{}
-		h.share.fileSecurity[key] = smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA |
-			smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
+		h.share.fileSecurity[key] = shareAccess
 	}
 }
 
@@ -193,6 +190,11 @@ const (
 	// whether the read caches of the other clients survive it.
 	writeAccess = smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA
 	readAccess  = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES
+
+	// shareAccess is what the share grants over a file: everything a test may want to do with
+	// one. It is what a tree connect on the test share carries as its maximal access.
+	shareAccess = smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA |
+		smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
 )
 
 // smbTestClients counts the clients built across a test binary, so that each gets a name and a
@@ -228,51 +230,31 @@ func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
 	h.t.Helper()
 
 	smbTestClients++
+
+	c := h.srv.newConnectionState(fmt.Sprintf("%s-%d", user, smbTestClients))
+
+	// What a negotiate would have settled.
+	c.clientGuid = guid[:]
+	c.negotiateDialect = smb2.SMB_DIALECT_311
+
+	// Nothing is draining the connection here, so what the server sends is queued for the test to
+	// read rather than handed to a sending goroutine.
 	sent := make(chan []byte, 16)
+	c.writeChan = sent
 
-	c := &connection{
-		server:           h.srv,
-		clientGuid:       guid[:],
-		clientName:       fmt.Sprintf("%s-%d", user, smbTestClients),
-		negotiateDialect: smb2.SMB_DIALECT_311,
-		// A real connection settles these at negotiate time; without them every read and write
-		// is longer than the server is willing to handle.
-		maxTransactSize:  smb2.MaxTransactSize,
-		maxReadSize:      smb2.MaxReadSize,
-		maxWriteSize:     smb2.MaxWriteSize,
-		writeChan:        sent,
-		closeChan:        make(chan struct{}),
-		sessionTable:     make(map[uint64]*session),
-		requestList:      make(map[uint64]*smb2.Request),
-		asyncCommandList: make(map[uint64]*smb2.Request),
-		pendingResponses: make(map[uint64]smb2.GenericResponse),
-		requestOpens:     make(map[uint64]*open),
-		stopChans:        make(map[uint64]chan struct{}),
-	}
+	// What a session setup would have settled.
+	ss := newSessionState(uint64(smbTestClients), c)
+	ss.state = sessionValid
+	ss.userName = user
+	ss.workgroup = h.workgroup
+	ss.channelList[c.clientName] = &channel{connection: c}
 
-	ss := &session{
-		sessionID:        uint64(smbTestClients),
-		state:            sessionValid,
-		userName:         user,
-		workgroup:        h.workgroup,
-		openTable:        make(map[uint64]*open),
-		treeConnectTable: make(map[uint32]*treeConnect),
-		channelList:      map[string]*channel{c.clientName: {connection: c}},
-		connection:       c,
-	}
-
-	tc := &treeConnect{
-		treeID:        1,
-		session:       ss,
-		share:         h.share,
-		client:        h.files,
-		maxUploadSize: 64 << 20,
-		// The share security of a real tree connect holds concrete access bits, not the
-		// generic rights, and the replay rules are written in terms of the concrete ones.
-		maximalAccess: smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA |
-			smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE,
-		persistedOpens: make(map[string]*open),
-	}
+	// The maximal access of a real tree connect comes from the share security, which holds
+	// concrete access bits rather than the generic rights; the replay rules are written in terms
+	// of the concrete ones.
+	tc := newTreeConnectState(1, ss, h.share, shareAccess)
+	tc.client = h.files
+	tc.maxUploadSize = 64 << 20
 
 	ss.treeConnectTable[tc.treeID] = tc
 	c.sessionTable[ss.sessionID] = ss
