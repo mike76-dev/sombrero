@@ -2345,35 +2345,38 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					return resp, ss, nil
 				}
 
-				if sir.Buffer()[0] == 1 { // Set the delete flag
+				// DeleteFile is a boolean, so anything other than zero asks for the deletion and
+				// zero calls off one that was pending. A request carrying no buffer at all was
+				// turned away before reaching here.
+				pending := sir.Buffer()[0] > 0
+				if pending {
 					if attr&smb2.FILE_ATTRIBUTE_DIRECTORY != 0 {
 						empty, err := tc.client.IsEmpty(op.ctx, acc, path+"/")
 						if err != nil {
 							log.Printf("Error listing directory contents on %s: %v", path, err)
 							resp := smb2.NewErrorResponse(sir, smb2.STATUS_NETWORK_NAME_DELETED, 0, nil)
 							return resp, ss, nil
-						} else {
-							if empty {
-								if op != nil {
-									op.mu.Lock()
-									op.createOptions |= smb2.FILE_DELETE_ON_CLOSE
-									op.mu.Unlock()
-								}
-							} else {
-								resp := smb2.NewErrorResponse(sir, smb2.STATUS_DIRECTORY_NOT_EMPTY, 0, nil)
-								return resp, ss, nil
-							}
 						}
-					} else {
-						op.mu.Lock()
-						op.createOptions |= smb2.FILE_DELETE_ON_CLOSE
-						op.mu.Unlock()
+						if !empty {
+							resp := smb2.NewErrorResponse(sir, smb2.STATUS_DIRECTORY_NOT_EMPTY, 0, nil)
+							return resp, ss, nil
+						}
 					}
 
-					// The file is on its way out, so the lease key it was taken out under is free
-					// to be used for another one (3.3.5.21.1).
-					op.markLeaseDeleteOnClose()
+					op.mu.Lock()
+					op.createOptions |= smb2.FILE_DELETE_ON_CLOSE
+					op.mu.Unlock()
+				} else {
+					// Nothing is deleted until the handle is closed, so up to that point the
+					// client may change its mind and keep the file.
+					op.mu.Lock()
+					op.createOptions &^= smb2.FILE_DELETE_ON_CLOSE
+					op.mu.Unlock()
 				}
+
+				// Whether the file is on its way out is also what decides whether the lease key
+				// it was taken out under is free for another file (3.3.5.21.1).
+				op.setLeaseDeleteOnClose(pending)
 
 			case smb2.FileRenameInformation:
 				if ga&smb2.DELETE == 0 {
@@ -3130,7 +3133,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			// A create that takes the file out to delete it says so on the lease, so that the
 			// key is free for another file once this one is gone.
 			if cr.CreateOptions()&smb2.FILE_DELETE_ON_CLOSE > 0 {
-				op.markLeaseDeleteOnClose()
+				op.setLeaseDeleteOnClose(true)
 			}
 		}
 

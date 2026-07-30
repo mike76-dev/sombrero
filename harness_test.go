@@ -108,7 +108,24 @@ func (fc *fakeClient) Write(context.Context, io.Reader, string, string, int, uin
 	return "etag", nil
 }
 
-func (fc *fakeClient) Delete(context.Context, stores.Account, string, bool) error { return nil }
+func (fc *fakeClient) Delete(_ context.Context, _ stores.Account, path string, _ bool) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	delete(fc.objects, path)
+
+	return nil
+}
+
+// has reports whether the file is still in the store.
+func (fc *fakeClient) has(path string) bool {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	_, found := fc.objects[path]
+
+	return found
+}
 
 func (fc *fakeClient) Rename(_ context.Context, _ stores.Account, from, to string, _, _ bool) error {
 	fc.mu.Lock()
@@ -424,6 +441,11 @@ func (cl *testClient) setInfo(fid []byte, class uint8, data []byte) ([]byte, err
 // last handle on it does.
 func (cl *testClient) markForDeletion(fid []byte) ([]byte, error) {
 	return cl.setInfo(fid, smb2.FileDispositionInformation, []byte{1})
+}
+
+// keepFile calls off a deletion that was pending, leaving the file where it is.
+func (cl *testClient) keepFile(fid []byte) ([]byte, error) {
+	return cl.setInfo(fid, smb2.FileDispositionInformation, []byte{0})
 }
 
 // rename sets FileRenameInformation on a handle.

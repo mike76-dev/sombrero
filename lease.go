@@ -184,10 +184,11 @@ func (op *open) leaveLease() {
 	}
 }
 
-// markLeaseDeleteOnClose records on the lease of the open, if it holds one, that the file is to
-// be deleted when the last handle on it goes. What that buys the client is the freedom to use
-// the same lease key for another file.
-func (op *open) markLeaseDeleteOnClose() {
+// setLeaseDeleteOnClose records on the lease of the open, if it holds one, whether the file is
+// to be deleted when the last handle on it goes. What a pending deletion buys the client is the
+// freedom to use the same lease key for another file; calling the deletion off takes that back,
+// since the file is staying and the key is its own again.
+func (op *open) setLeaseDeleteOnClose(pending bool) {
 	op.mu.Lock()
 	l := op.lease
 	op.mu.Unlock()
@@ -197,7 +198,7 @@ func (op *open) markLeaseDeleteOnClose() {
 	}
 
 	l.mu.Lock()
-	l.fileDeleteOnClose = true
+	l.fileDeleteOnClose = pending
 	l.mu.Unlock()
 }
 
