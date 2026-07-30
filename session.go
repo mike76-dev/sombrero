@@ -26,6 +26,13 @@ import (
 const (
 	sessionInProgress int = iota
 	sessionValid
+
+	// sessionExpired is reachable only under an authentication mechanism that hands back an
+	// expiry time. Session.ExpirationTime is whatever GSS returns when the session is set up,
+	// and infinity when it returns nothing (3.3.5.5.3); NTLM returns nothing, and NTLM is the
+	// only mechanism this server offers. So no session here ever expires, and the code that
+	// takes an expired one back through authentication is dormant rather than dead: it is what
+	// a Kerberos-authenticated session, whose ticket does have a lifetime, would need.
 	sessionExpired
 )
 

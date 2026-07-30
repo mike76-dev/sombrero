@@ -28,6 +28,14 @@ import (
 const (
 	// staleThreshold is how soon a connection or a session are considered stale.
 	staleThreshold = 10 * time.Minute
+
+	// connectionScavengeTimeout is how long a connection is given to get as far as an
+	// authenticated session before it is dropped. Windows uses the same value (note <435>).
+	connectionScavengeTimeout = 45 * time.Second
+
+	// connectionScavengeInterval is how often the connections that never got that far are
+	// looked for. Windows runs this timer every 45 seconds as well (note <215>).
+	connectionScavengeInterval = 45 * time.Second
 )
 
 var (
@@ -2859,6 +2867,72 @@ func (c *connection) isStale() bool {
 	}
 
 	return true
+}
+
+// isUnauthenticated reports whether nobody has got as far as an authenticated session over this
+// connection.
+//
+// The spec names three cases (3.3.6.3): no dialect negotiated, a dialect but no sessions, and
+// sessions none of which is Valid or Expired. They come to the same thing, since a session
+// cannot be set up before a dialect is agreed and cannot reach either of those two states
+// without authenticating, so one walk of the table answers all three.
+func (c *connection) isUnauthenticated() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, ss := range c.sessionTable {
+		ss.mu.Lock()
+		state := ss.state
+		ss.mu.Unlock()
+
+		if state == sessionValid || state == sessionExpired {
+			return false
+		}
+	}
+
+	return true
+}
+
+// scavengeConnections drops the connections that have been open a while without anybody
+// authenticating over them: a client that negotiated and stopped, one that never even did that,
+// and one whose session setup was left half finished. None of them can be reached for anything,
+// and each holds a slot against the limit on how many connections one address may have.
+func (s *server) scavengeConnections() {
+	s.mu.Lock()
+	conns := make([]*connection, 0, len(s.connectionList))
+	for _, c := range s.connectionList {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+
+	for _, c := range conns {
+		if time.Since(c.creationTime) <= connectionScavengeTimeout {
+			continue
+		}
+		if !c.isUnauthenticated() {
+			continue
+		}
+
+		if s.debug {
+			log.Printf("Dropping connection from %s: nothing was authenticated over it", c.clientName)
+		}
+		s.closeConnection(c)
+	}
+}
+
+// reapConnections drops the connections nobody authenticated over, until the server shuts down.
+func (s *server) reapConnections() {
+	ticker := time.NewTicker(connectionScavengeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.scavengeConnections()
+		}
+	}
 }
 
 // createFile carries out an SMB2_CREATE request that has passed its preliminary checks.

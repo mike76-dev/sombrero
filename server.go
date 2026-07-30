@@ -95,6 +95,7 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool,
 	s.listener = l
 
 	go s.reapDurableOpens()
+	go s.reapConnections()
 
 	return s
 }

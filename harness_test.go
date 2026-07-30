@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -242,6 +243,16 @@ type testClient struct {
 	mid  uint64
 }
 
+// newTestConnection builds a connection the way the server does, with a transport under it that
+// nothing reads from or writes to. It has to be there all the same: closing a connection closes
+// its transport, and a real one always has one.
+func (h *smbTest) newTestConnection(name string) *connection {
+	c := h.srv.newConnectionState(name)
+	c.conn, _ = net.Pipe()
+
+	return c
+}
+
 // dial brings up a client of its own, with a GUID nobody else shares.
 func (h *smbTest) dial(user string) *testClient {
 	h.t.Helper()
@@ -260,7 +271,7 @@ func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
 
 	smbTestClients++
 
-	c := h.srv.newConnectionState(fmt.Sprintf("%s-%d", user, smbTestClients))
+	c := h.newTestConnection(fmt.Sprintf("%s-%d", user, smbTestClients))
 
 	// What a negotiate would have settled.
 	c.clientGuid = guid[:]
