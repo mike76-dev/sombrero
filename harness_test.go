@@ -110,7 +110,19 @@ func (fc *fakeClient) Write(context.Context, io.Reader, string, string, int, uin
 
 func (fc *fakeClient) Delete(context.Context, stores.Account, string, bool) error { return nil }
 
-func (fc *fakeClient) Rename(context.Context, stores.Account, string, string, bool, bool) error {
+func (fc *fakeClient) Rename(_ context.Context, _ stores.Account, from, to string, _, _ bool) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	oi, found := fc.objects[from]
+	if !found {
+		return errNoObject
+	}
+
+	oi.Key = "/" + to
+	fc.objects[to] = oi
+	delete(fc.objects, from)
+
 	return nil
 }
 
@@ -350,6 +362,84 @@ func (cl *testClient) createLeased(name string, key [16]byte, state uint32, vers
 	return cl.recv(20 * time.Second), true
 }
 
+// createLeasedWithOptions opens a file asking for a lease, with particular create options.
+func (cl *testClient) createLeasedWithOptions(name string, key [16]byte, state, options uint32) (buf []byte, async bool) {
+	cl.h.t.Helper()
+
+	cl.mid++
+	msg := createRequestWithOptions(cl.mid, cl.ss.sessionID, cl.tc.treeID, name,
+		smb2.OPLOCK_LEVEL_LEASE, smb2.FILE_OPEN, writeAccess, options, leaseContext(key, state, 2))
+
+	resp, err := cl.send(msg)
+	if err != nil {
+		cl.h.t.Fatalf("leased create of %s: %v", name, err)
+	}
+
+	if resp.Header().Status() != smb2.STATUS_PENDING {
+		return resp.Encode(), false
+	}
+
+	return cl.recv(20 * time.Second), true
+}
+
+// setInfoRequest builds the bytes of an SMB2_SET_INFO request for a file information class.
+func setInfoRequest(mid, sid uint64, tid uint32, fid []byte, class uint8, data []byte) []byte {
+	bufOff := smb2.SMB2HeaderSize + smb2.SMB2SetInfoRequestMinSize
+
+	msg := make([]byte, bufOff)
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_SET_INFO)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetTreeID(tid)
+	h.SetCreditCharge(1)
+
+	body := msg[smb2.SMB2HeaderSize:]
+	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2SetInfoRequestStructureSize)
+	body[2] = smb2.INFO_FILE
+	body[3] = class
+	binary.LittleEndian.PutUint32(body[4:8], uint32(len(data)))
+	binary.LittleEndian.PutUint16(body[8:10], uint16(bufOff))
+	copy(body[16:32], fid)
+
+	return append(msg, data...)
+}
+
+// setInfo sends an SMB2_SET_INFO request through a handle.
+func (cl *testClient) setInfo(fid []byte, class uint8, data []byte) ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(setInfoRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, class, data))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Header().Status() != smb2.STATUS_PENDING {
+		return resp.Encode(), nil
+	}
+
+	return cl.recv(20 * time.Second), nil
+}
+
+// markForDeletion sets FileDispositionInformation on a handle, so that the file goes when the
+// last handle on it does.
+func (cl *testClient) markForDeletion(fid []byte) ([]byte, error) {
+	return cl.setInfo(fid, smb2.FileDispositionInformation, []byte{1})
+}
+
+// rename sets FileRenameInformation on a handle.
+func (cl *testClient) rename(fid []byte, to string) ([]byte, error) {
+	//   0: ReplaceIfExists
+	// 8-16: RootDirectory
+	// 16-20: FileNameLength
+	//   20-: FileName
+	encoded := utils.EncodeStringToBytes(to)
+	data := make([]byte, 20+len(encoded))
+	binary.LittleEndian.PutUint32(data[16:20], uint32(len(encoded)))
+	copy(data[20:], encoded)
+
+	return cl.setInfo(fid, smb2.FileRenameInformation, data)
+}
+
 // ackLeaseBreak answers a lease break notification, keeping the state named.
 func (cl *testClient) ackLeaseBreak(key [16]byte, state uint32) ([]byte, error) {
 	cl.mid++
@@ -443,6 +533,11 @@ func (cl *testClient) quiet(grace time.Duration, what string) {
 // createRequest builds the bytes of an SMB2_CREATE request, carrying the given create contexts
 // if there are any.
 func createRequest(mid, sid uint64, tid uint32, name string, oplock uint8, disposition, access uint32, contexts []byte) []byte {
+	return createRequestWithOptions(mid, sid, tid, name, oplock, disposition, access, 0, contexts)
+}
+
+// createRequestWithOptions is createRequest asking for particular create options.
+func createRequestWithOptions(mid, sid uint64, tid uint32, name string, oplock uint8, disposition, access, options uint32, contexts []byte) []byte {
 	encoded := utils.EncodeStringToBytes(name)
 
 	// The name follows the fixed part of the request, which is what puts it at the eight-byte
@@ -462,6 +557,7 @@ func createRequest(mid, sid uint64, tid uint32, name string, oplock uint8, dispo
 	body[3] = oplock
 	binary.LittleEndian.PutUint32(body[24:28], access)
 	binary.LittleEndian.PutUint32(body[36:40], disposition)
+	binary.LittleEndian.PutUint32(body[40:44], options)
 	binary.LittleEndian.PutUint16(body[44:46], uint16(nameOff))
 	binary.LittleEndian.PutUint16(body[46:48], uint16(len(encoded)))
 

@@ -2369,6 +2369,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 						op.createOptions |= smb2.FILE_DELETE_ON_CLOSE
 						op.mu.Unlock()
 					}
+
+					// The file is on its way out, so the lease key it was taken out under is free
+					// to be used for another one (3.3.5.21.1).
+					op.markLeaseDeleteOnClose()
 				}
 
 			case smb2.FileRenameInformation:
@@ -2427,6 +2431,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 						return resp, ss, nil
 					}
 				}
+
+				// The lease follows the file under its new name, and a file that has just been
+				// renamed is not one on its way out (3.3.5.21.1).
+				op.renameLease(newName)
 
 			case smb2.FileAllocationInformation:
 				if ga&smb2.FILE_WRITE_DATA == 0 {
@@ -3118,6 +3126,12 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		}
 		if granted != smb2.SMB2_LEASE_NONE {
 			oplockLevel = smb2.OPLOCK_LEVEL_LEASE
+
+			// A create that takes the file out to delete it says so on the lease, so that the
+			// key is free for another file once this one is gone.
+			if cr.CreateOptions()&smb2.FILE_DELETE_ON_CLOSE > 0 {
+				op.markLeaseDeleteOnClose()
+			}
 		}
 
 		// A client that asked for a lease is answered either way, so that it learns it was

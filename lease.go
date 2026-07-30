@@ -26,6 +26,11 @@ type lease struct {
 	breaking     bool
 	epoch        uint16
 
+	// fileDeleteOnClose records that the file the lease covers is to be deleted once the last
+	// handle on it goes. A lease key is otherwise tied to the file it was first used on for as
+	// long as the lease lives; this is the one thing that frees it.
+	fileDeleteOnClose bool
+
 	// opens are the opens sharing the lease, keyed by durable file ID. The lease is worth
 	// nothing once the last of them is gone.
 	opens map[uint64]*open
@@ -106,6 +111,20 @@ func (s *server) leaseFor(guid [16]byte, req smb2.LeaseRequest, path string) (*l
 	l, found := lt.leases[req.LeaseKey]
 	if found {
 		l.mu.Lock()
+
+		// A file on its way out is the exception to a key naming one file: the client may take
+		// the key it was using out on something else, since what it named is about to be gone
+		// (3.3.5.9.8, 3.3.5.9.11). Without this a client that deletes a file and opens another
+		// under the same key is refused until it thinks to pick a new one.
+		//
+		// The lease follows the key to the new file. The spec says only that the request is not
+		// to be refused, leaving the lease pointing at a name it no longer covers; moving it
+		// keeps the name honest, and ties the key to the new file as it was to the old.
+		if l.fileName != path && l.fileDeleteOnClose {
+			l.fileName = path
+			l.fileDeleteOnClose = false
+		}
+
 		matches := l.fileName == path
 		l.mu.Unlock()
 
@@ -163,6 +182,41 @@ func (op *open) leaveLease() {
 		close(l.breakDone)
 		l.breakDone = nil
 	}
+}
+
+// markLeaseDeleteOnClose records on the lease of the open, if it holds one, that the file is to
+// be deleted when the last handle on it goes. What that buys the client is the freedom to use
+// the same lease key for another file.
+func (op *open) markLeaseDeleteOnClose() {
+	op.mu.Lock()
+	l := op.lease
+	op.mu.Unlock()
+
+	if l == nil {
+		return
+	}
+
+	l.mu.Lock()
+	l.fileDeleteOnClose = true
+	l.mu.Unlock()
+}
+
+// renameLease points the lease of the open, if it holds one, at the new name of the file it
+// covers. A file that has just been renamed is not on its way out, so the key is tied to it
+// again (3.3.5.21.1).
+func (op *open) renameLease(path string) {
+	op.mu.Lock()
+	l := op.lease
+	op.mu.Unlock()
+
+	if l == nil {
+		return
+	}
+
+	l.mu.Lock()
+	l.fileName = path
+	l.fileDeleteOnClose = false
+	l.mu.Unlock()
 }
 
 // releaseCaching takes away whatever the open was allowed to cache, be it an oplock of its own
