@@ -117,30 +117,51 @@ func (s *server) RegisterShare(ss stores.Share) error {
 		if err != nil {
 			return err
 		}
-
-		accs := make(map[int]stores.Account)
-		for _, ar := range ars {
-			if _, exists := accs[ar.AccountID]; !exists {
-				acc, err := s.store.GetAccountByID(ar.AccountID)
-				if err != nil {
-					return err
-				}
-				accs[ar.AccountID] = acc
-			}
+		if err := s.loadAccessRights(sh, ars); err != nil {
+			return err
 		}
-
-		sh.mu.Lock()
-		for _, ar := range ars {
-			acc := accs[ar.AccountID]
-			sh.connectSecurity[acc.Workgroup+"/"+acc.Username] = struct{}{}
-			sh.fileSecurity[acc.Workgroup+"/"+acc.Username] = stores.FlagsFromAccessRights(ar)
-		}
-		sh.mu.Unlock()
 	}
 
 	s.mu.Lock()
 	s.shareList[sh.name] = sh
 	s.mu.Unlock()
+
+	return nil
+}
+
+// loadAccessRights fills the security maps of the share from the stored access rights.
+//
+// A row naming an account that is no longer there is skipped rather than allowed to fail the
+// whole share: one dangling row would otherwise take the share offline for everybody. Skipping
+// is also the safe direction, in that the principal the row describes ends up with no access at
+// all. The foreign key on the accounts table should keep this from arising; it is handled
+// because the share going down is far the worse of the two outcomes if it ever does.
+func (s *server) loadAccessRights(sh *share, ars []stores.AccessRights) error {
+	accs := make(map[int]stores.Account)
+	for _, ar := range ars {
+		if _, exists := accs[ar.AccountID]; exists {
+			continue
+		}
+		acc, err := s.store.GetAccountByID(ar.AccountID)
+		if errors.Is(err, stores.ErrAccountNotFound) {
+			log.Printf("Share %s: skipping access rights of account %d, which no longer exists", sh.name, ar.AccountID)
+			continue
+		} else if err != nil {
+			return err
+		}
+		accs[ar.AccountID] = acc
+	}
+
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	for _, ar := range ars {
+		acc, known := accs[ar.AccountID]
+		if !known {
+			continue
+		}
+		sh.connectSecurity[acc.Workgroup+"/"+acc.Username] = struct{}{}
+		sh.fileSecurity[acc.Workgroup+"/"+acc.Username] = stores.FlagsFromAccessRights(ar)
+	}
 
 	return nil
 }
@@ -194,8 +215,14 @@ func (s *server) UpdateAccessRights(ss stores.Share, ar stores.AccessRights) err
 		return nil
 	}
 
+	// An account that is not there has nothing to be granted and nothing to revoke: there is
+	// no name to key the security maps by. Saying so is better than failing the caller, which
+	// is updating a row that describes somebody who no longer exists.
 	acc, err := s.store.GetAccountByID(ar.AccountID)
-	if err != nil {
+	if errors.Is(err, stores.ErrAccountNotFound) {
+		log.Printf("Share %s: ignoring access rights of account %d, which no longer exists", sh.name, ar.AccountID)
+		return nil
+	} else if err != nil {
 		return err
 	}
 
