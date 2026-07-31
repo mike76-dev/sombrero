@@ -265,6 +265,16 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 			return err
 		}
 
+		// A lookup that came back with nothing must never reach the comparison below. The key
+		// it would be built from is NTOWFv2 over a nil hash, and the user name and domain that
+		// go into it are both the client's own: the whole of it is computable by whoever is
+		// asking, so every unknown user would authenticate. The store reports this as
+		// ErrAccountNotFound and is caught above; this is here so that a store that ever goes
+		// back to reporting it as a zero Account fails closed.
+		if len(acc.NTHash) == 0 {
+			return errors.New("login failure")
+		}
+
 		expectedNtChallengeResponse := make([]byte, len(ntChallengeResponse))
 		ntlmv2ClientChallenge := ntChallengeResponse[16:]
 		USER := utils.EncodeStringToBytes(strings.ToUpper(user))

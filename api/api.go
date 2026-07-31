@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -372,7 +373,10 @@ func (api *API) accountHandlerGET(w http.ResponseWriter, req *http.Request, _ ht
 			return
 		}
 		acc, err = api.store.FindAccount(username, wg.UUID.String())
-		if err != nil {
+		if errors.Is(err, stores.ErrAccountNotFound) {
+			writeError(w, "account not found", http.StatusNotFound)
+			return
+		} else if err != nil {
 			log.Printf("failed to find account: %v", err)
 			writeError(w, "internal error", http.StatusInternalServerError)
 			return
@@ -384,7 +388,10 @@ func (api *API) accountHandlerGET(w http.ResponseWriter, req *http.Request, _ ht
 			return
 		}
 		acc, err = api.store.GetAccountByID(int(id))
-		if err != nil {
+		if errors.Is(err, stores.ErrAccountNotFound) {
+			writeError(w, "account not found", http.StatusNotFound)
+			return
+		} else if err != nil {
 			log.Printf("failed to find account: %v", err)
 			writeError(w, "internal error", http.StatusInternalServerError)
 			return

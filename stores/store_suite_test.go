@@ -512,12 +512,14 @@ func TestStoreAccounts(t *testing.T) {
 			t.Fatal("GetAccountByID: plaintext password must not be returned")
 		}
 
-		// Unknown accounts are returned as zero values, not as errors.
-		if got, err := st.FindAccount("nobody", u); err != nil || got.ID != 0 {
-			t.Fatalf("FindAccount missing: %v %+v", err, got)
+		// An unknown account is reported as an error and never as a zero value. A zero
+		// Account looks usable to a caller that only checks the error, and its nil NTHash
+		// authenticates anybody who computes NTOWFv2 over it.
+		if got, err := st.FindAccount("nobody", u); !errors.Is(err, ErrAccountNotFound) {
+			t.Fatalf("FindAccount missing: got %v, %+v, want ErrAccountNotFound", err, got)
 		}
-		if got, err := st.GetAccountByID(999999); err != nil || got.ID != 0 {
-			t.Fatalf("GetAccountByID missing: %v %+v", err, got)
+		if got, err := st.GetAccountByID(999999); !errors.Is(err, ErrAccountNotFound) {
+			t.Fatalf("GetAccountByID missing: got %v, %+v, want ErrAccountNotFound", err, got)
 		}
 
 		// HasAccount.

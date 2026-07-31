@@ -431,6 +431,25 @@ func TestAccount(t *testing.T) {
 		checkStatus(t, w, http.StatusBadRequest)
 	})
 
+	t.Run("GET by username not found returns 404", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			findAccount: func(string, string) (stores.Account, error) {
+				return stores.Account{}, stores.ErrAccountNotFound
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/account?username=nobody&workgroup="+testUUID.String(), nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("GET by ID not found returns 404", func(t *testing.T) {
+		ms := &mockStore{getAccountByID: func(int) (stores.Account, error) {
+			return stores.Account{}, stores.ErrAccountNotFound
+		}}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/account?id=999999", nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
 	t.Run("GET by username store error", func(t *testing.T) {
 		ms := &mockStore{
 			findWorkgroup: foundWorkgroup(),

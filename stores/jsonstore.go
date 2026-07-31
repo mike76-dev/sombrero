@@ -252,7 +252,7 @@ func (js *JSONStore) GetAccountByID(id int) (acc Account, err error) {
 			return Account{ID: a.ID, Username: a.Username, NTHash: a.NTHash, Workgroup: a.Workgroup}, nil
 		}
 	}
-	return Account{}, nil
+	return Account{}, ErrAccountNotFound
 }
 
 // FindAccount tries to retrieve the account by the username and the workgroup UUID.
@@ -267,7 +267,7 @@ func (js *JSONStore) FindAccount(username, workgroup string) (acc Account, err e
 			return Account{ID: a.ID, Username: a.Username, NTHash: a.NTHash, Workgroup: a.Workgroup}, nil
 		}
 	}
-	return Account{}, nil
+	return Account{}, ErrAccountNotFound
 }
 
 // AddAccount adds a new account to the store.

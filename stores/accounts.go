@@ -12,6 +12,12 @@ import (
 	"golang.org/x/crypto/md4"
 )
 
+// ErrAccountNotFound is returned by the account lookups when there is no such account. It has
+// to be an error rather than a zero Account, because a zero Account is a usable-looking value
+// that the callers cannot tell apart from a real one: its NTHash is nil, and authenticating
+// against a nil hash succeeds for anybody who bothers to compute NTOWFv2 over it.
+var ErrAccountNotFound = errors.New("account not found")
+
 // Account represents a user account that can connect to particular shares.
 type Account struct {
 	ID        int    `json:"id"`
@@ -35,7 +41,7 @@ func (db *Database) GetAccountByID(id int) (acc Account, err error) {
 		var u uuid.UUID
 		err = tx.QueryRow(ctx, query, id).Scan(&username, &pwh, &u)
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil
+			return ErrAccountNotFound
 		} else if err != nil {
 			return fmt.Errorf("failed to retrieve account: %w", err)
 		}
@@ -63,7 +69,7 @@ func (db *Database) FindAccount(username, workgroup string) (acc Account, err er
 		var pwh []byte
 		err = tx.QueryRow(ctx, query, username, u[:]).Scan(&id, &pwh)
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil
+			return ErrAccountNotFound
 		} else if err != nil {
 			return fmt.Errorf("failed to retrieve account: %w", err)
 		}
