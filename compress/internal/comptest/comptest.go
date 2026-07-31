@@ -71,6 +71,49 @@ func Run(t *testing.T, c Codec) {
 	})
 }
 
+// Vector is a compressed stream that this module did not produce - one printed in [MS-XCA] - and
+// the data it stands for.
+type Vector struct {
+	Name   string
+	Packed []byte
+	Plain  []byte
+}
+
+// Conformance checks that a codec reads streams it did not write.
+//
+// This is the half of interoperability a round trip cannot reach. A round trip only shows that this
+// decompressor undoes this compressor: change a constant both of them read and the format on the
+// wire moves while every round trip still passes. What a Windows client puts on the wire is fixed
+// by the specification, so the streams it prints are the only thing here that says this is the
+// Xpress format rather than one of our own that happens to be self-consistent.
+func Conformance(t *testing.T, c Codec, vectors []Vector) {
+	t.Helper()
+
+	for _, v := range vectors {
+		t.Run(v.Name, func(t *testing.T) {
+			got, err := c.Decompress(v.Packed, len(v.Plain))
+			if err != nil {
+				t.Fatalf("the stream from the specification would not decompress: %v", err)
+			}
+
+			if !bytes.Equal(got, v.Plain) {
+				t.Fatalf("what came out is not what the specification says: %s", difference(v.Plain, got))
+			}
+
+			// And the same stream from the other side. Matching it byte for byte is not required:
+			// the specification fixes how a stream is read, not which of the several valid ways of
+			// writing one an encoder picks, and this one is free to find a shorter encoding than
+			// Microsoft's did. Coming out longer than theirs for the same input is the one outcome
+			// that cannot be an improvement, and is the only thing here that would notice the
+			// compression quietly getting worse.
+			if packed := c.Compress(v.Plain); len(packed) > len(v.Packed) {
+				t.Errorf("compressed %d bytes to %d, where the specification manages %d",
+					len(v.Plain), len(packed), len(v.Packed))
+			}
+		})
+	}
+}
+
 // roundTrip checks that what comes back out is what went in. That is the whole of what a
 // compressor promises: how small the output is, and what it looks like, are its own business.
 func roundTrip(t *testing.T, c Codec, src []byte) {
