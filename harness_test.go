@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,11 @@ var errNoObject = errors.New("no such object")
 type fakeClient struct {
 	mu      sync.Mutex
 	objects map[string]client.ObjectInfo
+
+	// emptyErr is what the emptiness check fails with, when a test asks it to. It is the one
+	// lookup the deletion of a directory cannot be decided without, so what the server does when
+	// it cannot be answered is worth being able to reach.
+	emptyErr error
 }
 
 func newFakeClient() *fakeClient {
@@ -45,6 +51,29 @@ func (fc *fakeClient) put(path string, size uint64) {
 		CreatedAt:  now,
 		ModifiedAt: now,
 	}
+}
+
+// putDir makes a directory appear in the store. A directory is held under its own path, exactly
+// as a file is, and is told apart by the trailing slash on the key: that is the shape both of the
+// real stores hand back, and the only thing the create path reads the directory attribute out of.
+func (fc *fakeClient) putDir(path string) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	now := time.Now()
+	fc.objects[path] = client.ObjectInfo{
+		Key:        "/" + path + "/",
+		CreatedAt:  now,
+		ModifiedAt: now,
+	}
+}
+
+// failEmptiness makes the emptiness check fail from here on.
+func (fc *fakeClient) failEmptiness(err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.emptyErr = err
 }
 
 func (fc *fakeClient) Object(_ context.Context, _ stores.Account, path string) (client.ObjectInfo, error) {
@@ -72,7 +101,7 @@ func (fc *fakeClient) List(_ context.Context, _ stores.Account, path string) ([]
 }
 
 func (fc *fakeClient) MakeDirectory(_ context.Context, _ stores.Account, path string) error {
-	fc.put(path+"/", 0)
+	fc.putDir(path)
 	return nil
 }
 
@@ -84,7 +113,24 @@ func (fc *fakeClient) Storage(context.Context) (client.StorageInfo, error) {
 	return client.StorageInfo{}, nil
 }
 
-func (fc *fakeClient) IsEmpty(context.Context, stores.Account, string) (bool, error) {
+// IsEmpty reports whether the directory holds nothing at all. The path arrives with a trailing
+// slash, which makes it the prefix of everything inside the directory and of nothing else: the
+// directory's own entry is held under the path without one, and a sibling whose name merely starts
+// the same way is cut off by the slash.
+func (fc *fakeClient) IsEmpty(_ context.Context, _ stores.Account, path string) (bool, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if fc.emptyErr != nil {
+		return false, fc.emptyErr
+	}
+
+	for key := range fc.objects {
+		if strings.HasPrefix(key, path) {
+			return false, nil
+		}
+	}
+
 	return true, nil
 }
 
@@ -492,6 +538,35 @@ func (cl *testClient) createLeased(name string, key [16]byte, state uint32, vers
 	}
 
 	return cl.recv(20 * time.Second), true
+}
+
+// openDir opens a directory, making it if it is not there. FILE_DIRECTORY_FILE is what says the
+// create is not about a file, and is what a client sends to make one.
+func (cl *testClient) openDir(name string) []byte {
+	cl.h.t.Helper()
+
+	return cl.openDirWithOptions(name, 0)
+}
+
+// openDirWithOptions is openDir carrying further create options beside the one that says the
+// create is about a directory.
+func (cl *testClient) openDirWithOptions(name string, options uint32) []byte {
+	cl.h.t.Helper()
+
+	cl.mid++
+	msg := createRequestWithOptions(cl.mid, cl.ss.sessionID, cl.tc.treeID, name,
+		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN_IF, writeAccess, smb2.FILE_DIRECTORY_FILE|options, nil)
+
+	resp, err := cl.send(msg)
+	if err != nil {
+		cl.h.t.Fatalf("open of directory %s: %v", name, err)
+	}
+
+	if status := resp.Header().Status(); status != smb2.STATUS_OK {
+		cl.h.t.Fatalf("open of directory %s returned %#x", name, status)
+	}
+
+	return resp.Encode()
 }
 
 // createLeasedWithOptions opens a file asking for a lease, with particular create options.

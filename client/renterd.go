@@ -173,7 +173,7 @@ func (rc *RenterdClient) usedStorage(ctx context.Context) (us uint64, err error)
 	return osr.TotalUploadedSize, nil
 }
 
-// IsEmpty returns true if the directory contains at least one object.
+// IsEmpty returns true if the directory contains no objects.
 func (rc *RenterdClient) IsEmpty(ctx context.Context, _ stores.Account, path string) (bool, error) {
 	values := url.Values{}
 	api.ListObjectOptions{

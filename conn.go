@@ -1113,11 +1113,36 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		path := op.pathName
 		op.mu.Unlock()
 		if co&smb2.FILE_DELETE_ON_CLOSE > 0 { // Delete the file or directory
-			tc.mu.Lock()
-			delete(tc.persistedOpens, path)
-			tc.mu.Unlock()
-			if err := tc.client.Delete(op.ctx, acc, path, attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0); err != nil {
-				log.Printf("Error deleting object %s: %v", path, err)
+			isDir := attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
+
+			// This is the moment the directory has to be empty, whatever it was when the deletion
+			// was asked for. The answer given then may have gone stale - anything may have been
+			// put in the directory since - and the create options are a second way to ask that
+			// never went past the emptiness check at all. Deleting a directory that has filled up
+			// takes the entry away and leaves what is inside it behind, reachable by nobody.
+			//
+			// The close succeeds either way: it is the deletion that does not happen. That is what
+			// a local file system does with a delete-on-close it cannot honour, and there is
+			// nowhere left to report it by the time the handle is going.
+			deleting := true
+			if isDir {
+				empty, err := tc.client.IsEmpty(op.ctx, acc, path+"/")
+				if err != nil {
+					log.Printf("Error listing directory contents on %s: %v", path, err)
+					deleting = false
+				} else if !empty {
+					log.Printf("Not deleting directory %s: it is no longer empty", path)
+					deleting = false
+				}
+			}
+
+			if deleting {
+				tc.mu.Lock()
+				delete(tc.persistedOpens, path)
+				tc.mu.Unlock()
+				if err := tc.client.Delete(op.ctx, acc, path, isDir); err != nil {
+					log.Printf("Error deleting object %s: %v", path, err)
+				}
 			}
 		}
 
