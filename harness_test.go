@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -212,6 +213,61 @@ func (h *smbTest) restrictTo(users ...string) {
 		h.share.connectSecurity[key] = struct{}{}
 		h.share.fileSecurity[key] = shareAccess
 	}
+}
+
+// signing turns the client's session into one that requires signing, as every session that is
+// not encrypting does once it has authenticated.
+func (cl *testClient) signing() *testClient {
+	cl.h.t.Helper()
+
+	cl.ss.sessionKey = bytes.Repeat([]byte{0x5a}, 16)
+	cl.ss.deriveKeys()
+	cl.ss.bindChannel(cl.conn, cl.ss.signingKey)
+	cl.ss.signingRequired = true
+	cl.ss.encryptData = false
+
+	return cl
+}
+
+// encrypting turns the client's session into an encrypting one, the way a 3.x session setup
+// does when the server has encryption switched on. The keys come out of the same derivation the
+// server uses, so what the test decrypts with is what the server encrypted with.
+func (cl *testClient) encrypting() *testClient {
+	cl.h.t.Helper()
+
+	cl.conn.cipherID = smb2.AES_128_GCM
+	cl.ss.sessionKey = bytes.Repeat([]byte{0xa5}, 16)
+	cl.ss.deriveKeys()
+	cl.ss.bindChannel(cl.conn, cl.ss.signingKey)
+	cl.ss.encryptData = true
+	cl.ss.signingRequired = false
+
+	return cl
+}
+
+// decrypted undoes the protection the server put on a message meant for this client, failing the
+// test if it was not encrypted or does not come apart. The server seals with its outbound key,
+// so that is what opens it.
+func (cl *testClient) decrypted(buf []byte) []byte {
+	cl.h.t.Helper()
+
+	if id := smb2.Header(buf).ProtocolID(); id != smb2.PROTOCOL_SMB2_ENCRYPTED {
+		cl.h.t.Fatalf("the message carries protocol ID %#x, want an encrypted one", id)
+	}
+
+	opener, err := cl.ss.aead(cl.ss.encryptionKey, cl.conn)
+	if err != nil {
+		cl.h.t.Fatalf("could not build the cipher: %v", err)
+	}
+
+	h := smb2.Header(buf)
+	sealed := append(buf[smb2.SMB2TransformHeaderSize:], h.EncryptionSignature()...)
+	msg, err := opener.Open(sealed[:0], h.Nonce()[:opener.NonceSize()], sealed, h.AssociatedData())
+	if err != nil {
+		cl.h.t.Fatalf("the message did not come apart: %v", err)
+	}
+
+	return msg
 }
 
 // impatient shortens the acknowledgment timers, so that a test of what happens when a client

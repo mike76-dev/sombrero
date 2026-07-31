@@ -209,19 +209,7 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 		log.Printf("Session key: %x\n", ss.sessionKey)
 	}
 
-	switch ss.connection.negotiateDialect {
-	case smb2.SMB_DIALECT_202, smb2.SMB_DIALECT_21:
-	case smb2.SMB_DIALECT_30, smb2.SMB_DIALECT_302:
-		ss.signingKey = kdf.Kdf(ss.sessionKey, []byte("SMB2AESCMAC\x00"), []byte("SmbSign\x00"))
-		ss.applicationKey = kdf.Kdf(ss.sessionKey, []byte("SMB2APP\x00"), []byte("SmbRpc\x00"))
-		ss.encryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerOut\x00"))
-		ss.decryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerIn \x00"))
-	case smb2.SMB_DIALECT_311:
-		ss.signingKey = kdf.Kdf(ss.sessionKey, []byte("SMBSigningKey\x00"), ss.preauthIntegrityHashValue)
-		ss.applicationKey = kdf.Kdf(ss.sessionKey, []byte("SMBAppKey\x00"), ss.preauthIntegrityHashValue)
-		ss.encryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMBS2CCipherKey\x00"), ss.preauthIntegrityHashValue)
-		ss.decryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMBC2SCipherKey\x00"), ss.preauthIntegrityHashValue)
-	}
+	ss.deriveKeys()
 
 	// The connection the session is established on becomes its first channel, and the
 	// signing key of that channel is the signing key of the session.
@@ -244,6 +232,25 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 
 	ss.state = sessionValid
 	ss.expirationTime = time.Now().Add(100 * 365 * 24 * time.Hour) // Impossibly long
+}
+
+// deriveKeys works the signing, application and encryption keys out of the session key, by the
+// method the dialect calls for. The dialects before 3.0 derive nothing: they sign with the
+// session key itself and cannot encrypt at all.
+func (ss *session) deriveKeys() {
+	switch ss.connection.negotiateDialect {
+	case smb2.SMB_DIALECT_202, smb2.SMB_DIALECT_21:
+	case smb2.SMB_DIALECT_30, smb2.SMB_DIALECT_302:
+		ss.signingKey = kdf.Kdf(ss.sessionKey, []byte("SMB2AESCMAC\x00"), []byte("SmbSign\x00"))
+		ss.applicationKey = kdf.Kdf(ss.sessionKey, []byte("SMB2APP\x00"), []byte("SmbRpc\x00"))
+		ss.encryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerOut\x00"))
+		ss.decryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerIn \x00"))
+	case smb2.SMB_DIALECT_311:
+		ss.signingKey = kdf.Kdf(ss.sessionKey, []byte("SMBSigningKey\x00"), ss.preauthIntegrityHashValue)
+		ss.applicationKey = kdf.Kdf(ss.sessionKey, []byte("SMBAppKey\x00"), ss.preauthIntegrityHashValue)
+		ss.encryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMBS2CCipherKey\x00"), ss.preauthIntegrityHashValue)
+		ss.decryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMBC2SCipherKey\x00"), ss.preauthIntegrityHashValue)
+	}
 }
 
 // signingKeyFor returns the key to sign the response with. In the SMB 3.x dialect family, an
