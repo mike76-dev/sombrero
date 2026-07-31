@@ -377,7 +377,7 @@ func (s *server) sendLeaseBreak(l *lease) {
 		return
 	}
 
-	time.AfterFunc(leaseBreakTimeout, func() {
+	time.AfterFunc(s.leaseBreakTimeout, func() {
 		if l.completeBreak(smb2.SMB2_LEASE_NONE) && s.debug {
 			log.Printf("Lease break on %s was not acknowledged in time", path)
 		}

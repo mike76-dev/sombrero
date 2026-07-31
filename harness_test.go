@@ -214,6 +214,15 @@ func (h *smbTest) restrictTo(users ...string) {
 	}
 }
 
+// impatient shortens the acknowledgment timers, so that a test of what happens when a client
+// never answers a break spends milliseconds on it rather than the 35 seconds a real client is
+// given. It returns the timeout it set, to save the caller repeating it.
+func (h *smbTest) impatient(d time.Duration) time.Duration {
+	h.srv.oplockBreakTimeout = d
+	h.srv.leaseBreakTimeout = d
+	return d
+}
+
 const (
 	// writeAccess is what a client asks for when it means to change the file, and readAccess
 	// when it only means to look at it. Which of the two a create asks for is what decides

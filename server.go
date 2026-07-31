@@ -54,7 +54,16 @@ type server struct {
 	// cachingMu guards the granting of oplocks and leases. Either is only promised to an open
 	// that has its file to itself, and only this lock keeps two creates racing for the same
 	// file from both finding it free. It is never held while a break is waited for.
-	cachingMu       sync.Mutex
+	cachingMu sync.Mutex
+
+	// oplockBreakTimeout and leaseBreakTimeout are how long a client is given to acknowledge a
+	// break before it loses what it held. They are fields carrying the constants rather than
+	// the constants themselves so that a test can wind them down: at 35 seconds apiece, the
+	// waiting is otherwise the only thing a test of the expiry could measure. Nothing outside
+	// of a test changes them.
+	oplockBreakTimeout time.Duration
+	leaseBreakTimeout  time.Duration
+
 	connectionCount map[string]int
 	store           stores.Store
 	debug           bool
@@ -78,6 +87,8 @@ func newServerState(ctx context.Context, db stores.Store, debug bool, cfg stores
 		globalSessionTable:   make(map[uint64]*session),
 		globalClientTable:    make(map[[16]byte]*smbClient),
 		globalLeaseTableList: make(map[[16]byte]*leaseTable),
+		oplockBreakTimeout:   oplockBreakTimeout,
+		leaseBreakTimeout:    leaseBreakTimeout,
 		connectionCount:      make(map[string]int),
 		store:                db,
 		debug:                debug,

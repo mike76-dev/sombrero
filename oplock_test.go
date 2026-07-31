@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 )
 
 // oplockTestClient counts the fake clients built for a test, so that each gets a name of its
@@ -65,12 +67,16 @@ func newOplockOpen(t *testing.T, s *server, sh *share, path string) (*open, *con
 
 // newCachingServer builds a server with the tables the oplock and lease paths reach for, and
 // nothing else.
+// newCachingServer returns a server for the unit tests of the granting and breaking code. It
+// goes through the same constructor as the running server, so that a field added there reaches
+// these tests without anybody remembering to add it here: this fixture used to be a struct
+// literal, and the acknowledgment timers arriving as fields left it timing out breaks the
+// instant they were sent.
+//
+// There is no store behind it. None of these tests reaches one, and a test that starts to will
+// fail loudly rather than quietly work on something half-built.
 func newCachingServer() *server {
-	return &server{
-		globalOpenTable:      make(map[uint64]*open),
-		globalLeaseTableList: make(map[[16]byte]*leaseTable),
-		connectionList:       make(map[string]*connection),
-	}
+	return newServerState(context.Background(), nil, false, stores.IndexdConfig{})
 }
 
 // recvBreak takes the break notification the server sent to a client, failing the test if none

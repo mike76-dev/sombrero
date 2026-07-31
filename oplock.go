@@ -217,7 +217,7 @@ func (s *server) sendOplockBreak(op *open) {
 		return
 	}
 
-	time.AfterFunc(oplockBreakTimeout, func() {
+	time.AfterFunc(s.oplockBreakTimeout, func() {
 		// A client that never answered keeps nothing: the file has been waiting on it.
 		if op.completeOplockBreak(smb2.OPLOCK_LEVEL_NONE) && s.debug {
 			log.Printf("Oplock break on %s was not acknowledged in time", path)
