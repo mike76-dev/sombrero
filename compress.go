@@ -166,10 +166,16 @@ func (c *connection) compress(msg []byte) []byte {
 				output = append(output, fwd.Marshal()...)
 				start += int(fwd.Repetitions)
 				remainingBytes -= int(fwd.Repetitions)
-				if bck != nil && bck.Repetitions > 0 {
-					remainingBytes -= int(bck.Repetitions)
-					end -= int(bck.Repetitions)
-				}
+			}
+
+			// The run at the end leaves the payload whenever a pattern is going to carry it,
+			// which is not only when there is a run at the start as well. A real message opens
+			// with the protocol ID, so the one at the start almost never fires; taking the end out
+			// of the payload only then would send it twice, and the message would come apart
+			// longer than the header beside it says it should.
+			if bck != nil && bck.Repetitions > 0 {
+				remainingBytes -= int(bck.Repetitions)
+				end -= int(bck.Repetitions)
 			}
 		}
 
