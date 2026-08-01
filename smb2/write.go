@@ -41,7 +41,7 @@ func (wr WriteRequest) Validate(supportsMultiCredit bool) error {
 	}
 
 	length := binary.LittleEndian.Uint32(wr.data[SMB2HeaderSize+4 : SMB2HeaderSize+8])
-	if uint32(wr.DataOffset())+length > uint32(len(wr.data)) {
+	if !fits(uint64(wr.DataOffset()), uint64(length), uint64(len(wr.data))) {
 		return ErrInvalidParameter
 	}
 
@@ -93,6 +93,10 @@ func (wr WriteRequest) Flags() uint32 {
 func (wr WriteRequest) Buffer() []byte {
 	off := uint32(wr.DataOffset())
 	length := binary.LittleEndian.Uint32(wr.data[SMB2HeaderSize+4 : SMB2HeaderSize+8])
+	if !fits(uint64(off), uint64(length), uint64(len(wr.data))) {
+		return nil
+	}
+
 	return wr.data[off : off+length]
 }
 

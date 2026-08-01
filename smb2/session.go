@@ -87,10 +87,11 @@ func (ssr SessionSetupRequest) PreviousSessionID() uint64 {
 func (ssr SessionSetupRequest) SecurityBuffer() []byte {
 	off := binary.LittleEndian.Uint16(ssr.data[SMB2HeaderSize+12 : SMB2HeaderSize+14])
 	length := binary.LittleEndian.Uint16(ssr.data[SMB2HeaderSize+14 : SMB2HeaderSize+16])
-	if off+length > uint16(len(ssr.data)) {
+	if !fits(uint64(off), uint64(length), uint64(len(ssr.data))) {
 		return nil
 	}
-	return ssr.data[off : off+length]
+
+	return ssr.data[off : uint32(off)+uint32(length)]
 }
 
 // SessionSetupResponse represents an SMB2_SESSION_SETUP response.

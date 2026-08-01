@@ -141,7 +141,7 @@ func (qdr QueryDirectoryRequest) Validate(supportsMultiCredit bool) error {
 
 	off := binary.LittleEndian.Uint16(qdr.data[SMB2HeaderSize+24 : SMB2HeaderSize+26])
 	length := binary.LittleEndian.Uint16(qdr.data[SMB2HeaderSize+26 : SMB2HeaderSize+28])
-	if off+length > uint16(len(qdr.data)) {
+	if !fits(uint64(off), uint64(length), uint64(len(qdr.data))) {
 		return ErrInvalidParameter
 	}
 
@@ -192,7 +192,11 @@ func (qdr QueryDirectoryRequest) OutputBufferLength() uint32 {
 func (qdr QueryDirectoryRequest) FileName() string {
 	off := binary.LittleEndian.Uint16(qdr.data[SMB2HeaderSize+24 : SMB2HeaderSize+26])
 	length := binary.LittleEndian.Uint16(qdr.data[SMB2HeaderSize+26 : SMB2HeaderSize+28])
-	return utils.DecodeToString(qdr.data[off : off+length])
+	if !fits(uint64(off), uint64(length), uint64(len(qdr.data))) {
+		return ""
+	}
+
+	return utils.DecodeToString(qdr.data[off : uint32(off)+uint32(length)])
 }
 
 type dirInfo struct {
@@ -729,7 +733,7 @@ func (qir QueryInfoRequest) Validate(supportsMultiCredit bool) error {
 
 	off := binary.LittleEndian.Uint16(qir.data[SMB2HeaderSize+8 : SMB2HeaderSize+10])
 	length := binary.LittleEndian.Uint32(qir.data[SMB2HeaderSize+12 : SMB2HeaderSize+16])
-	if uint32(off)+length > uint32(len(qir.data)) {
+	if !fits(uint64(off), uint64(length), uint64(len(qir.data))) {
 		return ErrInvalidParameter
 	}
 
@@ -768,6 +772,10 @@ func (qir QueryInfoRequest) OutputBufferLength() uint32 {
 func (qir QueryInfoRequest) InputBuffer() []byte {
 	off := binary.LittleEndian.Uint16(qir.data[SMB2HeaderSize+8 : SMB2HeaderSize+10])
 	length := binary.LittleEndian.Uint32(qir.data[SMB2HeaderSize+12 : SMB2HeaderSize+16])
+	if !fits(uint64(off), uint64(length), uint64(len(qir.data))) {
+		return nil
+	}
+
 	return qir.data[off : uint32(off)+length]
 }
 

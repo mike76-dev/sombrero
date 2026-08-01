@@ -174,13 +174,13 @@ func (cr CreateRequest) Validate(supportsMultiCredit bool) error {
 
 	off := binary.LittleEndian.Uint16(cr.data[SMB2HeaderSize+44 : SMB2HeaderSize+46])
 	length := binary.LittleEndian.Uint16(cr.data[SMB2HeaderSize+46 : SMB2HeaderSize+48])
-	if off%8 > 0 || length%2 > 0 || off+length > uint16(len(cr.data)) {
+	if off%8 > 0 || length%2 > 0 || !fits(uint64(off), uint64(length), uint64(len(cr.data))) {
 		return ErrInvalidParameter
 	}
 
 	cOff := binary.LittleEndian.Uint32(cr.data[SMB2HeaderSize+48 : SMB2HeaderSize+52])
 	cLength := binary.LittleEndian.Uint32(cr.data[SMB2HeaderSize+52 : SMB2HeaderSize+56])
-	if cOff+cLength > uint32(len(cr.data)) {
+	if !fits(uint64(cOff), uint64(cLength), uint64(len(cr.data))) {
 		return ErrInvalidParameter
 	}
 
@@ -275,7 +275,11 @@ func (cr CreateRequest) CreateOptionSelected(option uint32) bool {
 func (cr CreateRequest) Filename() string {
 	off := binary.LittleEndian.Uint16(cr.data[SMB2HeaderSize+44 : SMB2HeaderSize+46])
 	length := binary.LittleEndian.Uint16(cr.data[SMB2HeaderSize+46 : SMB2HeaderSize+48])
-	return utils.DecodeToString(cr.data[off : off+length])
+	if !fits(uint64(off), uint64(length), uint64(len(cr.data))) {
+		return ""
+	}
+
+	return utils.DecodeToString(cr.data[off : uint32(off)+uint32(length)])
 }
 
 // CreateContexts returns the create contexts referenced by the Buffer field of the SMB2_CREATE request.
@@ -286,33 +290,57 @@ func (cr CreateRequest) CreateContexts() (map[uint32][]byte, error) {
 		return nil, nil
 	}
 
-	contexts := make(map[uint32][]byte)
-	for off < uint32(len(cr.data)) {
-		next := binary.LittleEndian.Uint32(cr.data[off : off+4])
+	// The chain is walked in a width the offsets on the wire cannot carry past, so that a
+	// context which points beyond the message is answered for here rather than reached for, and
+	// a step that runs off the end of the count ends the walk instead of coming back round to a
+	// place already visited.
+	size := uint64(len(cr.data))
+	if !fits(uint64(off), uint64(length), size) {
+		return nil, ErrInvalidParameter
+	}
 
-		nameOff := uint32(binary.LittleEndian.Uint16(cr.data[off+4 : off+6]))
-		nameLen := binary.LittleEndian.Uint16(cr.data[off+6 : off+8])
+	contexts := make(map[uint32][]byte)
+	for pos := uint64(off); pos < size; {
+		// The fixed part of the context has to have arrived before any of it is read.
+		if !fits(pos, 16, size) {
+			return nil, ErrInvalidParameter
+		}
+
+		next := uint64(binary.LittleEndian.Uint32(cr.data[pos : pos+4]))
+		nameOff := uint64(binary.LittleEndian.Uint16(cr.data[pos+4 : pos+6]))
+		nameLen := binary.LittleEndian.Uint16(cr.data[pos+6 : pos+8])
 		if nameLen > 4 {
-			off += next
 			if next == 0 {
 				break
 			}
+			pos += next
 			continue
 		} else if nameLen < 4 {
 			return nil, ErrInvalidParameter
 		}
 
-		name := binary.BigEndian.Uint32(cr.data[off+nameOff : off+nameOff+4])
-		dataOff := uint32(binary.LittleEndian.Uint16(cr.data[off+10 : off+12]))
-		dataLen := binary.LittleEndian.Uint32(cr.data[off+12 : off+16])
+		if !fits(pos+nameOff, 4, size) {
+			return nil, ErrInvalidParameter
+		}
+		name := binary.BigEndian.Uint32(cr.data[pos+nameOff : pos+nameOff+4])
+
+		dataOff := uint64(binary.LittleEndian.Uint16(cr.data[pos+10 : pos+12]))
+		dataLen := uint64(binary.LittleEndian.Uint32(cr.data[pos+12 : pos+16]))
+
+		// The room set aside for the context is the room the context says it takes, so it is
+		// measured against the message before any of it is set aside.
+		if !fits(pos+dataOff, dataLen, size) {
+			return nil, ErrInvalidParameter
+		}
+
 		data := make([]byte, dataLen)
-		copy(data, cr.data[off+dataOff:off+dataOff+dataLen])
+		copy(data, cr.data[pos+dataOff:pos+dataOff+dataLen])
 		contexts[name] = data
 
-		off += next
 		if next == 0 {
 			break
 		}
+		pos += next
 	}
 
 	return contexts, nil

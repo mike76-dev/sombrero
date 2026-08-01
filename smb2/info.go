@@ -36,7 +36,7 @@ func (sir SetInfoRequest) Validate(supportsMultiCredit bool) error {
 
 	off := binary.LittleEndian.Uint16(sir.data[SMB2HeaderSize+8 : SMB2HeaderSize+10])
 	length := binary.LittleEndian.Uint32(sir.data[SMB2HeaderSize+4 : SMB2HeaderSize+8])
-	if uint32(off)+length > uint32(len(sir.data)) {
+	if !fits(uint64(off), uint64(length), uint64(len(sir.data))) {
 		return ErrInvalidParameter
 	}
 
@@ -81,6 +81,10 @@ func (sir SetInfoRequest) FileID() []byte {
 func (sir SetInfoRequest) Buffer() []byte {
 	off := binary.LittleEndian.Uint16(sir.data[SMB2HeaderSize+8 : SMB2HeaderSize+10])
 	length := binary.LittleEndian.Uint32(sir.data[SMB2HeaderSize+4 : SMB2HeaderSize+8])
+	if !fits(uint64(off), uint64(length), uint64(len(sir.data))) {
+		return nil
+	}
+
 	return sir.data[off : uint32(off)+length]
 }
 

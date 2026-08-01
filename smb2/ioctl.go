@@ -62,7 +62,7 @@ func (ir IoctlRequest) Validate(supportsMultiCredit bool) error {
 
 	off := binary.LittleEndian.Uint32(ir.data[SMB2HeaderSize+24 : SMB2HeaderSize+28])
 	length := binary.LittleEndian.Uint32(ir.data[SMB2HeaderSize+28 : SMB2HeaderSize+32])
-	if length > 0 && ((off > 0 && off < SMB2HeaderSize+SMB2IoctlRequestMinSize) || off%8 > 0 || off+length > uint32(len(ir.data))) {
+	if length > 0 && ((off > 0 && off < SMB2HeaderSize+SMB2IoctlRequestMinSize) || off%8 > 0 || !fits(uint64(off), uint64(length), uint64(len(ir.data)))) {
 		return ErrInvalidParameter
 	}
 
@@ -98,9 +98,10 @@ func (ir IoctlRequest) FileID() []byte {
 func (ir IoctlRequest) InputBuffer() []byte {
 	off := binary.LittleEndian.Uint32(ir.data[SMB2HeaderSize+24 : SMB2HeaderSize+28])
 	length := binary.LittleEndian.Uint32(ir.data[SMB2HeaderSize+28 : SMB2HeaderSize+32])
-	if len(ir.data) < int(off+length) {
+	if !fits(uint64(off), uint64(length), uint64(len(ir.data))) {
 		return nil
 	}
+
 	return ir.data[off : off+length]
 }
 
