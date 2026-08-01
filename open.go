@@ -436,6 +436,14 @@ func (op *open) fileAllInformation() []byte {
 		size = op.size
 		alloc = op.allocated
 	}
+
+	// A handle whose file is on its way out says so. Whether the deletion was asked for by the
+	// create that made the handle or by a disposition set on it later, it is kept in the same
+	// place, and the client decides what to do with the file on the strength of this.
+	if op.createOptions&smb2.FILE_DELETE_ON_CLOSE > 0 {
+		pd = true
+	}
+
 	fai := smb2.FileAllInfo{
 		BasicInfo: smb2.FileBasicInfo{
 			CreationTime:   op.lastModified,
@@ -485,6 +493,12 @@ func (op *open) fileStandardInformation() []byte {
 		size = op.size
 		alloc = op.allocated
 	}
+
+	// As above: a file that is going says so.
+	if op.createOptions&smb2.FILE_DELETE_ON_CLOSE > 0 {
+		pd = true
+	}
+
 	fsi := smb2.FileStandardInfo{
 		AllocationSize: alloc,
 		EndOfFile:      size,
