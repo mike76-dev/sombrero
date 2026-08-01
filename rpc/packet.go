@@ -3,11 +3,25 @@ package rpc
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
+	"math"
 )
 
 const (
 	HeaderSize = 16
+)
+
+var (
+	// ErrUnsupportedPacketType is returned for a packet of a type this implementation does not
+	// decode. The body is left unset, so the caller must not reach into it.
+	ErrUnsupportedPacketType = errors.New("rpc: packet type not supported")
+
+	// ErrTruncated is returned when a field runs past the end of what arrived.
+	ErrTruncated = errors.New("rpc: the packet ends in the middle of a field")
+
+	// ErrTooLongToSend is returned for a response that will not fit in one fragment.
+	ErrTooLongToSend = errors.New("rpc: the response is too long to send in one fragment")
 )
 
 var (
@@ -82,11 +96,13 @@ func (h *Header) Encode(w io.Writer) {
 }
 
 // Decode implements Decoder interface.
-func (h *Header) Decode(r io.Reader) {
+func (h *Header) Decode(r io.Reader) error {
 	buf := make([]byte, 16)
-	_, err := r.Read(buf)
-	if err != nil {
-		return
+	// Read is free to hand back fewer bytes than were asked for and no error with them, so the
+	// whole of the header is waited for rather than whatever the first read happened to bring.
+	// Taking the short read would leave the fields behind it holding zeroes that nothing sent.
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return err
 	}
 
 	h.RPCVersionMajor = buf[0]
@@ -97,6 +113,8 @@ func (h *Header) Decode(r io.Reader) {
 	h.FragLength = binary.LittleEndian.Uint16(buf[8:10])
 	h.AuthLength = binary.LittleEndian.Uint16(buf[10:12])
 	h.CallID = binary.LittleEndian.Uint32(buf[12:])
+
+	return nil
 }
 
 // NewHeader returns a standard MS-RPC packet header.
@@ -118,10 +136,16 @@ type InboundPacket struct {
 	Payload []byte
 }
 
-// Read reads and decodes an MS-RPC request.
-func (ip *InboundPacket) Read(r io.Reader) {
+// Read reads and decodes an MS-RPC request. A packet that cannot be read is reported rather than
+// left half-decoded: the caller reaches into the body and the payload on the strength of the
+// packet type, and a header that never arrived reads as a request of type zero carrying nothing,
+// which is a live opnum on two of the three pipes.
+func (ip *InboundPacket) Read(r io.Reader) error {
 	ip.Header = &Header{}
-	ip.Header.Decode(r)
+	if err := ip.Header.Decode(r); err != nil {
+		return err
+	}
+
 	switch ip.Header.PacketType {
 	case PACKET_TYPE_BIND:
 		ip.Body = &Bind{}
@@ -132,15 +156,20 @@ func (ip *InboundPacket) Read(r io.Reader) {
 	case PACKET_TYPE_RESPONSE:
 		ip.Body = &Response{}
 	default:
-		return
+		return ErrUnsupportedPacketType
 	}
 
-	ip.Body.Decode(r)
+	if err := ip.Body.Decode(r); err != nil {
+		return err
+	}
+
 	var buf bytes.Buffer
 	n, err := buf.ReadFrom(r)
 	if err == nil && n > 0 {
 		ip.Payload = buf.Bytes()
 	}
+
+	return nil
 }
 
 // OutboundPacket represents an MS-RPC response.
@@ -150,14 +179,27 @@ type OutboundPacket struct {
 }
 
 // Write encodes an MS-RPC response and writes it to the provided stream.
-func (op *OutboundPacket) Write(w io.Writer) {
+func (op *OutboundPacket) Write(w io.Writer) error {
 	if op == nil || op.Header == nil || op.Body == nil {
-		return
+		return nil
 	}
 
 	var body bytes.Buffer
 	op.Body.Encode(&body)
+
+	// The length of a fragment is told in sixteen bits, so a body that will not fit in one
+	// cannot be described by the header in front of it. Counted out regardless the length wraps
+	// round and the packet goes out saying it is a few bytes long while carrying tens of
+	// thousands, which a client reads as one packet and then reads the rest as another. This
+	// implementation does not break a response into fragments, so the honest answer is to say
+	// it cannot be sent. A share list long enough to reach this is the way in.
+	if body.Len()+HeaderSize > math.MaxUint16 {
+		return ErrTooLongToSend
+	}
+
 	op.Header.FragLength = uint16(body.Len()) + HeaderSize
 	op.Header.Encode(w)
-	w.Write(body.Bytes())
+	_, err := w.Write(body.Bytes())
+
+	return err
 }

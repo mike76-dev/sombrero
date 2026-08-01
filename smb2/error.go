@@ -33,6 +33,7 @@ const (
 	STATUS_EAS_NOT_SUPPORTED                     = 0xc000004f
 	STATUS_NO_SUCH_USER                          = 0xc0000064
 	STATUS_NONE_MAPPED                           = 0xc0000073
+	STATUS_INSUFFICIENT_RESOURCES                = 0xc000009a
 	STATUS_IO_TIMEOUT                            = 0xc00000b5
 	STATUS_NOT_SUPPORTED                         = 0xc00000bb
 	STATUS_NETWORK_NAME_DELETED                  = 0xc00000c9

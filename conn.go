@@ -1271,7 +1271,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			op.mu.Unlock()
 			if data != nil {
 				ip := rpc.InboundPacket{}
-				ip.Read(bytes.NewBuffer(data))
+				if err := ip.Read(bytes.NewBuffer(data)); err != nil {
+					// The packet was written by whoever is on the far end, so one that cannot
+					// be read is answered rather than reached into: the body and the payload
+					// are only there to reach for when the whole of it arrived. What was sent
+					// is dropped as well, so the same bad bytes are not read again.
+					op.mu.Lock()
+					op.srvsvcData = nil
+					op.mu.Unlock()
+					resp := smb2.NewErrorResponse(rr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+					return resp, ss, nil
+				}
 
 				var packet *rpc.OutboundPacket
 				switch ip.Header.PacketType {
@@ -1284,8 +1294,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					switch body.OpNum {
 					case rpc.NET_SHARE_ENUM_ALL:
 						var request rpc.NetShareEnumAllRequest
-						request.Unmarshal(ip.Payload)
-						if request.Level == 1 {
+						err := request.Unmarshal(ip.Payload)
+						if err == nil && request.Level == 1 {
 							packet = rpc.NewNetShareEnumAllResponse(
 								ip.Header.CallID,
 								c.server.enumShares(),
@@ -1300,7 +1310,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				}
 
 				var buf bytes.Buffer
-				packet.Write(&buf)
+				if err := packet.Write(&buf); err != nil {
+					log.Println("Couldn't write the RPC response:", err)
+					op.mu.Lock()
+					op.srvsvcData = nil
+					op.mu.Unlock()
+					resp := smb2.NewErrorResponse(rr, smb2.STATUS_INSUFFICIENT_RESOURCES, 0, nil)
+					return resp, ss, nil
+				}
+
 				resp := &smb2.ReadResponse{}
 				resp.FromRequest(rr)
 				resp.Generate(buf.Bytes(), rr.Padding())
@@ -1701,7 +1719,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 
 			ip := rpc.InboundPacket{}
-			ip.Read(bytes.NewBuffer(ir.InputBuffer()))
+			if err := ip.Read(bytes.NewBuffer(ir.InputBuffer())); err != nil {
+				// As above: nothing of the packet is looked at until the whole of it is known
+				// to have arrived.
+				resp := smb2.NewErrorResponse(ir, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+				return resp, ss, nil
+			}
 
 			var packet *rpc.OutboundPacket
 			op.mu.Lock()
@@ -1790,8 +1813,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					switch body.OpNum {
 					case rpc.NET_SHARE_GET_INFO:
 						var request rpc.NetShareGetInfoRequest
-						request.Unmarshal(ip.Payload)
-						if request.Level == 1 {
+						err := request.Unmarshal(ip.Payload)
+						if err == nil && request.Level == 1 {
 							packet = rpc.NewNetShareGetInfo1Response(
 								ip.Header.CallID,
 								request.Share,
@@ -1802,8 +1825,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 					case rpc.NET_SHARE_ENUM_ALL:
 						var request rpc.NetShareEnumAllRequest
-						request.Unmarshal(ip.Payload)
-						if request.Level == 1 {
+						err := request.Unmarshal(ip.Payload)
+						if err == nil && request.Level == 1 {
 							packet = rpc.NewNetShareEnumAllResponse(
 								ip.Header.CallID,
 								c.server.enumShares(),
@@ -1816,19 +1839,25 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					switch body.OpNum {
 					case rpc.MDS_OPEN:
 						var request rpc.MdsOpenRequest
-						request.Unmarshal(ip.Payload)
-						packet = rpc.NewMdsOpenResponse(
-							ip.Header.CallID,
-							request,
-							"",
-							smb2.STATUS_OK,
-						)
+						if err := request.Unmarshal(ip.Payload); err == nil {
+							packet = rpc.NewMdsOpenResponse(
+								ip.Header.CallID,
+								request,
+								"",
+								smb2.STATUS_OK,
+							)
+						}
 					}
 				}
 			}
 
 			var buf bytes.Buffer
-			packet.Write(&buf)
+			if err := packet.Write(&buf); err != nil {
+				log.Println("Couldn't write the RPC response:", err)
+				resp := smb2.NewErrorResponse(ir, smb2.STATUS_INSUFFICIENT_RESOURCES, 0, nil)
+				return resp, ss, nil
+			}
+
 			resp := &smb2.IoctlResponse{}
 			resp.FromRequest(ir)
 			resp.Generate(ir.CtlCode(), id, 0, buf.Bytes())
