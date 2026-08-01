@@ -3,6 +3,7 @@ package spnego
 
 import (
 	"encoding/asn1"
+	"errors"
 
 	"github.com/geoffgarside/ber"
 )
@@ -78,6 +79,14 @@ func DecodeNegTokenInit2(bs []byte) (*NegTokenInit2, error) {
 		return nil, err
 	}
 
+	// The inner token is marked optional, so a token that carries none of it decodes without
+	// complaint and leaves nothing behind. Reaching for the first one regardless is how a peer
+	// sending ten well-formed bytes takes the whole server down with it: nothing in the read
+	// path recovers, so the panic is not the connection ending but the process.
+	if len(init.Init2) == 0 {
+		return nil, errors.New("spnego: the token carries no negTokenInit2")
+	}
+
 	return &init.Init2[0], nil
 }
 
@@ -127,6 +136,11 @@ func DecodeNegTokenInit(bs []byte) (*NegTokenInit, error) {
 	_, err := ber.UnmarshalWithParams(bs, &init, "application,tag:0")
 	if err != nil {
 		return nil, err
+	}
+
+	// As above: the inner token is optional and may simply not be there.
+	if len(init.Init) == 0 {
+		return nil, errors.New("spnego: the token carries no negTokenInit")
 	}
 
 	return &init.Init[0], nil

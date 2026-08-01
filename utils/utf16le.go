@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"encoding/binary"
 	"unicode/utf16"
 )
@@ -59,22 +60,28 @@ func DecodeToString(bs []byte) string {
 func NullTerminatedToStrings(b []byte) []string {
 	var result []string
 	for len(b) > 0 {
+		// Anything below the printable range marks the start of an entry rather than belonging
+		// to one, and is stepped over. The step is taken whatever is left, including on the last
+		// byte: stopping short of it there would be to come round to the same byte again having
+		// consumed nothing.
 		if b[0] < 32 {
-			if len(b) > 1 {
-				b = b[1:]
-			}
+			b = b[1:]
 			continue
 		}
-		for i := 0; i < len(b); i++ {
-			if b[i] == 0 {
-				result = append(result, string(b[:i]))
-				b = b[i+1:]
-				break
-			}
+
+		i := bytes.IndexByte(b, 0)
+		if i < 0 {
+			// The last string was cut off before the byte that ends it. What is there is taken
+			// as it stands and the walk ends. Leaving it to be looked at again would be the
+			// same loop that never comes back, and these bytes are read off the wire before
+			// anybody has said who they are.
+			result = append(result, string(b))
+			break
 		}
+
+		result = append(result, string(b[:i]))
+		b = b[i+1:]
 	}
-	if len(result) > 0 {
-		return result
-	}
-	return []string{string(b)}
+
+	return result
 }
