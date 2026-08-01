@@ -65,6 +65,12 @@ const (
 	NtLmAuthenticate = 0x00000003
 )
 
+// ntlmv2ResponseMinSize is the part of an NTLMv2 response that is always there: sixteen bytes of
+// response, and then the fixed head of the client challenge behind it — the two response types,
+// two reserved fields, the timestamp and the challenge the client chose. Only the target
+// information that follows may be of any length. MS-NLMP lays both out in 2.2.2.8 and 2.2.2.7.
+const ntlmv2ResponseMinSize = 16 + 28
+
 // IsAuthenticate reports whether the message is an NTLM AUTHENTICATE message, which is what
 // the client sends in the second leg of the authentication exchange.
 func IsAuthenticate(msg []byte) bool {

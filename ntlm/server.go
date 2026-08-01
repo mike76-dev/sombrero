@@ -19,6 +19,14 @@ import (
 	"lukechampine.com/frand"
 )
 
+// fits reports whether a field of the given length starting at off lies wholly inside a message
+// of the given size. The sum is worked out in sixty-four bits: an offset and a length are read
+// off the wire in thirty-two and sixteen, and added in the width they arrived in a large offset
+// wraps round to a small one and the check waves it through.
+func fits(off, length, size uint64) bool {
+	return off+length <= size
+}
+
 // Server is an NTLMv2 authentication server.
 type Server struct {
 	targetName   string
@@ -215,7 +223,7 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		return errors.New("invalid NT challenge format")
 	}
 	ntChallengeResponseBufferOffset := binary.LittleEndian.Uint32(amsg[24:28]) // amsg.NtChallengeResponseBufferOffset
-	if len(amsg) < int(ntChallengeResponseBufferOffset+uint32(ntChallengeResponseLen)) {
+	if !fits(uint64(ntChallengeResponseBufferOffset), uint64(ntChallengeResponseLen), uint64(len(amsg))) {
 		return errors.New("invalid NT challenge format")
 	}
 	ntChallengeResponse := amsg[ntChallengeResponseBufferOffset : ntChallengeResponseBufferOffset+uint32(ntChallengeResponseLen)] // amsg.NtChallengeResponse
@@ -226,7 +234,7 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		return errors.New("invalid domain name format")
 	}
 	domainNameBufferOffset := binary.LittleEndian.Uint32(amsg[32:36]) // amsg.DomainNameBufferOffset
-	if len(amsg) < int(domainNameBufferOffset+uint32(domainNameLen)) {
+	if !fits(uint64(domainNameBufferOffset), uint64(domainNameLen), uint64(len(amsg))) {
 		return errors.New("invalid domain name format")
 	}
 	domainName := amsg[domainNameBufferOffset : domainNameBufferOffset+uint32(domainNameLen)] // amsg.DomainName
@@ -237,7 +245,7 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		return errors.New("invalid user name format")
 	}
 	userNameBufferOffset := binary.LittleEndian.Uint32(amsg[40:44]) // amsg.UserNameBufferOffset
-	if len(amsg) < int(userNameBufferOffset+uint32(userNameLen)) {
+	if !fits(uint64(userNameBufferOffset), uint64(userNameLen), uint64(len(amsg))) {
 		return errors.New("invalid user name format")
 	}
 	userName := amsg[userNameBufferOffset : userNameBufferOffset+uint32(userNameLen)] // amsg.UserName
@@ -248,7 +256,7 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		return errors.New("invalid session key format")
 	}
 	encryptedRandomSessionKeyBufferOffset := binary.LittleEndian.Uint32(amsg[56:60]) // amsg.EncryptedRandomSessionKeyBufferOffset
-	if len(amsg) < int(encryptedRandomSessionKeyBufferOffset+uint32(encryptedRandomSessionKeyLen)) {
+	if !fits(uint64(encryptedRandomSessionKeyBufferOffset), uint64(encryptedRandomSessionKeyLen), uint64(len(amsg))) {
 		return errors.New("invalid session key format")
 	}
 	encryptedRandomSessionKey := amsg[encryptedRandomSessionKeyBufferOffset : encryptedRandomSessionKeyBufferOffset+uint32(encryptedRandomSessionKeyLen)] // amsg.EncryptedRandomSessionKey
@@ -272,6 +280,23 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		// ErrAccountNotFound and is caught above; this is here so that a store that ever goes
 		// back to reporting it as a zero Account fails closed.
 		if len(acc.NTHash) == 0 {
+			return errors.New("login failure")
+		}
+
+		// The response has to be long enough to hold the parts that are read out of it before
+		// anything about it is checked. Everything below this line runs on a message from a
+		// client that has proved nothing yet — a user name is all it takes to get here, and a
+		// user name is not a secret — so a response cut short reached past its own end and ended
+		// the process, nothing in the read path recovering.
+		if len(ntChallengeResponse) < ntlmv2ResponseMinSize {
+			return errors.New("login failure")
+		}
+
+		// The server has to have issued the challenge that this response answers. A connection
+		// that was never asked for one has nothing to compare against, and a client chooses
+		// which leg of the exchange it is sending: an authenticate arriving first would read the
+		// challenge out of a buffer that was never filled in.
+		if len(s.cmsg) < 32 {
 			return errors.New("login failure")
 		}
 
@@ -303,6 +328,14 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		keyExchangeKey := sessionBaseKey // if ntlm version == 2
 
 		if flags&NTLMSSP_NEGOTIATE_KEY_EXCH != 0 {
+			// The key that comes back is sixteen bytes, and the client says how long the one it
+			// sent is. A longer one has nowhere to be written and takes the stream cipher past
+			// the end of what it was given; a shorter one leaves the rest of the key as the
+			// zeroes it was made with, which is not a key either side agreed on.
+			if len(encryptedRandomSessionKey) != 16 {
+				return errors.New("login failure")
+			}
+
 			session.exportedSessionKey = make([]byte, 16)
 			cipher, err := rc4.NewCipher(keyExchangeKey)
 			if err != nil {
@@ -314,15 +347,24 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		}
 
 		if infoMap, ok := parseAvPairs(targetInfo); ok {
-			if avFlags, ok := infoMap[MsvAvFlags]; ok && binary.LittleEndian.Uint32(avFlags)&0x02 != 0 {
-				MIC := make([]byte, 16)
+			// The pairs carry their own lengths, and the flags are read as four bytes whatever
+			// length the pair claimed. One shorter than that is read past the end of.
+			avFlags, hasFlags := infoMap[MsvAvFlags]
+			if hasFlags && len(avFlags) >= 4 && binary.LittleEndian.Uint32(avFlags)&0x02 != 0 {
+				// The check sits at a fixed place behind the header, and where that falls
+				// depends on whether a version was negotiated. A message that stops before it
+				// cannot be carrying one.
+				off := 64
 				if flags&NTLMSSP_NEGOTIATE_VERSION != 0 {
-					copy(MIC, amsg[72:88])
-					copy(amsg[72:88], zero[:])
-				} else {
-					copy(MIC, amsg[64:80])
-					copy(amsg[64:80], zero[:])
+					off = 72
 				}
+				if len(amsg) < off+16 {
+					return errors.New("login failure")
+				}
+
+				MIC := make([]byte, 16)
+				copy(MIC, amsg[off:off+16])
+				copy(amsg[off:off+16], zero[:])
 				h = hmac.New(md5.New, session.exportedSessionKey)
 				h.Write(s.nmsg)
 				h.Write(s.cmsg)
@@ -358,12 +400,12 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 	return errors.New("credential is empty")
 }
 
-// Signature generates a signature of an NTLM AUTHENTICATE message.
+// Signature generates a signature of an NTLM AUTHENTICATE message. It returns nothing until an
+// authentication has succeeded, there being no session key to sign with before then.
 func (s *Server) Signature() []byte {
-	h := hmac.New(md5.New, s.session.SessionKey())
-	h.Reset()
-	h.Write(s.nmsg)
-	h.Write(s.cmsg)
+	if s.session == nil || len(s.amsg) < 64 {
+		return nil
+	}
 
 	off := 64
 	flags := binary.LittleEndian.Uint32(s.amsg[60:64])
@@ -371,6 +413,14 @@ func (s *Server) Signature() []byte {
 		off = 72
 	}
 
+	if len(s.amsg) < off+16 {
+		return nil
+	}
+
+	h := hmac.New(md5.New, s.session.SessionKey())
+	h.Reset()
+	h.Write(s.nmsg)
+	h.Write(s.cmsg)
 	h.Write(s.amsg[:off])
 	h.Write(zero[:])
 	h.Write(s.amsg[off+16:])
