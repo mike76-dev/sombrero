@@ -2875,9 +2875,13 @@ func (c *connection) isStale() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// If there are no sessions on the connection, check the connection's creation time.
-	if len(c.sessionTable) == 0 && time.Since(c.creationTime) > staleThreshold {
-		return true
+	// A connection nobody has authenticated over yet is judged by its age alone, and the answer
+	// has to be given here. Letting it fall through to the end reaches an answer arrived at with
+	// nothing to go on, which gives up on the connection: a client still working through its
+	// negotiate and session setup has no session in the table yet, and dropping it would end a
+	// connection in the middle of being set up.
+	if len(c.sessionTable) == 0 {
+		return time.Since(c.creationTime) > staleThreshold
 	}
 
 	// Check each individual session: if at least one session is being used, the connection is alive.
