@@ -369,12 +369,16 @@ func (rc *RenterdClient) Parents(ctx context.Context, _ stores.Account, path str
 
 // Read downloads a file from the Sia network.
 func (rc *RenterdClient) Read(ctx context.Context, _ stores.Account, path string, offset, length uint64, buf io.Writer) (err error) {
+	if length == 0 {
+		return nil
+	}
+
 	values := url.Values{}
 	values.Set("bucket", rc.bucket)
 
 	// url.PathEscape does the full escape, so we need to convert any escaped forward slashes back.
 	path = strings.ReplaceAll(url.PathEscape(path), "%2F", "/")
-	path = fmt.Sprintf("/api/worker/object/%s?"+values.Encode(), path)
+	path = "/api/worker/object/" + path + "?" + values.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%v%v", rc.baseURL, path), nil)
 	if err != nil {
@@ -382,6 +386,10 @@ func (rc *RenterdClient) Read(ctx context.Context, _ stores.Account, path string
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+
+	// The range names the last byte wanted rather than the one past it, so a length of nothing
+	// counts back past the first byte and asks for a range ending below where it starts. Worked
+	// out unsigned that is the largest number there is, which reads as the whole of the object.
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 	if rc.password != "" {
 		req.SetBasicAuth("", rc.password)
@@ -520,7 +528,14 @@ func (rc *RenterdClient) Delete(ctx context.Context, _ stores.Account, path stri
 	} else {
 		values := make(url.Values)
 		values.Set("bucket", rc.bucket)
-		err = rc.doRequest(ctx, "DELETE", fmt.Sprintf("/api/worker/object/%s?"+values.Encode(), path), nil, nil)
+
+		// The name goes into the path of a URL, so it is escaped there as it is everywhere
+		// else. Sent as it stands, a name carrying a character that means something in a URL is
+		// read as that meaning rather than as part of the name: a file called "a#b.txt" asks to
+		// delete "a", the rest being a fragment that never leaves this machine, and "a" is
+		// somebody else's object.
+		path = api.ObjectKeyEscape(path)
+		err = rc.doRequest(ctx, "DELETE", "/api/worker/object/"+path+"?"+values.Encode(), nil, nil)
 	}
 	return
 }
@@ -532,7 +547,7 @@ func (rc *RenterdClient) MakeDirectory(ctx context.Context, _ stores.Account, pa
 	path += "/"
 	values := make(url.Values)
 	values.Set("bucket", rc.bucket)
-	return rc.doRequest(ctx, "PUT", fmt.Sprintf("/api/worker/object/%s?"+values.Encode(), path), nil, nil)
+	return rc.doRequest(ctx, "PUT", "/api/worker/object/"+path+"?"+values.Encode(), nil, nil)
 }
 
 // Rename renames a file or a directory.
