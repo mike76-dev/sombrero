@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/utils"
 )
@@ -92,13 +94,17 @@ func (s *server) dropFromBucket(key fileKey, dfid uint64) {
 
 // moveOpen points the open at a new path, moving it between the buckets of the index in the
 // same breath. Holding the index lock across both is what keeps every reader to one view: an
-// open is always found under exactly the name it carries. An open that is no longer indexed —
-// closed by a race the moment before — has its name changed and nothing else, so that the
-// move cannot resurrect it.
+// open is always found under exactly the name it carries.
 func (s *server) moveOpen(op *open, newPath string) {
 	s.openIndexMu.Lock()
 	defer s.openIndexMu.Unlock()
 
+	s.moveOpenLocked(op, newPath)
+}
+
+// moveOpenLocked is moveOpen with openIndexMu already held, so that the children of a renamed
+// directory can move in one breath with each other.
+func (s *server) moveOpenLocked(op *open, newPath string) {
 	op.mu.Lock()
 	defer op.mu.Unlock()
 
@@ -109,17 +115,53 @@ func (s *server) moveOpen(op *open, newPath string) {
 	op.fileName = utils.TrimPath(newPath)
 	newKey := op.fileKeyLocked()
 
-	if _, found := s.opensByFile[oldKey]; !found {
+	// An open that is not where the index says its file is has already been closed, by a race
+	// the moment before: its name changes and nothing else, so that the move cannot resurrect
+	// it.
+	bucket, found := s.opensByFile[oldKey]
+	if !found {
+		return
+	}
+	if _, present := bucket[dfid]; !present {
 		return
 	}
 
 	s.dropFromBucket(oldKey, dfid)
-	bucket, found := s.opensByFile[newKey]
+	target, found := s.opensByFile[newKey]
 	if !found {
-		bucket = make(map[uint64]*open)
-		s.opensByFile[newKey] = bucket
+		target = make(map[uint64]*open)
+		s.opensByFile[newKey] = target
 	}
-	bucket[dfid] = op
+	target[dfid] = op
+}
+
+// moveOpensUnder points every open beneath a renamed directory at its path under the new name,
+// and returns the opens moved. The whole tree moves under one hold of the index lock, so that
+// a create racing the rename finds every child under exactly one of its names.
+func (s *server) moveOpensUnder(sh *share, oldPath, newPath string) []*open {
+	prefix := oldPath + "/"
+
+	s.openIndexMu.Lock()
+	defer s.openIndexMu.Unlock()
+
+	// The moves reshape the map, so the children are all collected before the first is made.
+	var opens []*open
+	var paths []string
+	for key, bucket := range s.opensByFile {
+		if key.share != sh || !strings.HasPrefix(key.path, prefix) {
+			continue
+		}
+		for _, op := range bucket {
+			opens = append(opens, op)
+			paths = append(paths, newPath+"/"+key.path[len(prefix):])
+		}
+	}
+
+	for i, op := range opens {
+		s.moveOpenLocked(op, paths[i])
+	}
+
+	return opens
 }
 
 // markReplayEligible records that the create which made this open may still be replayed, and

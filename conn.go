@@ -2545,8 +2545,38 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 						delete(tc.persistedOpens, path)
 						tc.persistedOpens[newName] = op
 					}
+
+					// A renamed directory takes everything inside it along, so the persisted
+					// entries under it are re-keyed with it. The inserts wait until the walk
+					// is over: a key added while the map is ranged may or may not be visited.
+					if attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0 {
+						prefix := path + "/"
+						moved := make(map[string]*open)
+						for p, o := range tc.persistedOpens {
+							if strings.HasPrefix(p, prefix) {
+								moved[newName+"/"+p[len(prefix):]] = o
+								delete(tc.persistedOpens, p)
+							}
+						}
+						for p, o := range moved {
+							tc.persistedOpens[p] = o
+						}
+					}
+
 					c.server.moveOpen(op, newName)
 					tc.mu.Unlock()
+
+					// The opens on the files inside the directory follow their files, and the
+					// lease of each follows its open: a renamed file is not one on its way
+					// out, however it came by its new name (3.3.5.21.1).
+					if attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0 {
+						for _, child := range c.server.moveOpensUnder(tc.share, path, newName) {
+							child.mu.Lock()
+							childPath := child.pathName
+							child.mu.Unlock()
+							child.renameLease(childPath)
+						}
+					}
 				}
 
 				// The lease follows the file under its new name, and a file that has just been

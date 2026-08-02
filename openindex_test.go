@@ -77,6 +77,75 @@ func TestIntegrationBackendRenameMovesTheOpen(t *testing.T) {
 	}
 }
 
+// A renamed directory takes everything inside it along: the opens on the files under it, the
+// lease each of those holds, and the persisted entries of the files not yet uploaded.
+func TestIntegrationDirectoryRenameMovesTheChildren(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putDir("dir/sub")
+	h.files.put("dir/sub/file", 1024)
+
+	alice := h.dial("alice")
+
+	leased, _ := alice.createLeased("dir/sub/file", aliceKey, rwh, 2, smb2.FILE_OPEN)
+	if state, found := createdLeaseState(leased); !found || state != rwh {
+		t.Fatalf("alice holds %#x on the child, want %#x", state, rwh)
+	}
+
+	draft, _ := alice.create("dir/sub/draft", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(draft).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("creating the draft failed with %#x", status)
+	}
+
+	dir := alice.openDir("dir/sub")
+	buf, err := alice.rename(createdFileID(dir), "dir/moved")
+	if err != nil {
+		t.Fatalf("the rename failed: %v", err)
+	}
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the rename was answered with %#x", status)
+	}
+
+	// The opens follow their files.
+	for _, path := range []string{"dir/sub/file", "dir/sub/draft"} {
+		if got := len(h.srv.opensOn(h.share, path, nil)); got != 0 {
+			t.Errorf("%d open(s) left on %s, want none", got, path)
+		}
+	}
+	fileOpens := h.srv.opensOn(h.share, "dir/moved/file", nil)
+	if len(fileOpens) != 1 {
+		t.Fatalf("%d open(s) on dir/moved/file, want 1", len(fileOpens))
+	}
+	if got := len(h.srv.opensOn(h.share, "dir/moved/draft", nil)); got != 1 {
+		t.Errorf("%d open(s) on dir/moved/draft, want 1", got)
+	}
+
+	// The lease follows its open.
+	fileOpens[0].mu.Lock()
+	l := fileOpens[0].lease
+	fileOpens[0].mu.Unlock()
+	if l == nil {
+		t.Fatal("the child lost its lease in the move")
+	}
+	l.mu.Lock()
+	leaseName := l.fileName
+	l.mu.Unlock()
+	if leaseName != "dir/moved/file" {
+		t.Errorf("the lease covers %q, want dir/moved/file", leaseName)
+	}
+
+	// The persisted entry of the unuploaded draft is re-keyed with the directory.
+	alice.tc.mu.Lock()
+	_, oldKept := alice.tc.persistedOpens["dir/sub/draft"]
+	_, newKept := alice.tc.persistedOpens["dir/moved/draft"]
+	alice.tc.mu.Unlock()
+	if oldKept {
+		t.Error("the persisted entry was left under the old name")
+	}
+	if !newKept {
+		t.Error("the persisted entry did not follow the directory")
+	}
+}
+
 func TestIntegrationCloseAndRestoreKeepTheIndexRight(t *testing.T) {
 	h := newSMBTest(t)
 
