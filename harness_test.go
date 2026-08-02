@@ -29,14 +29,26 @@ type fakeClient struct {
 	mu      sync.Mutex
 	objects map[string]client.ObjectInfo
 
+	// contents holds the bytes of the files a test wants to be able to read back. A file put in
+	// the store without any is a file of the given size that reads as nothing.
+	contents map[string][]byte
+
 	// emptyErr is what the emptiness check fails with, when a test asks it to. It is the one
 	// lookup the deletion of a directory cannot be decided without, so what the server does when
 	// it cannot be answered is worth being able to reach.
 	emptyErr error
+
+	// deleteErr is what a deletion fails with, when a test asks it to. A deletion that the
+	// backend refuses for a reason other than the file not being there is the one the server
+	// still has to complain about.
+	deleteErr error
 }
 
 func newFakeClient() *fakeClient {
-	return &fakeClient{objects: make(map[string]client.ObjectInfo)}
+	return &fakeClient{
+		objects:  make(map[string]client.ObjectInfo),
+		contents: make(map[string][]byte),
+	}
 }
 
 // put makes a file appear in the store, as if it had been uploaded out of band.
@@ -53,6 +65,17 @@ func (fc *fakeClient) put(path string, size uint64) {
 	}
 }
 
+// putData makes a file with contents appear in the store, so that reading it back gives those
+// bytes rather than a hole of the right size.
+func (fc *fakeClient) putData(path string, data []byte) {
+	fc.put(path, uint64(len(data)))
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.contents[path] = data
+}
+
 // putDir makes a directory appear in the store. A directory is held under its own path, exactly
 // as a file is, and is told apart by the trailing slash on the key: that is the shape both of the
 // real stores hand back, and the only thing the create path reads the directory attribute out of.
@@ -66,6 +89,14 @@ func (fc *fakeClient) putDir(path string) {
 		CreatedAt:  now,
 		ModifiedAt: now,
 	}
+}
+
+// failDeletion makes every deletion fail from here on.
+func (fc *fakeClient) failDeletion(err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.deleteErr = err
 }
 
 // failEmptiness makes the emptiness check fail from here on.
@@ -138,8 +169,28 @@ func (fc *fakeClient) Parents(context.Context, stores.Account, string) (client.F
 	return client.FileInfo{}, client.FileInfo{}, nil
 }
 
-func (fc *fakeClient) Read(context.Context, stores.Account, string, uint64, uint64, io.Writer) error {
-	return nil
+// Read serves the range out of the contents the test gave the file, which is what lets a test tell
+// the bytes of one version of a file from those of another. A file that was only ever given a size
+// reads as nothing, as it did before any test cared what came back.
+func (fc *fakeClient) Read(_ context.Context, _ stores.Account, path string, offset, length uint64, w io.Writer) error {
+	fc.mu.Lock()
+	data, found := fc.contents[path]
+	fc.mu.Unlock()
+
+	if !found {
+		return nil
+	}
+
+	if offset >= uint64(len(data)) {
+		return nil
+	}
+	if offset+length > uint64(len(data)) {
+		length = uint64(len(data)) - offset
+	}
+
+	_, err := w.Write(data[offset : offset+length])
+
+	return err
 }
 
 func (fc *fakeClient) StartUpload(context.Context, stores.Account, string) (string, error) {
@@ -156,9 +207,20 @@ func (fc *fakeClient) Write(context.Context, io.Reader, string, string, int, uin
 	return "etag", nil
 }
 
+// Delete takes the file out of the store, and reports the one that was never in it the way both
+// of the real backends do: a file that was created and never written to has no object behind it,
+// so this is the answer the delete of it always gets.
 func (fc *fakeClient) Delete(_ context.Context, _ stores.Account, path string, _ bool) error {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
+
+	if fc.deleteErr != nil {
+		return fc.deleteErr
+	}
+
+	if _, found := fc.objects[path]; !found {
+		return stores.ErrNotFound
+	}
 
 	delete(fc.objects, path)
 

@@ -66,6 +66,15 @@ func (rc *RenterdClient) doRequest(ctx context.Context, method, path string, bod
 
 	if r.StatusCode < 200 || r.StatusCode >= 300 {
 		errMsg, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MiB limit
+
+		// The one status the caller has to be able to tell apart is the object that is not
+		// there, which is an answer rather than a failure for anything that was going to take
+		// the object away regardless. The other backend already says so with this error, and a
+		// caller should not have to know which one is underneath it to read the reply.
+		if r.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("%w: %s (status: %d)", stores.ErrNotFound, string(errMsg), r.StatusCode)
+		}
+
 		return fmt.Errorf("HTTP error: %s (status: %d)", string(errMsg), r.StatusCode)
 	}
 

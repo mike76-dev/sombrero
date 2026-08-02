@@ -1166,7 +1166,14 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				tc.mu.Lock()
 				delete(tc.persistedOpens, path)
 				tc.mu.Unlock()
-				if err := tc.client.Delete(op.ctx, acc, path, isDir); err != nil {
+
+				// A file that was created and never written to is not in the store at all:
+				// nothing empty can be uploaded, so the entry taken off the table above was the
+				// whole of it. The backend having nothing to delete is the expected end of that,
+				// not a failure, and reporting it as one says the server could not do what was
+				// asked when it has just done it.
+				err := tc.client.Delete(op.ctx, acc, path, isDir)
+				if err != nil && !errors.Is(err, stores.ErrNotFound) {
 					log.Printf("Error deleting object %s: %v", path, err)
 				}
 			}
@@ -3274,7 +3281,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 
 	if restored { // This file has already been "created", "restore" it
 		cancel()
-		c.server.restoreOpen(op, c)
+		c.server.restoreOpen(op, cr, c)
 	} else {
 		op = ss.registerOpen(cr, c, tc, info, ctx, cancel)
 		if op == nil {
@@ -3298,6 +3305,11 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		op.size = 0
 		op.allocated = 0
 		op.lastModified = time.Now()
+
+		// The create emptied the file, so anything the open had cached of it is the contents of
+		// a file that no longer exists. An open handed back to a second create is the one this
+		// matters for: a new one has nothing cached yet.
+		op.invalidateReadCache()
 		op.mu.Unlock()
 	}
 

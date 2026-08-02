@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -370,6 +371,51 @@ func TestRenterdReportsWhatTheFarEndSaid(t *testing.T) {
 		}
 		if err := c.Delete(context.Background(), stores.Account{}, "file.txt", false); err == nil {
 			t.Errorf("a status of %d was read as a delete that worked", status)
+		}
+	}
+}
+
+// TestRenterdSaysWhenTheObjectIsNotThere is the one status the caller above has to be able to act
+// on. A deletion of a file that is not in the store has already done everything there was to do,
+// and the share treats it as such - but only if it can tell that answer apart from the rest, which
+// means the error has to carry the sentinel the other backend uses rather than only a status code
+// buried in a string.
+func TestRenterdSaysWhenTheObjectIsNotThere(t *testing.T) {
+	f := newFakeRenterd(t)
+	f.fail("/", http.StatusNotFound)
+	c := f.client("default")
+
+	err := c.Delete(context.Background(), stores.Account{}, "gone.txt", false)
+	if err == nil {
+		t.Fatal("a delete of something that is not there came back as a delete that worked")
+	}
+	if !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("the delete failed with %v, want an error the caller can read as the object not being there", err)
+	}
+}
+
+// TestRenterdKeepsOtherFailuresApart holds the line above to the one status it is about: anything
+// else the far end refuses with is still a failure of its own, and reading it as a missing object
+// would have the share above quietly carry on past it.
+func TestRenterdKeepsOtherFailuresApart(t *testing.T) {
+	for _, status := range []int{
+		http.StatusBadRequest,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+	} {
+		f := newFakeRenterd(t)
+		f.fail("/", status)
+		c := f.client("default")
+
+		err := c.Delete(context.Background(), stores.Account{}, "file.txt", false)
+		if err == nil {
+			t.Errorf("a status of %d was read as a delete that worked", status)
+			continue
+		}
+		if errors.Is(err, stores.ErrNotFound) {
+			t.Errorf("a status of %d was read as the object not being there", status)
 		}
 	}
 }

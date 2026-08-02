@@ -26,6 +26,11 @@ import (
 var (
 	errNoDirectory = errors.New("not a directory")
 	errNoFiles     = errors.New("no files found")
+
+	// errNotUploaded is the read of a part of a file that is still being written and is no longer
+	// in memory. The store cannot answer it either: what has gone up so far are the parts of a
+	// multipart upload, which is not an object until it is completed.
+	errNotUploaded = errors.New("file is still being uploaded")
 )
 
 // uploadChunk represents a single part of a multipart upload.
@@ -46,6 +51,29 @@ type upload struct {
 	bufOffset  uint64
 	maxLength  uint64
 	mu         sync.Mutex
+}
+
+// readBuffered serves a range out of the data the upload is still holding, and says whether it
+// could. Only what sits in the contiguous buffer can be answered for: the parts already sent are
+// no longer in memory, and the backend has nothing to offer either, since a multipart upload is
+// not an object until it is completed.
+//
+// The buffer is where a client reading a file it is in the middle of writing looks: an unaligned
+// write that the client has to round out reads the block it is about to write over, and that block
+// is the one just written. Served from here, it is the data the client itself sent.
+func (u *upload) readBuffered(offset, length uint64) ([]byte, bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if offset < u.bufOffset || offset+length > u.bufOffset+uint64(len(u.buf)) {
+		return nil, false
+	}
+
+	start := offset - u.bufOffset
+	data := make([]byte, length)
+	copy(data, u.buf[start:start+length])
+
+	return data, true
 }
 
 // open represents an Open object.
@@ -317,11 +345,21 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 }
 
 // restoreOpen is invoked when a file created earlier during the session is mentioned again.
-func (s *server) restoreOpen(op *open, c *connection) {
+// The create that mentions it is the one the open now answers for, so what that create asked
+// for replaces what the create before it did.
+func (s *server) restoreOpen(op *open, cr smb2.CreateRequest, c *connection) {
 	// The open is established anew, this time over the connection that asked for it, which
 	// need not be the one that created it in the first place.
 	op.mu.Lock()
 	op.connection = c
+
+	// The create options belong to the handle that carried them and not to the name. Kept from
+	// the create that first stood the open up, they outlive the handle that asked for them and
+	// are applied to every later one over that name: a client that opens the destination of a
+	// copy with delete-on-close - which is how a client makes sure a copy it abandons leaves
+	// nothing behind - would leave that on the name, and the handle that went on to upload the
+	// file would delete it on the way out without ever having asked to.
+	op.createOptions = cr.CreateOptions()
 	op.mu.Unlock()
 
 	op.session.mu.Lock()
@@ -705,6 +743,16 @@ func (op *open) tryReadCached(offset, length uint64) ([]byte, bool) {
 	size := op.size
 	chunkSize := op.chunkSize
 
+	// A file with an upload running is being written, and the only account of what it holds is
+	// the one the upload keeps. The cache is emptied when the upload starts and nothing fills it
+	// again while the upload runs, so this is the same answer either way - but it is said here
+	// rather than left to be worked out from the two of them, because this path answers the
+	// client on its own and must not be able to serve the file as it stood before the write.
+	if op.pendingUpload != nil {
+		op.mu.Unlock()
+		return nil, false
+	}
+
 	if offset >= size {
 		op.mu.Unlock()
 		return nil, false
@@ -808,6 +856,22 @@ func (op *open) read(offset, length uint64) ([]byte, error) {
 
 	if offset+length >= size {
 		length = size - offset
+	}
+
+	// A file that is being uploaded is not an object in the store yet, so there is nothing there
+	// to fetch: the read is answered out of what the upload is still holding, or not at all.
+	op.mu.Lock()
+	u := op.pendingUpload
+	op.mu.Unlock()
+	if u != nil {
+		if data, ok := u.readBuffered(offset, length); ok {
+			return data, nil
+		}
+
+		// The range is behind the part of the file still in memory. Nothing can answer it until
+		// the upload is completed, which is the file being closed. It is not a failure of the
+		// store and is not reported as one.
+		return nil, errNotUploaded
 	}
 
 	acc, err := op.session.connection.server.store.FindAccount(op.session.userName, op.session.workgroup)
@@ -914,6 +978,27 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readC
 	return chunk
 }
 
+// invalidateReadCache drops everything the read cache is holding. It has to happen the moment
+// the file stops being the one those chunks were downloaded from, which is the moment a write
+// arrives: a write replaces the object wholesale rather than editing it in place, so every chunk
+// of the previous contents is stale from then on. Left in place, the cache answers a read of a
+// region the client has just overwritten with the bytes that were there before.
+//
+// A download still in flight is left to run. Its entry is gone from the table, so no later read
+// finds it, and the read that started it is served the file as it stood when that read began,
+// which is the most that can be said for a read racing a write over the same bytes anyway.
+//
+// op.mu must be held.
+func (op *open) invalidateReadCache() {
+	if len(op.buffer) == 0 {
+		return
+	}
+
+	op.buffer = make(map[uint64]*readChunk)
+	op.cacheOrder = nil
+	op.lastReadEnd = 0
+}
+
 // evictChunks drops the least recently used completed chunks until the cache fits
 // into its limit. Chunks that are still being downloaded are never dropped, and
 // touchChunk refreshes a chunk's position, so periodically re-read chunks (like a
@@ -960,6 +1045,10 @@ func (op *open) startUpload() error {
 	if err != nil {
 		return err
 	}
+
+	// From here the file is being written anew, so whatever was cached of the old one is no
+	// longer an answer to anything.
+	op.invalidateReadCache()
 
 	op.pendingUpload = &upload{
 		uploadID:   id,
