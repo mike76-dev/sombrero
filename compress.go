@@ -111,6 +111,17 @@ func (c *connection) decompress(msg []byte) ([]byte, error) {
 			if err := v1.Unmarshal(msg[smb2.SMB2CompressionTransformHeaderSize+start:]); err != nil {
 				return nil, err
 			}
+
+			// The run is as long as the message says, and the message says so in a thirty-two
+			// bit field. Room for it is taken before anything is looked at, so eight bytes
+			// asking for the largest value the field holds is four gigabytes claimed on the
+			// strength of a message from a peer that has not authenticated. The size of the
+			// whole segment was checked against what this connection allows, and no run inside
+			// it can be longer than that; the chained path already turns this away here.
+			if v1.Repetitions > ocss {
+				return nil, smb2.ErrInvalidParameter
+			}
+
 			buf = make([]byte, v1.Repetitions)
 			for i := range v1.Repetitions {
 				buf[i] = v1.Pattern

@@ -12,7 +12,7 @@ func codec() comptest.Codec {
 
 		// LZNT1 carries the length of each chunk in its header, so it has no use for the one the
 		// tests hand it.
-		Decompress: func(src []byte, _ int) ([]byte, error) { return Decompress(src) },
+		Decompress: Decompress,
 	}
 }
 

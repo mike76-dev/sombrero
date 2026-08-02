@@ -433,3 +433,52 @@ func TestDecompressRefusesANonSMB2Payload(t *testing.T) {
 		t.Errorf("the server answered %v, want it to refuse a payload that is not an SMB2 message", err)
 	}
 }
+
+// TestDecompressRefusesAPatternLongerThanTheSegment is eight bytes claiming four gigabytes. The
+// run is as long as the payload says, and it says so in a thirty-two bit field; room for the whole
+// of it was taken before anything about the message was looked at, so the largest value the field
+// holds asked for four gigabytes and the process was killed for it. Nothing here has
+// authenticated: compression is settled during the negotiate, and a compressed message is taken
+// apart before the requests inside it are so much as read.
+//
+// The size of the whole segment is already checked against what the connection allows, and no run
+// inside it can be longer than that. The chained path turns this away; the unchained one, which is
+// the one a client reaches without negotiating chaining, did not.
+func TestDecompressRefusesAPatternLongerThanTheSegment(t *testing.T) {
+	h := newSMBTest(t)
+	c := h.compressing(false, smb2.COMPRESSION_PATTERN_V1)
+
+	prefix := make([]byte, smb2.SMB2HeaderSize)
+	smb2.NewHeader(prefix)
+
+	for _, repetitions := range []uint32{0xffffffff, 0x7fffffff, 1 << 24, 8192} {
+		// The segment size is small and inside what the connection allows, so the guard on it
+		// lets the message through to the run behind it.
+		pattern := smb2.PatternV1{Pattern: 0x7e, Repetitions: repetitions}
+		msg := unchained(smb2.COMPRESSION_PATTERN_V1, 4096, uint32(len(prefix)),
+			append(prefix, pattern.Marshal()...))
+
+		got, err := c.decompress(msg)
+		if err == nil {
+			t.Errorf("a run of %d in a segment of 4096 came apart into %d bytes", repetitions, len(got))
+		}
+	}
+}
+
+// TestDecompressTakesAPatternThatFitsTheSegment is the control for the refusals above: a run that
+// the segment size accounts for still comes apart.
+func TestDecompressTakesAPatternThatFitsTheSegment(t *testing.T) {
+	h := newSMBTest(t)
+	c := h.compressing(false, smb2.COMPRESSION_PATTERN_V1)
+
+	prefix := make([]byte, smb2.SMB2HeaderSize)
+	smb2.NewHeader(prefix)
+
+	pattern := smb2.PatternV1{Pattern: 0x7e, Repetitions: 4096}
+	msg := unchained(smb2.COMPRESSION_PATTERN_V1, pattern.Repetitions, uint32(len(prefix)),
+		append(prefix, pattern.Marshal()...))
+
+	if _, err := c.decompress(msg); err != nil {
+		t.Fatalf("a run the segment accounts for would not come apart: %v", err)
+	}
+}

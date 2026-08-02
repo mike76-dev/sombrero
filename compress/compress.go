@@ -84,7 +84,7 @@ func (c *Compressor) Decompress(src []byte, limit int) ([]byte, error) {
 		return dst[:n], nil
 
 	case smb2.COMPRESSION_LZNT1:
-		return lznt1.Decompress(src)
+		return lznt1.Decompress(src, limit)
 
 	default:
 		return nil, nil
