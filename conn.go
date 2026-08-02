@@ -2079,7 +2079,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				return resp, ss, nil
 			}
 
-			// Send as many search results as the buffer length allows.
+			// Send as many search results as the buffer length allows. The results are the ones
+			// the search just found, not the ones read before it ran: a search whose first
+			// answer is built out of what the handle held beforehand carries nothing at all,
+			// and a client that reads an empty buffer as the end of the enumeration never sees
+			// the file it asked about.
+			op.mu.Lock()
+			res = op.searchResults
+			op.mu.Unlock()
+
 			var num int
 			buf, num = smb2.QueryDirectoryBuffer(qdr.FileInformationClass(), res, qdr.OutputBufferLength(), single, qdr.FileName() == "*", dir, parentDir)
 			op.mu.Lock()

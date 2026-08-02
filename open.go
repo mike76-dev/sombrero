@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"log"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -381,8 +380,7 @@ func (op *open) queryDirectory(acc stores.Account, pattern string) error {
 	found := make(map[string]struct{})
 	for _, oi := range ois {
 		path, name, _ := utils.ExtractFilename(oi.Key)
-		match, _ := filepath.Match(pattern, name)
-		if match {
+		if utils.MatchPattern(pattern, name) {
 			results = append(results, oi)
 			found[path] = struct{}{}
 		}
@@ -398,8 +396,7 @@ func (op *open) queryDirectory(acc stores.Account, pattern string) error {
 		if utils.TrimName(path) != op.pathName {
 			continue
 		}
-		match, _ := filepath.Match(pattern, utils.TrimPath(path))
-		if match {
+		if utils.MatchPattern(pattern, utils.TrimPath(path)) {
 			results = append(results, client.ObjectInfo{
 				Key:        "/" + path,
 				CreatedAt:  o.lastModified,
