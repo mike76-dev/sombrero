@@ -585,6 +585,36 @@ func TestBindSessionRefusesAnAuthenticationThatFails(t *testing.T) {
 	}
 }
 
+func TestBindSessionDropsTheHashOfAFailedExchange(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice").signing()
+	c := h.joining(cl)
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+
+	sid := cl.ss.sessionID
+
+	msg := signed(t, bindingRequest(1, sid, ntlmMessage(3, 64)), cl.ss.signingKey, smb2.SMB_DIALECT_311, 0)
+	ssr := binding(t, msg)
+
+	if _, status := c.prepareBinding(ssr); status != smb2.STATUS_OK {
+		t.Fatalf("the server answered %#x, want it to take the binding", status)
+	}
+
+	if _, _, err := c.bindSession(cl.ss, ssr); err != nil {
+		t.Fatalf("the server gave up on the binding: %v", err)
+	}
+
+	// The exchange failed, so its hash has to go with it. Kept, it would be picked up by the
+	// next attempt, whose key derivation would then fold the failed exchange in and disagree
+	// with the client, which starts its count afresh from the hash of the connection.
+	c.mu.Lock()
+	_, kept := c.preauthSessionTable[sid]
+	c.mu.Unlock()
+	if kept {
+		t.Fatal("the hash of the failed exchange was kept for the next attempt")
+	}
+}
+
 // ntHashOf is the hash of a password as the store keeps it, which is the one thing in an NTLM
 // exchange that the client has to know beforehand.
 func ntHashOf(password string) []byte {

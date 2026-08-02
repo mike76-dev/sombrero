@@ -242,6 +242,7 @@ func (c *connection) bindSession(ss *session, ssr smb2.SessionSetupRequest) (smb
 		challenge, err := c.ntlmServer.Challenge(token)
 		if err != nil {
 			log.Println("Couldn't generate CHALLENGE for a binding session:", err)
+			c.dropPreauthSession(sid)
 			return nil, nil, err
 		}
 
@@ -249,6 +250,7 @@ func (c *connection) bindSession(ss *session, ssr smb2.SessionSetupRequest) (smb
 			challenge, err = spnego.EncodeNegTokenResp(0x01, spnego.NlmpOid, challenge, nil)
 			if err != nil {
 				log.Println("Couldn't generate CHALLENGE token for a binding session:", err)
+				c.dropPreauthSession(sid)
 				return nil, nil, err
 			}
 		}
@@ -264,11 +266,15 @@ func (c *connection) bindSession(ss *session, ssr smb2.SessionSetupRequest) (smb
 		return resp, ss, nil
 	}
 
-	// The second leg; the client has to prove that it is the owner of the session.
+	// The second leg; the client has to prove that it is the owner of the session. A failed
+	// exchange is over as surely as a completed one, so its hash goes with it: kept, it would
+	// be picked up by the next attempt and fold the failure into that attempt's key
+	// derivation, deriving a signing key the client cannot match.
 	if err := c.ntlmServer.Authenticate(token); err != nil {
 		c.server.mu.Lock()
 		c.server.stats.PwErrors++
 		c.server.mu.Unlock()
+		c.dropPreauthSession(sid)
 		resp := smb2.NewErrorResponse(ssr, smb2.STATUS_NO_SUCH_USER, 0, nil)
 		return resp, nil, nil
 	}
@@ -276,6 +282,7 @@ func (c *connection) bindSession(ss *session, ssr smb2.SessionSetupRequest) (smb
 	// A channel may only be added to the session of the very same user: a successful
 	// authentication as somebody else is no reason to hand out the session.
 	if !strings.EqualFold(c.ntlmServer.Session().User(), ss.userName) {
+		c.dropPreauthSession(sid)
 		resp := smb2.NewErrorResponse(ssr, smb2.STATUS_NOT_SUPPORTED, 0, nil)
 		return resp, nil, nil
 	}
@@ -336,6 +343,17 @@ func (c *connection) updatePreauthHash(sid uint64, msg []byte) {
 		h.Write(msg)
 		pss.preauthIntegrityHashValue = h.Sum(pss.preauthIntegrityHashValue[:0])
 	}
+}
+
+// dropPreauthSession forgets the preauthentication integrity hash of the binding exchange
+// that the connection ran for the given session. It is what a failed exchange calls for
+// (3.3.5.5.3): prepareBinding only starts a hash when none is there, so one left over from a
+// failure would be picked up by the next attempt, which starts its own count from the hash of
+// the connection and would never agree with a count that has the failed exchange folded in.
+func (c *connection) dropPreauthSession(sid uint64) {
+	c.mu.Lock()
+	delete(c.preauthSessionTable, sid)
+	c.mu.Unlock()
 }
 
 // takePreauthHash returns the preauthentication integrity hash of the binding exchange that
