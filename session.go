@@ -129,7 +129,17 @@ func (s *server) registerSession(connection *connection, req smb2.SessionSetupRe
 
 // deregisterSession destroys the Session object and closes all associated tree connections.
 func (s *server) deregisterSession(conn *connection, sid uint64) (*session, error) {
+	// The session is taken off the connection here rather than only at the end, under the lock
+	// that guards that table. Read without it, the table races the very same read from a second
+	// teardown of the connection - the reading loop and the periodic sweep both come through
+	// here - and both of them would go on to tear the one session down twice over.
+	conn.mu.Lock()
 	ss, found := conn.sessionTable[sid]
+	if found {
+		delete(conn.sessionTable, sid)
+	}
+	conn.mu.Unlock()
+
 	if !found {
 		return nil, errSessionNotFound
 	}
@@ -143,7 +153,17 @@ func (s *server) deregisterSession(conn *connection, sid uint64) (*session, erro
 	}
 	ss.mu.Unlock()
 
+	// The tree connects are named first and closed after: closing one takes the lock of the
+	// session and deletes the entry, so a walk of the table itself would be reading it while a
+	// tree disconnect arriving over another channel writes to it.
+	ss.mu.Lock()
+	tids := make([]uint32, 0, len(ss.treeConnectTable))
 	for tid := range ss.treeConnectTable {
+		tids = append(tids, tid)
+	}
+	ss.mu.Unlock()
+
+	for _, tid := range tids {
 		ss.closeTreeConnect(tid)
 	}
 

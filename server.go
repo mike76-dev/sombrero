@@ -189,8 +189,16 @@ func (s *server) closeConnection(c *connection) {
 	for _, ss := range c.sessionTable {
 		sessions = append(sessions, ss)
 	}
-	for _, ch := range c.stopChans {
+	// Every request still being worked on is told to give up, and its channel goes from the
+	// table as it is closed. A connection is torn down by whoever notices it first, and more than
+	// one thing may: the reading loop finds the socket gone, the reaper finds the connection idle,
+	// a ban takes down everything from the host. All of them come through here, so a table left
+	// holding channels that have already been closed is a table the next of them closes twice,
+	// which is a panic rather than an error. The cancel path clears its entry the same way, and
+	// only the two of them ever close one of these channels.
+	for id, ch := range c.stopChans {
 		close(ch)
+		delete(c.stopChans, id)
 	}
 	c.mu.Unlock()
 
