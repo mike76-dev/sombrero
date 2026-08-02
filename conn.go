@@ -2534,6 +2534,19 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 						resp := smb2.NewErrorResponse(sir, status, 0, nil)
 						return resp, ss, nil
 					}
+
+					// The open follows the file to its new name, as in the branch above. Left
+					// pointing at the old one, every later read and write on this handle would
+					// reach for an object the backend no longer has, and the old name would go
+					// on blocking creates while the new one stood unguarded. A persisted entry
+					// moves with it, so that the old name stops resolving to this file.
+					tc.mu.Lock()
+					if _, found := tc.persistedOpens[path]; found {
+						delete(tc.persistedOpens, path)
+						tc.persistedOpens[newName] = op
+					}
+					c.server.moveOpen(op, newName)
+					tc.mu.Unlock()
 				}
 
 				// The lease follows the file under its new name, and a file that has just been

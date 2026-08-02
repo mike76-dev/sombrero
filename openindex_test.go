@@ -39,6 +39,44 @@ func TestIntegrationRenameMovesTheOpenBetweenBuckets(t *testing.T) {
 	}
 }
 
+// A rename of a file the backend already holds goes through the other branch of the handler,
+// which used to leave the open pointing at the old name: reads on the handle reached for an
+// object the backend no longer had, and the old name went on blocking creates while the new
+// one stood unguarded.
+func TestIntegrationBackendRenameMovesTheOpen(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+
+	alice := h.dial("alice")
+	held, _ := alice.create("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(held).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create failed with %#x", status)
+	}
+
+	buf, err := alice.rename(createdFileID(held), "dir/renamed")
+	if err != nil {
+		t.Fatalf("the rename failed: %v", err)
+	}
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the rename was answered with %#x", status)
+	}
+
+	if got := len(h.srv.opensOn(h.share, "dir/file", nil)); got != 0 {
+		t.Errorf("%d open(s) left on the old name, want none", got)
+	}
+	opens := h.srv.opensOn(h.share, "dir/renamed", nil)
+	if len(opens) != 1 {
+		t.Fatalf("%d open(s) on the new name, want 1", len(opens))
+	}
+
+	opens[0].mu.Lock()
+	pathName := opens[0].pathName
+	opens[0].mu.Unlock()
+	if pathName != "dir/renamed" {
+		t.Errorf("the open answers to %q, want dir/renamed", pathName)
+	}
+}
+
 func TestIntegrationCloseAndRestoreKeepTheIndexRight(t *testing.T) {
 	h := newSMBTest(t)
 
