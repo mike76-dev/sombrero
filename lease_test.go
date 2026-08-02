@@ -78,6 +78,48 @@ func TestLeaseStartBreak(t *testing.T) {
 			t.Errorf("epoch = %d, want 1 after a single break", epoch)
 		}
 	})
+
+	t.Run("a deeper conflict escalates the break in flight", func(t *testing.T) {
+		l := &lease{state: rwh, opens: make(map[uint64]*open)}
+
+		// A create that only reads starts a break that lets the client keep its read and
+		// handle caches.
+		first, started := l.startBreak(rh)
+		if first == nil || !started {
+			t.Fatal("the first break was not started")
+		}
+
+		// A create that changes the file needs everything gone, which is further than the
+		// break in flight goes: the client has to be told again, and answering the first
+		// notification is no longer good enough.
+		second, started := l.startBreak(smb2.SMB2_LEASE_NONE)
+		if second != first {
+			t.Error("the escalated break is not the one already in flight")
+		}
+		if !started {
+			t.Error("the deeper cut was not sent to the client")
+		}
+
+		l.mu.Lock()
+		to, epoch := l.breakToState, l.epoch
+		l.mu.Unlock()
+		if to != smb2.SMB2_LEASE_NONE {
+			t.Errorf("breakToState = %#x, want SMB2_LEASE_NONE", to)
+		}
+		if epoch != 2 {
+			t.Errorf("epoch = %d, want 2 after the second notification", epoch)
+		}
+
+		// A third conflict no deeper than the escalated break changes nothing and waits with
+		// everybody else.
+		third, started := l.startBreak(rh)
+		if third != first {
+			t.Error("the third caller was given a different break to wait on")
+		}
+		if started {
+			t.Error("a conflict the break already covers was sent to the client again")
+		}
+	})
 }
 
 func TestGrantLease(t *testing.T) {

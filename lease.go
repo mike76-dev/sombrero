@@ -303,7 +303,17 @@ func (l *lease) startBreak(to uint32) (chan struct{}, bool) {
 		return nil, false
 	}
 	if l.breaking {
-		return l.breakDone, false
+		// A target that takes nothing beyond what the break in flight is already taking is
+		// covered by that break, and is simply waited for. Otherwise a second conflict wants
+		// the lease cut back further, so the client is told again, at a fresh epoch, and
+		// answering the first notification is no longer good enough — as with an oplock.
+		if l.breakToState&^to == 0 {
+			return l.breakDone, false
+		}
+
+		l.breakToState &= to
+		l.epoch++
+		return l.breakDone, true
 	}
 
 	l.breaking = true
