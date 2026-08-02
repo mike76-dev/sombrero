@@ -586,6 +586,16 @@ func (op *open) newLSAFrame(ctx ntlm.SecurityContext) *rpc.Frame {
 func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc stores.Account, stopChan chan struct{}) {
 	ois, err := op.treeConnect.client.List(op.ctx, acc, op.pathName)
 	if err != nil {
+		// The watch never starts, so the share this request holds of the outstanding request
+		// counters of the open goes back, and the channel a cancel would stop the watch over
+		// goes away. Left counted, the request would sit in the counters for good, and once
+		// the client moved the open to a fresh channel the leftover would fail every replayed
+		// write with STATUS_FILE_NOT_AVAILABLE. The request stays in the async command list,
+		// so a cancel still finds it and the client still gets an answer to that.
+		c.releaseOpen(&req.Request)
+		c.mu.Lock()
+		delete(c.stopChans, req.CancelRequestID())
+		c.mu.Unlock()
 		return
 	}
 
@@ -618,6 +628,12 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc
 	for {
 		select {
 		case <-stopChan: // Execution terminated
+			// Whoever closed the channel — a cancel answering the request, or the connection
+			// going away underneath it — the request is over, and its share of the
+			// outstanding request counters of the open goes back. The open may well outlive
+			// the connection, so the counters must not wait for the connection's tables to
+			// go. The cancel path has already released it, and a second release is a no-op.
+			c.releaseOpen(&req.Request)
 			return
 		case <-time.After(15 * time.Second): // Check every 15 seconds
 		}
