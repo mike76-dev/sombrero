@@ -44,6 +44,44 @@ type treeConnect struct {
 	mu             sync.Mutex
 }
 
+// persistedObjects turns the opens the tree connect is holding for files that have been created
+// but not yet uploaded into the entries a listing would have carried, so that a client sees them
+// beside what the backend already knows about. Only the paths the caller asks for are taken.
+//
+// The size and the modification time of an open move under the lock of that open, and the writer
+// of a file holds it while it buffers what the client sends: read out of the table without it, an
+// upload in progress races every listing of the directory it is going into. The table is let go of
+// before any open is read, so the two locks are never held at once and the order they are taken in
+// cannot matter. want is called while the table is held, so it must not reach for a lock itself.
+func (tc *treeConnect) persistedObjects(want func(path string) bool) []client.ObjectInfo {
+	tc.mu.Lock()
+	paths := make([]string, 0, len(tc.persistedOpens))
+	opens := make([]*open, 0, len(tc.persistedOpens))
+	for path, o := range tc.persistedOpens {
+		if want(path) {
+			paths = append(paths, path)
+			opens = append(opens, o)
+		}
+	}
+	tc.mu.Unlock()
+
+	ois := make([]client.ObjectInfo, 0, len(opens))
+	for i, o := range opens {
+		o.mu.Lock()
+		lastModified, size := o.lastModified, o.size
+		o.mu.Unlock()
+
+		ois = append(ois, client.ObjectInfo{
+			Key:        "/" + paths[i],
+			CreatedAt:  lastModified,
+			ModifiedAt: lastModified,
+			Size:       size,
+		})
+	}
+
+	return ois
+}
+
 // extractShareName extracts the share name from the provided string of the format \\SERVER\SHARE.
 func extractShareName(path string) string {
 	var ok bool

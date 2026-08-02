@@ -367,11 +367,17 @@ func (s *server) closeOpen(op *open, persist bool) {
 // queryDirectory performs a search within the directory using the provided pattern.
 // Wildcards are supported.
 func (op *open) queryDirectory(acc stores.Account, pattern string) error {
-	if op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
+	op.mu.Lock()
+	attr := op.fileAttributes
+	dir := op.pathName
+	ctx := op.ctx
+	op.mu.Unlock()
+
+	if attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		return errNoDirectory
 	}
 
-	ois, err := op.treeConnect.client.List(op.ctx, acc, op.pathName+"/")
+	ois, err := op.treeConnect.client.List(ctx, acc, dir+"/")
 	if err != nil {
 		return err
 	}
@@ -387,28 +393,21 @@ func (op *open) queryDirectory(acc stores.Account, pattern string) error {
 	}
 
 	// Search persisted Opens, too.
-	tc := op.treeConnect
-	tc.mu.Lock()
-	for path, o := range tc.persistedOpens {
+	results = append(results, op.treeConnect.persistedObjects(func(path string) bool {
 		if _, ok := found[path]; ok {
-			continue
+			return false
 		}
-		if utils.TrimName(path) != op.pathName {
-			continue
+		if utils.TrimName(path) != dir {
+			return false
 		}
-		if utils.MatchPattern(pattern, utils.TrimPath(path)) {
-			results = append(results, client.ObjectInfo{
-				Key:        "/" + path,
-				CreatedAt:  o.lastModified,
-				ModifiedAt: o.lastModified,
-				Size:       o.size,
-			})
-		}
-	}
-	tc.mu.Unlock()
+		return utils.MatchPattern(pattern, utils.TrimPath(path))
+	})...)
 
+	op.mu.Lock()
 	op.lastSearch = pattern
 	op.searchResults = results
+	op.mu.Unlock()
+
 	if len(results) == 0 {
 		return errNoFiles
 	}
@@ -588,7 +587,12 @@ func (op *open) newLSAFrame(ctx ntlm.SecurityContext) *rpc.Frame {
 // during the session and not yet uploaded are folded in from the persisted opens, since the
 // backend does not know of them yet.
 func (op *open) directorySnapshot(acc stores.Account) ([]byte, error) {
-	ois, err := op.treeConnect.client.List(op.ctx, acc, op.pathName)
+	op.mu.Lock()
+	dir := op.pathName
+	ctx := op.ctx
+	op.mu.Unlock()
+
+	ois, err := op.treeConnect.client.List(ctx, acc, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -598,25 +602,15 @@ func (op *open) directorySnapshot(acc stores.Account) ([]byte, error) {
 		if oi.Key == "" {
 			continue
 		}
-		if strings.HasPrefix(oi.Key[1:], op.pathName) {
+		if strings.HasPrefix(oi.Key[1:], dir) {
 			found[oi.Key[1:]] = struct{}{}
 		}
 	}
 
-	tc := op.treeConnect
-	tc.mu.Lock()
-	for path, o := range tc.persistedOpens {
-		if _, ok := found[path]; ok {
-			continue
-		}
-		ois = append(ois, client.ObjectInfo{
-			Key:        "/" + path,
-			CreatedAt:  o.lastModified,
-			ModifiedAt: o.lastModified,
-			Size:       o.size,
-		})
-	}
-	tc.mu.Unlock()
+	ois = append(ois, op.treeConnect.persistedObjects(func(path string) bool {
+		_, ok := found[path]
+		return !ok
+	})...)
 
 	return makeSnapshot(ois), nil
 }
