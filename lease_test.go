@@ -26,7 +26,7 @@ func newLeasedOpen(t *testing.T, s *server, sh *share, path string, key [16]byte
 	if !matches {
 		t.Fatalf("the lease key is already in use for another file")
 	}
-	l.join(op, state)
+	l.join(s.leaseTableFor(l.clientGuid), op, state)
 
 	return op, l, c, sent
 }

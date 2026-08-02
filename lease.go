@@ -144,12 +144,23 @@ func (s *server) leaseFor(guid [16]byte, req smb2.LeaseRequest, path string) (*l
 	return l, true
 }
 
-// join adds the open to the lease, and hands the open its share of it.
-func (l *lease) join(op *open, state uint32) {
+// join adds the open to the lease, and hands the open its share of it. The table is the one the
+// lease lives in: a lease that lost its last open a moment ago has been removed from it, so
+// joining puts the lease back, and takes the lock of the table ahead of the lock of the lease
+// the way every path through the table does. Without that, an open racing a close under the
+// same key could come out holding a lease the table no longer knows about, whose breaks could
+// then never be acknowledged.
+func (l *lease) join(lt *leaseTable, op *open, state uint32) {
+	lt.mu.Lock()
+	if _, found := lt.leases[l.leaseKey]; !found {
+		lt.leases[l.leaseKey] = l
+	}
+
 	l.mu.Lock()
 	l.state = state
 	l.opens[op.durableFileID] = op
 	l.mu.Unlock()
+	lt.mu.Unlock()
 
 	op.mu.Lock()
 	op.lease = l
@@ -157,16 +168,26 @@ func (l *lease) join(op *open, state uint32) {
 }
 
 // leaveLease takes the open out of the lease it shared. A lease that has lost its last open is
-// worth nothing and gives up whatever it promised, releasing anybody waiting on a break of it.
+// worth nothing and gives up whatever it promised, releasing anybody waiting on a break of it;
+// it is also removed from the table of its client, so that the key it was taken out under is
+// free for another file and the table does not grow with every key the client ever used.
 func (op *open) leaveLease() {
 	op.mu.Lock()
 	l := op.lease
 	op.lease = nil
+	c := op.connection
 	op.mu.Unlock()
 
 	if l == nil {
 		return
 	}
+
+	// The table is locked ahead of the lease, in the order every path through the table takes
+	// the two, so that the departure of the last open and a create reusing the key cannot
+	// interleave halfway.
+	lt := c.server.leaseTableFor(l.clientGuid)
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -181,6 +202,10 @@ func (op *open) leaveLease() {
 		l.breaking = false
 		close(l.breakDone)
 		l.breakDone = nil
+	}
+
+	if lt.leases[l.leaseKey] == l {
+		delete(lt.leases, l.leaseKey)
 	}
 }
 
@@ -412,7 +437,7 @@ func (s *server) grantLease(op *open, l *lease, requested uint32, tc *treeConnec
 	}
 
 	if granted != smb2.SMB2_LEASE_NONE {
-		l.join(op, granted)
+		l.join(s.leaseTableFor(l.clientGuid), op, granted)
 		s.cachingMu.Unlock()
 
 		return granted
