@@ -511,7 +511,7 @@ func (s *server) acknowledgeLeaseBreak(guid, key [16]byte, state uint32) (uint32
 	// them can no longer be replayed. A lease break arrives without a FileId, so this is the
 	// one path that does not go past findOpen.
 	for _, op := range opens {
-		op.clearReplayEligible()
+		s.clearReplayEligible(op)
 	}
 
 	// Nothing is being broken, so the acknowledgment answers a break that never happened.

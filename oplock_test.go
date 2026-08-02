@@ -60,6 +60,7 @@ func newOplockOpen(t *testing.T, s *server, sh *share, path string) (*open, *con
 
 	ss.openTable[op.fileID] = op
 	s.globalOpenTable[op.durableFileID] = op
+	s.indexOpen(op)
 	s.connectionList[c.clientName] = c
 
 	return op, c, sent

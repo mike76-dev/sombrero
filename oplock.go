@@ -56,32 +56,6 @@ func createChangesFile(cr smb2.CreateRequest) bool {
 	return cr.CreateOptions()&smb2.FILE_DELETE_ON_CLOSE > 0
 }
 
-// opensOn collects the opens of a file, other than the one given. The global table is copied
-// before the opens in it are examined, so that the lock of the server and the lock of an open
-// are never held at the same time.
-func (s *server) opensOn(sh *share, path string, except *open) []*open {
-	s.mu.Lock()
-	candidates := make([]*open, 0, len(s.globalOpenTable))
-	for _, op := range s.globalOpenTable {
-		if op != except {
-			candidates = append(candidates, op)
-		}
-	}
-	s.mu.Unlock()
-
-	var opens []*open
-	for _, op := range candidates {
-		op.mu.Lock()
-		match := op.treeConnect.share == sh && op.pathName == path
-		op.mu.Unlock()
-		if match {
-			opens = append(opens, op)
-		}
-	}
-
-	return opens
-}
-
 // startOplockBreak moves an open from holding its oplock to giving it up. It returns the
 // channel that is closed once the break is over, and whether this call is the one that started
 // it: a break that is already in flight is waited for rather than sent twice.

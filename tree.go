@@ -245,9 +245,12 @@ func (ss *session) closeTreeConnect(tid uint32) error {
 
 	// The oplocks are given up outside the lock of the session: releasing one takes the lock
 	// of the open, and picking a channel to break an oplock over takes the two in the other
-	// order.
+	// order. An open that has left the global table leaves the indexes with it, and the
+	// create that made it can no longer be replayed.
 	for _, op := range closed {
 		op.releaseCaching()
+		ss.connection.server.clearReplayEligible(op)
+		ss.connection.server.unindexOpen(op)
 	}
 
 	return nil

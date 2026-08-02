@@ -56,6 +56,13 @@ type server struct {
 	// file from both finding it free. It is never held while a break is waited for.
 	cachingMu sync.Mutex
 
+	// openIndexMu guards the two indexes into the global open table: the opens by the file
+	// they are on, and the replayable opens by the create GUID that made them. The lock of an
+	// open may be taken inside it, never the other way round.
+	openIndexMu     sync.Mutex
+	opensByFile     map[fileKey]map[uint64]*open
+	replayableOpens map[replayKey]*open
+
 	// oplockBreakTimeout and leaseBreakTimeout are how long a client is given to acknowledge a
 	// break before it loses what it held. They are fields carrying the constants rather than
 	// the constants themselves so that a test can wind them down: at 35 seconds apiece, the
@@ -87,6 +94,8 @@ func newServerState(ctx context.Context, db stores.Store, debug bool, cfg stores
 		globalSessionTable:   make(map[uint64]*session),
 		globalClientTable:    make(map[[16]byte]*smbClient),
 		globalLeaseTableList: make(map[[16]byte]*leaseTable),
+		opensByFile:          make(map[fileKey]map[uint64]*open),
+		replayableOpens:      make(map[replayKey]*open),
 		oplockBreakTimeout:   oplockBreakTimeout,
 		leaseBreakTimeout:    leaseBreakTimeout,
 		connectionCount:      make(map[string]int),

@@ -43,57 +43,6 @@ func (op *open) grantDurability(req smb2.DurableHandleRequestV2) uint32 {
 	return uint32(timeout / time.Millisecond)
 }
 
-// markReplayEligible records that the create which made this open may still be replayed. Only
-// a file on a disk share that was actually opened for something is worth replaying; a directory
-// or a handle with no access to speak of has nothing a second attempt could lose.
-func (op *open) markReplayEligible(tc *treeConnect) {
-	if tc.share.name == "ipc$" {
-		return
-	}
-
-	const useful = smb2.FILE_READ_DATA | smb2.FILE_EXECUTE | smb2.FILE_WRITE_DATA |
-		smb2.FILE_APPEND_DATA | smb2.DELETE
-
-	op.mu.Lock()
-	defer op.mu.Unlock()
-
-	if op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 && op.grantedAccess&useful > 0 {
-		op.isReplayEligible = true
-	}
-}
-
-// clearReplayEligible records that the handle has been used, which is the point at which the
-// create that made it can no longer be replayed: a second copy of that create would now be
-// asking for something the client has already moved on from.
-func (op *open) clearReplayEligible() {
-	op.mu.Lock()
-	defer op.mu.Unlock()
-
-	op.isReplayEligible = false
-}
-
-// findReplayableOpen returns the open that a create bearing this GUID already made, if the
-// client may still replay that create.
-func (s *server) findReplayableOpen(clientGuid, createGuid [16]byte) *open {
-	s.mu.Lock()
-	candidates := make([]*open, 0, len(s.globalOpenTable))
-	for _, op := range s.globalOpenTable {
-		candidates = append(candidates, op)
-	}
-	s.mu.Unlock()
-
-	for _, op := range candidates {
-		op.mu.Lock()
-		match := op.isReplayEligible && op.createGuid == createGuid && op.clientGuid == clientGuid
-		op.mu.Unlock()
-		if match {
-			return op
-		}
-	}
-
-	return nil
-}
-
 // replayCreate answers a create that carries the create GUID of one the server has already made
 // an open for. A client whose answer never came back reissues the same create marked as a
 // replay, and gets the open the first attempt made instead of a second one on the same file.
@@ -336,6 +285,11 @@ func (s *server) sweepDurableOpens() {
 		if s.debug {
 			log.Printf("Durable handle for %s was not reclaimed in time", op.pathName)
 		}
+
+		// An open that has left the global table leaves the indexes with it, and the create
+		// that made it can no longer be replayed.
+		s.unindexOpen(op)
+		s.clearReplayEligible(op)
 
 		// An upload that is never coming back has to be called off at the backend as well,
 		// or the multipart upload it started is left hanging there.

@@ -308,6 +308,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 	c.server.globalOpenTable[op.durableFileID] = op
 	c.server.stats.FOpens++
 	c.server.mu.Unlock()
+	c.server.indexOpen(op)
 
 	tc.mu.Lock()
 	tc.openCount++
@@ -331,6 +332,7 @@ func (s *server) restoreOpen(op *open, c *connection) {
 	s.mu.Lock()
 	s.globalOpenTable[op.durableFileID] = op
 	s.mu.Unlock()
+	s.indexOpen(op)
 
 	op.treeConnect.mu.Lock()
 	op.treeConnect.openCount++
@@ -344,8 +346,10 @@ func (s *server) closeOpen(op *open, persist bool) {
 	}
 
 	// An open that goes away takes its oplock with it, and releases whoever was waiting for
-	// the break it was in the middle of.
+	// the break it was in the middle of. The create that made it can no longer be replayed
+	// either: a replay must never hand back a handle that has been closed.
 	op.releaseCaching()
+	s.clearReplayEligible(op)
 
 	op.treeConnect.mu.Lock()
 	op.treeConnect.openCount--
@@ -358,6 +362,7 @@ func (s *server) closeOpen(op *open, persist bool) {
 	s.mu.Lock()
 	delete(s.globalOpenTable, op.durableFileID)
 	s.mu.Unlock()
+	s.unindexOpen(op)
 }
 
 // queryDirectory performs a search within the directory using the provided pattern.

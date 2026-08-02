@@ -2509,9 +2509,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					}
 					tc.persistedOpens[newName] = op
 					delete(tc.persistedOpens, path)
+					// The path of the open changes through the index, so that a create
+					// racing this rename finds the open under exactly one of its names,
+					// never neither.
+					c.server.moveOpen(op, newName)
 					op.mu.Lock()
-					op.pathName = newName
-					op.fileName = utils.TrimPath(op.pathName)
 					op.lastModified = time.Now()
 					op.mu.Unlock()
 					tc.mu.Unlock()
@@ -2686,7 +2688,7 @@ func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open,
 
 	// Using the handle is what ends the window in which the create that made it may be
 	// replayed: this is every command that takes a FileId, so it is the one place to say so.
-	op.clearReplayEligible()
+	c.server.clearReplayEligible(op)
 
 	return op, c.verifyChannelSequence(op, req)
 }
@@ -3280,7 +3282,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 
 			// A create that was granted durability is one the client may replay if the answer
 			// never reaches it, so the open is left able to answer for it until it is used.
-			op.markReplayEligible(tc)
+			c.server.markReplayEligible(op, tc)
 		}
 	}
 
