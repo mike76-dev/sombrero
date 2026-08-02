@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"sync"
 	"testing"
 	"time"
@@ -304,5 +306,53 @@ func TestSweepDurableOpens(t *testing.T) {
 	s.sweepDurableOpens()
 	if len(s.globalOpenTable) != 3 {
 		t.Errorf("a repeated sweep changed the global open table: %d entries, want 3", len(s.globalOpenTable))
+	}
+}
+
+// A reconnect is a create like any other, so the contexts it carries are answered rather than
+// ignored. The lease in particular: it was released when the connection was lost, so a client
+// that asks after it is told it holds nothing, rather than left to guess.
+func TestIntegrationReconnectAnswersTheContextsItCarries(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+
+	alice := h.dial("alice")
+	held, _ := alice.createDurable("dir/file", testCreateGuid, false)
+	if status := smb2.Header(held).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the durable create failed with %#x", status)
+	}
+	fid := createdFileID(held)
+
+	// The connection is lost, and the open is set aside for reclaiming.
+	if n := alice.ss.orphanDurableOpens(); n != 1 {
+		t.Fatalf("%d opens were set aside, want 1", n)
+	}
+
+	// The client comes back, claims the handle, and asks for the lease it thinks it holds.
+	again := h.dial("alice")
+	contexts := chainContexts(
+		reconnectContext(binary.LittleEndian.Uint64(fid[:8]), binary.LittleEndian.Uint64(fid[8:16]), testCreateGuid),
+		leaseContext(aliceKey, rwh, 2),
+	)
+	buf, err := again.createWith("dir/file", smb2.OPLOCK_LEVEL_LEASE, smb2.FILE_OPEN, contexts)
+	if err != nil {
+		t.Fatalf("the reconnect failed: %v", err)
+	}
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the reconnect was answered with %#x", status)
+	}
+	if !bytes.Equal(createdFileID(buf), fid) {
+		t.Errorf("the reconnect handed back % x, want the handle % x", createdFileID(buf), fid)
+	}
+
+	data, found := createdContext(buf, smb2.CREATE_REQUEST_LEASE)
+	if !found {
+		t.Fatal("the client asked for a lease and was not answered")
+	}
+	if len(data) < 20 {
+		t.Fatalf("the lease response context is %d bytes long, want at least 20", len(data))
+	}
+	if state := binary.LittleEndian.Uint32(data[16:20]); state != smb2.SMB2_LEASE_NONE {
+		t.Errorf("the client was told it holds %#x, want SMB2_LEASE_NONE", state)
 	}
 }

@@ -851,6 +851,32 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				return resp, ss, nil
 			}
 
+			// The reconnect is a create like any other, and the contexts it carries are
+			// answered the same way, out of the open being handed back. The lease is the
+			// exception: it was released when the connection was lost, precisely so that
+			// others could get at the file in the meantime, so a client that asks is told
+			// it holds nothing rather than left to guess — a cache from before a gap the
+			// server cannot vouch for must not be blessed.
+			op.mu.Lock()
+			modified := op.lastModified
+			access := op.grantedAccess
+			handle := op.handle
+			op.mu.Unlock()
+
+			respContexts := make(map[uint32][]byte)
+			for id, ctx := range contexts {
+				switch id {
+				case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
+					respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, modified, access)
+				case smb2.CREATE_QUERY_ON_DISK_ID:
+					respContexts[id] = smb2.HandleCreateQueryOnDiskID(handle, tc.volumeID)
+				}
+			}
+
+			if lr := c.leaseRequest(cr, contexts); lr != nil {
+				respContexts[smb2.CREATE_REQUEST_LEASE] = smb2.HandleCreateRequestLease(*lr, smb2.SMB2_LEASE_NONE, 0)
+			}
+
 			resp := &smb2.CreateResponse{}
 			resp.FromRequest(cr)
 			op.mu.Lock()
@@ -863,7 +889,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
 				op.fileID,
 				op.durableFileID,
-				nil,
+				respContexts,
 			)
 			op.mu.Unlock()
 			req.SetOpenID(op.id())
