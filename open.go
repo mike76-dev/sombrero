@@ -581,22 +581,14 @@ func (op *open) newLSAFrame(ctx ntlm.SecurityContext) *rpc.Frame {
 	return frame
 }
 
-// checkForChanges monitors if any significant changes have occurred in the specified directory.
-// Significant changes include: file names, sizes, modify times, or contents.
-func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc stores.Account, stopChan chan struct{}) {
+// directorySnapshot reduces the directory of the open to a fingerprint that changes whenever
+// anything a client would care about changes: names, sizes, modify times. The files created
+// during the session and not yet uploaded are folded in from the persisted opens, since the
+// backend does not know of them yet.
+func (op *open) directorySnapshot(acc stores.Account) ([]byte, error) {
 	ois, err := op.treeConnect.client.List(op.ctx, acc, op.pathName)
 	if err != nil {
-		// The watch never starts, so the share this request holds of the outstanding request
-		// counters of the open goes back, and the channel a cancel would stop the watch over
-		// goes away. Left counted, the request would sit in the counters for good, and once
-		// the client moved the open to a fresh channel the leftover would fail every replayed
-		// write with STATUS_FILE_NOT_AVAILABLE. The request stays in the async command list,
-		// so a cancel still finds it and the client still gets an answer to that.
-		c.releaseOpen(&req.Request)
-		c.mu.Lock()
-		delete(c.stopChans, req.CancelRequestID())
-		c.mu.Unlock()
-		return
+		return nil, err
 	}
 
 	found := make(map[string]struct{})
@@ -624,7 +616,15 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc
 	}
 	tc.mu.Unlock()
 
-	snapshot := makeSnapshot(ois)
+	return makeSnapshot(ois), nil
+}
+
+// checkForChanges monitors if any significant changes have occurred in the specified directory.
+// Significant changes include: file names, sizes, modify times, or contents. The snapshot is the
+// state of the directory as it stood when the watch was granted: it is taken by the caller, so
+// that a directory that cannot be looked at at all is answered synchronously rather than armed
+// and left to fail behind an interim response.
+func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc stores.Account, snapshot []byte, stopChan chan struct{}) {
 	for {
 		select {
 		case <-stopChan: // Execution terminated
@@ -638,37 +638,11 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc
 		case <-time.After(15 * time.Second): // Check every 15 seconds
 		}
 
-		ois, err := op.treeConnect.client.List(op.ctx, acc, op.pathName)
+		newSnapshot, err := op.directorySnapshot(acc)
 		if err != nil {
 			continue
 		}
 
-		found := make(map[string]struct{})
-		for _, oi := range ois {
-			if oi.Key == "" {
-				continue
-			}
-			if strings.HasPrefix(oi.Key[1:], op.pathName) {
-				found[oi.Key[1:]] = struct{}{}
-			}
-		}
-
-		tc := op.treeConnect
-		tc.mu.Lock()
-		for path, o := range tc.persistedOpens {
-			if _, ok := found[path]; ok {
-				continue
-			}
-			ois = append(ois, client.ObjectInfo{
-				Key:        "/" + path,
-				CreatedAt:  o.lastModified,
-				ModifiedAt: o.lastModified,
-				Size:       o.size,
-			})
-		}
-		tc.mu.Unlock()
-
-		newSnapshot := makeSnapshot(ois)
 		if !bytes.Equal(newSnapshot, snapshot) {
 			// Normally, the server should monitor the changes according to the filter specified in each
 			// SMB2_CHANGE_NOTIFY request. If the WATCH_TREE flag is set, the server should also monitor
@@ -679,11 +653,14 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc
 			resp.FromRequest(req)
 			resp.Header().SetStatus(smb2.STATUS_NOTIFY_ENUM_DIR)
 			// The bookkeeping of the request belongs to the connection it arrived on, but
-			// the response itself may travel over any channel of the session.
+			// the response itself may travel over any channel of the session. An answered
+			// request leaves the async command list as well, or the close of the open would
+			// find it there and answer it a second time with STATUS_NOTIFY_CLEANUP.
 			c.releaseOpen(&req.Request)
 			conn := op.selectConnection(c)
 			conn.server.writeResponse(conn, op.session, resp)
 			c.mu.Lock()
+			delete(c.asyncCommandList, req.Header().AsyncID())
 			delete(c.stopChans, req.CancelRequestID())
 			c.mu.Unlock()
 			return

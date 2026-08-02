@@ -2123,6 +2123,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// The first look at the directory decides whether the watch can start at all, and is
+		// taken before anything is registered. A watch that cannot start is answered here and
+		// now: armed first and failed after, it could only fail behind an interim response the
+		// client has already been given, and the answer would race the interim on its way out.
+		snapshot, err := op.directorySnapshot(acc)
+		if err != nil {
+			log.Printf("Error listing directory contents on %s: %v", op.pathName, err)
+			resp := smb2.NewErrorResponse(cnr, smb2.STATUS_UNSUCCESSFUL, 0, nil)
+			return resp, ss, nil
+		}
+
 		// Put the request in the async command list.
 		aid := make([]byte, 8)
 		frand.Read(aid)
@@ -2136,7 +2147,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		c.mu.Unlock()
 
 		// Start a thread to monitor the directory for changes.
-		go op.checkForChanges(cnr, c, acc, ch)
+		go op.checkForChanges(cnr, c, acc, snapshot, ch)
 
 		// Send an interim response.
 		resp := smb2.NewErrorResponse(cnr, smb2.STATUS_PENDING, 0, nil)
