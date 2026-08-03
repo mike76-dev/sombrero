@@ -405,6 +405,7 @@ func (js *JSONStore) FindWorkgroup(u uuid.UUID) (wg Workgroup, err error) {
 
 // FindWorkgroupByName tries to retrieve the workgroup by its name.
 func (js *JSONStore) FindWorkgroupByName(name string) (wg Workgroup, err error) {
+	name = NormalizeWorkgroupName(name)
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	for _, w := range js.data.Workgroups {
@@ -426,6 +427,7 @@ func (js *JSONStore) GetWorkgroups() (wgs []Workgroup, err error) {
 
 // AddWorkgroup adds a new workgroup to the store.
 func (js *JSONStore) AddWorkgroup(wg Workgroup) error {
+	wg.Name = NormalizeWorkgroupName(wg.Name)
 	return js.update(func(d *jsonData) error {
 		for _, w := range d.Workgroups {
 			if w.UUID == wg.UUID {

@@ -7,36 +7,63 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/utils"
 	"golang.org/x/crypto/md4"
 )
 
 const (
-	testUser      = "alice"
-	testPassword  = "hunter2"
-	testWorkgroup = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+	testUser          = "alice"
+	testPassword      = "hunter2"
+	testWorkgroup      = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+	testOtherWorkgroup = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+	testWorkgroupName  = "wrg"
 )
 
-// stubStore answers every lookup with the account and error it was built with, whatever is
-// asked of it.
+// stubStore answers every account lookup with the account and error it was built with, whatever
+// is asked of it, and resolves the one workgroup name it was given.
 type stubStore struct {
 	acc stores.Account
 	err error
+
+	// name is the name of the workgroup testWorkgroup, if it is a named one. It is held in the
+	// form the stores keep it in, so that the lookup below folds its argument the way the real
+	// ones do.
+	name string
+
+	// lookedUp records the workgroup the account lookup was made under, so that a test can tell
+	// that the name the client sent was turned into the UUID before the store saw it.
+	lookedUp *string
 }
 
-func (s stubStore) FindAccount(string, string) (stores.Account, error) { return s.acc, s.err }
+func (s stubStore) FindAccount(_, workgroup string) (stores.Account, error) {
+	if s.lookedUp != nil {
+		*s.lookedUp = workgroup
+	}
+	return s.acc, s.err
+}
+
+func (s stubStore) FindWorkgroupByName(name string) (stores.Workgroup, error) {
+	if s.name == "" || stores.NormalizeWorkgroupName(name) != s.name {
+		return stores.Workgroup{}, nil // as the stores report a workgroup that is not there
+	}
+	return stores.Workgroup{ID: 1, UUID: uuid.MustParse(testWorkgroup), Name: s.name}, nil
+}
 
 // knownAccount is the store as it behaves when the account is there.
 func knownAccount() stubStore {
 	h := md4.New()
 	h.Write(utils.EncodeStringToBytes(testPassword))
-	return stubStore{acc: stores.Account{
-		ID:        1,
-		Username:  testUser,
-		NTHash:    h.Sum(nil),
-		Workgroup: testWorkgroup,
-	}}
+	return stubStore{
+		acc: stores.Account{
+			ID:        1,
+			Username:  testUser,
+			NTHash:    h.Sum(nil),
+			Workgroup: testWorkgroup,
+		},
+		name: testWorkgroupName,
+	}
 }
 
 // authenticateAs drives a whole NTLMv2 exchange against srv on behalf of user, signing the
@@ -107,6 +134,124 @@ func TestAuthenticateAcceptsTheRightPassword(t *testing.T) {
 	}
 	if got := srv.Session().User(); got != testUser {
 		t.Errorf("authenticated as %q, want %q", got, testUser)
+	}
+}
+
+// A client logs in as <workgroup>\<user>, and the workgroup part may be the name of a named
+// workgroup rather than its UUID. The name has to be resolved here, because everything below the
+// session - the account lookup, the security maps, the per-workgroup share connections - is keyed
+// by the UUID and by nothing else.
+//
+// The case the client sends is not the server's business either: a domain name is not
+// case-sensitive, and Windows sends the workgroup uppercased whatever the user typed.
+//
+// The response the client signs is computed over the domain exactly as it put it on the wire,
+// which is what authenticateAs does. So this also pins down that resolving the name does not
+// reach the key: a server that fed the UUID into NTOWFv2 instead would turn this login away.
+func TestAuthenticateResolvesWorkgroupName(t *testing.T) {
+	for _, domain := range []string{"wrg", "WRG", "Wrg"} {
+		var lookedUp string
+		store := knownAccount()
+		store.lookedUp = &lookedUp
+		srv := NewServer("SOMBRERO", "WORKGROUP", store)
+
+		if err := authenticateAs(t, srv, testUser, domain, ntHashOf(testPassword)); err != nil {
+			t.Fatalf("login as %q\\%q was turned away: %v", domain, testUser, err)
+		}
+		if lookedUp != testWorkgroup {
+			t.Errorf("account for %q looked up under workgroup %q, want %q", domain, lookedUp, testWorkgroup)
+		}
+		if got := srv.Session().Domain(); got != testWorkgroup {
+			t.Errorf("session workgroup for %q: got %q, want %q", domain, got, testWorkgroup)
+		}
+	}
+}
+
+// A workgroup UUID reaches the session in its canonical form, whatever spelling the client chose.
+// uuid.Parse takes the hyphenless and the braced forms too, and the keys the share connections are
+// held under are canonical, so passing the client's own spelling on would leave a session that
+// cannot find the connection its workgroup has.
+func TestAuthenticateCanonicalizesWorkgroupUUID(t *testing.T) {
+	for _, domain := range []string{
+		testWorkgroup,
+		"3F2504E04F8911D39A0C0305E82C3301",
+		"{3f2504e0-4f89-11d3-9a0c-0305e82c3301}",
+	} {
+		var lookedUp string
+		store := knownAccount()
+		store.lookedUp = &lookedUp
+		srv := NewServer("SOMBRERO", "WORKGROUP", store)
+
+		if err := authenticateAs(t, srv, testUser, domain, ntHashOf(testPassword)); err != nil {
+			t.Fatalf("login with workgroup %q was turned away: %v", domain, err)
+		}
+		if lookedUp != testWorkgroup {
+			t.Errorf("account for %q looked up under workgroup %q, want %q", domain, lookedUp, testWorkgroup)
+		}
+		if got := srv.Session().Domain(); got != testWorkgroup {
+			t.Errorf("session workgroup for %q: got %q, want %q", domain, got, testWorkgroup)
+		}
+	}
+}
+
+// A workgroup name that resolves to nothing must not become an account lookup. The stores report a
+// workgroup that is not there as a zero Workgroup, whose UUID is the zero UUID: a well-formed
+// workgroup key that an account could be found under, and one the client picks by sending a name
+// that does not exist.
+func TestAuthenticateRejectsAnUnknownWorkgroupName(t *testing.T) {
+	var lookedUp string
+	store := knownAccount()
+	store.lookedUp = &lookedUp
+	srv := NewServer("SOMBRERO", "WORKGROUP", store)
+
+	if err := authenticateAs(t, srv, testUser, "no-such-workgroup", ntHashOf(testPassword)); err == nil {
+		t.Error("a workgroup that does not exist authenticated")
+	}
+	if lookedUp != "" {
+		t.Errorf("the account was looked up under workgroup %q", lookedUp)
+	}
+}
+
+// The same login against a real store rather than a stub, which is what catches the two halves of
+// the name being kept and looked up in different forms: the store folds the name it is given, and
+// the server hands it the domain off the wire.
+func TestAuthenticateAgainstTheStore(t *testing.T) {
+	store, err := stores.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("could not create the store: %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	u := uuid.New()
+	if err := store.AddWorkgroup(stores.Workgroup{UUID: u, Name: testWorkgroupName}); err != nil {
+		t.Fatalf("could not add the workgroup: %v", err)
+	}
+	if err := store.AddAccount(stores.Account{
+		Username:  testUser,
+		Password:  testPassword,
+		Workgroup: u.String(),
+	}); err != nil {
+		t.Fatalf("could not add the account: %v", err)
+	}
+
+	// The name as a client sends it, the name as it was created, and the UUID. Windows uppercases
+	// the workgroup, so the first of these is the one the bug was found with.
+	for _, domain := range []string{strings.ToUpper(testWorkgroupName), testWorkgroupName, u.String()} {
+		srv := NewServer("SOMBRERO", "WORKGROUP", store)
+
+		if err := authenticateAs(t, srv, testUser, domain, ntHashOf(testPassword)); err != nil {
+			t.Errorf("login as %q\\%q was turned away: %v", domain, testUser, err)
+			continue
+		}
+		if got := srv.Session().Domain(); got != u.String() {
+			t.Errorf("session workgroup for %q: got %q, want %q", domain, got, u)
+		}
+	}
+
+	// A password that is not the account's still fails, whichever way the workgroup was named.
+	srv := NewServer("SOMBRERO", "WORKGROUP", store)
+	if err := authenticateAs(t, srv, testUser, testWorkgroupName, ntHashOf("not the password")); err == nil {
+		t.Error("a wrong password authenticated against a named workgroup")
 	}
 }
 

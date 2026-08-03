@@ -911,7 +911,8 @@ func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _
 	}
 
 	u := uuid.New()
-	wg := stores.Workgroup{UUID: u, Name: body.Name}
+	name := stores.NormalizeWorkgroupName(body.Name)
+	wg := stores.Workgroup{UUID: u, Name: name}
 	if err := api.store.AddWorkgroup(wg); err != nil {
 		log.Printf("failed to add workgroup: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -919,7 +920,7 @@ func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _
 	}
 
 	log.Printf("created new workgroup: %s", u)
-	writeJSON(w, WorkgroupResponse{UUID: u, Name: body.Name})
+	writeJSON(w, WorkgroupResponse{UUID: u, Name: name})
 }
 
 // workgroupsHandlerGET handles the GET /workgroups calls.

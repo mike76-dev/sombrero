@@ -67,7 +67,7 @@ func TestSecurityContextTellsUsersApart(t *testing.T) {
 // different users. The workgroup goes into the identifier for exactly that reason.
 func TestSecurityContextFollowsTheWorkgroup(t *testing.T) {
 	here := authenticated(t, testUser, testWorkgroup).GetSecurityContext()
-	there := authenticated(t, testUser, "a different workgroup entirely").GetSecurityContext()
+	there := authenticated(t, testUser, testOtherWorkgroup).GetSecurityContext()
 
 	if here.UserRID == there.UserRID {
 		t.Error("the same name in two workgroups was given the same identifier")

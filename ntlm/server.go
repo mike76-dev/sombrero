@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/spnego"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/utils"
@@ -44,6 +45,32 @@ type Server struct {
 // AccountStore defines the minimal account store.
 type AccountStore interface {
 	FindAccount(username, workgroup string) (stores.Account, error)
+	FindWorkgroupByName(name string) (stores.Workgroup, error)
+}
+
+// resolveWorkgroup turns the domain a client sent into the UUID of the workgroup it refers to.
+// The domain is either that UUID already or the name of a named workgroup. A UUID is returned in
+// its canonical form whatever spelling it arrived in: uuid.Parse takes several, while the keys
+// the share connections are held under are canonical, so the raw string cannot be passed on.
+func (s *Server) resolveWorkgroup(domain string) (string, error) {
+	if domain == "" {
+		return "", nil
+	}
+	if u, err := uuid.Parse(domain); err == nil {
+		return u.String(), nil
+	}
+	wg, err := s.accounts.FindWorkgroupByName(domain)
+	if err != nil {
+		return "", err
+	}
+
+	// A workgroup that is not there comes back as a zero Workgroup rather than an error, and the
+	// zero Workgroup carries the zero UUID, which is a perfectly well-formed UUID that the
+	// account lookup would go on to search under.
+	if wg.ID == 0 {
+		return "", errors.New("login failure")
+	}
+	return wg.UUID.String(), nil
 }
 
 // NewServer returns an initialized NTLMv2 server.
@@ -268,7 +295,16 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 			domain = strings.ToLower(utils.DecodeToString(domainName))
 		}
 
-		acc, err := s.accounts.FindAccount(user, domain)
+		// The account lookup, and every consumer of the session below it, keys the workgroup by
+		// its UUID, while a client logs in with whatever it was handed: the UUID of the
+		// workgroup, or the name of a named one. The name is turned into the UUID here, so that
+		// nothing downstream has to know that a workgroup can be referred to two ways.
+		workgroup, err := s.resolveWorkgroup(domain)
+		if err != nil {
+			return err
+		}
+
+		acc, err := s.accounts.FindAccount(user, workgroup)
 		if err != nil {
 			return err
 		}
@@ -318,7 +354,7 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		session.isClientSide = false
 
 		session.user = user
-		session.domain = domain
+		session.domain = workgroup
 		session.negotiateFlags = flags
 
 		h.Reset()

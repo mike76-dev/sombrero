@@ -278,9 +278,10 @@ func foundWorkgroup() func(uuid.UUID) (stores.Workgroup, error) {
 	}
 }
 
+// The stores fold the name they are given, so the stand-in for them does too.
 func foundWorkgroupByName() func(string) (stores.Workgroup, error) {
 	return func(name string) (stores.Workgroup, error) {
-		if name == testWorkgroupName {
+		if stores.NormalizeWorkgroupName(name) == testWorkgroupName {
 			return stores.Workgroup{ID: 1, UUID: testUUID, Name: testWorkgroupName}, nil
 		}
 		return stores.Workgroup{}, nil
@@ -972,6 +973,24 @@ func TestWorkgroups(t *testing.T) {
 		}
 	})
 
+	// A workgroup name is folded before it is stored, because a client sends it as the NTLM
+	// domain and a domain name is not case-sensitive. The response has to carry the name that was
+	// stored rather than the one that was asked for, or the caller is told to log in with a name
+	// that is not the one it will be found under.
+	t.Run("POST folds the workgroup name", func(t *testing.T) {
+		var got stores.Workgroup
+		ms := &mockStore{addWorkgroup: func(wg stores.Workgroup) error { got = wg; return nil }}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", map[string]string{"name": "AcMe"})
+		checkStatus(t, w, http.StatusOK)
+		resp := decodeJSON[WorkgroupResponse](t, w)
+		if resp.Name != "acme" {
+			t.Errorf("name: want %q, got %q", "acme", resp.Name)
+		}
+		if got.Name != "acme" {
+			t.Errorf("stored name: want %q, got %q", "acme", got.Name)
+		}
+	})
+
 	t.Run("POST store error", func(t *testing.T) {
 		ms := &mockStore{addWorkgroup: func(stores.Workgroup) error { return errStore }}
 		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", nil)
@@ -991,6 +1010,18 @@ func TestWorkgroups(t *testing.T) {
 	t.Run("GET returns workgroup by name", func(t *testing.T) {
 		ms := &mockStore{findWorkgroupByName: foundWorkgroupByName()}
 		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/"+testWorkgroupName, nil)
+		checkStatus(t, w, http.StatusOK)
+		wg := decodeJSON[stores.Workgroup](t, w)
+		if wg.Name != testWorkgroupName {
+			t.Errorf("name: want %q, got %q", testWorkgroupName, wg.Name)
+		}
+	})
+
+	// A name that is not a UUID has to take the name branch of the lookup whatever case it is in,
+	// and reach the store as it arrived for the store to fold.
+	t.Run("GET returns workgroup by name in any case", func(t *testing.T) {
+		ms := &mockStore{findWorkgroupByName: foundWorkgroupByName()}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/AcMe", nil)
 		checkStatus(t, w, http.StatusOK)
 		wg := decodeJSON[stores.Workgroup](t, w)
 		if wg.Name != testWorkgroupName {
