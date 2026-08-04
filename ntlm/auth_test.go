@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	testUser          = "alice"
-	testPassword      = "hunter2"
+	testUser           = "alice"
+	testPassword       = "hunter2"
 	testWorkgroup      = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
 	testOtherWorkgroup = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
 	testWorkgroupName  = "wrg"
