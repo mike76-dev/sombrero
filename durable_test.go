@@ -48,7 +48,7 @@ func TestGrantDurability(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			op := &open{}
+			op := &open{file: &fileState{}}
 			granted := op.grantDurability(smb2.DurableHandleRequestV2{
 				Timeout:    test.requested,
 				CreateGuid: testCreateGuid,
@@ -74,13 +74,14 @@ func TestGrantDurability(t *testing.T) {
 
 func TestOrphanDurableOpens(t *testing.T) {
 	durable := &open{
+		file:      &fileState{},
 		fileID:    1,
 		isDurable: true,
 		// A cached chunk is worth a lot of memory and nothing of what the open achieved.
 		buffer:     map[uint64]*readChunk{0: {}},
 		cacheOrder: []uint64{0},
 	}
-	ordinary := &open{fileID: 2}
+	ordinary := &open{file: &fileState{}, fileID: 2}
 
 	ss := &session{openTable: map[uint64]*open{1: durable, 2: ordinary}}
 
@@ -118,6 +119,7 @@ func newReclaimable(t *testing.T, userName, workgroup string, sh *share) (*conne
 
 	owner := &session{userName: userName, workgroup: workgroup}
 	op := &open{
+		file:           &fileState{},
 		fileID:         10,
 		durableFileID:  20,
 		session:        owner,
@@ -257,6 +259,7 @@ func TestSweepDurableOpens(t *testing.T) {
 	var cancelled sync.Map
 	newOpen := func(dfid uint64, disconnectedFor time.Duration, durable bool) *open {
 		op := &open{
+			file:           &fileState{},
 			durableFileID:  dfid,
 			pathName:       "file",
 			isDurable:      durable,

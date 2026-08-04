@@ -27,8 +27,20 @@ func TestIntegrationOplockBreakIsNotSigned(t *testing.T) {
 	alice := h.dial("alice").signing()
 	alice.create("dir/file", smb2.OPLOCK_LEVEL_BATCH, smb2.FILE_OPEN)
 
+	// Bob's create is answered only once the break is over, and nobody here acknowledges it, so it
+	// waits out the timer. The timer is wound down and the create is waited for, because a create
+	// still running when the test ends is a goroutine left to fail a later one.
+	h.impatient(50 * time.Millisecond)
+
 	bob := h.dial("bob")
-	go bob.create("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	opened := make(chan struct{})
+	go func() {
+		defer close(opened)
+		bob.createErr("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	}()
+	defer func() {
+		<-opened
+	}()
 
 	note := alice.recv(10 * time.Second)
 	assertUnsigned(t, note, "oplock break")
@@ -41,8 +53,20 @@ func TestIntegrationLeaseBreakIsNotSigned(t *testing.T) {
 	alice := h.dial("alice").signing()
 	alice.createLeased("dir/file", aliceKey, rwh, 2, smb2.FILE_OPEN)
 
+	// Bob's create is answered only once the break is over, and nobody here acknowledges it, so it
+	// waits out the timer. The timer is wound down and the create is waited for, because a create
+	// still running when the test ends is a goroutine left to fail a later one.
+	h.impatient(50 * time.Millisecond)
+
 	bob := h.dial("bob")
-	go bob.create("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	opened := make(chan struct{})
+	go func() {
+		defer close(opened)
+		bob.createErr("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	}()
+	defer func() {
+		<-opened
+	}()
 
 	note := alice.recv(10 * time.Second)
 	if !isLeaseBreak(note) {
@@ -73,8 +97,19 @@ func TestIntegrationOplockBreakIsEncrypted(t *testing.T) {
 	alice := h.dial("alice").encrypting()
 	held, _ := alice.create("dir/file", smb2.OPLOCK_LEVEL_BATCH, smb2.FILE_OPEN)
 
+	// As above: the create waits out the acknowledgment timer, so the timer is wound down and the
+	// create is waited for rather than left running past the end of the test.
+	h.impatient(50 * time.Millisecond)
+
 	bob := h.dial("bob")
-	go bob.create("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	opened := make(chan struct{})
+	go func() {
+		defer close(opened)
+		bob.createErr("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	}()
+	defer func() {
+		<-opened
+	}()
 
 	// What comes off the wire has to be unreadable, and what it comes apart into has to be the
 	// break. Asserting only the first would be satisfied by the server sending rubbish.
@@ -96,8 +131,19 @@ func TestIntegrationLeaseBreakIsEncrypted(t *testing.T) {
 	alice := h.dial("alice").encrypting()
 	alice.createLeased("dir/file", aliceKey, rwh, 2, smb2.FILE_OPEN)
 
+	// As above: the create waits out the acknowledgment timer, so the timer is wound down and the
+	// create is waited for rather than left running past the end of the test.
+	h.impatient(50 * time.Millisecond)
+
 	bob := h.dial("bob")
-	go bob.create("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	opened := make(chan struct{})
+	go func() {
+		defer close(opened)
+		bob.createErr("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	}()
+	defer func() {
+		<-opened
+	}()
 
 	sealed := alice.recv(10 * time.Second)
 	note := alice.decrypted(sealed)

@@ -857,8 +857,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			// others could get at the file in the meantime, so a client that asks is told
 			// it holds nothing rather than left to guess — a cache from before a gap the
 			// server cannot vouch for must not be blessed.
+			_, _, _, modified, _ := op.file.stat()
 			op.mu.Lock()
-			modified := op.lastModified
 			access := op.grantedAccess
 			handle := op.handle
 			op.mu.Unlock()
@@ -877,16 +877,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				respContexts[smb2.CREATE_REQUEST_LEASE] = smb2.HandleCreateRequestLease(*lr, smb2.SMB2_LEASE_NONE, 0)
 			}
 
+			size, allocated, _, modifiedNow, attributes := op.file.stat()
 			resp := &smb2.CreateResponse{}
 			resp.FromRequest(cr)
 			op.mu.Lock()
 			resp.Generate(
 				smb2.OPLOCK_LEVEL_NONE,
 				smb2.FILE_OPENED,
-				op.size,
-				op.allocated,
-				op.lastModified,
-				op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
+				size,
+				allocated,
+				modifiedNow,
+				attributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
 				op.fileID,
 				op.durableFileID,
 				respContexts,
@@ -958,8 +959,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// cannot happen here: a connection serves its requests one at a time, and the
 		// acknowledgment being waited for may be on its way in over this very connection. A
 		// read cache has no level below it to argue about, so its holder is simply told.
-		if !c.server.needsBreakWait(tc.share, path, nil, own, sharedOK) {
-			c.server.tellHoldersOn(tc.share, path, nil, own, sharedOK)
+		// The client that is asking is what says whose promises stand: an oplock it holds itself
+		// covers the file it is opening again, and it has nothing to give up.
+		var asking [16]byte
+		if len(c.clientGuid) == 16 {
+			asking = [16]byte(c.clientGuid)
+		}
+
+		if !c.server.needsBreakWait(tc.share, path, nil, own, asking, sharedOK) {
+			c.server.tellHoldersOn(tc.share, path, nil, own, asking, sharedOK)
 			return c.createFile(req, cr, ss, tc, acc, contexts, path, lr), ss, nil
 		}
 
@@ -972,7 +980,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		c.mu.Unlock()
 
 		go func() {
-			c.server.breakHoldersOn(tc.share, path, nil, own, sharedOK)
+			c.server.breakHoldersOn(tc.share, path, nil, own, asking, sharedOK)
 
 			resp := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
 
@@ -1123,9 +1131,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
-		op.mu.Lock()
-		pu := op.pendingUpload
-		op.mu.Unlock()
+		pu := op.file.uploadNow()
 		if pu != nil { // This SMB2_CLOSE request is a sign for us to flush any active multipart upload
 			if err := op.flush(); err != nil {
 				op.cancelUpload()
@@ -1133,9 +1139,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 		}
 
+		attr := op.file.attributesNow()
 		op.mu.Lock()
 		co := op.createOptions
-		attr := op.fileAttributes
 		path := op.pathName
 		op.mu.Unlock()
 		if co&smb2.FILE_DELETE_ON_CLOSE > 0 { // Delete the file or directory
@@ -1164,7 +1170,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 			if deleting {
 				tc.mu.Lock()
-				delete(tc.persistedOpens, path)
+				delete(tc.persistedFiles, path)
 				tc.mu.Unlock()
 
 				// A file that was created and never written to is not in the store at all:
@@ -1179,10 +1185,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 		}
 
-		tc.mu.Lock()
-		_, found = tc.persistedOpens[path]
-		tc.mu.Unlock()
-		c.server.closeOpen(op, found)
+		c.server.closeOpen(op)
 
 		// Issue a response to each SMB2_CHANGE_NOTIFY request that the Open is associated with.
 		toNotify := make(map[uint64]*smb2.Request)
@@ -1203,11 +1206,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			c.server.writeResponse(c, ss, resp)
 		}
 
+		closeSize, closeAllocated, _, closeModified, closeAttributes := op.file.stat()
 		resp := &smb2.CloseResponse{}
 		resp.FromRequest(cr)
-		op.mu.Lock()
-		resp.Generate(op.lastModified, op.size, op.allocated, op.fileAttributes)
-		op.mu.Unlock()
+		resp.Generate(closeModified, closeSize, closeAllocated, closeAttributes)
 
 		return resp, ss, nil
 
@@ -1362,9 +1364,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 		}
 
-		op.mu.Lock()
-		size := op.size
-		op.mu.Unlock()
+		size := op.file.sizeNow()
 		if rr.Offset() >= size {
 			resp := smb2.NewErrorResponse(rr, smb2.STATUS_END_OF_FILE, 0, nil)
 			return resp, ss, nil
@@ -1485,8 +1485,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		co := op.createOptions
 		ga := op.grantedAccess
 		name := op.fileName
-		size := op.size
 		op.mu.Unlock()
+		size := op.file.sizeNow()
 		if c.dialect == "2.1" || c.dialect == "3.0" {
 			if wr.Flags()&smb2.WRITEFLAG_WRITE_THROUGH > 0 && co&smb2.FILE_NO_INTERMEDIATE_BUFFERING == 0 {
 				resp := smb2.NewErrorResponse(wr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
@@ -2028,8 +2028,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		attr := op.file.attributesNow()
 		op.mu.Lock()
-		attr := op.fileAttributes
 		ga := op.grantedAccess
 		op.mu.Unlock()
 		if attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 { // The Open must be a directory
@@ -2150,8 +2150,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		attr := op.file.attributesNow()
 		op.mu.Lock()
-		attr := op.fileAttributes
 		ga := op.grantedAccess
 		op.mu.Unlock()
 		if attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 { // The Open must be a directory
@@ -2391,8 +2391,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		attr := op.file.attributesNow()
 		op.mu.Lock()
-		attr := op.fileAttributes
 		ga := op.grantedAccess
 		path := op.pathName
 		op.mu.Unlock()
@@ -2413,10 +2413,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					return resp, ss, nil
 				}
 
-				size := binary.LittleEndian.Uint64(sir.Buffer())
-				op.mu.Lock()
-				op.allocated = size
-				op.mu.Unlock()
+				op.file.setAllocated(binary.LittleEndian.Uint64(sir.Buffer()))
 
 			case smb2.FileBasicInformation:
 				if ga&smb2.FILE_WRITE_ATTRIBUTES == 0 {
@@ -2431,7 +2428,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				}
 
 				var modTime time.Time
-				op.mu.Lock()
 				if !fbi.CreationTime.IsZero() {
 					modTime = fbi.CreationTime
 				}
@@ -2444,14 +2440,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					modTime = fbi.ChangeTime
 				}
 
-				if modTime.After(op.lastModified) {
-					op.lastModified = modTime
-				}
+				// setModified keeps whichever is later, so a time from before the last write to
+				// the file is not taken.
+				op.file.setModified(modTime)
 
 				if fbi.FileAttributes != 0 {
-					op.fileAttributes = fbi.FileAttributes
+					op.file.setAttributes(fbi.FileAttributes)
 				}
-				op.mu.Unlock()
 
 			case smb2.FileDispositionInformation:
 				if ga&smb2.DELETE == 0 {
@@ -2511,26 +2506,22 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 				// Rename the file or the directory.
 				newName := strings.ReplaceAll(fri.FileName, "\\", "/")
-				op.mu.Lock()
-				size := op.size
-				op.mu.Unlock()
+				size := op.file.sizeNow()
 				if size == 0 && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
 					tc.mu.Lock()
-					_, found := tc.persistedOpens[newName]
+					_, found := tc.persistedFiles[newName]
 					if found {
 						tc.mu.Unlock()
 						resp := smb2.NewErrorResponse(sir, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
 						return resp, ss, nil
 					}
-					tc.persistedOpens[newName] = op
-					delete(tc.persistedOpens, path)
+					tc.persistedFiles[newName] = op.file
+					delete(tc.persistedFiles, path)
 					// The path of the open changes through the index, so that a create
 					// racing this rename finds the open under exactly one of its names,
 					// never neither.
 					c.server.moveOpen(op, newName)
-					op.mu.Lock()
-					op.lastModified = time.Now()
-					op.mu.Unlock()
+					op.file.touch()
 					tc.mu.Unlock()
 				} else {
 					if err := tc.client.Rename(
@@ -2556,9 +2547,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					// on blocking creates while the new one stood unguarded. A persisted entry
 					// moves with it, so that the old name stops resolving to this file.
 					tc.mu.Lock()
-					if _, found := tc.persistedOpens[path]; found {
-						delete(tc.persistedOpens, path)
-						tc.persistedOpens[newName] = op
+					if _, found := tc.persistedFiles[path]; found {
+						delete(tc.persistedFiles, path)
+						tc.persistedFiles[newName] = op.file
 					}
 
 					// A renamed directory takes everything inside it along, so the persisted
@@ -2566,15 +2557,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					// is over: a key added while the map is ranged may or may not be visited.
 					if attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0 {
 						prefix := path + "/"
-						moved := make(map[string]*open)
-						for p, o := range tc.persistedOpens {
+						moved := make(map[string]*fileState)
+						for p, fs := range tc.persistedFiles {
 							if strings.HasPrefix(p, prefix) {
-								moved[newName+"/"+p[len(prefix):]] = o
-								delete(tc.persistedOpens, p)
+								moved[newName+"/"+p[len(prefix):]] = fs
+								delete(tc.persistedFiles, p)
 							}
 						}
-						for p, o := range moved {
-							tc.persistedOpens[p] = o
+						for p, fs := range moved {
+							tc.persistedFiles[p] = fs
 						}
 					}
 
@@ -2610,9 +2601,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					return resp, ss, nil
 				}
 
-				op.mu.Lock()
-				op.allocated = binary.LittleEndian.Uint64(buf)
-				op.mu.Unlock()
+				op.file.setAllocated(binary.LittleEndian.Uint64(buf))
 
 			default:
 				resp := smb2.NewErrorResponse(sir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
@@ -3111,6 +3100,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	var info client.ObjectInfo
 	var result uint32
 	var restored bool
+	var known *fileState
 	var op *open
 	var err error
 	if tc.share.name == "ipc$" { // A named pipe is being created
@@ -3140,7 +3130,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		case smb2.FILE_SUPERSEDE:
 			if err != nil {
 				tc.mu.Lock()
-				op, restored = tc.persistedOpens[path]
+				known, restored = tc.persistedFiles[path]
 				tc.mu.Unlock()
 				if !restored {
 					info = client.ObjectInfo{
@@ -3158,7 +3148,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		case smb2.FILE_OPEN:
 			if err != nil {
 				tc.mu.Lock()
-				op, restored = tc.persistedOpens[path]
+				known, restored = tc.persistedFiles[path]
 				tc.mu.Unlock()
 				if !restored {
 					cancel()
@@ -3200,7 +3190,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		case smb2.FILE_OPEN_IF:
 			if err != nil {
 				tc.mu.Lock()
-				op, restored = tc.persistedOpens[path]
+				known, restored = tc.persistedFiles[path]
 				tc.mu.Unlock()
 				if !restored {
 					info = client.ObjectInfo{
@@ -3232,7 +3222,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		case smb2.FILE_OVERWRITE:
 			if err != nil {
 				tc.mu.Lock()
-				op, restored = tc.persistedOpens[path]
+				known, restored = tc.persistedFiles[path]
 				tc.mu.Unlock()
 				if !restored {
 					cancel()
@@ -3247,7 +3237,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		case smb2.FILE_OVERWRITE_IF:
 			if err != nil {
 				tc.mu.Lock()
-				op, restored = tc.persistedOpens[path]
+				known, restored = tc.persistedFiles[path]
 				tc.mu.Unlock()
 				if !restored {
 					info = client.ObjectInfo{
@@ -3279,39 +3269,44 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		}
 	}
 
-	if restored { // This file has already been "created", "restore" it
-		cancel()
-		c.server.restoreOpen(op, cr, c)
-	} else {
-		op = ss.registerOpen(cr, c, tc, info, ctx, cancel)
-		if op == nil {
-			cancel()
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
-			return resp
+	// A file that is known only by its state has no object behind it for the lookup above to have
+	// found, so what the open is built from is put together here: the name the file was created
+	// under, and what its state says of it. The key is the one the file was created with, so the
+	// handle a client is told the file is at does not move about between opens of it.
+	if restored {
+		size, _, created, modified, _ := known.stat()
+		info = client.ObjectInfo{
+			Key:        "/" + path,
+			CreatedAt:  created,
+			ModifiedAt: modified,
+			Size:       size,
 		}
 	}
 
-	op.mu.Lock()
-	attr := op.fileAttributes
-	op.mu.Unlock()
+	// A file that has been created but not yet uploaded is known by its state, which every open
+	// on it shares. The open itself is this handle's own, whether the file was met before or not:
+	// two handles on one file are two opens, with a file ID and a caching promise apiece, and
+	// handing the same open to both is what left the server breaking an oplock on the very handle
+	// a create was about to answer with.
+	op = ss.registerOpen(cr, c, tc, info, ctx, cancel, known)
+	if op == nil {
+		cancel()
+		resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+		return resp
+	}
+
+	attr := op.file.attributesNow()
 	if result == smb2.FILE_CREATED && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 { // Persist the file for any future requests
 		tc.mu.Lock()
-		tc.persistedOpens[path] = op
+		tc.persistedFiles[path] = op.file
 		tc.mu.Unlock()
 	}
 
 	if result == smb2.FILE_SUPERSEDED || result == smb2.FILE_OVERWRITTEN {
-		op.mu.Lock()
-		op.size = 0
-		op.allocated = 0
-		op.lastModified = time.Now()
-
-		// The create emptied the file, so anything the open had cached of it is the contents of
-		// a file that no longer exists. An open handed back to a second create is the one this
-		// matters for: a new one has nothing cached yet.
-		op.invalidateReadCache()
-		op.mu.Unlock()
+		op.file.empty()
 	}
+
+	_, _, _, createdModified, _ := op.file.stat()
 
 	respContexts := make(map[uint32][]byte)
 	for id, ctx := range contexts {
@@ -3320,13 +3315,11 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_EAS_NOT_SUPPORTED, 0, nil)
 			return resp
 		case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
-			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, op.lastModified, op.grantedAccess)
+			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, createdModified, op.grantedAccess)
 		case smb2.CREATE_QUERY_ON_DISK_ID:
 			respContexts[id] = smb2.HandleCreateQueryOnDiskID(op.handle, tc.volumeID)
 		case smb2.CREATE_ALLOCATION_SIZE: // The file is about to be uploaded, we just got its size
-			op.mu.Lock()
-			op.allocated = binary.LittleEndian.Uint64(ctx)
-			op.mu.Unlock()
+			op.file.setAllocated(binary.LittleEndian.Uint64(ctx))
 		case smb2.SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2:
 			// The handle is to survive the loss of the connection. A directory has no
 			// work in progress worth preserving, and a named pipe has nothing to go
@@ -3335,10 +3328,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			if !ok || tc.share.name == "ipc$" {
 				break
 			}
-			op.mu.Lock()
-			isDir := op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
-			op.mu.Unlock()
-			if isDir {
+			if op.file.isDirectory() {
 				break
 			}
 			respContexts[id] = smb2.HandleCreateDurableHandleRequestV2(op.grantDurability(dh))
@@ -3381,14 +3371,15 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 
 	resp := &smb2.CreateResponse{}
 	resp.FromRequest(cr)
+	size, allocated, _, modified, attributes := op.file.stat()
 	op.mu.Lock()
 	resp.Generate(
 		oplockLevel,
 		result,
-		op.size,
-		op.allocated,
-		op.lastModified,
-		op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
+		size,
+		allocated,
+		modified,
+		attributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
 		op.fileID,
 		op.durableFileID,
 		respContexts,

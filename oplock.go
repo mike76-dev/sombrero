@@ -223,7 +223,30 @@ func startBreaks(opens []*open, to uint8) (waits []chan struct{}, notify []*open
 //
 // An open holds either an oplock or a share of a lease, never both, so the two are gathered
 // apart and each lease is named once however many opens it covers.
-func holdersIn(opens []*open, own *lease) (oplocks []*open, leases []*lease) {
+// sameCacheView reports whether the open belongs to the client that is asking.
+//
+// An oplock is a promise to a client's view of a file rather than to one handle on it, and a
+// second open by that same client is in the same view: nothing it caches has gone stale, so there
+// is nothing to tell it about. [MS-FSA] carries this as the oplock key of an open, "a GUID value
+// that identifies multiple handles belonging to the same client cache view", and an open whose key
+// matches the oplock's does not break it.
+//
+// Nothing on the wire carries that key for an oplock - only a lease has one, in its lease key - so
+// the client the open was made by stands for it. A client that presented no GUID has no view to
+// speak of and matches nothing: the zero value is not an identity.
+func sameCacheView(op *open, guid [16]byte) bool {
+	if guid == ([16]byte{}) {
+		return false
+	}
+
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
+	return op.clientGuid == guid
+}
+
+// guid is the client that is asking, whose own oplocks are left standing. See sameCacheView.
+func holdersIn(opens []*open, own *lease, guid [16]byte) (oplocks []*open, leases []*lease) {
 	seen := make(map[*lease]struct{})
 	for _, op := range opens {
 		op.mu.Lock()
@@ -251,7 +274,7 @@ func holdersIn(opens []*open, own *lease) (oplocks []*open, leases []*lease) {
 			continue
 		}
 
-		if held {
+		if held && !sameCacheView(op, guid) {
 			oplocks = append(oplocks, op)
 		}
 	}
@@ -260,8 +283,8 @@ func holdersIn(opens []*open, own *lease) (oplocks []*open, leases []*lease) {
 }
 
 // holdersOn is holdersIn over the opens of a file.
-func (s *server) holdersOn(sh *share, path string, except *open, own *lease) ([]*open, []*lease) {
-	return holdersIn(s.opensOn(sh, path, except), own)
+func (s *server) holdersOn(sh *share, path string, except *open, own *lease, guid [16]byte) ([]*open, []*lease) {
+	return holdersIn(s.opensOn(sh, path, except), own, guid)
 }
 
 // opensOutside returns the opens that do not belong to the given lease. A lease may be granted
@@ -316,8 +339,8 @@ func exclusiveHeld(oplocks []*open, leases []*lease) bool {
 // It must not be called from the goroutine that serves a connection. The wait lasts as long as
 // the acknowledgment timer, and the acknowledgment it is waiting for may be on its way in over
 // that very connection.
-func (s *server) breakHoldersOn(sh *share, path string, except *open, own *lease, sharedOK bool) {
-	waits, notify, leaseNotify := s.startHolderBreaks(sh, path, except, own, sharedOK)
+func (s *server) breakHoldersOn(sh *share, path string, except *open, own *lease, guid [16]byte, sharedOK bool) {
+	waits, notify, leaseNotify := s.startHolderBreaks(sh, path, except, own, guid, sharedOK)
 
 	for _, op := range notify {
 		s.sendOplockBreak(op)
@@ -332,11 +355,11 @@ func (s *server) breakHoldersOn(sh *share, path string, except *open, own *lease
 
 // startHolderBreaks cuts back every promise on a file and returns what it takes to finish the
 // job: the channels to wait on, and the holders that still have to be told.
-func (s *server) startHolderBreaks(sh *share, path string, except *open, own *lease, sharedOK bool) (waits []chan struct{}, notify []*open, leaseNotify []*lease) {
+func (s *server) startHolderBreaks(sh *share, path string, except *open, own *lease, guid [16]byte, sharedOK bool) (waits []chan struct{}, notify []*open, leaseNotify []*lease) {
 	s.cachingMu.Lock()
 	defer s.cachingMu.Unlock()
 
-	oplocks, leases := s.holdersOn(sh, path, except, own)
+	oplocks, leases := s.holdersOn(sh, path, except, own, guid)
 	waits, notify = startBreaks(oplocks, oplockBreakTarget(sharedOK))
 	leaseWaits, leaseNotify := startLeaseBreaks(leases, sharedOK)
 
@@ -346,8 +369,8 @@ func (s *server) startHolderBreaks(sh *share, path string, except *open, own *le
 // tellHoldersOn cuts back the promises on a file without waiting for anybody. It is what an
 // operation does when nothing it found has to be acknowledged, and it must be used wherever the
 // goroutine serving a connection would otherwise be held up.
-func (s *server) tellHoldersOn(sh *share, path string, except *open, own *lease, sharedOK bool) {
-	_, notify, leaseNotify := s.startHolderBreaks(sh, path, except, own, sharedOK)
+func (s *server) tellHoldersOn(sh *share, path string, except *open, own *lease, guid [16]byte, sharedOK bool) {
+	_, notify, leaseNotify := s.startHolderBreaks(sh, path, except, own, guid, sharedOK)
 	if len(notify) == 0 && len(leaseNotify) == 0 {
 		return
 	}
@@ -365,8 +388,8 @@ func (s *server) tellHoldersOn(sh *share, path string, except *open, own *lease,
 // needsBreakWait reports whether a create would have to wait for a break before it may look at
 // the file. Only a promise that has to be acknowledged is worth waiting for: a read cache has
 // no level below it to argue about, so its holder is told and that is the end of it.
-func (s *server) needsBreakWait(sh *share, path string, except *open, own *lease, sharedOK bool) bool {
-	oplocks, leases := s.holdersOn(sh, path, except, own)
+func (s *server) needsBreakWait(sh *share, path string, except *open, own *lease, guid [16]byte, sharedOK bool) bool {
+	oplocks, leases := s.holdersOn(sh, path, except, own, guid)
 
 	to := oplockBreakTarget(sharedOK)
 	for _, op := range oplocks {
@@ -392,14 +415,21 @@ func (s *server) needsBreakWait(sh *share, path string, except *open, own *lease
 
 // hasHoldersOn reports whether anybody holds, or is in the middle of giving up, an oplock or a
 // lease on a file.
-func (s *server) hasHoldersOn(sh *share, path string, except *open, own *lease) bool {
-	oplocks, leases := s.holdersOn(sh, path, except, own)
+func (s *server) hasHoldersOn(sh *share, path string, except *open, own *lease, guid [16]byte) bool {
+	oplocks, leases := s.holdersOn(sh, path, except, own, guid)
 	return len(oplocks) > 0 || len(leases) > 0
 }
 
 // breakForChange cuts back every promise on a file that would let a client go on serving data
 // the change about to be made has rendered stale. It is what a write, a truncation, a rename or
 // a delete has to do.
+//
+// Every promise, and not only the ones outside the cache view of whoever is making the change. A
+// second open does not conflict with an oplock of the same client, because opening a file changes
+// nothing about it - but a write, a rename or a delete does, and what the client has cached through
+// its other handles is stale whoever made it so. A client left holding a cached handle on a file
+// that has been deleted goes on thinking it has that file open, which is what it says when it is
+// asked to let the share go.
 //
 // The breaks are not waited for. A read cache has nothing to acknowledge with, and an exclusive
 // promise cannot be standing while the open making the change exists, so there is nothing here
@@ -411,7 +441,7 @@ func (s *server) breakForChange(op *open) {
 	own := op.lease
 	op.mu.Unlock()
 
-	s.tellHoldersOn(sh, path, op, own, false)
+	s.tellHoldersOn(sh, path, op, own, [16]byte{}, false)
 }
 
 // grantOplock gives the open the oplock it asked for, and returns the level granted. An
@@ -436,13 +466,26 @@ func (s *server) grantOplock(op *open, requested uint8, tc *treeConnect, path st
 		return smb2.OPLOCK_LEVEL_NONE
 	}
 
+	// The opens of the client that is asking are in the same view of the file as the open being
+	// granted, so they neither stand in the way of the promise nor are broken for it.
+	op.mu.Lock()
+	guid := op.clientGuid
+	op.mu.Unlock()
+
 	others := s.opensOn(tc.share, path, op)
-	oplocks, leases := holdersIn(others, nil)
+	var elsewhere []*open
+	for _, other := range others {
+		if !sameCacheView(other, guid) {
+			elsewhere = append(elsewhere, other)
+		}
+	}
+
+	oplocks, leases := holdersIn(elsewhere, nil, guid)
 
 	// The file is free, so it may be promised in full. Otherwise nothing exclusive can be
 	// promised, but a read cache still can, as long as nobody else is holding more than one.
 	granted := requested
-	if len(others) > 0 {
+	if len(elsewhere) > 0 {
 		if exclusiveHeld(oplocks, leases) {
 			granted = smb2.OPLOCK_LEVEL_NONE
 		} else {

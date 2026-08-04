@@ -40,41 +40,39 @@ type treeConnect struct {
 	// However, it's not possible to upload empty files to the Sia network, so we have to work around that.
 	// The workaround is to remember the names of the files that were created (for the lifetime
 	// of the TreeConnect or until the files are deleted).
-	persistedOpens map[string]*open
+	persistedFiles map[string]*fileState
 	mu             sync.Mutex
 }
 
-// persistedObjects turns the opens the tree connect is holding for files that have been created
-// but not yet uploaded into the entries a listing would have carried, so that a client sees them
-// beside what the backend already knows about. Only the paths the caller asks for are taken.
+// persistedObjects turns the files the tree connect is holding that have been created but not yet
+// uploaded into the entries a listing would have carried, so that a client sees them beside what
+// the backend already knows about. Only the paths the caller asks for are taken.
 //
-// The size and the modification time of an open move under the lock of that open, and the writer
-// of a file holds it while it buffers what the client sends: read out of the table without it, an
-// upload in progress races every listing of the directory it is going into. The table is let go of
-// before any open is read, so the two locks are never held at once and the order they are taken in
-// cannot matter. want is called while the table is held, so it must not reach for a lock itself.
+// The size and the modification time of a file move under the lock of its state, and the writer of
+// a file settles them there as it goes: read out of the table without it, an upload in progress
+// races every listing of the directory it is going into. The table is let go of before any state is
+// read, so the two locks are never held at once and the order they are taken in cannot matter. want
+// is called while the table is held, so it must not reach for a lock itself.
 func (tc *treeConnect) persistedObjects(want func(path string) bool) []client.ObjectInfo {
 	tc.mu.Lock()
-	paths := make([]string, 0, len(tc.persistedOpens))
-	opens := make([]*open, 0, len(tc.persistedOpens))
-	for path, o := range tc.persistedOpens {
+	paths := make([]string, 0, len(tc.persistedFiles))
+	files := make([]*fileState, 0, len(tc.persistedFiles))
+	for path, fs := range tc.persistedFiles {
 		if want(path) {
 			paths = append(paths, path)
-			opens = append(opens, o)
+			files = append(files, fs)
 		}
 	}
 	tc.mu.Unlock()
 
-	ois := make([]client.ObjectInfo, 0, len(opens))
-	for i, o := range opens {
-		o.mu.Lock()
-		lastModified, size := o.lastModified, o.size
-		o.mu.Unlock()
+	ois := make([]client.ObjectInfo, 0, len(files))
+	for i, fs := range files {
+		size, _, _, modified, _ := fs.stat()
 
 		ois = append(ois, client.ObjectInfo{
 			Key:        "/" + paths[i],
-			CreatedAt:  lastModified,
-			ModifiedAt: lastModified,
+			CreatedAt:  modified,
+			ModifiedAt: modified,
 			Size:       size,
 		})
 	}
@@ -112,7 +110,7 @@ func newTreeConnectState(tid uint32, ss *session, sh *share, access uint32) *tre
 		share:          sh,
 		creationTime:   time.Now(),
 		maximalAccess:  access,
-		persistedOpens: make(map[string]*open),
+		persistedFiles: make(map[string]*fileState),
 	}
 }
 

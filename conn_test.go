@@ -115,6 +115,7 @@ func TestVerifyChannelSequence(t *testing.T) {
 				requestOpens:     make(map[uint64]*open),
 			}
 			op := &open{
+				file:                            &fileState{},
 				channelSequence:                 test.channelSequence,
 				outstandingRequestCount:         test.outstanding,
 				outstandingPreviousRequestCount: test.previous,
@@ -150,7 +151,7 @@ func TestVerifyChannelSequenceSkippedForOldDialects(t *testing.T) {
 		negotiateDialect: smb2.SMB_DIALECT_21,
 		requestOpens:     make(map[uint64]*open),
 	}
-	op := &open{channelSequence: 7, outstandingRequestCount: 2}
+	op := &open{file: &fileState{}, channelSequence: 7, outstandingRequestCount: 2}
 	req := newTestRequest(t, smb2.SMB2_WRITE, 9, false)
 
 	if status := c.verifyChannelSequence(op, req); status != smb2.STATUS_OK {

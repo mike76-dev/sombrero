@@ -176,8 +176,9 @@ func (s *server) markReplayEligible(op *open, tc *treeConnect) {
 	const useful = smb2.FILE_READ_DATA | smb2.FILE_EXECUTE | smb2.FILE_WRITE_DATA |
 		smb2.FILE_APPEND_DATA | smb2.DELETE
 
+	isDir := op.file.isDirectory()
 	op.mu.Lock()
-	eligible := op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 && op.grantedAccess&useful > 0
+	eligible := !isDir && op.grantedAccess&useful > 0
 	op.mu.Unlock()
 
 	if !eligible {

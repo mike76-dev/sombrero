@@ -106,10 +106,8 @@ func (c *connection) replayCreate(cr smb2.CreateRequest, ss *session, tc *treeCo
 
 // replayResponse builds the answer to a replayed create out of the open the first attempt made.
 func (c *connection) replayResponse(op *open, cr smb2.CreateRequest, tc *treeConnect, contexts map[uint32][]byte, lr *smb2.LeaseRequest) smb2.GenericResponse {
+	size, allocated, _, modified, attr := op.file.stat()
 	op.mu.Lock()
-	size, allocated := op.size, op.allocated
-	modified := op.lastModified
-	attr := op.fileAttributes
 	access := op.grantedAccess
 	handle := op.handle
 	fileID, durableFileID := op.fileID, op.durableFileID

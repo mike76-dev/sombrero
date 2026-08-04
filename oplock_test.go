@@ -49,6 +49,7 @@ func newOplockOpen(t *testing.T, s *server, sh *share, path string) (*open, *con
 	}
 
 	op := &open{
+		file:          &fileState{},
 		fileID:        uint64(oplockTestClient) * 10,
 		durableFileID: uint64(oplockTestClient) * 20,
 		session:       ss,
@@ -289,7 +290,7 @@ func TestAcknowledgeOplockBreak(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			op := &open{oplockLevel: test.held, oplockState: smb2.OplockHeld}
+			op := &open{file: &fileState{}, oplockLevel: test.held, oplockState: smb2.OplockHeld}
 			op.cond = sync.NewCond(&op.mu)
 
 			var wait chan struct{}
@@ -365,7 +366,7 @@ func TestBreakOplocksOn(t *testing.T) {
 
 		done := make(chan struct{})
 		go func() {
-			s.breakHoldersOn(sh, "dir/file", nil, nil, false)
+			s.breakHoldersOn(sh, "dir/file", nil, nil, [16]byte{}, false)
 			close(done)
 		}()
 
@@ -396,7 +397,7 @@ func TestBreakOplocksOn(t *testing.T) {
 
 		done := make(chan struct{})
 		go func() {
-			s.breakHoldersOn(sh, "dir/file", nil, nil, false)
+			s.breakHoldersOn(sh, "dir/file", nil, nil, [16]byte{}, false)
 			close(done)
 		}()
 
@@ -419,11 +420,11 @@ func TestBreakOplocksOn(t *testing.T) {
 
 		op, _, sent := newOplockOpen(t, s, sh, "dir/file")
 
-		if s.hasHoldersOn(sh, "dir/file", nil, nil) {
+		if s.hasHoldersOn(sh, "dir/file", nil, nil, [16]byte{}) {
 			t.Error("a file nobody holds an oplock on was reported as held")
 		}
 
-		s.breakHoldersOn(sh, "dir/file", nil, nil, false)
+		s.breakHoldersOn(sh, "dir/file", nil, nil, [16]byte{}, false)
 
 		select {
 		case <-sent:
@@ -448,7 +449,7 @@ func TestReleaseOplockFreesWaiters(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		s.breakHoldersOn(sh, "dir/file", nil, nil, false)
+		s.breakHoldersOn(sh, "dir/file", nil, nil, [16]byte{}, false)
 		close(done)
 	}()
 
@@ -465,7 +466,7 @@ func TestReleaseOplockFreesWaiters(t *testing.T) {
 		t.Fatal("the wait outlived the open it was waiting for")
 	}
 
-	if s.hasHoldersOn(sh, "dir/file", nil, nil) {
+	if s.hasHoldersOn(sh, "dir/file", nil, nil, [16]byte{}) {
 		t.Error("the oplock survived the open that held it")
 	}
 }

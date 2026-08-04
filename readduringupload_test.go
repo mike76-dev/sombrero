@@ -68,9 +68,7 @@ func TestReadOfWhatTheUploadNoLongerHoldsIsNotAStoreFailure(t *testing.T) {
 
 	// The buffer is made to look like one whose earlier part has already been sent, which is what
 	// it looks like once a file large enough to fill a part has gone through it.
-	file.mu.Lock()
-	u := file.pendingUpload
-	file.mu.Unlock()
+	u := file.file.uploadNow()
 
 	u.mu.Lock()
 	u.buf = u.buf[512:]

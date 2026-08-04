@@ -432,7 +432,14 @@ func (s *server) grantLease(op *open, l *lease, requested uint32, tc *treeConnec
 	s.cachingMu.Lock()
 
 	others := s.opensOn(tc.share, path, op)
-	oplocks, leases := holdersIn(others, l)
+
+	// A client asking for a lease on a file it already holds an oplock on through another handle is
+	// asking about its own view of the file, so that oplock is left standing.
+	op.mu.Lock()
+	guid := op.clientGuid
+	op.mu.Unlock()
+
+	oplocks, leases := holdersIn(others, l, guid)
 
 	// The file is the client's own, so it may be promised in full. Otherwise nothing that lets
 	// the client write can be promised, but a read cache still can, as long as nobody else is

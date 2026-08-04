@@ -91,7 +91,6 @@ type open struct {
 	resumeKey                       []byte
 	fileName                        string
 	createOptions                   uint32
-	fileAttributes                  uint32
 	createGuid                      [16]byte
 	applicationInstanceVersion      [16]byte
 	channelSequence                 uint16
@@ -129,14 +128,9 @@ type open struct {
 	// an oplock or a lease, never both.
 	lease *lease
 
-	created      time.Time
-	lastModified time.Time
-
-	// size is how much space the file occupies.
-	// allocated in most cases means the same, except when a file is being uploaded.
-	// In such case, it may hold the future size of the file (it depends on the client, though).
-	size      uint64
-	allocated uint64
+	// file is what this open shares with every other open on the same file: the size, the
+	// timestamps, the attributes and the upload carrying it to the backend. Never nil.
+	file *fileState
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -147,14 +141,17 @@ type open struct {
 	lastSearch    string
 	searchResults []client.ObjectInfo
 
-	// if pendingUpload is not nil, it points to an active multipart upload.
-	pendingUpload *upload
-
 	// To speed up the downloads, read buffering is implemented. The buffer consists of several
 	// caches, because the SMB2_READ requests may come out of order. Chunks are downloaded in the
 	// background, so an entry may still be in flight; readers wait on its done channel. When the
 	// reads look sequential, the next few chunks are prefetched so the network transfer overlaps
 	// with serving cached data.
+	// cacheGeneration is which writing of the file the cache below was filled in. The cache
+	// belongs to this handle, and a write through another handle on the same file has to reach
+	// it: the generation of the file moves on when it is written anew, and a cache left behind
+	// is dropped rather than served.
+	cacheGeneration uint64
+
 	buffer       map[uint64]*readChunk
 	cacheOrder   []uint64
 	chunkSize    uint64
@@ -258,8 +255,213 @@ func grantAccess(cr smb2.CreateRequest, tc *treeConnect, ss *session) bool {
 	return true
 }
 
+// fileState is what every open on the same file shares: the size and the timestamps that a write
+// through one handle has to be visible through another, the attributes, and the upload that is
+// carrying the file to the backend. An open points at it rather than holding the fields itself, so
+// that a client asking after a file while another of its handles is still uploading it is answered
+// with what the file is now, and not with what the handle was opened on.
+//
+// It is also the record by which a file that has been created but not yet uploaded is known. The
+// state outlives the opens on it, which is what lets a create that comes later find such a file
+// although the backend has no object for it. Nothing else about an open is shared: the file ID, the
+// caching promise and the read cache all belong to the handle alone, and every create makes its own.
+//
+// mu guards all of it, and is a leaf: no other lock of the server is taken while it is held.
+type fileState struct {
+	mu sync.Mutex
+
+	created  time.Time
+	modified time.Time
+
+	// size is how much space the file occupies. allocated usually means the same, except while a
+	// file is being uploaded, when it may hold the size the file is going to be - which of the
+	// two a client sets is up to the client.
+	size      uint64
+	allocated uint64
+
+	attributes uint32
+
+	// upload, when it is not nil, is the multipart upload the file is being written through.
+	// Every open on the file writes through the same one.
+	upload *upload
+
+	// generation counts the times the file has been written anew. A read cache belongs to the
+	// generation it was filled in, and an open drops its own once the file has moved on: the
+	// caches belong to the handles, so a write through one of them has to reach the rest.
+	generation uint64
+
+	// startingMu serializes the start of an upload, which takes a call to the backend and so
+	// cannot be done under mu.
+	startingMu sync.Mutex
+}
+
+// generationNow is which writing of the file the state is on.
+func (fs *fileState) generationNow() uint64 {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.generation
+}
+
+// stat reads out everything a client is told about a file at once, so that the answer is of one
+// moment rather than of several.
+func (fs *fileState) stat() (size, allocated uint64, created, modified time.Time, attributes uint32) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.size, fs.allocated, fs.created, fs.modified, fs.attributes
+}
+
+// sizeNow is how large the file is at this moment.
+func (fs *fileState) sizeNow() uint64 {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.size
+}
+
+// attributesNow is what the file is at this moment.
+func (fs *fileState) attributesNow() uint32 {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.attributes
+}
+
+// isDirectory reports whether the file is a directory.
+func (fs *fileState) isDirectory() bool {
+	return fs.attributesNow()&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
+}
+
+// markDirectory turns the file into a directory, which it is either from the moment it is made or
+// never.
+func (fs *fileState) markDirectory() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.attributes |= smb2.FILE_ATTRIBUTE_DIRECTORY
+	fs.attributes &^= smb2.FILE_ATTRIBUTE_NORMAL
+}
+
+// setAttributes replaces what the file is.
+func (fs *fileState) setAttributes(attributes uint32) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.attributes = attributes
+}
+
+// setAllocated sets the space the file is to occupy, which a client may ask for before it has
+// written anything.
+func (fs *fileState) setAllocated(allocated uint64) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.allocated = allocated
+}
+
+// setModified moves the modification time forward, and never back: the time a client sets is
+// refused if the file has been written since.
+func (fs *fileState) setModified(modified time.Time) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if modified.After(fs.modified) {
+		fs.modified = modified
+	}
+}
+
+// touch marks the file as modified now.
+func (fs *fileState) touch() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.modified = time.Now()
+}
+
+// empty is the file after a create that superseded or overwrote it. The contents are gone, so the
+// file moves on a generation and every read cache on it is left behind: what a handle had cached is
+// the contents of a file that no longer exists, and the handle that emptied it need not be the one
+// that cached it.
+func (fs *fileState) empty() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.size = 0
+	fs.allocated = 0
+	fs.modified = time.Now()
+	fs.generation++
+}
+
+// uploadNow is the upload the file is being written through, if there is one.
+func (fs *fileState) uploadNow() *upload {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.upload
+}
+
+// startUpload takes the upload on, and reports whether it did: a file already being written
+// through one upload is not written through a second. The file is being written anew, so it moves
+// on a generation and every read cache on it is left behind.
+func (fs *fileState) startUpload(u *upload) bool {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.upload != nil {
+		return false
+	}
+
+	fs.upload = u
+	fs.generation++
+
+	return true
+}
+
+// advanceUpload takes the size the upload has reached, so that a client asking after the file
+// while it is being written is told how much of it there is.
+func (fs *fileState) advanceUpload(u *upload, size uint64) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.upload != u {
+		return
+	}
+
+	fs.size = size
+	fs.allocated = size
+	fs.modified = time.Now()
+}
+
+// finishUpload settles the file at the size it was written to and lets the upload go.
+func (fs *fileState) finishUpload(u *upload, size uint64) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.upload != u {
+		return
+	}
+
+	fs.size = size
+	fs.allocated = size
+	fs.upload = nil
+	fs.modified = time.Now()
+}
+
+// dropUpload lets an upload go without settling anything, for one that came to nothing.
+func (fs *fileState) dropUpload(u *upload) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.upload == u {
+		fs.upload = nil
+	}
+}
+
 // registerOpen creates a new Open object and registers it with the server.
-func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeConnect, info client.ObjectInfo, ctx context.Context, cancel context.CancelFunc) *open {
+// fs is the state of the file the open is on, which is nil for a file being opened for the first
+// time and the state every other open on it shares for one that is already known.
+func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeConnect, info client.ObjectInfo, ctx context.Context, cancel context.CancelFunc, fs *fileState) *open {
 	h, _ := blake2b.New256(nil)
 	h.Write([]byte(info.Key))
 	id := h.Sum(nil)
@@ -277,29 +479,43 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 		filepath, filename, isDir = utils.ExtractFilename(info.Key)
 	}
 
+	// A file that has been created but not yet uploaded is already known by its state, which
+	// every open on it shares. Anything else is met here for the first time.
+	if fs == nil {
+		attributes := uint32(smb2.FILE_ATTRIBUTE_NORMAL)
+		if isDir {
+			attributes = smb2.FILE_ATTRIBUTE_DIRECTORY
+		}
+		fs = &fileState{
+			created:    info.CreatedAt,
+			modified:   info.ModifiedAt,
+			size:       info.Size,
+			allocated:  info.Size,
+			attributes: attributes,
+		}
+	} else if isDir {
+		fs.markDirectory()
+	}
+
 	fid := make([]byte, 16)
 	frand.Read(fid)
 	op := &open{
-		handle:         binary.LittleEndian.Uint64(id[:8]),
-		fileID:         binary.LittleEndian.Uint64(fid[:8]),
-		durableFileID:  binary.LittleEndian.Uint64(fid[8:]),
-		session:        ss,
-		connection:     c,
-		treeConnect:    tc,
-		grantedAccess:  access,
-		fileName:       filename,
-		pathName:       filepath,
-		resumeKey:      id[:24],
-		createOptions:  cr.CreateOptions(),
-		fileAttributes: smb2.FILE_ATTRIBUTE_NORMAL,
-		created:        info.CreatedAt,
-		lastModified:   info.ModifiedAt,
-		size:           info.Size,
-		allocated:      info.Size,
-		ctx:            ctx,
-		cancel:         cancel,
-		lsaFrames:      make(map[uint32]*rpc.Frame),
-		buffer:         make(map[uint64]*readChunk),
+		handle:        binary.LittleEndian.Uint64(id[:8]),
+		fileID:        binary.LittleEndian.Uint64(fid[:8]),
+		durableFileID: binary.LittleEndian.Uint64(fid[8:]),
+		session:       ss,
+		connection:    c,
+		treeConnect:   tc,
+		grantedAccess: access,
+		fileName:      filename,
+		pathName:      filepath,
+		resumeKey:     id[:24],
+		createOptions: cr.CreateOptions(),
+		file:          fs,
+		ctx:           ctx,
+		cancel:        cancel,
+		lsaFrames:     make(map[uint32]*rpc.Frame),
+		buffer:        make(map[uint64]*readChunk),
 		// For indexd shares, maxUploadSize equals the slab size, which is also the
 		// alignment that makes downloads the cheapest. For renterd shares, it is
 		// merely the multipart part size; renterd serves arbitrary ranges, so the
@@ -322,11 +538,6 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 		op.channelSequence = cr.Header().ChannelSequence()
 	}
 
-	if isDir {
-		op.fileAttributes |= smb2.FILE_ATTRIBUTE_DIRECTORY
-		op.fileAttributes = op.fileAttributes &^ smb2.FILE_ATTRIBUTE_NORMAL
-	}
-
 	ss.mu.Lock()
 	ss.openTable[op.fileID] = op
 	ss.mu.Unlock()
@@ -344,43 +555,9 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 	return op
 }
 
-// restoreOpen is invoked when a file created earlier during the session is mentioned again.
-// The create that mentions it is the one the open now answers for, so what that create asked
-// for replaces what the create before it did.
-func (s *server) restoreOpen(op *open, cr smb2.CreateRequest, c *connection) {
-	// The open is established anew, this time over the connection that asked for it, which
-	// need not be the one that created it in the first place.
-	op.mu.Lock()
-	op.connection = c
-
-	// The create options belong to the handle that carried them and not to the name. Kept from
-	// the create that first stood the open up, they outlive the handle that asked for them and
-	// are applied to every later one over that name: a client that opens the destination of a
-	// copy with delete-on-close - which is how a client makes sure a copy it abandons leaves
-	// nothing behind - would leave that on the name, and the handle that went on to upload the
-	// file would delete it on the way out without ever having asked to.
-	op.createOptions = cr.CreateOptions()
-	op.mu.Unlock()
-
-	op.session.mu.Lock()
-	op.session.openTable[op.fileID] = op
-	op.session.mu.Unlock()
-
-	s.mu.Lock()
-	s.globalOpenTable[op.durableFileID] = op
-	s.mu.Unlock()
-	s.indexOpen(op)
-
-	op.treeConnect.mu.Lock()
-	op.treeConnect.openCount++
-	op.treeConnect.mu.Unlock()
-}
-
 // closeOpen cancels all operations on the Open and destroys it.
-func (s *server) closeOpen(op *open, persist bool) {
-	if !persist {
-		op.cancel()
-	}
+func (s *server) closeOpen(op *open) {
+	op.cancel()
 
 	// An open that goes away takes its oplock with it, and releases whoever was waiting for
 	// the break it was in the middle of. The create that made it can no longer be replayed
@@ -405,8 +582,8 @@ func (s *server) closeOpen(op *open, persist bool) {
 // queryDirectory performs a search within the directory using the provided pattern.
 // Wildcards are supported.
 func (op *open) queryDirectory(acc stores.Account, pattern string) error {
+	attr := op.file.attributesNow()
 	op.mu.Lock()
-	attr := op.fileAttributes
 	dir := op.pathName
 	ctx := op.ctx
 	op.mu.Unlock()
@@ -466,14 +643,16 @@ func (op *open) fileAllInformation() []byte {
 	var size, alloc uint64
 	var lc uint32
 	var pd bool
+	fileSize, allocated, _, modified, attributes := op.file.stat()
+	isDir := attributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
 	op.mu.Lock()
 	if strings.ToLower(op.fileName) == "srvsvc" {
 		alloc = 4096
 		lc = 1
 		pd = true
-	} else if op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		size = op.size
-		alloc = op.allocated
+	} else if !isDir {
+		size = fileSize
+		alloc = allocated
 	}
 
 	// A handle whose file is on its way out says so. Whether the deletion was asked for by the
@@ -485,18 +664,18 @@ func (op *open) fileAllInformation() []byte {
 
 	fai := smb2.FileAllInfo{
 		BasicInfo: smb2.FileBasicInfo{
-			CreationTime:   op.lastModified,
-			LastAccessTime: op.lastModified,
-			LastWriteTime:  op.lastModified,
-			ChangeTime:     op.lastModified,
-			FileAttributes: op.fileAttributes,
+			CreationTime:   modified,
+			LastAccessTime: modified,
+			LastWriteTime:  modified,
+			ChangeTime:     modified,
+			FileAttributes: attributes,
 		},
 		StandardInfo: smb2.FileStandardInfo{
 			AllocationSize: alloc,
 			EndOfFile:      size,
 			NumberOfLinks:  lc,
 			DeletePending:  pd,
-			Directory:      op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
+			Directory:      isDir,
 		},
 		InternalInfo: smb2.FileInternalInfo{
 			IndexNumber: op.handle,
@@ -523,14 +702,16 @@ func (op *open) fileStandardInformation() []byte {
 	var size, alloc uint64
 	var lc uint32
 	var pd bool
+	fileSize, allocated, _, _, attributes := op.file.stat()
+	isDir := attributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
 	op.mu.Lock()
 	if strings.ToLower(op.fileName) == "srvsvc" {
 		alloc = 4096
 		lc = 1
 		pd = true
-	} else if op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		size = op.size
-		alloc = op.allocated
+	} else if !isDir {
+		size = fileSize
+		alloc = allocated
 	}
 
 	// As above: a file that is going says so.
@@ -543,7 +724,7 @@ func (op *open) fileStandardInformation() []byte {
 		EndOfFile:      size,
 		NumberOfLinks:  lc,
 		DeletePending:  pd,
-		Directory:      op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY > 0,
+		Directory:      isDir,
 	}
 	op.mu.Unlock()
 	return fsi.Encode()
@@ -552,21 +733,20 @@ func (op *open) fileStandardInformation() []byte {
 // fileNetworkOpenInformation genereates a FileNetworkOpenInfo structure.
 func (op *open) fileNetworkOpenInformation() []byte {
 	var size, alloc uint64
-	op.mu.Lock()
-	if op.fileAttributes&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		size = op.size
-		alloc = op.allocated
+	fileSize, allocated, _, modified, attributes := op.file.stat()
+	if attributes&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		size = fileSize
+		alloc = allocated
 	}
 	fnoi := smb2.FileNetworkOpenInfo{
-		CreationTime:   op.lastModified,
-		LastAccessTime: op.lastModified,
-		LastWriteTime:  op.lastModified,
-		ChangeTime:     op.lastModified,
+		CreationTime:   modified,
+		LastAccessTime: modified,
+		LastWriteTime:  modified,
+		ChangeTime:     modified,
 		AllocationSize: alloc,
 		EndOfFile:      size,
-		FileAttributes: op.fileAttributes,
+		FileAttributes: attributes,
 	}
-	op.mu.Unlock()
 	return fnoi.Encode()
 }
 
@@ -590,13 +770,12 @@ func (op *open) fileEaInformation() []byte {
 
 // fileStreamInformation generates a FileStreamInfo structure.
 func (op *open) fileStreamInformation() []byte {
-	op.mu.Lock()
+	size, allocated, _, _, _ := op.file.stat()
 	fsi := smb2.FileStreamInfo{
 		StreamName:           "::$DATA",
-		StreamSize:           op.size,
-		StreamAllocationSize: op.allocated,
+		StreamSize:           size,
+		StreamAllocationSize: allocated,
 	}
-	op.mu.Unlock()
 	return fsi.Encode()
 }
 
@@ -739,19 +918,20 @@ func (op *open) getObjectID() []byte {
 // has already been downloaded. It returns false if any part of the range is missing
 // or still in flight, in which case the caller should fall back to op.read.
 func (op *open) tryReadCached(offset, length uint64) ([]byte, bool) {
-	op.mu.Lock()
-	size := op.size
-	chunkSize := op.chunkSize
-
 	// A file with an upload running is being written, and the only account of what it holds is
 	// the one the upload keeps. The cache is emptied when the upload starts and nothing fills it
 	// again while the upload runs, so this is the same answer either way - but it is said here
 	// rather than left to be worked out from the two of them, because this path answers the
 	// client on its own and must not be able to serve the file as it stood before the write.
-	if op.pendingUpload != nil {
-		op.mu.Unlock()
+	size, _, _, _, _ := op.file.stat()
+	if op.file.uploadNow() != nil {
 		return nil, false
 	}
+	generation := op.file.generationNow()
+
+	op.mu.Lock()
+	op.dropCacheOfOlderGeneration(generation)
+	chunkSize := op.chunkSize
 
 	if offset >= size {
 		op.mu.Unlock()
@@ -844,8 +1024,10 @@ func (op *open) tryReadCached(offset, length uint64) ([]byte, bool) {
 // that can be served from the cache alone should use tryReadCached instead.
 func (op *open) read(offset, length uint64) ([]byte, error) {
 	// Fetch variables for convenience.
+	size := op.file.sizeNow()
+	generation := op.file.generationNow()
 	op.mu.Lock()
-	size := op.size
+	op.dropCacheOfOlderGeneration(generation)
 	path := op.pathName
 	chunkSize := op.chunkSize
 	op.mu.Unlock()
@@ -860,10 +1042,7 @@ func (op *open) read(offset, length uint64) ([]byte, error) {
 
 	// A file that is being uploaded is not an object in the store yet, so there is nothing there
 	// to fetch: the read is answered out of what the upload is still holding, or not at all.
-	op.mu.Lock()
-	u := op.pendingUpload
-	op.mu.Unlock()
-	if u != nil {
+	if u := op.file.uploadNow(); u != nil {
 		if data, ok := u.readBuffered(offset, length); ok {
 			return data, nil
 		}
@@ -989,6 +1168,17 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readC
 // which is the most that can be said for a read racing a write over the same bytes anyway.
 //
 // op.mu must be held.
+// dropCacheOfOlderGeneration empties the read cache if the file has been written anew since it was
+// filled. op.mu must be held.
+func (op *open) dropCacheOfOlderGeneration(generation uint64) {
+	if op.cacheGeneration == generation {
+		return
+	}
+
+	op.invalidateReadCache()
+	op.cacheGeneration = generation
+}
+
 func (op *open) invalidateReadCache() {
 	if len(op.buffer) == 0 {
 		return
@@ -1028,11 +1218,14 @@ func (op *open) evictChunks() {
 }
 
 // startUpload initiates a multipart upload.
+// The upload belongs to the file and not to the handle, so every open on the file writes through
+// the one upload. Starting it takes a call to the backend, which cannot be made under the lock that
+// guards the state, so the start is serialized on a lock of its own instead.
 func (op *open) startUpload() error {
-	op.mu.Lock()
-	defer op.mu.Unlock()
+	op.file.startingMu.Lock()
+	defer op.file.startingMu.Unlock()
 
-	if op.pendingUpload != nil {
+	if op.file.uploadNow() != nil {
 		return nil
 	}
 
@@ -1041,39 +1234,45 @@ func (op *open) startUpload() error {
 		return err
 	}
 
-	id, err := op.treeConnect.client.StartUpload(op.ctx, acc, op.pathName)
+	op.mu.Lock()
+	ctx, path := op.ctx, op.pathName
+	op.mu.Unlock()
+
+	id, err := op.treeConnect.client.StartUpload(ctx, acc, path)
 	if err != nil {
 		return err
 	}
 
 	// From here the file is being written anew, so whatever was cached of the old one is no
-	// longer an answer to anything.
+	// longer an answer to anything. The caches of the other opens on the file go with the
+	// generation the upload moves the file on to.
+	op.mu.Lock()
 	op.invalidateReadCache()
+	op.mu.Unlock()
 
-	op.pendingUpload = &upload{
+	op.file.startUpload(&upload{
 		uploadID:   id,
 		pending:    make(map[uint64]*uploadChunk),
 		nextOffset: 0,
 		bufOffset:  0,
 		maxLength:  op.treeConnect.maxUploadSize,
-	}
+	})
 
 	return nil
 }
 
 // write buffers contiguous chunks of data and uploads them as needed.
 func (op *open) write(offset uint64, data []byte) error {
-	op.mu.Lock()
-	u := op.pendingUpload
-	op.mu.Unlock()
-
+	u := op.file.uploadNow()
 	if u == nil {
 		if err := op.startUpload(); err != nil {
 			return err
 		}
-		op.mu.Lock()
-		u = op.pendingUpload
-		op.mu.Unlock()
+		u = op.file.uploadNow()
+	}
+
+	if u == nil {
+		return errors.New("write: the upload went away before anything was written")
 	}
 
 	u.mu.Lock()
@@ -1097,13 +1296,7 @@ func (op *open) write(offset uint64, data []byte) error {
 		u.nextOffset += uint64(len(ch.data))
 		delete(u.pending, ch.offset)
 
-		op.mu.Lock()
-		if op.pendingUpload == u {
-			op.size = u.totalSize
-			op.allocated = u.totalSize
-			op.lastModified = time.Now()
-		}
-		op.mu.Unlock()
+		op.file.advanceUpload(u, u.totalSize)
 	}
 
 	// Detach any complete slabs while holding the lock, then upload them
@@ -1147,11 +1340,11 @@ func (op *open) write(offset uint64, data []byte) error {
 
 // flush uploads the remaining part and finalizes the upload.
 func (op *open) flush() error {
+	u := op.file.uploadNow()
 	op.mu.Lock()
-	u := op.pendingUpload
 	for u != nil && op.inflight > 0 {
 		op.cond.Wait()
-		u = op.pendingUpload
+		u = op.file.uploadNow()
 	}
 	op.mu.Unlock()
 
@@ -1214,17 +1407,10 @@ func (op *open) flush() error {
 		return err
 	}
 
-	op.mu.Lock()
-	if op.pendingUpload == u {
-		op.size = finalSize
-		op.allocated = finalSize
-		op.pendingUpload = nil
-		op.lastModified = time.Now()
-	}
-	op.mu.Unlock()
+	op.file.finishUpload(u, finalSize)
 
 	op.treeConnect.mu.Lock()
-	delete(op.treeConnect.persistedOpens, op.pathName)
+	delete(op.treeConnect.persistedFiles, op.pathName)
 	op.treeConnect.mu.Unlock()
 
 	return nil
@@ -1232,14 +1418,11 @@ func (op *open) flush() error {
 
 // cancelUpload aborts the running upload.
 func (op *open) cancelUpload() {
-	op.mu.Lock()
-	u := op.pendingUpload
-	op.pendingUpload = nil
-	op.mu.Unlock()
-
+	u := op.file.uploadNow()
 	if u == nil {
 		return
 	}
+	op.file.dropUpload(u)
 
 	u.mu.Lock()
 	uploadID := u.uploadID

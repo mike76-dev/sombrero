@@ -160,7 +160,7 @@ func TestScavengeReleasesWhatTheConnectionHeld(t *testing.T) {
 
 	alice := h.dial("alice")
 	alice.create("dir/file", smb2.OPLOCK_LEVEL_BATCH, smb2.FILE_OPEN)
-	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil) {
+	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil, [16]byte{}) {
 		t.Fatal("alice was not granted an oplock to begin with")
 	}
 
@@ -176,7 +176,7 @@ func TestScavengeReleasesWhatTheConnectionHeld(t *testing.T) {
 	if h.stillConnected(alice.conn.clientName) {
 		t.Fatal("the connection was kept although nobody was authenticated over it")
 	}
-	if h.srv.hasHoldersOn(h.share, "dir/file", nil, nil) {
+	if h.srv.hasHoldersOn(h.share, "dir/file", nil, nil, [16]byte{}) {
 		t.Error("the oplock outlived the connection that held it")
 	}
 }

@@ -351,7 +351,7 @@ func TestIntegrationSameClientSharesLease(t *testing.T) {
 
 	alice.quiet(200*time.Millisecond, "a client was told to break its own lease")
 
-	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil) {
+	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil, [16]byte{}) {
 		t.Error("the lease was given up when the client opened the file a second time")
 	}
 }
@@ -494,7 +494,7 @@ func TestIntegrationLeaseKeyBoundToOneFile(t *testing.T) {
 	}
 
 	// The refusal must leave nothing behind: the file it was refused on stays free.
-	if h.srv.hasHoldersOn(h.share, "dir/other", nil, nil) {
+	if h.srv.hasHoldersOn(h.share, "dir/other", nil, nil, [16]byte{}) {
 		t.Error("a refused create left a promise on the file")
 	}
 }
@@ -520,7 +520,7 @@ func TestIntegrationLeaseOutlivesOneOfItsOpens(t *testing.T) {
 	if state := l.stateNow(); state != rwh {
 		t.Errorf("the lease holds %#x after one of two handles closed, want %#x", state, rwh)
 	}
-	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil) {
+	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil, [16]byte{}) {
 		t.Error("the lease was given up while an open still shared it")
 	}
 
@@ -531,7 +531,7 @@ func TestIntegrationLeaseOutlivesOneOfItsOpens(t *testing.T) {
 	if state := l.stateNow(); state != smb2.SMB2_LEASE_NONE {
 		t.Errorf("the lease holds %#x after its last handle closed, want none", state)
 	}
-	if h.srv.hasHoldersOn(h.share, "dir/file", nil, nil) {
+	if h.srv.hasHoldersOn(h.share, "dir/file", nil, nil, [16]byte{}) {
 		t.Error("the lease outlived the last open that shared it")
 	}
 }
@@ -654,7 +654,7 @@ func TestIntegrationLeaseBreakAcknowledgment(t *testing.T) {
 	if status := smb2.Header(resp).Status(); status != smb2.STATUS_OK {
 		t.Errorf("a proper acknowledgment gave %#x, want success", status)
 	}
-	if h.srv.hasHoldersOn(h.share, "dir/file", nil, nil) {
+	if h.srv.hasHoldersOn(h.share, "dir/file", nil, nil, [16]byte{}) {
 		t.Error("the lease survived the break it acknowledged")
 	}
 }

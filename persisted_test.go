@@ -35,13 +35,13 @@ func TestPersistedOpensAreListedWithoutRacingTheWriter(t *testing.T) {
 	}
 	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
 
-	if _, ok := func() (*open, bool) {
+	if _, ok := func() (*fileState, bool) {
 		cl.tc.mu.Lock()
 		defer cl.tc.mu.Unlock()
-		o, ok := cl.tc.persistedOpens["docs/notes.txt"]
-		return o, ok
+		fs, ok := cl.tc.persistedFiles["docs/notes.txt"]
+		return fs, ok
 	}(); !ok {
-		t.Fatal("the created file left no persisted open, so a listing has nothing to race with")
+		t.Fatal("the created file left no persisted state, so a listing has nothing to race with")
 	}
 
 	var wg sync.WaitGroup

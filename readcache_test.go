@@ -55,38 +55,47 @@ func TestWriteInvalidatesTheReadCache(t *testing.T) {
 }
 
 // TestOverwritingCreateInvalidatesTheReadCache is the same staleness reached through a create
-// rather than a write. A create that supersedes or overwrites empties the file, and where the open
-// it is answered with is one that was kept aside and handed back, that open arrives carrying the
-// cache of the file it held the last time round.
+// rather than a write, and through another handle rather than this one. A create that supersedes or
+// overwrites empties the file, and the cache belongs to the handle: the handle that emptied the file
+// need not be the one holding the contents of it from before.
 func TestOverwritingCreateInvalidatesTheReadCache(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")
 
-	// A file that exists only as the entry the tree connect keeps under its name, which is the
-	// open a second create is handed back.
+	// A file that exists only as the state the tree connect keeps under its name, which every open
+	// on it shares.
 	created := cl.createWithOptions("clip.mp4", smb2.FILE_CREATE, 0)
 	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
 
 	// A cache is put on the handle by hand: what matters is that a create which empties the file
-	// leaves nothing of it behind, not how the chunks came to be there.
+	// leaves nothing of it to be read, not how the chunks came to be there.
+	file.file.mu.Lock()
+	file.file.size = 4096
+	file.file.mu.Unlock()
 	file.mu.Lock()
 	file.buffer[0] = &readChunk{data: bytes.Repeat([]byte("O"), 4096), done: closedChan()}
 	file.cacheOrder = []uint64{0}
-	file.size = 4096
+	file.cacheGeneration = file.file.generationNow()
 	file.mu.Unlock()
 
+	// The overwriting create is answered with an open of its own, so nothing about the handle above
+	// is touched by it. What the file is has moved on all the same.
 	cl.createWithOptions("clip.mp4", smb2.FILE_OVERWRITE_IF, 0)
+
+	if size := file.file.sizeNow(); size != 0 {
+		t.Errorf("the overwriting create left the file at %d bytes, want it emptied", size)
+	}
+
+	// The read is what the cache is for, so the read is what says whether it survived.
+	if data, ok := file.tryReadCached(0, 4096); ok {
+		t.Errorf("the first handle served %d bytes of the file as it was before it was emptied", len(data))
+	}
 
 	file.mu.Lock()
 	cached := len(file.buffer)
-	size := file.size
 	file.mu.Unlock()
-
-	if size != 0 {
-		t.Errorf("the overwriting create left the file at %d bytes, want it emptied", size)
-	}
 	if cached != 0 {
-		t.Error("the overwriting create left the contents of the emptied file in the read cache")
+		t.Error("the contents of the emptied file were left in the read cache")
 	}
 }
 

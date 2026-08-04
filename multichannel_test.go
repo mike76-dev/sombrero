@@ -70,7 +70,7 @@ func TestIntegrationOplockGoesWhenNoChannelIsLeft(t *testing.T) {
 
 	alice := h.dial("alice")
 	alice.create("dir/file", smb2.OPLOCK_LEVEL_BATCH, smb2.FILE_OPEN)
-	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil) {
+	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil, [16]byte{}) {
 		t.Fatal("alice was not granted an oplock to begin with")
 	}
 
@@ -157,7 +157,7 @@ func TestIntegrationLeaseGoesWhenTheClientCannotBeReached(t *testing.T) {
 
 	alice := h.dial("alice")
 	alice.createLeased("dir/file", aliceKey, rwh, 2, smb2.FILE_OPEN)
-	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil) {
+	if !h.srv.hasHoldersOn(h.share, "dir/file", nil, nil, [16]byte{}) {
 		t.Fatal("alice was not granted a lease to begin with")
 	}
 

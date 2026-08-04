@@ -135,8 +135,8 @@ func TestIntegrationDirectoryRenameMovesTheChildren(t *testing.T) {
 
 	// The persisted entry of the unuploaded draft is re-keyed with the directory.
 	alice.tc.mu.Lock()
-	_, oldKept := alice.tc.persistedOpens["dir/sub/draft"]
-	_, newKept := alice.tc.persistedOpens["dir/moved/draft"]
+	_, oldKept := alice.tc.persistedFiles["dir/sub/draft"]
+	_, newKept := alice.tc.persistedFiles["dir/moved/draft"]
 	alice.tc.mu.Unlock()
 	if oldKept {
 		t.Error("the persisted entry was left under the old name")
@@ -146,7 +146,7 @@ func TestIntegrationDirectoryRenameMovesTheChildren(t *testing.T) {
 	}
 }
 
-func TestIntegrationCloseAndRestoreKeepTheIndexRight(t *testing.T) {
+func TestIntegrationCloseAndReopenKeepTheIndexRight(t *testing.T) {
 	h := newSMBTest(t)
 
 	alice := h.dial("alice")
@@ -162,14 +162,14 @@ func TestIntegrationCloseAndRestoreKeepTheIndexRight(t *testing.T) {
 		t.Errorf("%d open(s) after the close, want none", got)
 	}
 
-	// Reopening a file created during the session restores the persisted open, and the index
-	// entry with it.
+	// Reopening a file created during the session makes an open of its own on it, which the index
+	// carries like any other.
 	again, _ := alice.create("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
 	if status := smb2.Header(again).Status(); status != smb2.STATUS_OK {
 		t.Fatalf("reopening failed with %#x", status)
 	}
 	if got := len(h.srv.opensOn(h.share, "dir/file", nil)); got != 1 {
-		t.Errorf("%d open(s) after the restore, want 1", got)
+		t.Errorf("%d open(s) after reopening, want 1", got)
 	}
 }
 
