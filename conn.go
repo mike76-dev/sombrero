@@ -371,6 +371,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 		c.grantCredits(nr.Header().MessageID(), 1) // Grant just one credit
 
+		if dialect != smb2.SMB_DIALECT_202 && c.server.isLeasingCapable {
+			c.serverCapabilities |= smb2.GLOBAL_CAP_LEASING
+		}
+
 		resp := smb2.NewNegotiateResponse(c.server.serverGuid[:], c.ntlmServer, dialect, c.serverCapabilities, uint32(c.maxTransactSize), uint32(c.maxReadSize), uint32(c.maxWriteSize))
 		return resp, nil, nil
 	}
@@ -408,6 +412,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		if smb2.Is3X(c.negotiateDialect) && c.server.isMultiChannelCapable && c.clientCapabilities&smb2.GLOBAL_CAP_MULTI_CHANNEL > 0 {
 			c.serverCapabilities |= smb2.GLOBAL_CAP_MULTI_CHANNEL
+		}
+
+		// Leasing turns on the dialect alone. A client does not have to say it wants leases - the
+		// 2.0.2 dialect is simply the one that has none - and it asks for one per create, in the
+		// lease create context, rather than up here.
+		if c.negotiateDialect != smb2.SMB_DIALECT_202 && c.server.isLeasingCapable {
+			c.serverCapabilities |= smb2.GLOBAL_CAP_LEASING
 		}
 
 		if nr.SecurityMode()&smb2.NEGOTIATE_SIGNING_REQUIRED > 0 {
@@ -959,15 +970,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// cannot happen here: a connection serves its requests one at a time, and the
 		// acknowledgment being waited for may be on its way in over this very connection. A
 		// read cache has no level below it to argue about, so its holder is simply told.
-		// The client that is asking is what says whose promises stand: an oplock it holds itself
+		// Who is asking is what says whose promises stand: a promise the client already holds
 		// covers the file it is opening again, and it has nothing to give up.
-		var asking [16]byte
-		if len(c.clientGuid) == 16 {
-			asking = [16]byte(c.clientGuid)
-		}
+		asking := c.askedBy(own, lr)
 
-		if !c.server.needsBreakWait(tc.share, path, nil, own, asking, sharedOK) {
-			c.server.tellHoldersOn(tc.share, path, nil, own, asking, sharedOK)
+		if !c.server.needsBreakWait(tc.share, path, nil, asking, sharedOK) {
+			c.server.tellHoldersOn(tc.share, path, nil, asking, sharedOK)
 			return c.createFile(req, cr, ss, tc, acc, contexts, path, lr), ss, nil
 		}
 
@@ -980,7 +988,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		c.mu.Unlock()
 
 		go func() {
-			c.server.breakHoldersOn(tc.share, path, nil, own, asking, sharedOK)
+			c.server.breakHoldersOn(tc.share, path, nil, asking, sharedOK)
 
 			resp := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
 
@@ -1131,11 +1139,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// A close is what finishes an upload, so a close whose upload fails is a file that was not
+		// stored. The open is torn down all the same - the handle is gone either way - but the
+		// answer says so, because a client told its close succeeded believes the file it just
+		// wrote is on the share.
+		var unsaved bool
 		pu := op.file.uploadNow()
 		if pu != nil { // This SMB2_CLOSE request is a sign for us to flush any active multipart upload
 			if err := op.flush(); err != nil {
 				op.cancelUpload()
 				log.Println("Error completing write:", err)
+				unsaved = true
 			}
 		}
 
@@ -1169,9 +1183,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 
 			if deleting {
-				tc.mu.Lock()
-				delete(tc.persistedFiles, path)
-				tc.mu.Unlock()
+				tc.forgetPersistedFile(path)
 
 				// A file that was created and never written to is not in the store at all:
 				// nothing empty can be uploaded, so the entry taken off the table above was the
@@ -1206,6 +1218,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			c.server.writeResponse(c, ss, resp)
 		}
 
+		if unsaved {
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
+			return resp, ss, nil
+		}
+
 		closeSize, closeAllocated, _, closeModified, closeAttributes := op.file.stat()
 		resp := &smb2.CloseResponse{}
 		resp.FromRequest(cr)
@@ -1213,7 +1230,20 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		return resp, ss, nil
 
-	case smb2.SMB2_FLUSH: // We don't do anything on an SMB2_FLUSH request, only send a response
+	// A flush waits for what the client has sent to be taken in, and does not store it.
+	//
+	// [MS-SMB2] 3.3.5.13 has the server push what it has buffered to the store before it answers,
+	// and this server cannot: a file goes to the backend as one multipart upload, and an upload that
+	// has been finished cannot be added to. Storing on a flush would mean finishing the upload and
+	// then, on the next write, uploading the whole file again to append to it - a client that flushes
+	// after every write, which is what an office application does while it saves, would rewrite the
+	// file from the start each time.
+	//
+	// So the guarantee is the weaker one: everything sent so far has been taken into the upload, and
+	// what cannot be stored is reported when the file is closed, which is when the upload is finished.
+	// A write that fails is reported to the write that caused it. Nothing is claimed that is not true;
+	// what is not claimed is durability, which no answer here could honestly give.
+	case smb2.SMB2_FLUSH:
 		fr := smb2.FlushRequest{Request: *req}
 		if err := fr.Validate(c.supportsMultiCredit); err != nil {
 			if errors.Is(err, smb2.ErrInvalidParameter) {
@@ -1231,6 +1261,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		if !found {
 			resp := smb2.NewErrorResponse(fr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
 			return resp, nil, nil
+		}
+
+		if op, status := c.findOpen(ss, fr.FileID(), req); status == smb2.STATUS_OK {
+			op.file.waitForWrites()
 		}
 
 		resp := &smb2.FlushResponse{}
@@ -1567,16 +1601,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		resp.Header().ClearFlag(smb2.FLAGS_SIGNED)
 		resp.Header()[len(resp.Header())-1] = 0x21
 
-		op.mu.Lock()
-		op.inflight++
-		op.mu.Unlock()
+		// The write is counted against the file rather than against this handle: whoever finalizes
+		// the upload has to wait for every write going into it, whichever handle sent it.
+		op.file.beginWrite()
 		go func() {
-			defer func() {
-				op.mu.Lock()
-				op.inflight--
-				op.cond.Broadcast()
-				op.mu.Unlock()
-			}()
+			defer op.file.endWrite()
 			var resp smb2.GenericResponse
 
 			if err := op.write(wr.Offset(), wr.Buffer()); err != nil {
@@ -2506,23 +2535,39 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 				// Rename the file or the directory.
 				newName := strings.ReplaceAll(fri.FileName, "\\", "/")
+
+				// A rename moves what the store holds, and a file still being written is not held
+				// by it yet: the bytes are in the upload buffer, under a name the rename is about
+				// to take away. So the upload is finished under the name it was started with, and
+				// the rename moves what it stored. Renaming is metadata on both backends, so this
+				// costs the upload it was always going to cost and nothing besides.
+				//
+				// A client that renames before closing is the one this is for. What Excel does -
+				// write, close, rename - finishes the upload at the close and never comes here with
+				// one pending.
+				if op.file.uploadNow() != nil {
+					if err := op.flush(); err != nil {
+						op.cancelUpload()
+						log.Printf("Error completing write of %s before renaming it: %v", path, err)
+						resp := smb2.NewErrorResponse(sir, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
+						return resp, ss, nil
+					}
+				}
+
 				size := op.file.sizeNow()
 				if size == 0 && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
-					tc.mu.Lock()
-					_, found := tc.persistedFiles[newName]
-					if found {
-						tc.mu.Unlock()
+					if _, found := tc.persistedFile(newName); found {
 						resp := smb2.NewErrorResponse(sir, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
 						return resp, ss, nil
 					}
-					tc.persistedFiles[newName] = op.file
-					delete(tc.persistedFiles, path)
+
+					tc.movePersistedFile(path, newName, op.file)
+
 					// The path of the open changes through the index, so that a create
 					// racing this rename finds the open under exactly one of its names,
 					// never neither.
 					c.server.moveOpen(op, newName)
 					op.file.touch()
-					tc.mu.Unlock()
 				} else {
 					if err := tc.client.Rename(
 						op.ctx,
@@ -2546,31 +2591,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					// reach for an object the backend no longer has, and the old name would go
 					// on blocking creates while the new one stood unguarded. A persisted entry
 					// moves with it, so that the old name stops resolving to this file.
-					tc.mu.Lock()
-					if _, found := tc.persistedFiles[path]; found {
-						delete(tc.persistedFiles, path)
-						tc.persistedFiles[newName] = op.file
+					if fs, found := tc.persistedFile(path); found {
+						tc.movePersistedFile(path, newName, fs)
 					}
 
-					// A renamed directory takes everything inside it along, so the persisted
-					// entries under it are re-keyed with it. The inserts wait until the walk
-					// is over: a key added while the map is ranged may or may not be visited.
+					// A renamed directory takes everything inside it along, so the entries under
+					// it are re-keyed with it.
 					if attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0 {
-						prefix := path + "/"
-						moved := make(map[string]*fileState)
-						for p, fs := range tc.persistedFiles {
-							if strings.HasPrefix(p, prefix) {
-								moved[newName+"/"+p[len(prefix):]] = fs
-								delete(tc.persistedFiles, p)
-							}
-						}
-						for p, fs := range moved {
-							tc.persistedFiles[p] = fs
-						}
+						tc.movePersistedTree(path, newName)
 					}
 
 					c.server.moveOpen(op, newName)
-					tc.mu.Unlock()
 
 					// The opens on the files inside the directory follow their files, and the
 					// lease of each follows its open: a renamed file is not one on its way
@@ -3129,9 +3160,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		switch cr.CreateDisposition() {
 		case smb2.FILE_SUPERSEDE:
 			if err != nil {
-				tc.mu.Lock()
-				known, restored = tc.persistedFiles[path]
-				tc.mu.Unlock()
+				known, restored = tc.persistedFile(path)
 				if !restored {
 					info = client.ObjectInfo{
 						Key:        "/" + path,
@@ -3147,9 +3176,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			}
 		case smb2.FILE_OPEN:
 			if err != nil {
-				tc.mu.Lock()
-				known, restored = tc.persistedFiles[path]
-				tc.mu.Unlock()
+				known, restored = tc.persistedFile(path)
 				if !restored {
 					cancel()
 					resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
@@ -3176,8 +3203,11 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 							resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
 							return resp
 						} else {
+							// The store failed the call, which is not the same as the name not
+							// being there: answering that it is not there has the client tell
+							// whoever asked that the folder they are making no longer exists.
 							log.Printf("Couldn't create directory %s: %v\n", path, err)
-							resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+							resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
 							return resp
 						}
 					}
@@ -3189,9 +3219,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			}
 		case smb2.FILE_OPEN_IF:
 			if err != nil {
-				tc.mu.Lock()
-				known, restored = tc.persistedFiles[path]
-				tc.mu.Unlock()
+				known, restored = tc.persistedFile(path)
 				if !restored {
 					info = client.ObjectInfo{
 						Key:        "/" + path,
@@ -3207,8 +3235,9 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
 								return resp
 							} else {
+								// As above: the store failing is not the name being absent.
 								log.Printf("Couldn't create directory %s: %v\n", path, err)
-								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+								resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
 								return resp
 							}
 						}
@@ -3221,9 +3250,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			}
 		case smb2.FILE_OVERWRITE:
 			if err != nil {
-				tc.mu.Lock()
-				known, restored = tc.persistedFiles[path]
-				tc.mu.Unlock()
+				known, restored = tc.persistedFile(path)
 				if !restored {
 					cancel()
 					resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
@@ -3236,9 +3263,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			}
 		case smb2.FILE_OVERWRITE_IF:
 			if err != nil {
-				tc.mu.Lock()
-				known, restored = tc.persistedFiles[path]
-				tc.mu.Unlock()
+				known, restored = tc.persistedFile(path)
 				if !restored {
 					info = client.ObjectInfo{
 						Key:        "/" + path,
@@ -3254,8 +3279,9 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
 								return resp
 							} else {
+								// As above: the store failing is not the name being absent.
 								log.Printf("Couldn't create directory %s: %v\n", path, err)
-								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+								resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
 								return resp
 							}
 						}
@@ -3297,9 +3323,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 
 	attr := op.file.attributesNow()
 	if result == smb2.FILE_CREATED && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 { // Persist the file for any future requests
-		tc.mu.Lock()
-		tc.persistedFiles[path] = op.file
-		tc.mu.Unlock()
+		tc.persistFile(path, op.file)
 	}
 
 	if result == smb2.FILE_SUPERSEDED || result == smb2.FILE_OVERWRITTEN {

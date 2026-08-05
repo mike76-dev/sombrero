@@ -36,12 +36,71 @@ type treeConnect struct {
 	createdAt     time.Time
 	volumeID      uint64
 
-	// When a request to create a file comes in, the client assumes that the file exists from then on.
-	// However, it's not possible to upload empty files to the Sia network, so we have to work around that.
-	// The workaround is to remember the names of the files that were created (for the lifetime
-	// of the TreeConnect or until the files are deleted).
-	persistedFiles map[string]*fileState
-	mu             sync.Mutex
+	mu sync.Mutex
+}
+
+// The files a client has created but not yet uploaded are kept on the share, under the workgroup
+// whose namespace they are in. The tree connect is where the two are known together, so the asking
+// is done through it: a client that loses its connection and comes back finds the file it made,
+// which it would not if the table went with the tree connect it was made on.
+
+// persistedFile returns the state of such a file, if the share is holding one under this name.
+func (tc *treeConnect) persistedFile(path string) (*fileState, bool) {
+	tc.share.mu.Lock()
+	defer tc.share.mu.Unlock()
+
+	fs, found := tc.share.persisted[persistedKey{tc.session.workgroup, path}]
+
+	return fs, found
+}
+
+// persistFile takes the file on, so that everything on the share sees it from now on.
+func (tc *treeConnect) persistFile(path string, fs *fileState) {
+	tc.share.mu.Lock()
+	defer tc.share.mu.Unlock()
+	tc.share.ensurePersisted()
+
+	tc.share.persisted[persistedKey{tc.session.workgroup, path}] = fs
+}
+
+// forgetPersistedFile drops the file, which is what happens once it has been uploaded or deleted:
+// from then on the store answers for it.
+func (tc *treeConnect) forgetPersistedFile(path string) {
+	tc.share.mu.Lock()
+	defer tc.share.mu.Unlock()
+
+	delete(tc.share.persisted, persistedKey{tc.session.workgroup, path})
+}
+
+// movePersistedFile carries the file over to another name.
+func (tc *treeConnect) movePersistedFile(from, to string, fs *fileState) {
+	tc.share.mu.Lock()
+	defer tc.share.mu.Unlock()
+	tc.share.ensurePersisted()
+
+	delete(tc.share.persisted, persistedKey{tc.session.workgroup, from})
+	tc.share.persisted[persistedKey{tc.session.workgroup, to}] = fs
+}
+
+// movePersistedTree carries everything under a directory over with it, so that a renamed directory
+// takes the files that were made in it and never uploaded. The inserts wait until the walk is over:
+// a key added while the map is ranged may or may not be visited.
+func (tc *treeConnect) movePersistedTree(from, to string) {
+	tc.share.mu.Lock()
+	defer tc.share.mu.Unlock()
+	tc.share.ensurePersisted()
+
+	prefix := from + "/"
+	moved := make(map[persistedKey]*fileState)
+	for key, fs := range tc.share.persisted {
+		if key.workgroup == tc.session.workgroup && strings.HasPrefix(key.path, prefix) {
+			moved[persistedKey{key.workgroup, to + "/" + key.path[len(prefix):]}] = fs
+			delete(tc.share.persisted, key)
+		}
+	}
+	for key, fs := range moved {
+		tc.share.persisted[key] = fs
+	}
 }
 
 // persistedObjects turns the files the tree connect is holding that have been created but not yet
@@ -54,16 +113,16 @@ type treeConnect struct {
 // read, so the two locks are never held at once and the order they are taken in cannot matter. want
 // is called while the table is held, so it must not reach for a lock itself.
 func (tc *treeConnect) persistedObjects(want func(path string) bool) []client.ObjectInfo {
-	tc.mu.Lock()
-	paths := make([]string, 0, len(tc.persistedFiles))
-	files := make([]*fileState, 0, len(tc.persistedFiles))
-	for path, fs := range tc.persistedFiles {
-		if want(path) {
-			paths = append(paths, path)
+	tc.share.mu.Lock()
+	paths := make([]string, 0, len(tc.share.persisted))
+	files := make([]*fileState, 0, len(tc.share.persisted))
+	for key, fs := range tc.share.persisted {
+		if key.workgroup == tc.session.workgroup && want(key.path) {
+			paths = append(paths, key.path)
 			files = append(files, fs)
 		}
 	}
-	tc.mu.Unlock()
+	tc.share.mu.Unlock()
 
 	ois := make([]client.ObjectInfo, 0, len(files))
 	for i, fs := range files {
@@ -105,12 +164,11 @@ func extractShareName(path string) string {
 // applies as for newServerState.
 func newTreeConnectState(tid uint32, ss *session, sh *share, access uint32) *treeConnect {
 	return &treeConnect{
-		treeID:         tid,
-		session:        ss,
-		share:          sh,
-		creationTime:   time.Now(),
-		maximalAccess:  access,
-		persistedFiles: make(map[string]*fileState),
+		treeID:        tid,
+		session:       ss,
+		share:         sh,
+		creationTime:  time.Now(),
+		maximalAccess: access,
 	}
 }
 
@@ -130,6 +188,7 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			remark:          "IPC service",
 			connectSecurity: map[string]struct{}{},
 			fileSecurity:    make(map[string]uint32),
+			persisted:       make(map[persistedKey]*fileState),
 		}
 		sh.connectSecurity[ss.workgroup+"/"+ss.userName] = struct{}{}
 		access = smb2.FILE_READ_DATA |

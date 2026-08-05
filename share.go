@@ -28,6 +28,26 @@ var (
 	errShareInUse       = errors.New("share currently in use by one or more clients")
 )
 
+// persistedKey names a file that has been created but not yet uploaded: the workgroup whose
+// namespace it is in, and its path within the share.
+type persistedKey struct {
+	workgroup string
+	path      string
+}
+
+// ensurePersisted makes the table of files that have been created but not yet uploaded, if it is
+// not there yet. sh.mu must be held.
+//
+// It is made here rather than only where a share is built because a share is built in several
+// places, and a table that is missing from one of them is a panic on the first file a client
+// creates over it. A read of a table that is not there answers as an empty one, so only the writers
+// come through here.
+func (sh *share) ensurePersisted() {
+	if sh.persisted == nil {
+		sh.persisted = make(map[persistedKey]*fileState)
+	}
+}
+
 // indexdConn holds the per-workgroup state for an indexd share connection.
 type indexdConn struct {
 	client        client.Client
@@ -61,7 +81,18 @@ type share struct {
 	indexdConns map[string]*indexdConn // keyed by workgroup UUID string
 
 	backend string
-	mu      sync.Mutex
+	// A file that has been created but not yet uploaded has no object behind it: the Sia network
+	// takes nothing empty. The state of such a file is kept here so that everything on the share
+	// goes on seeing the file until it is written or deleted — it used to be kept on the tree
+	// connect that created it, and a client that lost its connection came back to a share where
+	// the file it had just made was gone.
+	//
+	// The workgroup is part of the key because a share is one namespace per workgroup: two
+	// workgroups may each hold a file of the same name on the same share, and neither may see the
+	// other's.
+	persisted map[persistedKey]*fileState
+
+	mu sync.Mutex
 }
 
 // RegisterShare adds a new share to the SMB server.
@@ -83,6 +114,7 @@ func (s *server) RegisterShare(ss stores.Share) error {
 		remark:          ss.Remark,
 		connectSecurity: make(map[string]struct{}),
 		fileSecurity:    make(map[string]uint32),
+		persisted:       make(map[persistedKey]*fileState),
 		encryptData:     s.encryptData,
 		compressData:    s.compressionSupported,
 	}
@@ -365,6 +397,16 @@ func (s *server) RemoveConnection(wg stores.Workgroup, share stores.Share) error
 		}
 		sh.mu.Unlock()
 	}
+
+	// The files the workgroup created and never uploaded go with it: nothing of that workgroup is
+	// on the share any more to ask after them.
+	sh.mu.Lock()
+	for key := range sh.persisted {
+		if key.workgroup == wg.UUID.String() {
+			delete(sh.persisted, key)
+		}
+	}
+	sh.mu.Unlock()
 
 	accs, err := s.store.FindAccounts(wg.UUID.String())
 	if err != nil {

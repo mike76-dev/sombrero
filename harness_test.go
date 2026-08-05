@@ -38,6 +38,17 @@ type fakeClient struct {
 	// it cannot be answered is worth being able to reach.
 	emptyErr error
 
+	// uploaded is how far the parts of an upload reach, by path, so that finishing one can put an
+	// object of the right size in the store. A real backend turns the parts into the object; a fake
+	// that leaves the store empty cannot say what a rename of a file just written finds.
+	uploaded map[string]uint64
+
+	// dirErr is what making a directory fails with, and finishErr what finishing an upload fails
+	// with, when a test asks them to. They stand for a store that is there but will not do the
+	// work — the Sia node out of sync is the one that prompted them.
+	dirErr    error
+	finishErr error
+
 	// deleteErr is what a deletion fails with, when a test asks it to. A deletion that the
 	// backend refuses for a reason other than the file not being there is the one the server
 	// still has to complain about.
@@ -99,6 +110,23 @@ func (fc *fakeClient) failDeletion(err error) {
 	fc.deleteErr = err
 }
 
+// failDirectories makes every directory creation fail from here on.
+func (fc *fakeClient) failDirectories(err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.dirErr = err
+}
+
+// failFinishingUploads makes the finishing of every upload fail from here on, which is what a store
+// that took the parts and will not put them together does.
+func (fc *fakeClient) failFinishingUploads(err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.finishErr = err
+}
+
 // failEmptiness makes the emptiness check fail from here on.
 func (fc *fakeClient) failEmptiness(err error) {
 	fc.mu.Lock()
@@ -132,7 +160,15 @@ func (fc *fakeClient) List(_ context.Context, _ stores.Account, path string) ([]
 }
 
 func (fc *fakeClient) MakeDirectory(_ context.Context, _ stores.Account, path string) error {
+	fc.mu.Lock()
+	err := fc.dirErr
+	fc.mu.Unlock()
+	if err != nil {
+		return err
+	}
+
 	fc.putDir(path)
+
 	return nil
 }
 
@@ -199,11 +235,37 @@ func (fc *fakeClient) StartUpload(context.Context, stores.Account, string) (stri
 
 func (fc *fakeClient) AbortUpload(context.Context, string, string) error { return nil }
 
-func (fc *fakeClient) FinishUpload(context.Context, string, string, []api.MultipartCompletedPart) error {
+func (fc *fakeClient) FinishUpload(_ context.Context, path, _ string, _ []api.MultipartCompletedPart) error {
+	fc.mu.Lock()
+	size, uploaded := fc.uploaded[path], fc.uploaded != nil
+	err := fc.finishErr
+	if uploaded {
+		delete(fc.uploaded, path)
+	}
+	fc.mu.Unlock()
+
+	if err != nil {
+		return err
+	}
+
+	// The parts become the object, which is what makes the file findable by everything that comes
+	// after — a rename of it, above all.
+	fc.put(path, size)
+
 	return nil
 }
 
-func (fc *fakeClient) Write(context.Context, io.Reader, string, string, int, uint64, uint64) (string, error) {
+func (fc *fakeClient) Write(_ context.Context, _ io.Reader, path, _ string, _ int, offset, length uint64) (string, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if fc.uploaded == nil {
+		fc.uploaded = make(map[string]uint64)
+	}
+	if end := offset + length; end > fc.uploaded[path] {
+		fc.uploaded[path] = end
+	}
+
 	return "etag", nil
 }
 
@@ -450,6 +512,11 @@ func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
 	c.clientGuid = guid[:]
 	c.negotiateDialect = smb2.SMB_DIALECT_311
 	c.dialect = dialectName(c.negotiateDialect)
+
+	// Including the capabilities the server answers a 3.1.1 negotiate with. Leasing is the one the
+	// tests turn on: a lease is only granted over a connection the server offered leases on, so a
+	// connection built here without it would refuse every lease the tests ask for.
+	c.serverCapabilities |= smb2.GLOBAL_CAP_LEASING
 
 	// Nothing is draining the connection here, so what the server sends is queued for the test to
 	// read rather than handed to a sending goroutine.
@@ -1131,6 +1198,35 @@ func closeRequest(mid, sid uint64, tid uint32, fid []byte) []byte {
 	copy(body[8:24], fid)
 
 	return msg
+}
+
+// flushRequest builds an SMB2_FLUSH request, which is what a client sends when it wants what it has
+// written to be made safe.
+func flushRequest(mid, sid uint64, tid uint32, fid []byte) []byte {
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2FlushRequestMinSize)
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_FLUSH)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetTreeID(tid)
+	h.SetCreditCharge(1)
+
+	body := msg[smb2.SMB2HeaderSize:]
+	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2FlushRequestStructureSize)
+	copy(body[8:24], fid)
+
+	return msg
+}
+
+// flushHandle asks for what has been written through the handle to be made safe.
+func (cl *testClient) flushHandle(fid []byte) ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(flushRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid))
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Encode(), nil
 }
 
 // openIDOf returns the key under which the global open table holds the open a create response

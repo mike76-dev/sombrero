@@ -46,6 +46,7 @@ type server struct {
 	compressionSupported        bool
 	chainedCompressionSupported bool
 	isMultiChannelCapable       bool
+	isLeasingCapable            bool
 
 	// Auxiliary fields.
 	listener net.Listener

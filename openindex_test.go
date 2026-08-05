@@ -133,11 +133,9 @@ func TestIntegrationDirectoryRenameMovesTheChildren(t *testing.T) {
 		t.Errorf("the lease covers %q, want dir/moved/file", leaseName)
 	}
 
-	// The persisted entry of the unuploaded draft is re-keyed with the directory.
-	alice.tc.mu.Lock()
-	_, oldKept := alice.tc.persistedFiles["dir/sub/draft"]
-	_, newKept := alice.tc.persistedFiles["dir/moved/draft"]
-	alice.tc.mu.Unlock()
+	// The entry of the unuploaded draft is re-keyed with the directory.
+	_, oldKept := alice.tc.persistedFile("dir/sub/draft")
+	_, newKept := alice.tc.persistedFile("dir/moved/draft")
 	if oldKept {
 		t.Error("the persisted entry was left under the old name")
 	}

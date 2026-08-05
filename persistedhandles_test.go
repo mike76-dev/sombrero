@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 )
 
 // A file that has been created but not yet uploaded is remembered by its state, because the backend
@@ -260,5 +263,455 @@ func TestIntegrationChangeBreaksTheClientsOtherHandle(t *testing.T) {
 	if !bytes.Equal(brokenFileID(note), createdFileID(held)) {
 		t.Errorf("the break named the file ID %x, want the %x of the handle holding the cache",
 			brokenFileID(note), createdFileID(held))
+	}
+}
+
+// TestIntegrationLeaseIsRefusedWhenItWasNotOffered holds the granting of leases to what the server
+// said at negotiate time. A client only asks for a lease because the server advertised
+// SMB2_GLOBAL_CAP_LEASING, and [MS-SMB2] 3.3.5.9 has a server that does not support leasing ignore
+// the lease create context — so a connection that never offered leases must not hand one out. The
+// two answers are the same answer, and this is what keeps them so.
+func TestIntegrationLeaseIsRefusedWhenItWasNotOffered(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+
+	cl := h.dial("alice")
+
+	// The connection the harness builds carries what a 3.1.1 negotiate settles, leasing included,
+	// so it is taken away again here: this is the 2.0.2 client, or a server built without leases.
+	cl.conn.serverCapabilities &^= smb2.GLOBAL_CAP_LEASING
+
+	buf, _ := cl.createLeased("dir/file", aliceKey, rwh, 2, smb2.FILE_OPEN)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+
+	// The oplock level of the response is what says whether a lease was granted: a lease answers
+	// with SMB2_OPLOCK_LEVEL_LEASE, and anything else means the context was passed over.
+	if level := createdOplockLevel(buf); level == smb2.OPLOCK_LEVEL_LEASE {
+		t.Error("a lease was granted over a connection that never offered leases")
+	}
+
+	file := h.srv.globalOpenTable[openIDOf(createdFileID(buf))]
+	if file == nil {
+		t.Fatal("the create left no open behind it")
+	}
+	file.mu.Lock()
+	held := file.lease
+	file.mu.Unlock()
+	if held != nil {
+		t.Error("the open holds a lease over a connection that never offered leases")
+	}
+}
+
+// TestIntegrationAnUnuploadedFileSurvivesTheTreeConnect is what a client sees after the connection
+// it created a file over has gone. A file created and not yet written to has no object behind it —
+// the Sia network takes nothing empty — so the server is the only thing that knows it is there. That
+// state used to be kept on the tree connect, so a client whose connection dropped came back to a
+// share where the file it had just made could not be opened at all: "the file couldn't be found",
+// for a file the client had created seconds earlier and never closed the share on.
+//
+// The state belongs to the share now, under the workgroup whose namespace the file is in, so the
+// file is there for the next tree connect as it was for the last.
+func TestIntegrationAnUnuploadedFileSurvivesTheTreeConnect(t *testing.T) {
+	h := newSMBTest(t)
+
+	first := h.dial("alice")
+	created, _ := first.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(created).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create of the file was answered with %#x", status)
+	}
+	if _, err := first.closeHandle(createdFileID(created)); err != nil {
+		t.Fatalf("closing the handle failed: %v", err)
+	}
+
+	// The connection goes, and with it the session and the tree connect the file was made on.
+	first.goesAway()
+
+	// The client comes back — a new connection, a new session, a new tree connect, the same
+	// workgroup — and asks for the file it made.
+	again := h.dial("alice")
+	opened, _ := again.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(opened).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the file over a new tree connect was answered with %#x, want it found", status)
+	}
+
+	// And it is the same file: the state the first tree connect left is the state this open is on.
+	file := h.srv.globalOpenTable[openIDOf(createdFileID(opened))]
+	if file == nil {
+		t.Fatal("the open has nothing behind it")
+	}
+	if fs, found := again.tc.persistedFile("notes.txt"); !found || fs != file.file {
+		t.Error("the open is not on the state the share is holding for the file")
+	}
+
+	// A listing over the new tree connect shows it too, which is what an explorer window asks for.
+	shown := again.tc.persistedObjects(func(path string) bool { return path == "notes.txt" })
+	if len(shown) != 1 {
+		t.Errorf("the listing carried %d entries for the file, want it there", len(shown))
+	}
+}
+
+// TestIntegrationEncryptedLeaseBreakNamesItsSession is the rule that decides what happens on the
+// wire when two rules disagree.
+//
+// [MS-SMB2] 3.3.4.7 has a lease break notification carry a SessionId of zero: a lease belongs to a
+// client rather than to a session, and the lease key alone says what is meant. [MS-SMB2] 3.2.5.1.1
+// has a client disconnect the connection when a decrypted message names a different session than the
+// transform header it arrived in — and zero is a different session. A client cannot be told to give
+// up a lease at all if the telling costs it the connection, so what is encrypted names the session
+// it is encrypted under.
+func TestIntegrationEncryptedLeaseBreakNamesItsSession(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+
+	alice := h.dial("alice").encrypting()
+	alice.createLeased("dir/file", aliceKey, rwh, 2, smb2.FILE_OPEN)
+
+	// Somebody else opening the file is what takes the lease away.
+	h.impatient(50 * time.Millisecond)
+	bob := h.dial("bob")
+	opened := make(chan struct{})
+	go func() {
+		defer close(opened)
+		bob.createErr("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	}()
+	defer func() {
+		<-opened
+	}()
+
+	sealed := alice.recv(10 * time.Second)
+	if id := smb2.Header(sealed).ProtocolID(); id != smb2.PROTOCOL_SMB2_ENCRYPTED {
+		t.Fatalf("the break went out under protocol %#x, want it encrypted", id)
+	}
+
+	// The transform header names the session, because that is what the client finds the key by.
+	if got := smb2.Header(sealed).TransformSessionID(); got != alice.ss.sessionID {
+		t.Errorf("the transform header names session %#x, want %#x", got, alice.ss.sessionID)
+	}
+
+	// And so must the message inside it, or the client drops the connection instead of reading it.
+	note := alice.decrypted(sealed)
+	if !isLeaseBreak(note) {
+		t.Fatal("what came apart is not a lease break")
+	}
+	if got := smb2.Header(note).SessionID(); got != alice.ss.sessionID {
+		t.Errorf("the lease break names session %#x, want the %#x the transform header names",
+			got, alice.ss.sessionID)
+	}
+}
+
+// TestIntegrationFlushWaitsForEveryHandlesWrites is the upload belonging to the file rather than to
+// the handle that started it.
+//
+// Two handles on one file write through the one upload, so a handle that finalizes it has to wait for
+// the writes going into it through every other handle as well. Waiting only for its own left the
+// finalize running against a buffer with a hole in it, which comes back as "non-contiguous pending
+// write data": the upload is thrown away, and a file that a client saved through two handles — which
+// is how an office application saves, through a temporary file it then renames — is lost.
+func TestIntegrationFlushWaitsForEveryHandlesWrites(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	first, _ := cl.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(first).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+	second, _ := cl.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(second).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the file again was answered with %#x", status)
+	}
+
+	one := h.srv.globalOpenTable[openIDOf(createdFileID(first))]
+	two := h.srv.globalOpenTable[openIDOf(createdFileID(second))]
+	if one == nil || two == nil || one.file != two.file {
+		t.Fatal("the two handles are not two opens on one file")
+	}
+
+	// A real write through the first handle, so that there is an upload for the flush to finalize.
+	if _, err := cl.write(createdFileID(first), 0, []byte("sombrero")); err != nil {
+		t.Fatalf("the write failed: %v", err)
+	}
+	if one.file.uploadNow() == nil {
+		t.Fatal("the write left no upload for the flush to wait on")
+	}
+
+	// And a second write on its way in through that handle, counted as the write path counts it.
+	one.file.beginWrite()
+
+	// The second handle finalizes the upload. It must not get as far as the flush while that write
+	// is outstanding, so this is expected to sit still until the write lands.
+	flushed := make(chan error, 1)
+	go func() {
+		flushed <- two.flush()
+	}()
+
+	select {
+	case err := <-flushed:
+		t.Fatalf("the flush ran with a write of another handle still in flight (%v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Once the write has landed, the flush goes ahead and finalizes the upload.
+	one.file.endWrite()
+
+	select {
+	case err := <-flushed:
+		if err != nil {
+			t.Errorf("the flush failed once the write had landed: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the flush never came back after the write had landed")
+	}
+}
+
+// TestIntegrationKeylessOpenLeavesTheClientsLeaseAlone is the lease side of the cache view, and the
+// second half of the deadlock the oplock exemption fixed.
+//
+// A client holding a lease on a file and opening that file again — through an ordinary create, with no
+// lease key on it — is asking about the file it already has, so its lease stands. Breaking it deadlocks
+// the two ends: the client will not answer a break until the create that provoked it is answered, and
+// the server will not answer the create until the break is answered. That cost 35 seconds an open, and
+// the acknowledgment arrived the moment the server gave up waiting for it.
+func TestIntegrationKeylessOpenLeavesTheClientsLeaseAlone(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+
+	cl := h.dial("alice")
+	held, _ := cl.createLeased("dir/file", aliceKey, rwh, 2, smb2.FILE_OPEN)
+	if state, found := createdLeaseState(held); !found || state != rwh {
+		t.Fatalf("the lease was granted %#x (found %v) rather than read, write and handle caching", state, found)
+	}
+
+	// The same client opens the file again, naming no lease key.
+	again, async := cl.create("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if async {
+		t.Error("the second open was held back for a break of the client's own lease")
+	}
+	if status := smb2.Header(again).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the second open was answered with %#x", status)
+	}
+
+	cl.quiet(200*time.Millisecond, "a break of the client's own lease")
+
+	// The lease still promises everything it did.
+	l := h.srv.findLease([16]byte(cl.conn.clientGuid), aliceKey)
+	if l == nil {
+		t.Fatal("the lease is gone")
+	}
+	if state := l.stateNow(); state != rwh {
+		t.Errorf("the lease is at %#x, want the %#x it was granted", state, rwh)
+	}
+}
+
+// TestIntegrationKeyedOpenBreaksTheClientsOtherLease is the line the exemption stops at. Two lease
+// keys are two views of the file, even in one client, and a client keeps them apart by key: a create
+// naming a second key has to take the first view's write caching away, or the client would be caching
+// writes in one view that the other cannot see.
+func TestIntegrationKeyedOpenBreaksTheClientsOtherLease(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+	h.impatient(50 * time.Millisecond)
+
+	cl := h.dial("alice")
+	held, _ := cl.createLeased("dir/file", aliceKey, rwh, 2, smb2.FILE_OPEN)
+	if state, found := createdLeaseState(held); !found || state != rwh {
+		t.Fatalf("the lease was granted %#x (found %v) rather than read, write and handle caching", state, found)
+	}
+
+	// The same client, a second lease key: another view of the file, which the first has to make
+	// room for. The create waits for the break, so it is sent from a goroutine of its own.
+	opened := make(chan struct{})
+	go func() {
+		defer close(opened)
+		cl.createWith("dir/file", smb2.OPLOCK_LEVEL_LEASE, smb2.FILE_OPEN, leaseContext(bobKey, rwh, 2))
+	}()
+	defer func() {
+		<-opened
+	}()
+
+	note := cl.recv(10 * time.Second)
+	if !isLeaseBreak(note) {
+		t.Fatalf("what arrived was command %d, want the break of the first lease",
+			smb2.Header(note).Command())
+	}
+	if key := brokenLeaseKey(note); key != aliceKey {
+		t.Errorf("the break names the lease key %x, want the first view's %x", key, aliceKey)
+	}
+}
+
+// TestIntegrationAStoreThatFailsIsNotANameThatIsGone is what a client is told when the store will not
+// do the work. A Sia node that is out of sync refuses to make a directory, and answering that the
+// name was not found has the client tell whoever asked that the folder they are creating no longer
+// exists — which is untrue, unhelpful, and sends them looking for a file system problem.
+func TestIntegrationAStoreThatFailsIsNotANameThatIsGone(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.failDirectories(errors.New("consensus is not synced"))
+
+	cl := h.dial("alice")
+	// The create is sent by hand: the helper for directories fails the test on any status but
+	// success, and a status is exactly what this is about.
+	cl.mid++
+	resp, err := cl.send(createRequestWithOptions(cl.mid, cl.ss.sessionID, cl.tc.treeID, "New folder",
+		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN_IF, writeAccess, smb2.FILE_DIRECTORY_FILE, nil))
+	if err != nil {
+		t.Fatalf("the create failed outright: %v", err)
+	}
+
+	status := resp.Header().Status()
+	if status == smb2.STATUS_OBJECT_NAME_NOT_FOUND {
+		t.Error("the store failing was answered as the name not being found")
+	}
+	if status != smb2.STATUS_UNEXPECTED_NETWORK_ERROR {
+		t.Errorf("the create was answered with %#x, want an error naming the store", status)
+	}
+}
+
+// TestIntegrationACloseThatCannotStoreTheFileSaysSo is the write that never reached the store. A
+// close is what finishes an upload, so a close whose upload fails is a file that was not saved: a
+// client told the close succeeded believes what it wrote is on the share, and the bytes are gone with
+// nothing to say so.
+func TestIntegrationACloseThatCannotStoreTheFileSaysSo(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	created, _ := cl.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(created).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+
+	if _, err := cl.write(createdFileID(created), 0, []byte("sombrero")); err != nil {
+		t.Fatalf("the write failed: %v", err)
+	}
+
+	// The store takes the parts and will not put them together.
+	h.files.failFinishingUploads(errors.New("consensus is not synced"))
+
+	closed, err := cl.closeHandle(createdFileID(created))
+	if err != nil {
+		t.Fatalf("the close failed outright: %v", err)
+	}
+	if status := smb2.Header(closed).Status(); status == smb2.STATUS_OK {
+		t.Error("the close of a file that was never stored was answered with success")
+	} else if status != smb2.STATUS_UNEXPECTED_NETWORK_ERROR {
+		t.Errorf("the close was answered with %#x, want an error naming the store", status)
+	}
+}
+
+// TestIntegrationFlushWaitsForTheWritesItCoversAndStoresNothing is the contract a flush carries here.
+//
+// Storing on a flush is not open to this server: a file goes to the backend as one multipart upload,
+// and a finished upload cannot be added to, so committing on every flush would mean uploading the whole
+// file again on the next write. What a flush does mean is that everything sent so far has been taken
+// in — a client that pipelines a write and a flush must not be told the flush is done while the write
+// is still on its way — and the upload is left running for the close to finish.
+func TestIntegrationFlushWaitsForTheWritesItCoversAndStoresNothing(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	created, _ := cl.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(created).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+	if _, err := cl.write(createdFileID(created), 0, []byte("sombrero")); err != nil {
+		t.Fatalf("the write failed: %v", err)
+	}
+
+	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
+	if file == nil {
+		t.Fatal("the create left no open behind it")
+	}
+
+	// A write on its way in, counted as the write path counts it.
+	file.file.beginWrite()
+
+	flushed := make(chan []byte, 1)
+	go func() {
+		resp, err := cl.flushHandle(createdFileID(created))
+		if err != nil {
+			flushed <- nil
+			return
+		}
+		flushed <- resp
+	}()
+
+	select {
+	case <-flushed:
+		t.Fatal("the flush was answered with a write still on its way in")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	file.file.endWrite()
+
+	select {
+	case resp := <-flushed:
+		if resp == nil {
+			t.Fatal("the flush failed")
+		}
+		if status := smb2.Header(resp).Status(); status != smb2.STATUS_OK {
+			t.Errorf("the flush was answered with %#x", status)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the flush never came back after the write had landed")
+	}
+
+	// And it stored nothing: the upload is still there for the close to finish.
+	if file.file.uploadNow() == nil {
+		t.Error("the flush finished the upload, which would mean rewriting the file on the next write")
+	}
+}
+
+// TestIntegrationRenameStoresWhatIsStillBeingWritten is a rename that arrives before the close.
+//
+// The bytes of a file being written are in the upload buffer, not in the store, and a rename moves
+// what the store holds — so renaming while the upload is pending asked the backend to move an object
+// that was not there, and the client was told its rename failed on a file it had just written. The
+// upload is finished under the name it was started with first, and the rename moves what it stored.
+func TestIntegrationRenameStoresWhatIsStillBeingWritten(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	created, _ := cl.create("draft.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(created).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+
+	data := bytes.Repeat([]byte("sombrero "), 64)
+	if _, err := cl.write(createdFileID(created), 0, data); err != nil {
+		t.Fatalf("the write failed: %v", err)
+	}
+
+	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
+	if file == nil {
+		t.Fatal("the create left no open behind it")
+	}
+	if file.file.uploadNow() == nil {
+		t.Fatal("the write left no upload pending, so the rename has nothing to finish")
+	}
+
+	// The rename comes while the upload is still pending, which is the case this is about.
+	renamed, err := cl.rename(createdFileID(created), "final.txt")
+	if err != nil {
+		t.Fatalf("the rename failed outright: %v", err)
+	}
+	if status := smb2.Header(renamed).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the rename was answered with %#x, want the file moved", status)
+	}
+
+	// What the store holds is the file under its new name, with everything that was written to it.
+	if _, err := h.files.Object(context.Background(), stores.Account{}, "draft.txt"); err == nil {
+		t.Error("the store still holds the file under the name it was written under")
+	}
+	oi, err := h.files.Object(context.Background(), stores.Account{}, "final.txt")
+	if err != nil {
+		t.Fatalf("the store does not hold the file under its new name: %v", err)
+	}
+	if oi.Size != uint64(len(data)) {
+		t.Errorf("the stored file is %d bytes, want the %d that were written", oi.Size, len(data))
+	}
+
+	// And the upload is done with, rather than left pending under a name nothing points at.
+	if file.file.uploadNow() != nil {
+		t.Error("the upload is still pending after the rename")
 	}
 }

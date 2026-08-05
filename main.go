@@ -88,6 +88,12 @@ func main() {
 	server := newServer(ctx, l, db, cfg.Debug, cfg.Indexd)
 	if smb2.MaxSupportedDialect != smb2.SMB_DIALECT_202 {
 		server.serverCapabilities |= smb2.GLOBAL_CAP_LARGE_MTU
+
+		// A lease is what a client of 2.1 and above caches a file under, and it will not ask for
+		// one unless the server says it grants them. Without this the whole of the lease support
+		// goes unused: a Windows client falls back to an oplock, which promises the same thing to
+		// one handle instead of to the client.
+		server.isLeasingCapable = true
 	}
 	if smb2.Is3X(smb2.MaxSupportedDialect) {
 		server.serverCapabilities |= smb2.GLOBAL_CAP_ENCRYPTION

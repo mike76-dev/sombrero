@@ -36,6 +36,7 @@ const (
 	STATUS_INSUFFICIENT_RESOURCES                = 0xc000009a
 	STATUS_IO_TIMEOUT                            = 0xc00000b5
 	STATUS_NOT_SUPPORTED                         = 0xc00000bb
+	STATUS_UNEXPECTED_NETWORK_ERROR              = 0xc00000c4
 	STATUS_NETWORK_NAME_DELETED                  = 0xc00000c9
 	STATUS_NETWORK_ACCESS_DENIED                 = 0xc00000ca
 	STATUS_BAD_NETWORK_NAME                      = 0xc00000cc

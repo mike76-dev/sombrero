@@ -501,6 +501,18 @@ func (ss *session) encrypt(buf []byte, c *connection) []byte {
 		log.Printf("Error creating encrypter: %v", err)
 		return nil
 	}
+	// Whatever is encrypted has to name the session it is encrypted under. [MS-SMB2] 3.2.5.1.1: a
+	// client that decrypts a message whose SMB2 header names a different session than the transform
+	// header disconnects the connection, and a session of zero is a different session.
+	//
+	// A lease break notification is the message this is for. [MS-SMB2] 3.3.4.7 has the server set
+	// its SessionId to zero - a lease belongs to a client rather than to a session - and that is
+	// what goes out over a connection that does not encrypt. Encrypted, the two rules cannot both
+	// be kept, and the client's is the one that decides what happens on the wire: it drops the
+	// connection the moment it reads a lease break, and a client that could never be told to give
+	// up a lease is worse off than one told in a header it can make sense of.
+	stampSessionID(buf, ss.sessionID)
+
 	nonce := make([]byte, encrypter.NonceSize())
 	frand.Read(nonce)
 	output := smb2.Header(make([]byte, smb2.SMB2TransformHeaderSize+len(buf)+16))
@@ -513,6 +525,29 @@ func (ss *session) encrypt(buf []byte, c *connection) []byte {
 	output.SetEncryptionSignature(output[len(output)-16:])
 	output = output[:len(output)-16]
 	return output
+}
+
+// stampSessionID names the session in every SMB2 header of the message that names none. A message
+// built for a session says so already; one built for a client, as a lease break is, says nothing,
+// and that is what a peer will not read once it is encrypted.
+func stampSessionID(msg []byte, sessionID uint64) {
+	var off uint32
+	for {
+		if uint64(off)+smb2.SMB2HeaderSize > uint64(len(msg)) {
+			return
+		}
+
+		h := smb2.Header(msg[off:])
+		if h.SessionID() == 0 {
+			h.SetSessionID(sessionID)
+		}
+
+		next := h.NextCommand()
+		if next == 0 {
+			return
+		}
+		off += next
+	}
 }
 
 // decrypt uses the decryption key to decrypt the SMB message.

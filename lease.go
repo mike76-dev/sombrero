@@ -272,7 +272,16 @@ func (l *lease) currentEpoch() uint16 {
 // leaseRequest returns the lease the client is asking for with this create, or nil if it is
 // asking for none. A lease context means nothing unless the client says it wants a lease, and
 // only a client that named a GUID at negotiate time can hold one.
+//
+// It also means nothing on a connection the server never offered leases on. [MS-SMB2] 3.3.5.9: a
+// server that does not support leasing ignores the lease create context, and 2.0.2 is the dialect
+// that has no leases in it - so what is advertised at negotiate time and what is granted here are
+// the same answer.
 func (c *connection) leaseRequest(cr smb2.CreateRequest, contexts map[uint32][]byte) *smb2.LeaseRequest {
+	if c.serverCapabilities&smb2.GLOBAL_CAP_LEASING == 0 {
+		return nil
+	}
+
 	if cr.RequestedOplockLevel() != smb2.OPLOCK_LEVEL_LEASE || len(c.clientGuid) != 16 {
 		return nil
 	}
@@ -439,7 +448,7 @@ func (s *server) grantLease(op *open, l *lease, requested uint32, tc *treeConnec
 	guid := op.clientGuid
 	op.mu.Unlock()
 
-	oplocks, leases := holdersIn(others, l, guid)
+	oplocks, leases := holdersIn(others, asker{guid: guid, own: l, keyed: true})
 
 	// The file is the client's own, so it may be promised in full. Otherwise nothing that lets
 	// the client write can be promised, but a read cache still can, as long as nobody else is

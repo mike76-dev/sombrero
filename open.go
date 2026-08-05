@@ -166,9 +166,6 @@ type open struct {
 	srvsvcData []byte
 
 	mu sync.Mutex
-
-	inflight int
-	cond     *sync.Cond
 }
 
 // readChunk is a cached chunk of a file. The download runs in the background;
@@ -290,9 +287,62 @@ type fileState struct {
 	// caches belong to the handles, so a write through one of them has to reach the rest.
 	generation uint64
 
+	// inflight is how many writes are on their way into the upload, through any handle on the
+	// file, and writes is what waits for them to land. They are counted per file and not per
+	// handle because the upload is the file's: a handle that finalizes it while another handle's
+	// write is still buffering finalizes an upload with a hole in it, which the flush then refuses
+	// as non-contiguous and the file is lost.
+	inflight int
+	writes   *sync.Cond
+
 	// startingMu serializes the start of an upload, which takes a call to the backend and so
 	// cannot be done under mu.
 	startingMu sync.Mutex
+}
+
+// writesCond returns what waits for the writes in flight, making it if this is the first waiter.
+// fs.mu must be held.
+func (fs *fileState) writesCond() *sync.Cond {
+	if fs.writes == nil {
+		fs.writes = sync.NewCond(&fs.mu)
+	}
+
+	return fs.writes
+}
+
+// beginWrite counts a write on its way into the file.
+func (fs *fileState) beginWrite() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.inflight++
+}
+
+// endWrite counts one that has landed, and wakes whoever is waiting to finalize the upload.
+func (fs *fileState) endWrite() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.inflight--
+	fs.writesCond().Broadcast()
+}
+
+// waitForWrites waits until nothing is on its way into the file through any handle, and hands back
+// the upload that is carrying it, if there is one.
+//
+// The waiting does not depend on there being an upload yet. A write starts one, so a write still in
+// flight may not have started it: waiting only while there is one would let a close finish before the
+// write it is racing had begun, and the file would be left with an upload nobody finishes and a client
+// that was told its close succeeded.
+func (fs *fileState) waitForWrites() *upload {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	for fs.inflight > 0 {
+		fs.writesCond().Wait()
+	}
+
+	return fs.upload
 }
 
 // generationNow is which writing of the file the state is on.
@@ -523,7 +573,6 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 		chunkSize: readChunkSize(tc.maxUploadSize),
 	}
 	op.maxCacheSize = readCacheSize(op.chunkSize)
-	op.cond = sync.NewCond(&op.mu)
 
 	// The open remembers which client made it, because it may outlive the connection it was
 	// made on and a replay may arrive over another one.
@@ -1277,26 +1326,54 @@ func (op *open) write(offset uint64, data []byte) error {
 
 	u.mu.Lock()
 
-	buf := make([]byte, len(data))
-	copy(buf, data)
-	u.pending[offset] = &uploadChunk{offset: offset, data: buf}
+	// A client may write over what it has already written. An office application builds its file,
+	// then writes the whole of it again from the start - longer the second time, as the last of the
+	// parts is added - and saves. The upload takes the bytes in the order they are to be stored, so a
+	// write landing behind where the buffering has reached is not another chunk to be queued: queued,
+	// it would sit in pending for ever and take the whole file down with it at the flush, as data
+	// that is not contiguous.
+	//
+	// It can be answered as long as the bytes it covers have not gone to the store yet, which is to
+	// say the buffer still begins at or before it. What overlaps is written over, and anything past
+	// the end carries the buffer on. Bytes already sent are beyond recall, and saying so is better
+	// than storing a file that is not the one the client wrote.
+	if offset < u.nextOffset {
+		if offset < u.bufOffset {
+			u.mu.Unlock()
 
-	for {
-		ch, ok := u.pending[u.nextOffset]
-		if !ok {
-			break
+			return errors.New("write: rewriting a part of the file that has already been stored")
 		}
 
-		if len(u.buf) == 0 {
-			u.bufOffset = u.nextOffset
+		written := copy(u.buf[offset-u.bufOffset:], data)
+		if written < len(data) {
+			u.buf = append(u.buf, data[written:]...)
+			u.nextOffset = offset + uint64(len(data))
+			u.totalSize = u.nextOffset
 		}
-
-		u.buf = append(u.buf, ch.data...)
-		u.totalSize += uint64(len(ch.data))
-		u.nextOffset += uint64(len(ch.data))
-		delete(u.pending, ch.offset)
 
 		op.file.advanceUpload(u, u.totalSize)
+	} else {
+		buf := make([]byte, len(data))
+		copy(buf, data)
+		u.pending[offset] = &uploadChunk{offset: offset, data: buf}
+
+		for {
+			ch, ok := u.pending[u.nextOffset]
+			if !ok {
+				break
+			}
+
+			if len(u.buf) == 0 {
+				u.bufOffset = u.nextOffset
+			}
+
+			u.buf = append(u.buf, ch.data...)
+			u.totalSize += uint64(len(ch.data))
+			u.nextOffset += uint64(len(ch.data))
+			delete(u.pending, ch.offset)
+
+			op.file.advanceUpload(u, u.totalSize)
+		}
 	}
 
 	// Detach any complete slabs while holding the lock, then upload them
@@ -1340,14 +1417,7 @@ func (op *open) write(offset uint64, data []byte) error {
 
 // flush uploads the remaining part and finalizes the upload.
 func (op *open) flush() error {
-	u := op.file.uploadNow()
-	op.mu.Lock()
-	for u != nil && op.inflight > 0 {
-		op.cond.Wait()
-		u = op.file.uploadNow()
-	}
-	op.mu.Unlock()
-
+	u := op.file.waitForWrites()
 	if u == nil {
 		return nil
 	}
@@ -1409,9 +1479,10 @@ func (op *open) flush() error {
 
 	op.file.finishUpload(u, finalSize)
 
-	op.treeConnect.mu.Lock()
-	delete(op.treeConnect.persistedFiles, op.pathName)
-	op.treeConnect.mu.Unlock()
+	op.mu.Lock()
+	path := op.pathName
+	op.mu.Unlock()
+	op.treeConnect.forgetPersistedFile(path)
 
 	return nil
 }
