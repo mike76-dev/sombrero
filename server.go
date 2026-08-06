@@ -72,6 +72,11 @@ type server struct {
 	oplockBreakTimeout time.Duration
 	leaseBreakTimeout  time.Duration
 
+	// watchInterval is how often a directory being watched is looked at again, and is a field for
+	// the same reason: a test of what becomes of a watch cannot wait a quarter of a minute for
+	// every look.
+	watchInterval time.Duration
+
 	connectionCount map[string]int
 	store           stores.Store
 	debug           bool
@@ -99,6 +104,7 @@ func newServerState(ctx context.Context, db stores.Store, debug bool, cfg stores
 		replayableOpens:      make(map[replayKey]*open),
 		oplockBreakTimeout:   oplockBreakTimeout,
 		leaseBreakTimeout:    leaseBreakTimeout,
+		watchInterval:        watchInterval,
 		connectionCount:      make(map[string]int),
 		store:                db,
 		debug:                debug,

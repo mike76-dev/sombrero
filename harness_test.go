@@ -43,11 +43,24 @@ type fakeClient struct {
 	// that leaves the store empty cannot say what a rename of a file just written finds.
 	uploaded map[string]uint64
 
+	// staged is the bytes the parts carried, by path, so that finishing an upload puts the file the
+	// client actually wrote in the store and a test can read it back. It is what tells the contents
+	// of one writing of a file from those of another.
+	staged map[string][]byte
+
+	// started counts the uploads begun on a path, which is what tells one upload carrying the
+	// writes of every handle on a file from two uploads racing to be the last one finished.
+	started map[string]int
+
 	// dirErr is what making a directory fails with, and finishErr what finishing an upload fails
 	// with, when a test asks them to. They stand for a store that is there but will not do the
 	// work — the Sia node out of sync is the one that prompted them.
 	dirErr    error
 	finishErr error
+
+	// readGate holds up every read until a test lets it go, so that a test can arrange for
+	// something to happen to the handle while a read on it is still being worked on.
+	readGate chan struct{}
 
 	// deleteErr is what a deletion fails with, when a test asks it to. A deletion that the
 	// backend refuses for a reason other than the file not being there is the one the server
@@ -100,6 +113,17 @@ func (fc *fakeClient) putDir(path string) {
 		CreatedAt:  now,
 		ModifiedAt: now,
 	}
+}
+
+// holdReads makes every read wait, and returns what lets them all go.
+func (fc *fakeClient) holdReads() func() {
+	gate := make(chan struct{})
+
+	fc.mu.Lock()
+	fc.readGate = gate
+	fc.mu.Unlock()
+
+	return func() { close(gate) }
 }
 
 // failDeletion makes every deletion fail from here on.
@@ -210,6 +234,14 @@ func (fc *fakeClient) Parents(context.Context, stores.Account, string) (client.F
 // reads as nothing, as it did before any test cared what came back.
 func (fc *fakeClient) Read(_ context.Context, _ stores.Account, path string, offset, length uint64, w io.Writer) error {
 	fc.mu.Lock()
+	gate := fc.readGate
+	fc.mu.Unlock()
+
+	if gate != nil {
+		<-gate
+	}
+
+	fc.mu.Lock()
 	data, found := fc.contents[path]
 	fc.mu.Unlock()
 
@@ -229,8 +261,33 @@ func (fc *fakeClient) Read(_ context.Context, _ stores.Account, path string, off
 	return err
 }
 
-func (fc *fakeClient) StartUpload(context.Context, stores.Account, string) (string, error) {
+func (fc *fakeClient) StartUpload(_ context.Context, _ stores.Account, path string) (string, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if fc.started == nil {
+		fc.started = make(map[string]int)
+	}
+	fc.started[path]++
+
 	return "upload", nil
+}
+
+// uploadsOf is how many uploads have been started on the file.
+func (fc *fakeClient) uploadsOf(path string) int {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	return fc.started[path]
+}
+
+// dataOf is what the store holds for the file, which is what the parts of the last upload to be
+// finished carried.
+func (fc *fakeClient) dataOf(path string) []byte {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	return fc.contents[path]
 }
 
 func (fc *fakeClient) AbortUpload(context.Context, string, string) error { return nil }
@@ -238,9 +295,11 @@ func (fc *fakeClient) AbortUpload(context.Context, string, string) error { retur
 func (fc *fakeClient) FinishUpload(_ context.Context, path, _ string, _ []api.MultipartCompletedPart) error {
 	fc.mu.Lock()
 	size, uploaded := fc.uploaded[path], fc.uploaded != nil
+	data := fc.staged[path]
 	err := fc.finishErr
 	if uploaded {
 		delete(fc.uploaded, path)
+		delete(fc.staged, path)
 	}
 	fc.mu.Unlock()
 
@@ -249,13 +308,29 @@ func (fc *fakeClient) FinishUpload(_ context.Context, path, _ string, _ []api.Mu
 	}
 
 	// The parts become the object, which is what makes the file findable by everything that comes
-	// after — a rename of it, above all.
+	// after — a rename of it, above all. What they carried becomes its contents, so that the file in
+	// the store is the file that was written and not merely one of the right length.
 	fc.put(path, size)
+	if uint64(len(data)) > size {
+		data = data[:size]
+	}
+	if len(data) > 0 {
+		fc.mu.Lock()
+		fc.contents[path] = data
+		fc.mu.Unlock()
+	}
 
 	return nil
 }
 
-func (fc *fakeClient) Write(_ context.Context, _ io.Reader, path, _ string, _ int, offset, length uint64) (string, error) {
+func (fc *fakeClient) Write(_ context.Context, r io.Reader, path, _ string, _ int, offset, length uint64) (string, error) {
+	part := make([]byte, length)
+	n, err := io.ReadFull(r, part)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	part = part[:n]
+
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 
@@ -265,6 +340,16 @@ func (fc *fakeClient) Write(_ context.Context, _ io.Reader, path, _ string, _ in
 	if end := offset + length; end > fc.uploaded[path] {
 		fc.uploaded[path] = end
 	}
+
+	if fc.staged == nil {
+		fc.staged = make(map[string][]byte)
+	}
+	if end := offset + uint64(len(part)); end > uint64(len(fc.staged[path])) {
+		grown := make([]byte, end)
+		copy(grown, fc.staged[path])
+		fc.staged[path] = grown
+	}
+	copy(fc.staged[path][offset:], part)
 
 	return "etag", nil
 }

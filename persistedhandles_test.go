@@ -715,3 +715,252 @@ func TestIntegrationRenameStoresWhatIsStillBeingWritten(t *testing.T) {
 		t.Error("the upload is still pending after the rename")
 	}
 }
+
+// A file the store has an object for is shared exactly as one it has nothing for: the state on the
+// share is what every handle on the file finds, whoever opened it. These are the tests of what the
+// sharing keeps from happening — two writings of one file going up as two uploads, and a file left
+// at a size the store was never given.
+
+// readData is the bytes a read response carries.
+func readData(t *testing.T, buf []byte) []byte {
+	t.Helper()
+
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the read was answered with %#x", status)
+	}
+	if len(buf) < smb2.SMB2HeaderSize+smb2.SMB2ReadResponseMinSize {
+		t.Fatalf("the read answered with %d bytes, too few for a read response", len(buf))
+	}
+
+	offset := int(buf[smb2.SMB2HeaderSize+2])
+	length := int(binary.LittleEndian.Uint32(buf[smb2.SMB2HeaderSize+4 : smb2.SMB2HeaderSize+8]))
+	if offset+length > len(buf) {
+		t.Fatalf("the read names %d bytes at offset %d of a %d byte response", length, offset, len(buf))
+	}
+
+	return buf[offset : offset+length]
+}
+
+// TestIntegrationTwoClientsOnAStoredFileShareItsState is the sharing itself, for a file that is in
+// the store. It used to hold only for a file the store had nothing for: the state was asked for
+// where the object lookup had failed and nowhere else, so two clients opening a file that exists got
+// a state apiece and, with it, a size apiece.
+func TestIntegrationTwoClientsOnAStoredFileShareItsState(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putData("notes.txt", []byte("another test"))
+
+	first, second := h.dial("alice"), h.dial("alice")
+	one, _ := first.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(one).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the first client's open was answered with %#x", status)
+	}
+	two, _ := second.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(two).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the second client's open was answered with %#x", status)
+	}
+
+	opOne := h.srv.globalOpenTable[openIDOf(createdFileID(one))]
+	opTwo := h.srv.globalOpenTable[openIDOf(createdFileID(two))]
+	if opOne == nil || opTwo == nil {
+		t.Fatal("one of the opens is missing")
+	}
+	if opOne.file != opTwo.file {
+		t.Fatal("the two clients have the same file open and do not share its state")
+	}
+
+	// So what one client writes is the size the other is told, as it is for two handles of one
+	// client: the file is one file.
+	if _, err := first.write(createdFileID(one), 0, []byte("test")); err != nil {
+		t.Fatalf("the write failed: %v", err)
+	}
+	info := queriedInfo(t, second.queryInfo(createdFileID(two), smb2.FileStandardInformation, 64))
+	if len(info) < 16 {
+		t.Fatalf("the query answered with %d bytes, too few for a standard information structure", len(info))
+	}
+	if got := binary.LittleEndian.Uint64(info[8:16]); got != 4 {
+		t.Errorf("the second client says the file is %d bytes long, want the 4 the first has written", got)
+	}
+}
+
+// TestIntegrationTwoClientsWritingAStoredFileShareOneUpload is the corruption the sharing was
+// found by. A file goes to the backend as one multipart upload, and the upload belongs to the file:
+// two clients writing one file used to start one upload each, both to the same path, and the store
+// kept whichever was finished last. Everything the other client wrote was gone, and until then each
+// of them read the object the store still held cut off at a length of its own.
+func TestIntegrationTwoClientsWritingAStoredFileShareOneUpload(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putData("notes.txt", []byte("0123456789ab"))
+
+	first, second := h.dial("alice"), h.dial("alice")
+	one, _ := first.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(one).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the first client's open was answered with %#x", status)
+	}
+	two, _ := second.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(two).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the second client's open was answered with %#x", status)
+	}
+
+	// Both write before either closes, which is what makes it one writing of the file rather than
+	// two in a row.
+	if _, err := second.write(createdFileID(two), 0, []byte("another test")); err != nil {
+		t.Fatalf("the second client's write failed: %v", err)
+	}
+	if _, err := first.write(createdFileID(one), 0, []byte("test")); err != nil {
+		t.Fatalf("the first client's write failed: %v", err)
+	}
+
+	if got := h.files.uploadsOf("notes.txt"); got != 1 {
+		t.Errorf("%d uploads were started for the file, want the one it goes to the backend as", got)
+	}
+
+	if _, err := first.closeHandle(createdFileID(one)); err != nil {
+		t.Fatalf("the first client's close failed: %v", err)
+	}
+	if _, err := second.closeHandle(createdFileID(two)); err != nil {
+		t.Fatalf("the second client's close failed: %v", err)
+	}
+
+	// The file the store holds is the file as both of them left it: the longer write, with the
+	// shorter one over the front of it. Neither client's bytes went nowhere.
+	if got := string(h.files.dataOf("notes.txt")); got != "testher test" {
+		t.Errorf("the store holds %q, want both writings of the file", got)
+	}
+}
+
+// TestIntegrationAnUploadThatCameToNothingLeavesTheStoredSize is the file that read as four
+// characters of somebody else's writing.
+//
+// A write moves the size of the file to what the writer has reached, and the store is given none of
+// it until the upload is finished. An upload that is called off - a close whose store refused it, a
+// handle nobody came back for - used to leave that size behind: the store still held the object it
+// always had, and a read of the file was served those bytes cut off at the length of a writing that
+// never happened.
+func TestIntegrationAnUploadThatCameToNothingLeavesTheStoredSize(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putData("notes.txt", []byte("another test"))
+
+	// The second client holds the file open throughout, so that the state survives the close that
+	// fails and the rollback is what the read is answered out of.
+	first, second := h.dial("alice"), h.dial("alice")
+	watching, _ := second.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(watching).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the watching open was answered with %#x", status)
+	}
+	writing, _ := first.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(writing).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the writing open was answered with %#x", status)
+	}
+
+	h.files.failFinishingUploads(errors.New("the store is out of sync"))
+	if _, err := first.write(createdFileID(writing), 0, []byte("test")); err != nil {
+		t.Fatalf("the write failed: %v", err)
+	}
+
+	closed, err := first.closeHandle(createdFileID(writing))
+	if err != nil {
+		t.Fatalf("the close failed outright: %v", err)
+	}
+	if status := smb2.Header(closed).Status(); status != smb2.STATUS_UNEXPECTED_NETWORK_ERROR {
+		t.Fatalf("the close was answered with %#x, want the file it could not store reported", status)
+	}
+
+	// The file is what the store holds, whole: the size of the writing that came to nothing is gone
+	// with it.
+	info := queriedInfo(t, second.queryInfo(createdFileID(watching), smb2.FileStandardInformation, 64))
+	if len(info) < 16 {
+		t.Fatalf("the query answered with %d bytes, too few for a standard information structure", len(info))
+	}
+	if got := binary.LittleEndian.Uint64(info[8:16]); got != 12 {
+		t.Errorf("the file is %d bytes long, want the 12 the store holds", got)
+	}
+
+	read, err := second.readOver(createdFileID(watching), 64, smb2.SMB2_CHANNEL_NONE)
+	if err != nil {
+		t.Fatalf("the read failed outright: %v", err)
+	}
+	if got := string(readData(t, read)); got != "another test" {
+		t.Errorf("the file reads as %q, want what the store holds", got)
+	}
+}
+
+// TestIntegrationTheStateOfAStoredFileGoesWithTheLastHandle is the other side of keeping the state
+// on the share. A file the store answers for is answered for by the store again once nobody holds it
+// open: kept any longer, the state would go on telling every create what the last writer left behind.
+// A file the store has nothing for stays, because the state is the only record that it exists.
+func TestIntegrationTheStateOfAStoredFileGoesWithTheLastHandle(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putData("stored.txt", []byte("another test"))
+
+	cl := h.dial("alice")
+	stored, _ := cl.create("stored.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(stored).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the open of the stored file was answered with %#x", status)
+	}
+	made, _ := cl.create("made.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(made).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+
+	// While they are open, both are on the share: that is what the handles share.
+	if _, found := cl.tc.persistedFile("stored.txt"); !found {
+		t.Error("the file that is open is not on the share")
+	}
+
+	if _, err := cl.closeHandle(createdFileID(stored)); err != nil {
+		t.Fatalf("the close of the stored file failed: %v", err)
+	}
+	if _, err := cl.closeHandle(createdFileID(made)); err != nil {
+		t.Fatalf("the close of the created file failed: %v", err)
+	}
+
+	if _, found := cl.tc.persistedFile("stored.txt"); found {
+		t.Error("the state of the stored file outlived the last handle on it")
+	}
+	if _, found := cl.tc.persistedFile("made.txt"); !found {
+		t.Error("the file that was never uploaded is gone, and nothing else knows it exists")
+	}
+}
+
+// TestIntegrationAWriterThatDisconnectsLeavesTheStoredSize is the same file, lost the other way.
+// Nothing finishes the upload of a client that goes away, so the size it reached describes a file
+// that was never stored — and the file was left at it, to be read as the object the store still held
+// cut off at that length.
+func TestIntegrationAWriterThatDisconnectsLeavesTheStoredSize(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putData("notes.txt", []byte("another test"))
+
+	first, second := h.dial("alice"), h.dial("alice")
+	watching, _ := second.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(watching).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the watching open was answered with %#x", status)
+	}
+	writing, _ := first.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(writing).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the writing open was answered with %#x", status)
+	}
+
+	if _, err := first.write(createdFileID(writing), 0, []byte("test")); err != nil {
+		t.Fatalf("the write failed: %v", err)
+	}
+
+	// The writer is gone before it closed the handle, so its upload is never finished. The handle
+	// is not durable, so nothing is set aside for it to come back to.
+	h.srv.closeConnection(first.conn)
+
+	info := queriedInfo(t, second.queryInfo(createdFileID(watching), smb2.FileStandardInformation, 64))
+	if len(info) < 16 {
+		t.Fatalf("the query answered with %d bytes, too few for a standard information structure", len(info))
+	}
+	if got := binary.LittleEndian.Uint64(info[8:16]); got != 12 {
+		t.Errorf("the file is %d bytes long, want the 12 the store holds", got)
+	}
+
+	read, err := second.readOver(createdFileID(watching), 64, smb2.SMB2_CHANNEL_NONE)
+	if err != nil {
+		t.Fatalf("the read failed outright: %v", err)
+	}
+	if got := string(readData(t, read)); got != "another test" {
+		t.Errorf("the file reads as %q, want what the store holds", got)
+	}
+}

@@ -31,6 +31,10 @@ var (
 	// in memory. The store cannot answer it either: what has gone up so far are the parts of a
 	// multipart upload, which is not an object until it is completed.
 	errNotUploaded = errors.New("file is still being uploaded")
+
+	// errTruncateSent is a file cut short at a point that has already gone to the store. The parts
+	// of a multipart upload cannot be taken back, so the file cannot be made to end there.
+	errTruncateSent = errors.New("truncate: what is beyond the new end of the file has already been stored")
 )
 
 // uploadChunk represents a single part of a multipart upload.
@@ -74,6 +78,40 @@ func (u *upload) readBuffered(offset, length uint64) ([]byte, bool) {
 	copy(data, u.buf[start:start+length])
 
 	return data, true
+}
+
+// cutTo cuts the upload down to a file of n bytes, and reports whether it could. What has already
+// gone to the store as a part is beyond recall, so an upload can only be cut back as far as the
+// buffer still reaches. Anything the client wrote past the new end goes, buffered or queued: the
+// file ends where it has just been told to end.
+func (u *upload) cutTo(n uint64) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if n >= u.totalSize {
+		return true
+	}
+
+	if n < u.bufOffset {
+		return false
+	}
+
+	u.buf = u.buf[:n-u.bufOffset]
+	u.nextOffset = n
+	u.totalSize = n
+
+	for offset, chunk := range u.pending {
+		if offset >= n {
+			delete(u.pending, offset)
+			continue
+		}
+
+		if end := offset + uint64(len(chunk.data)); end > n {
+			chunk.data = chunk.data[:n-offset]
+		}
+	}
+
+	return true
 }
 
 // open represents an Open object.
@@ -188,6 +226,15 @@ const (
 
 	// Rough per-open memory budget of the read cache, used to derive maxCacheSize.
 	readCacheBudget = 128 * 1024 * 1024
+
+	// How often a directory that is being watched is looked at again, to see whether anything a
+	// client asked to be told about has changed.
+	watchInterval = 15 * time.Second
+
+	// How much of a file is read back at a time when it is cut short and what is left of it has to
+	// be written out again. The parts of the upload are the size the backend takes, so this only
+	// bounds what is held while a part is being filled.
+	maxTruncateChunkSize = 32 * 1024 * 1024
 )
 
 // readChunkSize picks a read chunk size for the given slab size: a whole multiple of
@@ -258,10 +305,12 @@ func grantAccess(cr smb2.CreateRequest, tc *treeConnect, ss *session) bool {
 // that a client asking after a file while another of its handles is still uploading it is answered
 // with what the file is now, and not with what the handle was opened on.
 //
-// It is also the record by which a file that has been created but not yet uploaded is known. The
-// state outlives the opens on it, which is what lets a create that comes later find such a file
-// although the backend has no object for it. Nothing else about an open is shared: the file ID, the
-// caching promise and the read cache all belong to the handle alone, and every create makes its own.
+// It is also the record by which an open file is known on the share, so that every handle on it
+// finds the one state whether the backend has an object for the file or not. A file that has none
+// is known by nothing else, so its state stays for as long as the file does; one that has an object
+// is answered for by the store again once the last handle on it is gone. Nothing else about an open
+// is shared: the file ID, the caching promise and the read cache all belong to the handle alone, and
+// every create makes its own.
 //
 // mu guards all of it, and is a leaf: no other lock of the server is taken while it is held.
 type fileState struct {
@@ -282,10 +331,27 @@ type fileState struct {
 	// Every open on the file writes through the same one.
 	upload *upload
 
+	// stored says the backend has an object for the file, which decides who answers for it once
+	// nobody holds it open: the store, or this state alone.
+	stored bool
+
+	// handles is how many opens share the state. The state of a file the store answers for is
+	// worth keeping for exactly as long as one of them is alive: kept longer, it would go on
+	// answering with the size the last writer left behind, which is the size of a file the store
+	// may never have been given.
+	handles int
+
 	// generation counts the times the file has been written anew. A read cache belongs to the
 	// generation it was filled in, and an open drops its own once the file has moved on: the
 	// caches belong to the handles, so a write through one of them has to reach the rest.
 	generation uint64
+
+	// What the file measured when the upload started, so that an upload that comes to nothing can
+	// put it back. The store was never given what that upload was carrying, so a file left at the
+	// size the writer reached is a file whose size and contents come from different writings of it:
+	// a read is served the object the store still holds, cut off at a length it never had.
+	sizeBefore      uint64
+	allocatedBefore uint64
 
 	// inflight is how many writes are on their way into the upload, through any handle on the
 	// file, and writes is what waits for them to land. They are counted per file and not per
@@ -343,6 +409,60 @@ func (fs *fileState) waitForWrites() *upload {
 	}
 
 	return fs.upload
+}
+
+// attach counts a handle that shares the state.
+func (fs *fileState) attach() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.handles++
+}
+
+// detach counts a handle that is gone, and reports whether the state has done its work: no handle
+// is left on the file and the store answers for it from here on.
+func (fs *fileState) detach() bool {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.handles--
+
+	return fs.handles <= 0 && fs.stored
+}
+
+// lastHandle reports whether the open asking is the only one left on the file, which is what decides
+// whether an upload of it is still anybody else's to store.
+func (fs *fileState) lastHandle() bool {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.handles <= 1
+}
+
+// markStored records that the backend has an object for the file, which it has once an upload of it
+// has been completed.
+func (fs *fileState) markStored() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.stored = true
+}
+
+// markUnstored records that the backend no longer has an object for the file, which is what a file
+// cut down to nothing becomes: nothing empty can be stored, so the state is all there is of it.
+func (fs *fileState) markUnstored() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.stored = false
+}
+
+// isStored reports whether the backend has an object for the file.
+func (fs *fileState) isStored() bool {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.stored
 }
 
 // generationNow is which writing of the file the state is on.
@@ -464,6 +584,8 @@ func (fs *fileState) startUpload(u *upload) bool {
 
 	fs.upload = u
 	fs.generation++
+	fs.sizeBefore = fs.size
+	fs.allocatedBefore = fs.allocated
 
 	return true
 }
@@ -498,14 +620,22 @@ func (fs *fileState) finishUpload(u *upload, size uint64) {
 	fs.modified = time.Now()
 }
 
-// dropUpload lets an upload go without settling anything, for one that came to nothing.
+// dropUpload lets an upload go, for one that came to nothing, and puts the file back to the size it
+// was before it started: the store was never given what the upload was carrying, so the size it
+// reached describes a file that does not exist anywhere. The file moves on a generation as well,
+// since what the handles cached while it was being written is of that file and not of this one.
 func (fs *fileState) dropUpload(u *upload) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	if fs.upload == u {
-		fs.upload = nil
+	if fs.upload != u {
+		return
 	}
+
+	fs.upload = nil
+	fs.size = fs.sizeBefore
+	fs.allocated = fs.allocatedBefore
+	fs.generation++
 }
 
 // registerOpen creates a new Open object and registers it with the server.
@@ -529,8 +659,8 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 		filepath, filename, isDir = utils.ExtractFilename(info.Key)
 	}
 
-	// A file that has been created but not yet uploaded is already known by its state, which
-	// every open on it shares. Anything else is met here for the first time.
+	// A file that is already open, or that has been created and not yet uploaded, is known by its
+	// state, which every open on it shares. Anything else is met here for the first time.
 	if fs == nil {
 		attributes := uint32(smb2.FILE_ATTRIBUTE_NORMAL)
 		if isDir {
@@ -546,6 +676,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 	} else if isDir {
 		fs.markDirectory()
 	}
+	fs.attach()
 
 	fid := make([]byte, 16)
 	frand.Read(fid)
@@ -626,6 +757,22 @@ func (s *server) closeOpen(op *open) {
 	delete(s.globalOpenTable, op.durableFileID)
 	s.mu.Unlock()
 	s.unindexOpen(op)
+	op.releaseFile()
+}
+
+// releaseFile lets go of the state of the file the open was on, and takes it off the share once the
+// last handle on a file the store answers for has gone. A file the store has nothing for is left
+// where it is: the state is the only record that it exists.
+func (op *open) releaseFile() {
+	if !op.file.detach() {
+		return
+	}
+
+	op.mu.Lock()
+	path := op.pathName
+	op.mu.Unlock()
+
+	op.treeConnect.forgetPersistedFile(path)
 }
 
 // queryDirectory performs a search within the directory using the provided pattern.
@@ -887,6 +1034,10 @@ func (op *open) directorySnapshot(acc stores.Account) ([]byte, error) {
 // that a directory that cannot be looked at at all is answered synchronously rather than armed
 // and left to fail behind an interim response.
 func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc stores.Account, snapshot []byte, stopChan chan struct{}) {
+	op.mu.Lock()
+	ctx := op.ctx
+	op.mu.Unlock()
+
 	for {
 		select {
 		case <-stopChan: // Execution terminated
@@ -897,7 +1048,17 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc
 			// go. The cancel path has already released it, and a second release is a no-op.
 			c.releaseOpen(&req.Request)
 			return
-		case <-time.After(15 * time.Second): // Check every 15 seconds
+
+		case <-ctx.Done():
+			// The open is gone: closed, or taken down with the tree connect or the session.
+			// Whoever took it down answers the watch, so nothing is sent from here - what this
+			// has to do is stop. Left polling, it goes on listing a directory nobody is waiting
+			// to hear about for as long as the server runs, and answers a request that has
+			// already been answered the next time that directory changes.
+			c.releaseOpen(&req.Request)
+			return
+
+		case <-time.After(c.server.watchInterval): // Look at the directory again
 		}
 
 		newSnapshot, err := op.directorySnapshot(acc)
@@ -1415,6 +1576,131 @@ func (op *open) write(offset uint64, data []byte) error {
 	return nil
 }
 
+// setEndOfFile carries out a client's setting of the end of the file.
+//
+// Which way it goes is what it means. Cutting the file short changes its contents - what is beyond
+// the new end is gone - so it is carried out. Setting the end beyond what the file holds asks for
+// space rather than for contents, and neither backend can put a hole in an object without writing
+// the whole of it out again, so it is taken as the allocation and the size settles at what is
+// actually stored when the upload is finished. A client that means to have the bytes writes them.
+func (op *open) setEndOfFile(acc stores.Account, eof uint64) error {
+	if eof >= op.file.sizeNow() {
+		op.file.setAllocated(eof)
+
+		return nil
+	}
+
+	// The file is being written, so the new end is somewhere in the upload: inside what it is still
+	// holding, which can be cut back, or behind what it has already sent, which cannot.
+	if u := op.file.uploadNow(); u != nil {
+		if !u.cutTo(eof) {
+			return errTruncateSent
+		}
+
+		op.file.advanceUpload(u, eof)
+
+		return nil
+	}
+
+	// Nothing is being written, so the store holds the file as it stands and the truncation has to
+	// reach it. A file cut down to nothing is one this server already has a shape for: a file with
+	// no object behind it, known by its state alone. Nothing empty can be stored in any case.
+	op.mu.Lock()
+	ctx, path := op.ctx, op.pathName
+	op.mu.Unlock()
+
+	if eof == 0 {
+		if err := op.treeConnect.client.Delete(ctx, acc, path, false); err != nil && !errors.Is(err, stores.ErrNotFound) {
+			return err
+		}
+
+		op.file.empty()
+		op.file.markUnstored()
+
+		return nil
+	}
+
+	return op.retainPrefix(acc, eof)
+}
+
+// retainPrefix cuts a stored file down to its first n bytes by writing them out again as a new
+// upload of the same file. There is no shortening an object on either backend, and leaving the store
+// holding the longer one would make the truncation last no longer than the handles on the file: the
+// next create would find the old length, and the bytes behind it.
+//
+// The upload is left pending rather than finished. It is the same state a file being written is in,
+// and the client that has just cut the file short is almost always about to write the new contents
+// over it - which then goes into this upload instead of costing the file a second one.
+func (op *open) retainPrefix(acc stores.Account, n uint64) error {
+	if err := op.startUpload(); err != nil {
+		return err
+	}
+
+	op.mu.Lock()
+	ctx, path := op.ctx, op.pathName
+	op.mu.Unlock()
+
+	length := op.treeConnect.maxUploadSize
+	if length == 0 || length > maxTruncateChunkSize {
+		length = maxTruncateChunkSize
+	}
+
+	// The writes go through the accounting of the file like any others, so that a close racing this
+	// waits for them. The upload cannot be finalized while they are outstanding, which is why the
+	// counting ends before anything else is done with it.
+	var kept uint64
+	err := func() error {
+		op.file.beginWrite()
+		defer op.file.endWrite()
+
+		for kept < n {
+			want := min(length, n-kept)
+			buf := bytes.NewBuffer(make([]byte, 0, want))
+			if err := op.treeConnect.client.Read(ctx, acc, path, kept, want, buf); err != nil {
+				return err
+			}
+
+			// The store gave less than the file was said to hold, so that is the whole of what
+			// there is to keep. What the file measures is settled by what was written, as it is
+			// for anything else that goes up.
+			if buf.Len() == 0 {
+				break
+			}
+
+			if err := op.write(kept, buf.Bytes()); err != nil {
+				return err
+			}
+
+			kept += uint64(buf.Len())
+			if uint64(buf.Len()) < want {
+				break
+			}
+		}
+
+		return nil
+	}()
+	if err != nil {
+		op.cancelUpload()
+
+		return err
+	}
+
+	// Nothing came back for any of it, so there is nothing to keep and nothing to store: the file
+	// is the empty one it would have been cut down to.
+	if kept == 0 {
+		op.cancelUpload()
+
+		if err := op.treeConnect.client.Delete(ctx, acc, path, false); err != nil && !errors.Is(err, stores.ErrNotFound) {
+			return err
+		}
+
+		op.file.empty()
+		op.file.markUnstored()
+	}
+
+	return nil
+}
+
 // flush uploads the remaining part and finalizes the upload.
 func (op *open) flush() error {
 	u := op.file.waitForWrites()
@@ -1479,10 +1765,11 @@ func (op *open) flush() error {
 
 	op.file.finishUpload(u, finalSize)
 
-	op.mu.Lock()
-	path := op.pathName
-	op.mu.Unlock()
-	op.treeConnect.forgetPersistedFile(path)
+	// The store has an object for the file from here on, so it is the store that answers for it
+	// once the handles are gone. Until then the state stays where it is: it is what the handles
+	// still open on the file share, and taking it off the share now would leave the next create on
+	// the file with a state of its own and a second upload to go with it.
+	op.file.markStored()
 
 	return nil
 }

@@ -1143,22 +1143,44 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// stored. The open is torn down all the same - the handle is gone either way - but the
 		// answer says so, because a client told its close succeeded believes the file it just
 		// wrote is on the share.
-		var unsaved bool
-		pu := op.file.uploadNow()
-		if pu != nil { // This SMB2_CLOSE request is a sign for us to flush any active multipart upload
-			if err := op.flush(); err != nil {
-				op.cancelUpload()
-				log.Println("Error completing write:", err)
-				unsaved = true
-			}
-		}
-
 		attr := op.file.attributesNow()
 		op.mu.Lock()
 		co := op.createOptions
 		path := op.pathName
 		op.mu.Unlock()
-		if co&smb2.FILE_DELETE_ON_CLOSE > 0 { // Delete the file or directory
+		deleteOnClose := co&smb2.FILE_DELETE_ON_CLOSE > 0
+
+		var unsaved bool
+		if pu := op.file.uploadNow(); pu != nil { // This SMB2_CLOSE request is a sign for us to flush any active multipart upload
+			// Whichever of them comes last is what the file is: a save after a deletion puts the
+			// file back, and a deletion after a save takes it away. What that leaves the close to
+			// decide is whether this upload is still anybody's to store.
+			switch {
+			case deleteOnClose && op.file.lastHandle():
+				// Nothing else is on the file, so the upload holds this client's own writing and
+				// the client has asked for the file to go. Storing it first is an upload of a file
+				// that is deleted the moment it lands, and one more thing that can fail on the way
+				// out: told its close failed, a client keeps the handle, and a handle it will not
+				// let go of is what stands between it and disconnecting the share.
+				op.cancelUpload()
+
+			case deleteOnClose:
+				// Somebody else is still on the file, and the upload is the file's: what is in it
+				// may be their writing, and their close is what stores it. Storing it here would
+				// leave the deletion below to take their file away again, and calling it off would
+				// throw their save out. The deletion is what happens now; if their save comes after
+				// it, the file comes back as they wrote it.
+
+			default:
+				if err := op.flush(); err != nil {
+					op.cancelUpload()
+					log.Println("Error completing write:", err)
+					unsaved = true
+				}
+			}
+		}
+
+		if deleteOnClose { // Delete the file or directory
 			isDir := attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0
 
 			// This is the moment the directory has to be empty, whatever it was when the deletion
@@ -1198,25 +1220,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		c.server.closeOpen(op)
-
-		// Issue a response to each SMB2_CHANGE_NOTIFY request that the Open is associated with.
-		toNotify := make(map[uint64]*smb2.Request)
-		c.mu.Lock()
-		for aid, r := range c.asyncCommandList {
-			if r.Header().Command() == smb2.SMB2_CHANGE_NOTIFY && bytes.Equal(r.OpenID(), id) {
-				toNotify[aid] = r
-				delete(c.asyncCommandList, aid)
-			}
-		}
-		c.mu.Unlock()
-
-		for aid, r := range toNotify {
-			resp := smb2.NewErrorResponse(r, smb2.STATUS_NOTIFY_CLEANUP, 0, nil)
-			resp.Header().ClearFlag(smb2.FLAGS_RELATED_OPERATIONS)
-			resp.Header().SetAsyncID(aid)
-			c.releaseOpen(r)
-			c.server.writeResponse(c, ss, resp)
-		}
+		c.completeWatches(ss, id)
 
 		if unsaved {
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
@@ -1465,15 +1469,21 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			delete(c.asyncCommandList, asyncID)
 			c.mu.Unlock()
 
-			// Check if the context is still valid before sending the response.
+			// The handle may have gone while the work was being done, and what was worked out
+			// is of no use if it has. The client is still waiting on the request either way, so
+			// it is answered rather than left: an unanswered request is one the client counts
+			// as outstanding on the connection for as long as it holds it, and the answer to a
+			// handle that is gone is that it is gone.
 			select {
 			case <-op.ctx.Done():
-				return
+				resp = smb2.NewErrorResponse(req, smb2.STATUS_FILE_CLOSED, 0, nil)
+				resp.Header().SetAsyncID(asyncID)
+				resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
 			default:
 			}
 
 			c.releaseOpen(req)
-			c.server.writeResponse(c, ss, resp)
+			c.server.trySendResponse(c, ss, resp)
 		}()
 
 		return resp, ss, nil
@@ -1625,15 +1635,21 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			delete(c.asyncCommandList, asyncID)
 			c.mu.Unlock()
 
-			// Check if the context is still valid before sending the response.
+			// The handle may have gone while the work was being done, and what was worked out
+			// is of no use if it has. The client is still waiting on the request either way, so
+			// it is answered rather than left: an unanswered request is one the client counts
+			// as outstanding on the connection for as long as it holds it, and the answer to a
+			// handle that is gone is that it is gone.
 			select {
 			case <-op.ctx.Done():
-				return
+				resp = smb2.NewErrorResponse(req, smb2.STATUS_FILE_CLOSED, 0, nil)
+				resp.Header().SetAsyncID(asyncID)
+				resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
 			default:
 			}
 
 			c.releaseOpen(req)
-			c.server.writeResponse(c, ss, resp)
+			c.server.trySendResponse(c, ss, resp)
 		}()
 
 		return resp, ss, nil
@@ -2442,7 +2458,27 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					return resp, ss, nil
 				}
 
-				op.file.setAllocated(binary.LittleEndian.Uint64(sir.Buffer()))
+				buf := sir.Buffer()
+				if len(buf) != 8 {
+					resp := smb2.NewErrorResponse(sir, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+					return resp, ss, nil
+				}
+
+				// The end of the file is where the file ends, and a client that moves it back is
+				// throwing away what is beyond it. Recording it as the space the file takes up and
+				// nothing else left the truncation to whatever happened to be written afterwards:
+				// a file cut short and not written to went on reading as the whole of what the
+				// store held, and one cut short and written over read as the new bytes with the
+				// tail of the old file behind them.
+				if err := op.setEndOfFile(acc, binary.LittleEndian.Uint64(buf)); err != nil {
+					log.Printf("Error setting the end of %s: %v", path, err)
+					status := uint32(smb2.STATUS_UNEXPECTED_NETWORK_ERROR)
+					if errors.Is(err, errTruncateSent) {
+						status = smb2.STATUS_DATA_ERROR
+					}
+					resp := smb2.NewErrorResponse(sir, status, 0, nil)
+					return resp, ss, nil
+				}
 
 			case smb2.FileBasicInformation:
 				if ga&smb2.FILE_WRITE_ATTRIBUTES == 0 {
@@ -2554,9 +2590,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					}
 				}
 
-				size := op.file.sizeNow()
-				if size == 0 && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
-					if _, found := tc.persistedFile(newName); found {
+				// A file the store has nothing for is renamed on the share and nowhere else. What
+				// makes it that file is not its size but the store having no object for it: an
+				// emptied file the store still holds an object for is renamed at the backend like
+				// any other, or the object would be left behind under the old name.
+				if !op.file.isStored() && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
+					if fs, found := tc.persistedFile(newName); found && !fs.isStored() {
 						resp := smb2.NewErrorResponse(sir, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
 						return resp, ss, nil
 					}
@@ -2768,6 +2807,14 @@ func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open,
 	// replayed: this is every command that takes a FileId, so it is the one place to say so.
 	c.server.clearReplayEligible(op)
 
+	// The request is on this open from here on, and says so. It was only ever recorded for a
+	// request in a chain, which named no handle of its own and had to be traced back to one, so
+	// whatever went looking for the requests outstanding on an open found none of the ones sent
+	// on their own - the directory watches among them.
+	if req != nil {
+		req.SetOpenID(op.id())
+	}
+
 	return op, c.verifyChannelSequence(op, req)
 }
 
@@ -2866,6 +2913,33 @@ func (c *connection) releaseOpen(req *smb2.Request) {
 		}
 	} else if op.outstandingPreviousRequestCount > 0 {
 		op.outstandingPreviousRequestCount--
+	}
+}
+
+// completeWatches answers every SMB2_CHANGE_NOTIFY the open is still holding, which is what the end
+// of that open - a close, or the tree connect or session going out from under it - makes of a watch:
+// the client is waiting on the request, and nothing is ever going to come of it now.
+//
+// It is also what stops the watch. Left in the list, the request is one the client counts as an
+// unfinished directory search for as long as it holds the connection, and the goroutine behind it
+// goes on listing a directory nobody is waiting to hear about.
+func (c *connection) completeWatches(ss *session, id []byte) {
+	toNotify := make(map[uint64]*smb2.Request)
+	c.mu.Lock()
+	for aid, r := range c.asyncCommandList {
+		if r.Header().Command() == smb2.SMB2_CHANGE_NOTIFY && bytes.Equal(r.OpenID(), id) {
+			toNotify[aid] = r
+			delete(c.asyncCommandList, aid)
+		}
+	}
+	c.mu.Unlock()
+
+	for aid, r := range toNotify {
+		resp := smb2.NewErrorResponse(r, smb2.STATUS_NOTIFY_CLEANUP, 0, nil)
+		resp.Header().ClearFlag(smb2.FLAGS_RELATED_OPERATIONS)
+		resp.Header().SetAsyncID(aid)
+		c.releaseOpen(r)
+		c.server.writeResponse(c, ss, resp)
 	}
 }
 
@@ -3130,7 +3204,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	ctx, cancel := context.WithCancel(context.Background())
 	var info client.ObjectInfo
 	var result uint32
-	var restored bool
+	var restored, stored bool
 	var known *fileState
 	var op *open
 	var err error
@@ -3156,11 +3230,20 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_IO_TIMEOUT, 0, nil)
 			return resp
 		}
+		stored = err == nil
+
+		// Every handle on a file shares one state, so the share is asked for it here rather than
+		// only where the store has nothing to offer. A create that makes its own state for a file
+		// somebody else already has open gives that file a second size and a second upload to the
+		// same path, and the store keeps whichever upload was finished last: the writes that went
+		// into the other one are lost, and until then each handle reads the object the store holds
+		// cut off at a length of its own.
+		known, _ = tc.persistedFile(path)
 
 		switch cr.CreateDisposition() {
 		case smb2.FILE_SUPERSEDE:
 			if err != nil {
-				known, restored = tc.persistedFile(path)
+				restored = known != nil
 				if !restored {
 					info = client.ObjectInfo{
 						Key:        "/" + path,
@@ -3176,7 +3259,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			}
 		case smb2.FILE_OPEN:
 			if err != nil {
-				known, restored = tc.persistedFile(path)
+				restored = known != nil
 				if !restored {
 					cancel()
 					resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
@@ -3219,7 +3302,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			}
 		case smb2.FILE_OPEN_IF:
 			if err != nil {
-				known, restored = tc.persistedFile(path)
+				restored = known != nil
 				if !restored {
 					info = client.ObjectInfo{
 						Key:        "/" + path,
@@ -3250,7 +3333,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			}
 		case smb2.FILE_OVERWRITE:
 			if err != nil {
-				known, restored = tc.persistedFile(path)
+				restored = known != nil
 				if !restored {
 					cancel()
 					resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
@@ -3263,7 +3346,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			}
 		case smb2.FILE_OVERWRITE_IF:
 			if err != nil {
-				known, restored = tc.persistedFile(path)
+				restored = known != nil
 				if !restored {
 					info = client.ObjectInfo{
 						Key:        "/" + path,
@@ -3321,8 +3404,14 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		return resp
 	}
 
+	// The state answers for the file for as long as it is open, and the share is where every handle
+	// on it finds the one state. A file the store has an object for is answered for by the store
+	// again once the last handle goes; one it has nothing for is known by this and by nothing else.
 	attr := op.file.attributesNow()
-	if result == smb2.FILE_CREATED && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 { // Persist the file for any future requests
+	if tc.share.name != "ipc$" && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		if stored {
+			op.file.markStored()
+		}
 		tc.persistFile(path, op.file)
 	}
 

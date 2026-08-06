@@ -105,7 +105,9 @@ func (tc *treeConnect) movePersistedTree(from, to string) {
 
 // persistedObjects turns the files the tree connect is holding that have been created but not yet
 // uploaded into the entries a listing would have carried, so that a client sees them beside what
-// the backend already knows about. Only the paths the caller asks for are taken.
+// the backend already knows about. Only the paths the caller asks for are taken, and only the files
+// the backend has nothing for: the table also holds the state of every file that is merely open,
+// which the backend lists itself.
 //
 // The size and the modification time of a file move under the lock of its state, and the writer of
 // a file settles them there as it goes: read out of the table without it, an upload in progress
@@ -126,6 +128,10 @@ func (tc *treeConnect) persistedObjects(want func(path string) bool) []client.Ob
 
 	ois := make([]client.ObjectInfo, 0, len(files))
 	for i, fs := range files {
+		if fs.isStored() {
+			continue
+		}
+
 		size, _, _, modified, _ := fs.stat()
 
 		ois = append(ois, client.ObjectInfo{
@@ -326,7 +332,6 @@ func (ss *session) closeTreeConnect(tid uint32) error {
 			ss.connection.server.mu.Lock()
 			delete(ss.connection.server.globalOpenTable, op.durableFileID)
 			ss.connection.server.mu.Unlock()
-			op.cancel()
 			closed = append(closed, op)
 		}
 	}
@@ -342,10 +347,25 @@ func (ss *session) closeTreeConnect(tid uint32) error {
 	// of the open, and picking a channel to break an oplock over takes the two in the other
 	// order. An open that has left the global table leaves the indexes with it, and the
 	// create that made it can no longer be replayed.
+	//
+	// An upload nobody is going to finish is called off here, which is also what puts the file
+	// back to the size the store holds it at: left at the size the writer reached, the file
+	// would read as the object the store still has cut off at a length it never had. The context
+	// of the open is cancelled last, so that the abort still has one to travel on.
 	for _, op := range closed {
 		op.releaseCaching()
 		ss.connection.server.clearReplayEligible(op)
 		ss.connection.server.unindexOpen(op)
+		op.cancelUpload()
+		op.releaseFile()
+
+		// The directory watches on the open are answered here rather than left outstanding. A
+		// change notify is a request the client is still waiting on, and a tree disconnect is
+		// where it ends: what a client counts as an unfinished directory search on the
+		// connection is exactly this.
+		ss.connection.completeWatches(ss, op.id())
+
+		op.cancel()
 	}
 
 	return nil
