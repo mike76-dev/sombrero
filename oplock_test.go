@@ -26,9 +26,11 @@ func newOplockOpen(t *testing.T, s *server, sh *share, path string) (*open, *con
 	sent := make(chan []byte, 8)
 
 	// Each fake client gets a GUID of its own, so that the lease paths, which key everything
-	// off it, tell them apart.
+	// off it, tell them apart. The count goes into bytes of its own, clear of the first byte the
+	// tests name their own GUIDs by and of the bytes the dialled clients count in.
 	var guid [16]byte
-	guid[0] = byte(oplockTestClient)
+	guid[3] = byte(oplockTestClient)
+	guid[4] = byte(oplockTestClient >> 8)
 
 	c := &connection{
 		server:           s,

@@ -2385,18 +2385,21 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				info = smb2.FileFsVolumeInfo(tc.createdAt, uint32(tc.volumeID), tc.share.name)
 			case smb2.FileFsAttributeInformation:
 				info = smb2.FileFsAttributeInfo(tc.share.backend)
-			case smb2.FileFsSizeInformation:
+			case smb2.FileFsSizeInformation, smb2.FileFsFullSizeInformation:
+				// How much room the share has is what a client checks before it copies anything
+				// and again while it copies: a destination that looks too small is a copy given
+				// up on. An answer that could not be worked out is said to be one, because the
+				// alternative - an answer of no bytes at all, where the client is waiting for a
+				// structure - is one the client cannot read as anything.
 				si, err := tc.client.Storage(op.ctx)
 				if err != nil {
 					log.Println("Error getting storage info:", err)
-				} else {
-					info = smb2.FileFsSizeInfo(si)
+					resp := smb2.NewErrorResponse(qir, smb2.STATUS_INSUFFICIENT_RESOURCES, 0, nil)
+					return resp, ss, nil
 				}
-			case smb2.FileFsFullSizeInformation:
-				// Same as above.
-				si, err := tc.client.Storage(op.ctx)
-				if err != nil {
-					log.Println("Error getting storage info:", err)
+
+				if qir.FileInfoClass() == smb2.FileFsSizeInformation {
+					info = smb2.FileFsSizeInfo(si)
 				} else {
 					info = smb2.FileFsFullSizeInfo(si)
 				}
@@ -3096,7 +3099,7 @@ func (c *connection) completeWatches(ss *session, id []byte) {
 		resp.Header().ClearFlag(smb2.FLAGS_RELATED_OPERATIONS)
 		resp.Header().SetAsyncID(aid)
 		c.releaseOpen(r)
-		c.server.writeResponse(c, ss, resp)
+		c.server.trySendResponse(c, ss, resp)
 	}
 }
 
