@@ -2,6 +2,7 @@ package smb2
 
 import (
 	"encoding/binary"
+	"strings"
 	"time"
 
 	"github.com/mike76-dev/sombrero/client"
@@ -633,6 +634,13 @@ func QueryDirectoryBuffer(class uint8, entries []client.ObjectInfo, bufSize uint
 			di.FileAttributes = FILE_ATTRIBUTE_NORMAL
 			di.EndOfFile = entry.Size
 			di.AllocationSize = entry.Size
+		}
+
+		// A name that begins with a dot is hidden where the convention is understood, and carries the
+		// attribute where it is not, so that a listing does not show what no user asked to see.
+		if strings.HasPrefix(name, ".") {
+			di.FileAttributes |= FILE_ATTRIBUTE_HIDDEN
+			di.FileAttributes &^= FILE_ATTRIBUTE_NORMAL
 		}
 
 		hash := blake2b.Sum256([]byte(entry.Key))

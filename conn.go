@@ -963,10 +963,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		path := strings.ReplaceAll(cr.Filename(), "\\", "/")
-		if strings.HasPrefix(path, ".") { // Hidden files of any sort are not supported
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_NOT_SUPPORTED, 0, nil)
-			return resp, ss, nil
-		}
 
 		co := cr.CreateOptions()
 		if co&smb2.FILE_DELETE_ON_CLOSE > 0 && (tc.maximalAccess&(smb2.DELETE|smb2.GENERIC_ALL|smb2.GENERIC_EXECUTE|smb2.GENERIC_READ|smb2.GENERIC_WRITE) == 0) {
@@ -1608,13 +1604,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// the request can reasonably have put it (3.3.5.13).
 		if wr.DataOffset() > smb2.MaxWriteDataOffset {
 			resp := smb2.NewErrorResponse(wr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
-			return resp, ss, nil
-		}
-
-		if name != "" && name[0] == '.' { // Ignore SMB2_WRITE requests to any hidden file (whose name starts with a dot)
-			resp := &smb2.WriteResponse{}
-			resp.FromRequest(wr)
-			resp.Generate(uint32(len(wr.Buffer())))
 			return resp, ss, nil
 		}
 
