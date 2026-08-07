@@ -176,6 +176,18 @@ func corpus() []input {
 	add("two bytes", []byte{0x00, 0xff})
 	add("shorter than a match", []byte{0x01, 0x02})
 
+	// The shortest run that can be said as a match, and the ones on either side of it. The nearest
+	// distance and the shortest length are the smallest numbers an encoding has to carry, so they
+	// are where an encoding runs out of room to say anything at all: the LZ77+Huffman symbol for a
+	// match of three at a distance of one is the symbol that ends the stream, and a stream that
+	// says it has ended one byte in is a file the peer refuses. Four of a kind is enough to reach
+	// it, and it is not a shape a corpus of random data is likely to isolate.
+	for n := 1; n <= 12; n++ {
+		add(fmt.Sprintf("run of one value/%d", n), bytes.Repeat([]byte{0x42}, n))
+		add(fmt.Sprintf("run between literals/%d", n),
+			append(append([]byte("head"), bytes.Repeat([]byte{0x42}, n)...), []byte("tail")...))
+	}
+
 	for _, n := range []int{4095, 4096, 4097, 8191, 8192, 8193, 1 << 16} {
 		add(fmt.Sprintf("zeros/%d", n), make([]byte, n))
 		add(fmt.Sprintf("one value/%d", n), bytes.Repeat([]byte{0xff}, n))

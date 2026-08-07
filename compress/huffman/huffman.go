@@ -174,7 +174,17 @@ func parse(src []byte, last bool) ([]item, []uint32) {
 		chain[i] = head[h]
 		head[h] = int32(i)
 
-		if bestLen < minMatch {
+		// A match of the shortest length at a distance of one has nowhere to be written down. The
+		// symbol of a match is the end-of-file symbol plus the length above the shortest, plus
+		// sixteen for every bit of the distance below its highest - so the shortest match at the
+		// nearest distance adds nothing to either, and is the end-of-file symbol itself. A decoder
+		// reading it stops there, which is what four bytes of the same value did to this: the
+		// literal, then three of it at a distance of one, and the block ended after one byte.
+		//
+		// Written out as a literal instead, it costs a few bits on a run of exactly four and
+		// nothing anywhere else: a longer run at that distance carries a length above the shortest,
+		// and any other distance carries a bit above the lowest.
+		if bestLen < minMatch || (bestLen == minMatch && bestDist == 1) {
 			items = append(items, item{literal: src[i]})
 			freq[src[i]]++
 			i++

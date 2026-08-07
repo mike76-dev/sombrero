@@ -160,3 +160,43 @@ func TestMultipleBlocks(t *testing.T) {
 		}
 	}
 }
+
+// TestNoMatchIsWrittenAsTheEndOfTheStream is the one match this encoding cannot say. A match carries
+// its length above the shortest and its distance as the bits below the highest, both added to the
+// end-of-file symbol — so the shortest match at the nearest distance adds nothing to either and is
+// the end-of-file symbol itself. Four bytes of the same value is enough to reach it, and a peer
+// reading the stream stops one byte in: everything after that is a file it refuses.
+func TestNoMatchIsWrittenAsTheEndOfTheStream(t *testing.T) {
+	// Every run length around the shortest match, alone and with data on either side of it, at the
+	// front of a block and inside one.
+	for n := 1; n <= 20; n++ {
+		run := bytes.Repeat([]byte{0x42}, n)
+
+		cases := map[string][]byte{
+			"alone":            run,
+			"after a literal":  append([]byte{0x01}, run...),
+			"between literals": append(append([]byte("head"), run...), []byte("tail")...),
+			"twice over":       append(append([]byte{}, run...), run...),
+		}
+
+		for name, data := range cases {
+			packed := Compress(data)
+			got, err := Decompress(packed, len(data))
+			if err != nil {
+				t.Fatalf("a run of %d %s: %d bytes would not decompress: %v", n, name, len(data), err)
+			}
+			if !bytes.Equal(got, data) {
+				t.Fatalf("a run of %d %s came back as %x, want %x", n, name, got, data)
+			}
+		}
+	}
+
+	// And the symbol itself is never written for anything but the end: a match of three at a
+	// distance of one is the case, so the items of that input carry no such match.
+	items, _ := parse(bytes.Repeat([]byte{0x42}, 4), true)
+	for _, it := range items {
+		if it.length == minMatch && it.distance == 1 {
+			t.Error("the shortest match at the nearest distance was emitted, which is the end-of-file symbol")
+		}
+	}
+}
