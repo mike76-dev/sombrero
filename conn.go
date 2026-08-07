@@ -2660,7 +2660,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 					// The path of the open changes through the index, so that a create
 					// racing this rename finds the open under exactly one of its names,
-					// never neither.
+					// never neither. Every handle on the file goes, not only this one.
+					for _, other := range c.server.moveOpensOnFile(tc.share, path, newName) {
+						if other != op {
+							other.renameLease(newName)
+						}
+					}
 					c.server.moveOpen(op, newName)
 					op.file.touch()
 				} else {
@@ -2696,6 +2701,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 						tc.movePersistedTree(path, newName)
 					}
 
+					for _, other := range c.server.moveOpensOnFile(tc.share, path, newName) {
+						if other != op {
+							other.renameLease(newName)
+						}
+					}
 					c.server.moveOpen(op, newName)
 
 					// The opens on the files inside the directory follow their files, and the
