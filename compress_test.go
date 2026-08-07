@@ -667,3 +667,78 @@ func TestCompressionLeavesSmallMessagesAlone(t *testing.T) {
 		}
 	}
 }
+
+// What a client may send is settled at the negotiate, and a client that sends something else is
+// turned away rather than taken at its word. These are the tests of the two ways a message could say
+// it was something other than what was agreed: a shape that was not negotiated, and a segment that
+// comes apart to more than the message says it comes to.
+
+// TestChainedCompressionIsRefusedWhenItWasNotNegotiated is the shape a connection never agreed to.
+// The two shapes are read differently — the chained one keeps its payload header where the unchained
+// one keeps the head of its segment — so a chained message read as unchained comes apart as something
+// nobody sent. Refusing it is the only answer that cannot be talked into anything.
+func TestChainedCompressionIsRefusedWhenItWasNotNegotiated(t *testing.T) {
+	h := newSMBTest(t)
+
+	// The connection negotiated compression, and not chaining.
+	c := h.compressing(false, smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77)
+
+	// The payload names an algorithm the connection did negotiate, so nothing but the shape itself
+	// stands between this message and being taken apart: read as unchained, the bytes of the payload
+	// header are read as the head of a segment and the message comes apart as something else again.
+	msg := chainedMessage(64, chainedPayload(smb2.COMPRESSION_LZ77,
+		smb2.COMPRESSION_CAPABILITIES_FLAG_CHAINED, bytes.Repeat([]byte("s"), 64)))
+
+	if _, err := c.decompress(msg); !errors.Is(err, smb2.ErrInvalidParameter) {
+		t.Errorf("a chained message on a connection that did not negotiate chaining failed with %v, want it refused", err)
+	}
+}
+
+// TestCompressionFlagsThatWereNotAgreedAreRefused is the flags field carrying something other than the
+// one flag it may carry. There is nothing to do with the rest of them but say so.
+func TestCompressionFlagsThatWereNotAgreedAreRefused(t *testing.T) {
+	h := newSMBTest(t)
+	c := h.compressing(true, smb2.COMPRESSION_LZ77)
+
+	msg := unchained(smb2.COMPRESSION_LZ77, 64, 0, bytes.Repeat([]byte("s"), 8))
+	smb2.Header(msg).SetCompressionFlags(0x4)
+
+	if _, err := c.decompress(msg); !errors.Is(err, smb2.ErrInvalidParameter) {
+		t.Errorf("a message with flags nobody agreed to failed with %v, want it refused", err)
+	}
+}
+
+// TestAChainThatComesApartToMoreThanItSaysIsRefusedAsItGoes is the decompression bomb. Every payload
+// of a chain may come apart to as much as the whole message says it comes to, so a chain of them
+// claims that much over and over: a message of a few kilobytes asks for gigabytes, from a peer that
+// has authenticated nothing. What the chain comes to is checked as each payload is taken rather than
+// once the whole of it is in hand, so the message is refused on the payload that goes over.
+func TestAChainThatComesApartToMoreThanItSaysIsRefusedAsItGoes(t *testing.T) {
+	h := newSMBTest(t)
+	c := h.compressing(true, smb2.COMPRESSION_PATTERN_V1)
+	c.maxTransactSize = 8 * 1024 * 1024
+
+	// Each payload is eight bytes on the wire and a megabyte once taken apart, and the message says
+	// it comes to one megabyte in all.
+	const ocss = 1024 * 1024
+	pattern := smb2.PatternV1{Pattern: 's', Repetitions: ocss}.Marshal()
+
+	payloads := make([][]byte, 0, 64)
+	for i := range 64 {
+		flags := uint16(0)
+		if i == 0 {
+			flags = smb2.COMPRESSION_CAPABILITIES_FLAG_CHAINED
+		}
+		payloads = append(payloads, chainedPayload(smb2.COMPRESSION_PATTERN_V1, flags, pattern))
+	}
+
+	msg := chainedMessage(ocss, payloads...)
+	if len(msg) > 2048 {
+		t.Fatalf("the bomb is %d bytes on the wire, which is not much of a bomb", len(msg))
+	}
+
+	if _, err := c.decompress(msg); !errors.Is(err, smb2.ErrInvalidParameter) {
+		t.Errorf("a chain claiming %s from %d bytes failed with %v, want it refused as it went",
+			traceBytes(64*ocss), len(msg), err)
+	}
+}

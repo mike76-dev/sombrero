@@ -37,9 +37,22 @@ func (c *connection) decompress(msg []byte) ([]byte, error) {
 		return nil, smb2.ErrInvalidParameter
 	}
 
+	// Which of the two shapes the message is in is the client's to say, but not the client's to
+	// choose: a chained message is only a chained message on a connection that negotiated chaining.
+	// Taken as unchained instead, its payload header is read as the head of an unchained segment and
+	// the message comes apart as something nobody sent - so it is turned away rather than guessed at.
+	// The flags field holds one flag and no others.
+	flags := smb2.Header(msg).CompressionFlags()
+	if flags&^smb2.COMPRESSION_CAPABILITIES_FLAG_CHAINED != 0 {
+		return nil, smb2.ErrInvalidParameter
+	}
+	chained := flags == smb2.COMPRESSION_CAPABILITIES_FLAG_CHAINED
+	if chained && !c.supportsChainedCompression {
+		return nil, smb2.ErrInvalidParameter
+	}
+
 	var output []byte
 	start := 0
-	chained := c.supportsChainedCompression && smb2.Header(msg).CompressionFlags() == smb2.COMPRESSION_CAPABILITIES_FLAG_CHAINED
 	if chained {
 		offset := smb2.SMB2CompressionPayloadHeaderOffset
 		for {
@@ -68,6 +81,9 @@ func (c *connection) decompress(msg []byte) ([]byte, error) {
 					return nil, smb2.ErrInvalidParameter
 				}
 				output = append(output, msg[offset+smb2.SMB2CompressionPayloadHeaderSize:offset+smb2.SMB2CompressionPayloadHeaderSize+int(length)]...)
+				if uint64(len(output)) > uint64(ocss) {
+					return nil, smb2.ErrInvalidParameter
+				}
 
 			case smb2.COMPRESSION_PATTERN_V1:
 				var v1 smb2.PatternV1
@@ -82,6 +98,9 @@ func (c *connection) decompress(msg []byte) ([]byte, error) {
 					chunk[i] = v1.Pattern
 				}
 				output = append(output, chunk...)
+				if uint64(len(output)) > uint64(ocss) {
+					return nil, smb2.ErrInvalidParameter
+				}
 
 			default:
 				compressor := compress.New(algo)
@@ -94,6 +113,9 @@ func (c *connection) decompress(msg []byte) ([]byte, error) {
 					return nil, smb2.ErrWrongLength
 				}
 				output = append(output, chunk...)
+				if uint64(len(output)) > uint64(ocss) {
+					return nil, smb2.ErrInvalidParameter
+				}
 			}
 
 			offset += smb2.SMB2CompressionPayloadHeaderSize + int(length)
