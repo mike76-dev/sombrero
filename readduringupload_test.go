@@ -54,14 +54,23 @@ func TestReadDuringUploadIsServedFromTheUploadBuffer(t *testing.T) {
 // a part of the multipart upload and is no longer in memory. Nothing can answer it until the file
 // is closed, and that is a property of the upload rather than a failure of the store: it is told
 // apart so that the read path does not report the store as broken over it.
+//
+// The front of the file is the exception, and is kept for exactly this reason: a client reads the
+// front of what it is copying, and an error there is a copy abandoned. So what cannot be answered is
+// a range past the front and behind the buffer.
 func TestReadOfWhatTheUploadNoLongerHoldsIsNotAStoreFailure(t *testing.T) {
+	was := uploadHeadKept
+	uploadHeadKept = 4096
+	t.Cleanup(func() { uploadHeadKept = was })
+
 	h := newSMBTest(t)
 	cl := h.dial("alice")
 
 	created := cl.createWithOptions("clip.mp4", smb2.FILE_CREATE, 0)
 	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
 
-	data := bytes.Repeat([]byte("x"), 1024)
+	// Enough that there is a range past the front of the file to ask about at all.
+	data := bytes.Repeat([]byte("x"), int(uploadHeadKept)+1024)
 	if err := file.write(0, data); err != nil {
 		t.Fatalf("the write failed: %v", err)
 	}
@@ -71,20 +80,29 @@ func TestReadOfWhatTheUploadNoLongerHoldsIsNotAStoreFailure(t *testing.T) {
 	u := file.file.uploadNow()
 
 	u.mu.Lock()
-	u.buf = u.buf[512:]
-	u.bufOffset = 512
+	u.buf = u.buf[uploadHeadKept+512:]
+	u.bufOffset = uploadHeadKept + 512
 	u.mu.Unlock()
 
-	if _, err := file.read(0, 256); !errors.Is(err, errNotUploaded) {
+	if _, err := file.read(uploadHeadKept, 256); !errors.Is(err, errNotUploaded) {
 		t.Errorf("the read of a range the upload no longer holds failed with %v, want it told apart", err)
 	}
 
+	// The front of the file is answered all the same, out of what is kept of it.
+	front, err := file.read(0, 256)
+	if err != nil {
+		t.Fatalf("the read of the front of the file failed: %v", err)
+	}
+	if !bytes.Equal(front, data[:256]) {
+		t.Error("the read of the front gave back the wrong bytes")
+	}
+
 	// What the upload does still hold is answered as before.
-	got, err := file.read(512, 256)
+	got, err := file.read(uploadHeadKept+512, 256)
 	if err != nil {
 		t.Fatalf("the read of a range the upload still holds failed: %v", err)
 	}
-	if !bytes.Equal(got, data[512:768]) {
+	if !bytes.Equal(got, data[uploadHeadKept+512:uploadHeadKept+768]) {
 		t.Error("the read gave back the wrong bytes")
 	}
 }

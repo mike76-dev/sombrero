@@ -38,15 +38,12 @@ type fakeClient struct {
 	// it cannot be answered is worth being able to reach.
 	emptyErr error
 
-	// uploaded is how far the parts of an upload reach, by path, so that finishing one can put an
-	// object of the right size in the store. A real backend turns the parts into the object; a fake
-	// that leaves the store empty cannot say what a rename of a file just written finds.
-	uploaded map[string]uint64
-
-	// staged is the bytes the parts carried, by path, so that finishing an upload puts the file the
-	// client actually wrote in the store and a test can read it back. It is what tells the contents
-	// of one writing of a file from those of another.
-	staged map[string][]byte
+	// uploads are the parts of each upload that has been begun, by the ID the backend gave it. An
+	// upload is not an object until it is completed, and it is completed with the parts the completion
+	// names: the ones left out of it are no part of the file, which is what lets a file be cut back to
+	// a point already sent. One that is called off leaves nothing behind at all.
+	uploads      map[string]map[int]stagedPart
+	nextUploadID int
 
 	// started counts the uploads begun on a path, which is what tells one upload carrying the
 	// writes of every handle on a file from two uploads racing to be the last one finished.
@@ -62,16 +59,39 @@ type fakeClient struct {
 	// something to happen to the handle while a read on it is still being worked on.
 	readGate chan struct{}
 
+	// partGate holds up the part uploads a test names — every one of them if partHeld is zero — so
+	// that a test can see what the server does while a part is still on its way to the backend.
+	partGate chan struct{}
+	partHeld int
+
+	// writeErr is what a part upload fails with, when a test asks it to. A part is sent long after
+	// the write it came from was answered, so where its failure surfaces is worth being able to
+	// reach.
+	writeErr error
+
+	// partsWritten is the parts that were sent, in the order they were sent, and partsFinished the
+	// list the backend was handed to put them together. The backend needs that list in the order the
+	// parts make the file up in, which is not the order they land in.
+	partsWritten  []int
+	partsFinished []int
+
 	// deleteErr is what a deletion fails with, when a test asks it to. A deletion that the
 	// backend refuses for a reason other than the file not being there is the one the server
 	// still has to complain about.
 	deleteErr error
 }
 
+// stagedPart is a part the backend has taken and not yet put into an object.
+type stagedPart struct {
+	offset uint64
+	data   []byte
+}
+
 func newFakeClient() *fakeClient {
 	return &fakeClient{
 		objects:  make(map[string]client.ObjectInfo),
 		contents: make(map[string][]byte),
+		uploads:  make(map[string]map[int]stagedPart),
 	}
 }
 
@@ -113,6 +133,50 @@ func (fc *fakeClient) putDir(path string) {
 		CreatedAt:  now,
 		ModifiedAt: now,
 	}
+}
+
+// putSizedDir makes a directory appear in the store whose key carries a size, which is what a query
+// for the share root comes back with on renterd.
+func (fc *fakeClient) putSizedDir(path string, size uint64) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	now := time.Now()
+	fc.objects[path] = client.ObjectInfo{
+		Key:        "/" + path + "/",
+		Size:       size,
+		CreatedAt:  now,
+		ModifiedAt: now,
+	}
+}
+
+// holdParts makes the upload of the given part wait, or of every part when the number is zero, and
+// returns what lets them go.
+func (fc *fakeClient) holdParts(part int) func() {
+	gate := make(chan struct{})
+
+	fc.mu.Lock()
+	fc.partGate = gate
+	fc.partHeld = part
+	fc.mu.Unlock()
+
+	return func() { close(gate) }
+}
+
+// failParts makes every part upload fail from here on.
+func (fc *fakeClient) failParts(err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.writeErr = err
+}
+
+// storedParts is the order the backend was given the parts of the file in.
+func (fc *fakeClient) storedParts() []int {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	return append([]int(nil), fc.partsFinished...)
 }
 
 // holdReads makes every read wait, and returns what lets them all go.
@@ -270,7 +334,13 @@ func (fc *fakeClient) StartUpload(_ context.Context, _ stores.Account, path stri
 	}
 	fc.started[path]++
 
-	return "upload", nil
+	// An ID of its own apiece, as a real backend gives: two uploads of one file are two uploads, and
+	// what one of them holds is no part of the other.
+	fc.nextUploadID++
+	id := fmt.Sprintf("upload-%d", fc.nextUploadID)
+	fc.uploads[id] = make(map[int]stagedPart)
+
+	return id, nil
 }
 
 // uploadsOf is how many uploads have been started on the file.
@@ -290,16 +360,26 @@ func (fc *fakeClient) dataOf(path string) []byte {
 	return fc.contents[path]
 }
 
-func (fc *fakeClient) AbortUpload(context.Context, string, string) error { return nil }
-
-func (fc *fakeClient) FinishUpload(_ context.Context, path, _ string, _ []api.MultipartCompletedPart) error {
+// AbortUpload throws away what the upload was holding, which is what makes an upload that was called
+// off leave nothing behind.
+func (fc *fakeClient) AbortUpload(_ context.Context, _, uploadID string) error {
 	fc.mu.Lock()
-	size, uploaded := fc.uploaded[path], fc.uploaded != nil
-	data := fc.staged[path]
+	defer fc.mu.Unlock()
+
+	delete(fc.uploads, uploadID)
+
+	return nil
+}
+
+// FinishUpload turns the parts the completion names into the object, in the order it names them,
+// which is what a real multipart completion does. A part that is not named is no part of the file.
+func (fc *fakeClient) FinishUpload(_ context.Context, path, uploadID string, given []api.MultipartCompletedPart) error {
+	fc.mu.Lock()
+	staged := fc.uploads[uploadID]
 	err := fc.finishErr
-	if uploaded {
-		delete(fc.uploaded, path)
-		delete(fc.staged, path)
+	fc.partsFinished = nil
+	for _, p := range given {
+		fc.partsFinished = append(fc.partsFinished, p.PartNumber)
 	}
 	fc.mu.Unlock()
 
@@ -307,13 +387,20 @@ func (fc *fakeClient) FinishUpload(_ context.Context, path, _ string, _ []api.Mu
 		return err
 	}
 
-	// The parts become the object, which is what makes the file findable by everything that comes
-	// after — a rename of it, above all. What they carried becomes its contents, so that the file in
-	// the store is the file that was written and not merely one of the right length.
-	fc.put(path, size)
-	if uint64(len(data)) > size {
-		data = data[:size]
+	var data []byte
+	for _, p := range given {
+		part, found := staged[p.PartNumber]
+		if !found {
+			return fmt.Errorf("the completion names part %d, which was never uploaded", p.PartNumber)
+		}
+		data = append(data, part.data...)
 	}
+
+	fc.mu.Lock()
+	delete(fc.uploads, uploadID)
+	fc.mu.Unlock()
+
+	fc.put(path, uint64(len(data)))
 	if len(data) > 0 {
 		fc.mu.Lock()
 		fc.contents[path] = data
@@ -323,33 +410,34 @@ func (fc *fakeClient) FinishUpload(_ context.Context, path, _ string, _ []api.Mu
 	return nil
 }
 
-func (fc *fakeClient) Write(_ context.Context, r io.Reader, path, _ string, _ int, offset, length uint64) (string, error) {
-	part := make([]byte, length)
-	n, err := io.ReadFull(r, part)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+func (fc *fakeClient) Write(_ context.Context, r io.Reader, path, uploadID string, number int, offset, length uint64) (string, error) {
+	fc.mu.Lock()
+	gate, held, err := fc.partGate, fc.partHeld, fc.writeErr
+	fc.partsWritten = append(fc.partsWritten, number)
+	fc.mu.Unlock()
+
+	if gate != nil && (held == 0 || held == number) {
+		<-gate
+	}
+
+	if err != nil {
 		return "", err
+	}
+
+	part := make([]byte, length)
+	n, rerr := io.ReadFull(r, part)
+	if rerr != nil && !errors.Is(rerr, io.ErrUnexpectedEOF) && !errors.Is(rerr, io.EOF) {
+		return "", rerr
 	}
 	part = part[:n]
 
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 
-	if fc.uploaded == nil {
-		fc.uploaded = make(map[string]uint64)
+	if fc.uploads[uploadID] == nil {
+		fc.uploads[uploadID] = make(map[int]stagedPart)
 	}
-	if end := offset + length; end > fc.uploaded[path] {
-		fc.uploaded[path] = end
-	}
-
-	if fc.staged == nil {
-		fc.staged = make(map[string][]byte)
-	}
-	if end := offset + uint64(len(part)); end > uint64(len(fc.staged[path])) {
-		grown := make([]byte, end)
-		copy(grown, fc.staged[path])
-		fc.staged[path] = grown
-	}
-	copy(fc.staged[path][offset:], part)
+	fc.uploads[uploadID][number] = stagedPart{offset: offset, data: part}
 
 	return "etag", nil
 }
@@ -396,6 +484,13 @@ func (fc *fakeClient) Rename(_ context.Context, _ stores.Account, from, to strin
 	oi.Key = "/" + to
 	fc.objects[to] = oi
 	delete(fc.objects, from)
+
+	// The bytes go with the name, as they do on a backend where a rename is metadata: left behind,
+	// the renamed file reads as nothing and a test cannot tell that from a file that never moved.
+	if data, found := fc.contents[from]; found {
+		fc.contents[to] = data
+		delete(fc.contents, from)
+	}
 
 	return nil
 }
@@ -574,11 +669,20 @@ func (h *smbTest) newTestConnection(name string) *connection {
 }
 
 // dial brings up a client of its own, with a GUID nobody else shares.
+//
+// The count goes into the second and third bytes and never into the first, which is what keeps it
+// clear of the GUIDs the tests name for themselves: those carry the first byte, and a count that went
+// there would wrap past every one of them as the binary dialled its way through 256 clients. A client
+// that collides with another is not a test failing loudly - it is the same client as far as the lease
+// paths are concerned, so a break that ought to be sent is correctly not sent, and the test that was
+// waiting for it fails a long way from the cause.
 func (h *smbTest) dial(user string) *testClient {
 	h.t.Helper()
 
+	n := smbTestClients + 1
 	var guid [16]byte
-	guid[0] = byte(smbTestClients + 1)
+	guid[1] = byte(n)
+	guid[2] = byte(n >> 8)
 
 	return h.dialAs(user, guid)
 }
