@@ -48,7 +48,24 @@ var (
 
 // connection represents a Connection object.
 type connection struct {
-	commandSequenceWindow      map[uint64]struct{}
+	commandSequenceWindow map[uint64]struct{}
+
+	// interimSent is what an asynchronous command waits on before it answers, by the message ID of
+	// the request. Both responses travel over the one queue, so the order of them is settled the
+	// moment the interim is put on it - but the work may be finished before the interim has been
+	// handed over at all, and then the client is given the answer to a request it has never been
+	// told is pending. What it makes of the interim that follows is nothing good: a macOS client
+	// gives up on the file with "RPC struct is bad", which is its way of saying it was sent a
+	// message it cannot place.
+	interimSent map[uint64]chan struct{}
+
+	// creditsGranted is how many credits each request in hand was granted, so that the response
+	// tells the client exactly what the window was opened by. Told more than that, the client sends
+	// beyond the window and the message it sends is one the server has to turn away; told less, it
+	// holds back for credits it has already been given. The first response to carry the grant takes
+	// it, which for a command answered with an interim response is that interim: the final response
+	// of an asynchronous command grants nothing.
+	creditsGranted             map[uint64]uint16
 	requestList                map[uint64]*smb2.Request
 	pendingResponses           map[uint64]smb2.GenericResponse
 	clientCapabilities         uint32
@@ -93,12 +110,46 @@ type connection struct {
 	requestOpens map[uint64]*open
 }
 
-// grantCredits increases the number of credits available to the client by the given number.
-// Each SMB2 request consumes at least one credit.
-func (c *connection) grantCredits(mid uint64, numCredits uint16) error {
-	if numCredits == 0 {
-		numCredits = 1 // At least one credit needs to be granted
+// maxSequenceWindow is the most message IDs a client may hold at once, which is the most credits it
+// may be granted: it may have exactly as many requests outstanding as it has credits, and every credit
+// is an ID this server has to hold open for it.
+//
+// There has to be a limit. A client asks for credits on every request - a macOS client asks for 256
+// apiece - and spends a fraction of what it asks for, so a window that granted every request in full
+// grew by a couple of hundred IDs per request and never gave any of them back, bounded by nothing but
+// the length of the connection.
+//
+// It has to be a high one. This is not how a client is paced - that is done by what each response
+// grants, where the backlog at the store is known - and a limit low enough to be reached in the
+// ordinary course of a transfer paces the client by accident: a macOS client holds a couple of
+// hundred requests open at once and asks for more room on every one of them, and it slows itself
+// down when it stops being given any. What this catches is the growth, not the client.
+const maxSequenceWindow = 65536
+
+// grantCredits increases the number of credits available to the client, up to what it asked for and
+// no further than the window allows, and returns how many it granted.
+//
+// What it may never grant is less than the request spent. A request consumes its charge from the
+// window and is answered with what is granted here, so granting the charge back leaves the client
+// with what it had and granting less leaves it with less - and a client whose credits fall away has
+// fewer requests it may have outstanding, until it is down to one at a time and gives up on what it
+// was doing. That is what a full window used to do: with no room left it granted what was left of the
+// room, which is nothing, and a client that asked for 256 on every request was answered with one.
+//
+// So the window is the limit on growth alone. At the limit the client keeps what it holds, which is
+// as many credits as this server was ever willing to open at once.
+func (c *connection) grantCredits(mid uint64, numCredits, charge uint16) (uint16, error) {
+	if charge == 0 {
+		charge = 1
 	}
+
+	if room := maxSequenceWindow - len(c.commandSequenceWindow); room < int(numCredits) {
+		numCredits = uint16(max(room, 0))
+	}
+	if numCredits < charge {
+		numCredits = charge
+	}
+
 	// Find the maximal message ID that a request may come in with.
 	max, _ := utils.FindMaxKey(c.commandSequenceWindow)
 	if max == 0 { // Window empty or only containing zero
@@ -106,7 +157,7 @@ func (c *connection) grantCredits(mid uint64, numCredits uint16) error {
 	}
 
 	if uint64(numCredits) > math.MaxUint64-max {
-		return errCommandSecuenceWindowExceeded
+		return 0, errCommandSecuenceWindowExceeded
 	}
 
 	var i uint64
@@ -114,7 +165,7 @@ func (c *connection) grantCredits(mid uint64, numCredits uint16) error {
 		c.commandSequenceWindow[max+i+1] = struct{}{}
 	}
 
-	return nil
+	return numCredits, nil
 }
 
 // acceptRequest processes an SMB message into one or more requests and puts them in the queue.
@@ -190,7 +241,7 @@ func (c *connection) acceptRequest(msg []byte) error {
 				return smb2.ErrWrongProtocol
 			}
 			c.mu.Lock()
-			c.grantCredits(mid, 1) // Grant just one credit
+			c.grantCredits(mid, 1, 1) // Grant just one credit
 			c.mu.Unlock()
 		} else {
 			if c.supportsMultiCredit {
@@ -216,8 +267,10 @@ func (c *connection) acceptRequest(msg []byte) error {
 			}
 
 			c.mu.Lock()
-			c.grantCredits(mid, credits)
+			granted, _ := c.grantCredits(mid, credits, req.Header().CreditCharge())
+			c.creditsGranted[mid] = granted
 			c.mu.Unlock()
+
 			if req.Header().Command() == smb2.SMB2_CANCEL { // SMB2_CANCEL requests are handled separately
 				if err := c.cancelRequest(req); err != nil {
 					log.Printf("Couldn't cancel request %d:, %v\n", req.Header().Command(), err)
@@ -275,7 +328,7 @@ func (c *connection) acceptRequest(msg []byte) error {
 			var count uint16
 			i := mid
 			m, _ := utils.FindMaxKey(c.commandSequenceWindow)
-			for i < m && count < req.Header().CreditCharge() {
+			for i <= m && count < req.Header().CreditCharge() {
 				if _, found := c.commandSequenceWindow[i]; found {
 					delete(c.commandSequenceWindow, i)
 					count++
@@ -369,7 +422,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		case smb2.SMB_DIALECT_MULTICREDIT:
 			c.supportsMultiCredit = true
 		}
-		c.grantCredits(nr.Header().MessageID(), 1) // Grant just one credit
+		c.grantCredits(nr.Header().MessageID(), 1, 1) // Grant just one credit
 
 		if dialect != smb2.SMB_DIALECT_202 && c.server.isLeasingCapable {
 			c.serverCapabilities |= smb2.GLOBAL_CAP_LEASING
@@ -987,15 +1040,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		c.asyncCommandList[asyncID] = req
 		c.mu.Unlock()
 
+		interim := c.expectInterim(req.Header().MessageID())
 		go func() {
 			c.server.breakHoldersOn(tc.share, path, nil, asking, sharedOK)
 
 			resp := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
 
-			// The final response of an asynchronous command must carry the async flag and ID
-			// in all cases, including errors.
-			resp.Header().SetAsyncID(asyncID)
-			resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+			c.awaitInterim(interim)
+
+			finalAsync(resp, asyncID)
 
 			c.mu.Lock()
 			delete(c.requestList, resp.Header().MessageID())
@@ -1445,6 +1498,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		resp.Header().ClearFlag(smb2.FLAGS_SIGNED)
 		resp.Header()[len(resp.Header())-1] = 0x21
 
+		interim := c.expectInterim(rr.Header().MessageID())
 		go func() {
 			var resp smb2.GenericResponse
 			data, err := op.read(rr.Offset(), length)
@@ -1459,10 +1513,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				resp.FromRequest(rr)
 				resp.(*smb2.ReadResponse).Generate(data, rr.Padding())
 			}
-			// The final response of an async operation must carry the async flag and
-			// ID in all cases, including errors.
-			resp.Header().SetAsyncID(asyncID)
-			resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+			finalAsync(resp, asyncID)
 
 			c.mu.Lock()
 			delete(c.requestList, resp.Header().MessageID())
@@ -1477,10 +1528,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			select {
 			case <-op.ctx.Done():
 				resp = smb2.NewErrorResponse(req, smb2.STATUS_FILE_CLOSED, 0, nil)
-				resp.Header().SetAsyncID(asyncID)
-				resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+				finalAsync(resp, asyncID)
 			default:
 			}
+
+			c.awaitInterim(interim)
 
 			c.releaseOpen(req)
 			c.server.trySendResponse(c, ss, resp)
@@ -1611,8 +1663,19 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		resp.Header().ClearFlag(smb2.FLAGS_SIGNED)
 		resp.Header()[len(resp.Header())-1] = 0x21
 
+		// This is where the credits of the write go back, so it is where the client is paced: the
+		// further the backend is behind on this file, the less it is given to send with.
+		waiting := op.file.waitingOnTheBackend()
+		wanted := creditsToGrant(wr.Header().CreditCharge(), wr.Header().CreditRequest(),
+			waiting, pacingCapacity(op.treeConnect.maxUploadSize))
+		resp.Header().SetCreditResponse(wanted)
+
+		// Every write is named as it arrives, however many there are: the timestamps of the
+		// arrivals are what a transfer that stalls is read out of, and the credits are what a
+		// client stalls for want of.
 		// The write is counted against the file rather than against this handle: whoever finalizes
 		// the upload has to wait for every write going into it, whichever handle sent it.
+		interim := c.expectInterim(wr.Header().MessageID())
 		op.file.beginWrite()
 		go func() {
 			defer op.file.endWrite()
@@ -1626,8 +1689,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				resp = &smb2.WriteResponse{}
 				resp.FromRequest(wr)
 				resp.(*smb2.WriteResponse).Generate(uint32(len(wr.Buffer())))
-				resp.Header().SetAsyncID(asyncID)
-				resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+				finalAsync(resp, asyncID)
 			}
 
 			c.mu.Lock()
@@ -1643,10 +1705,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			select {
 			case <-op.ctx.Done():
 				resp = smb2.NewErrorResponse(req, smb2.STATUS_FILE_CLOSED, 0, nil)
-				resp.Header().SetAsyncID(asyncID)
-				resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+				finalAsync(resp, asyncID)
 			default:
 			}
+
+			c.awaitInterim(interim)
+
+			// The uneventful writes are reported now and then rather than every time, and the
+			// ones that went wrong or took long enough for a client to give up on the server
+			// are reported whenever they happen.
 
 			c.releaseOpen(req)
 			c.server.trySendResponse(c, ss, resp)
@@ -2713,6 +2780,11 @@ func (c *connection) processRequests() {
 				return
 			}
 
+			// The credits of the request it answers go back on it, and it is counted as the answer
+			// to that request - here rather than where the message goes out, because a chain goes
+			// out as one message and carries a header of its own for every request in it.
+			c.grantOnResponse(resp)
+
 			c.mu.Lock()
 			delete(c.requestList, resp.Header().MessageID())
 			var pendingResp smb2.GenericResponse
@@ -2748,6 +2820,10 @@ func (c *connection) processRequests() {
 				c.mu.Unlock()
 			}
 
+			// Whatever is going out for this request is on the queue now, so the work behind an
+			// asynchronous one may answer.
+			c.interimQueued(resp.Header().MessageID())
+
 			// An interim response doesn't complete the request: the counters are
 			// decremented when the asynchronous command sends its final response.
 			if resp.Header().Status() != smb2.STATUS_PENDING {
@@ -2777,6 +2853,88 @@ func (c *connection) sendResponses() {
 			}
 		}
 	}
+}
+
+// The credits a client is answered with are how fast it is allowed to write. A client may only have
+// as many requests outstanding as it has credits, so granting fewer is how a server tells it to send
+// less at a time - and it is the only way of doing so that costs the client nothing: every request is
+// answered at once, and the client paces itself.
+//
+// The alternative is to hold a write until the backend has caught up, which is what this server used
+// to do. It works only while the wait is shorter than the client's patience: a write held longer than
+// that is one the client gives up on, and the transfer fails outright rather than slowing down.
+//
+// creditsToGrant is what a write is answered with, given what it charged the window, what it asked
+// for, and how far the backend is behind on the file it belongs to.
+//
+// The measure is what the pipeline holds rather than a fixed number of bytes, because a part is 4 MiB
+// on one backend and a slab of tens of MiB on the other: a figure that leaves room on the first is one
+// that three parts of the second overrun, and a client writing to indexd would be cut back to a
+// request at a time for no reason at all.
+//
+// Well inside what the pipeline holds the client is given what it asked for, so that it may grow its window and
+// run as fast as the link allows. Over half of it the client is given exactly what the write cost,
+// which holds its window where it is. At the whole of it it is given the least a client may be given,
+// which is one: the window falls away with every write and the client is down to a request at a time
+// until the backend has caught up. Never nothing, since a client with no credits can send nothing at
+// all and would wait for a grant that only another request could prompt.
+func creditsToGrant(charge, request uint16, waiting, capacity uint64) uint16 {
+	spent := max(charge, 1)
+
+	switch {
+	case capacity == 0:
+		return max(spent, request)
+	case waiting >= capacity:
+		return 1
+	case waiting >= capacity/2:
+		return spent
+	default:
+		return max(spent, request)
+	}
+}
+
+// expectInterim records that the request will be answered with an interim response, and returns what
+// the work behind it waits on before it answers for real.
+func (c *connection) expectInterim(mid uint64) chan struct{} {
+	sent := make(chan struct{})
+
+	c.mu.Lock()
+	c.interimSent[mid] = sent
+	c.mu.Unlock()
+
+	return sent
+}
+
+// awaitInterim waits until the interim response has been queued, or until the connection goes.
+func (c *connection) awaitInterim(sent chan struct{}) {
+	select {
+	case <-sent:
+	case <-c.closeChan:
+	}
+}
+
+// interimQueued says that whatever was going out for the request has been queued, which lets the work
+// behind it answer.
+func (c *connection) interimQueued(mid uint64) {
+	c.mu.Lock()
+	sent, found := c.interimSent[mid]
+	delete(c.interimSent, mid)
+	c.mu.Unlock()
+
+	if found {
+		close(sent)
+	}
+}
+
+// finalAsync marks the response as the final one of an asynchronous command. It carries the async ID
+// and flag in every case, errors included, and grants no credits: those were handed back with the
+// interim response, when the work was taken on. Granted twice for the one request, they would leave
+// the client believing it may send further than the sequence window this server has opened, and the
+// message it sent on the strength of that is one the server has to turn away.
+func finalAsync(resp smb2.GenericResponse, asyncID uint64) {
+	resp.Header().SetAsyncID(asyncID)
+	resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+	resp.Header().SetCreditResponse(0)
 }
 
 // findOpen is a helper function that tries to find an open by its ID. It returns the status

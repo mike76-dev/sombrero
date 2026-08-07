@@ -142,6 +142,8 @@ func (s *server) Stats() api.ServerStats {
 func (s *server) newConnectionState(clientName string) *connection {
 	c := &connection{
 		commandSequenceWindow: make(map[uint64]struct{}),
+		creditsGranted:        make(map[uint64]uint16),
+		interimSent:           make(map[uint64]chan struct{}),
 		requestList:           make(map[uint64]*smb2.Request),
 		asyncCommandList:      make(map[uint64]*smb2.Request),
 		pendingResponses:      make(map[uint64]smb2.GenericResponse),
@@ -182,6 +184,39 @@ func (s *server) newConnection(conn net.Conn) *connection {
 	go c.processRequests()
 
 	return c
+}
+
+// grantOnResponse settles the credits the response goes out with: no more than the window was opened
+// by for the request it answers, and no more than the response already meant to grant. The grant is
+// taken by the first response to carry it, so an interim response hands the credits back and the final
+// response of the same request grants nothing - which is what [MS-SMB2] 3.3.4.2 has the two of them do.
+//
+// Nothing is done for a message the server sends of its own accord: a break notification answers no
+// request, and has no credits of anybody's to hand back.
+func (c *connection) grantOnResponse(resp smb2.GenericResponse) {
+	if resp.Header().Command() == smb2.SMB2_OPLOCK_BREAK && resp.Header().Status() == smb2.STATUS_OK {
+		return
+	}
+
+	mid := resp.Header().MessageID()
+
+	c.mu.Lock()
+	granted, found := c.creditsGranted[mid]
+	if found {
+		delete(c.creditsGranted, mid)
+	}
+	c.mu.Unlock()
+
+	if !found {
+		return
+	}
+
+	// The credit field of a response sits where a request carries the credits it asks for.
+	if carried := resp.Header().CreditRequest(); carried < granted {
+		granted = carried
+	}
+
+	resp.Header().SetCreditResponse(granted)
 }
 
 // closeConnection destroys the Connection object.
@@ -311,6 +346,12 @@ func (s *server) trySendResponse(c *connection, ss *session, resp smb2.GenericRe
 		return false
 	default:
 	}
+
+	c.grantOnResponse(resp)
+
+	// Counted here as well as in writeResponse: the final response of an asynchronous read or write
+	// goes out this way, and a count that missed them would show every one of them as a request the
+	// client is still waiting on.
 
 	buf := s.encodeResponse(c, ss, resp)
 

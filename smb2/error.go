@@ -110,8 +110,14 @@ func NewErrorResponse(req GenericRequest, status uint32, count uint8, data []byt
 	er := &ErrorResponse{}
 	er.FromRequest(req)
 	Header(er.data).SetStatus(status)
+
+	// An interim response is where the credits of the request it holds open are handed back
+	// ([MS-SMB2] 3.3.4.2, which sets the field as 3.3.1.2 has it). Held until the final response,
+	// they are held for as long as the work takes: a client that has spent its credits on requests
+	// the server is still working on has nothing left to send with and waits, however much of the
+	// window it was granted.
 	if status == STATUS_PENDING {
-		Header(er.data).SetCreditResponse(0)
+		Header(er.data).SetCreditResponse(max(req.Header().CreditCharge(), req.Header().CreditRequest()))
 	}
 	er.SetErrorContextCount(count)
 	er.SetErrorData(data)

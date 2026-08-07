@@ -797,6 +797,11 @@ func (cl *testClient) send(msg []byte) (smb2.GenericResponse, error) {
 		return nil, fmt.Errorf("the server gave up on the request: %w", err)
 	}
 
+	// The dispatcher says when what is going out for a request has been queued, which is what the
+	// work behind an asynchronous one waits for before it answers. This stands in for the
+	// dispatcher, so it has to say so too, or that work waits for ever.
+	cl.conn.interimQueued(resp.Header().MessageID())
+
 	return resp, nil
 }
 

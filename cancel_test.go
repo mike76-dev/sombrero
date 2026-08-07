@@ -103,8 +103,10 @@ func TestGrantCredits(t *testing.T) {
 		t.Fatalf("a new connection accepts %v, want only the request that opens the window", got)
 	}
 
-	if err := c.grantCredits(0, 3); err != nil {
+	if granted, err := c.grantCredits(0, 3, 1); err != nil {
 		t.Fatalf("the server would not grant credits: %v", err)
+	} else if granted != 3 {
+		t.Fatalf("the server granted %d credits of the three asked for", granted)
 	}
 	if got := c.window(); !slices.Equal(got, []uint64{0, 1, 2, 3}) {
 		t.Fatalf("the connection accepts %v, want three more IDs on top of the first", got)
@@ -112,7 +114,7 @@ func TestGrantCredits(t *testing.T) {
 
 	// The next grant carries on from the highest ID handed out rather than from the one the
 	// request came in under.
-	if err := c.grantCredits(1, 2); err != nil {
+	if _, err := c.grantCredits(1, 2, 1); err != nil {
 		t.Fatalf("the server would not grant credits: %v", err)
 	}
 	if got := c.window(); !slices.Equal(got, []uint64{0, 1, 2, 3, 4, 5}) {
@@ -126,7 +128,7 @@ func TestGrantCreditsAlwaysGrantsOne(t *testing.T) {
 	h := newSMBTest(t)
 	c := h.newTestConnection("credits")
 
-	if err := c.grantCredits(0, 0); err != nil {
+	if _, err := c.grantCredits(0, 0, 1); err != nil {
 		t.Fatalf("the server would not grant credits: %v", err)
 	}
 	if got := c.window(); !slices.Equal(got, []uint64{0, 1}) {
@@ -145,7 +147,7 @@ func TestGrantCreditsFromAnEmptyWindow(t *testing.T) {
 	clear(c.commandSequenceWindow)
 	c.mu.Unlock()
 
-	if err := c.grantCredits(9, 2); err != nil {
+	if _, err := c.grantCredits(9, 2, 1); err != nil {
 		t.Fatalf("the server would not grant credits: %v", err)
 	}
 	if got := c.window(); !slices.Equal(got, []uint64{10, 11}) {
@@ -165,7 +167,7 @@ func TestGrantCreditsRefusesToRunPastTheEnd(t *testing.T) {
 	c.commandSequenceWindow[^uint64(0)-1] = struct{}{}
 	c.mu.Unlock()
 
-	if err := c.grantCredits(0, 4); !errors.Is(err, errCommandSecuenceWindowExceeded) {
+	if _, err := c.grantCredits(0, 4, 1); !errors.Is(err, errCommandSecuenceWindowExceeded) {
 		t.Fatalf("the server answered %v, want it to refuse to run past the end of the window", err)
 	}
 }
