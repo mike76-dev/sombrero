@@ -360,3 +360,182 @@ func TestIntegrationASaveAfterADeletionPutsTheFileBack(t *testing.T) {
 		t.Errorf("the store holds %q, want the file exactly as it was saved", got)
 	}
 }
+
+// A client cuts a file short while it is being written, which is what a copy that has lost its place
+// does: it rolls the file back to where it last knows it stood and carries on from there. The bytes may
+// have gone to the store by then, and a part cannot be taken back - but a part left out of the
+// completion was never part of the file, so a new end that falls where a part ends can be honoured.
+
+// TestIntegrationCuttingBackToAPartBoundaryLeavesThePartsOut is that rollback. Refused, it costs the
+// client the whole transfer: it is told its truncation failed and has nowhere to go from there.
+func TestIntegrationCuttingBackToAPartBoundaryLeavesThePartsOut(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	cl.tc.maxUploadSize = 1024
+
+	handle, _ := cl.create("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(handle).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+	fid := createdFileID(handle)
+
+	// Four parts, so that the file can be cut back to the end of the second.
+	for i := range 4 {
+		block := bytes.Repeat([]byte{byte('a' + i)}, 1024)
+		if _, err := cl.write(fid, uint64(i)*1024, block); err != nil {
+			t.Fatalf("the write of block %d failed: %v", i, err)
+		}
+	}
+
+	set, err := cl.endOfFile(fid, 2048)
+	if err != nil {
+		t.Fatalf("cutting the file back failed outright: %v", err)
+	}
+	if status := smb2.Header(set).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("cutting the file back was answered with %#x, want it carried out", status)
+	}
+
+	// The client carries on from where it rolled back to.
+	if _, err := cl.write(fid, 2048, bytes.Repeat([]byte("z"), 1024)); err != nil {
+		t.Fatalf("the write after the rollback failed: %v", err)
+	}
+
+	closed, err := cl.closeHandle(fid)
+	if err != nil {
+		t.Fatalf("the close failed outright: %v", err)
+	}
+	if status := smb2.Header(closed).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the close was answered with %#x, want the file stored", status)
+	}
+
+	// The file is the two parts that were kept and what was written after the rollback. The parts
+	// that were left out are no part of it.
+	want := append(bytes.Repeat([]byte("a"), 1024), bytes.Repeat([]byte("b"), 1024)...)
+	want = append(want, bytes.Repeat([]byte("z"), 1024)...)
+	if got := h.files.dataOf("big.bin"); !bytes.Equal(got, want) {
+		t.Errorf("the store holds %d bytes %.8q…, want %d bytes %.8q…", len(got), got, len(want), want)
+	}
+}
+
+// TestIntegrationEmptyingAFileBeingWrittenCallsOffTheUpload is the other end of it: a client that cuts
+// the file to nothing while writing it. There is nothing to keep and nothing to store, so the upload is
+// called off and the file is the empty one it was cut down to — which the client may then write anew.
+func TestIntegrationEmptyingAFileBeingWrittenCallsOffTheUpload(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	cl.tc.maxUploadSize = 1024
+
+	handle, _ := cl.create("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	fid := createdFileID(handle)
+
+	for i := range 3 {
+		if _, err := cl.write(fid, uint64(i)*1024, bytes.Repeat([]byte("s"), 1024)); err != nil {
+			t.Fatalf("the write of block %d failed: %v", i, err)
+		}
+	}
+
+	set, err := cl.endOfFile(fid, 0)
+	if err != nil {
+		t.Fatalf("emptying the file failed outright: %v", err)
+	}
+	if status := smb2.Header(set).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("emptying the file was answered with %#x, want it carried out", status)
+	}
+
+	file := h.srv.globalOpenTable[openIDOf(fid)]
+	if file == nil {
+		t.Fatal("the handle has no open behind it")
+	}
+	if file.file.uploadNow() != nil {
+		t.Error("the upload is still running after the file was emptied")
+	}
+	if got := file.file.sizeNow(); got != 0 {
+		t.Errorf("the file is %d bytes, want the empty file it was cut down to", got)
+	}
+
+	// And the client writes it anew, as one that has started over does.
+	if _, err := cl.write(fid, 0, []byte("starting over")); err != nil {
+		t.Fatalf("the write after emptying the file failed: %v", err)
+	}
+	if _, err := cl.closeHandle(fid); err != nil {
+		t.Fatalf("the close failed: %v", err)
+	}
+	if got := string(h.files.dataOf("big.bin")); got != "starting over" {
+		t.Errorf("the store holds %q, want what was written after the file was emptied", got)
+	}
+}
+
+// TestIntegrationARollbackIntoTheLastPartIsHonoured is the rewind a copy does when it loses its
+// place. A macOS client copying with fcopyfile sets the end of the file back by one write and carries
+// on from there — 27 MiB of a file it had written 28 MiB of, which is inside the part that had just
+// gone to the store rather than on the boundary of one. Refused, it tries three more times and gives
+// up with "RPC struct is bad", and the copy is over.
+func TestIntegrationARollbackIntoTheLastPartIsHonoured(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	cl.tc.maxUploadSize = 4096
+
+	handle, _ := cl.create("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(handle).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+	fid := createdFileID(handle)
+
+	// Seven parts, the last of which has gone to the store.
+	for i := range 7 {
+		block := bytes.Repeat([]byte{byte('a' + i)}, 4096)
+		if _, err := cl.write(fid, uint64(i)*4096, block); err != nil {
+			t.Fatalf("the write of block %d failed: %v", i, err)
+		}
+	}
+
+	// Back by a quarter of the last part, which is where the client's rollback lands.
+	const back = 7*4096 - 1024
+	set, err := cl.endOfFile(fid, back)
+	if err != nil {
+		t.Fatalf("rolling the file back failed outright: %v", err)
+	}
+	if status := smb2.Header(set).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("rolling the file back was answered with %#x, want it carried out", status)
+	}
+
+	// And the client carries on from where it rolled back to, as it does.
+	if _, err := cl.write(fid, back, bytes.Repeat([]byte("z"), 2048)); err != nil {
+		t.Fatalf("the write after the rollback failed: %v", err)
+	}
+
+	closed, err := cl.closeHandle(fid)
+	if err != nil {
+		t.Fatalf("the close failed outright: %v", err)
+	}
+	if status := smb2.Header(closed).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the close was answered with %#x, want the file stored", status)
+	}
+
+	// The file is the six parts that stood, the three quarters of the seventh that were kept, and
+	// what was written over the rest.
+	var want []byte
+	for i := range 6 {
+		want = append(want, bytes.Repeat([]byte{byte('a' + i)}, 4096)...)
+	}
+	want = append(want, bytes.Repeat([]byte("g"), 3072)...)
+	want = append(want, bytes.Repeat([]byte("z"), 2048)...)
+
+	if got := h.files.dataOf("big.bin"); !bytes.Equal(got, want) {
+		t.Errorf("the store holds %d bytes, want %d; first difference at %d", len(got), len(want), firstDifference(got, want))
+	}
+}
+
+// firstDifference is where two runs of bytes stop agreeing, for a message that says something.
+func firstDifference(a, b []byte) int {
+	for i := range min(len(a), len(b)) {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+
+	return min(len(a), len(b))
+}
