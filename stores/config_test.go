@@ -114,6 +114,38 @@ func TestReadConfigRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+// TestReadConfigDefaultsAPIAddress verifies that a config that says nothing
+// about the API address gets localhost rather than every interface, since
+// net.Listen treats an empty address as a wildcard bind on a random port.
+func TestReadConfigDefaultsAPIAddress(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "sombrero.yml"), []byte(body), 0600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	write("api:\n  password: hunter2\n")
+	cfg, err := ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if cfg.API.Address != defaultAPIAddress {
+		t.Fatalf("want the API address defaulted to %q, got %q", defaultAPIAddress, cfg.API.Address)
+	}
+
+	// An address that is spelled out is left alone.
+	write("api:\n  address: 0.0.0.0:8080\n  password: hunter2\n")
+	cfg, err = ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if cfg.API.Address != "0.0.0.0:8080" {
+		t.Fatalf("want the configured API address kept, got %q", cfg.API.Address)
+	}
+}
+
 // TestSaveConfigRoundTrip verifies that a saved config reads back as it was,
 // since the server rewrites the file after generating a seed phrase.
 func TestSaveConfigRoundTrip(t *testing.T) {
@@ -123,7 +155,7 @@ func TestSaveConfigRoundTrip(t *testing.T) {
 		Debug:          true,
 		Mode:           ModeLite,
 		MaxConnections: 30,
-		API:            APIConfig{Port: 9999, Password: "hunter2"},
+		API:            APIConfig{Address: "127.0.0.1:9999", Password: "hunter2"},
 		Database:       DatabaseConfig{Host: "127.0.0.1", Port: 5432, User: "postgres", Database: "sombrero", SSLMode: "disable"},
 		Indexd: IndexdConfig{
 			Name:              "Sombrero",

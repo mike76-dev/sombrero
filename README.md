@@ -86,8 +86,10 @@ debug: false               # indicates whether to display the session ID and key
 mode: normal               # the server mode: 'normal' or 'lite' (see below)
 maxConnections: 30         # the maximum number of connections accepted from the same IP within 10 minutes
 api:
-  port: 9999               # the port number that the API is listening on
-  password: <API_PASSWORD> # the password to access the API
+  address: 127.0.0.1:9999  # the address the API is listening on; defaults to localhost, since the API administers
+                           # the whole server. Change it only if the API needs to be reached from another machine,
+                           # and put a reverse proxy with TLS in front of it if you do
+  password: <API_PASSWORD> # the password to access the API; the server refuses to start without one
 database:
   host: 127.0.0.1          # the address of the PostgreSQL server
   port: 5432               # the port number of the PostgreSQL server

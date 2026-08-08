@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -40,6 +39,12 @@ func main() {
 	cfg, err := stores.ReadConfig(dir)
 	if err != nil {
 		panic(err)
+	}
+
+	// The API administers the whole server, so it must not be reachable
+	// without a password.
+	if cfg.API.Password == "" {
+		log.Fatal("no API password set: add one to the `api` section of sombrero.yml")
 	}
 
 	if cfg.Mode == stores.ModeNormal {
@@ -90,13 +95,13 @@ func main() {
 	db.WithShares(server)
 
 	// Start the API server.
-	lAPI, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.API.Port))
+	lAPI, err := net.Listen("tcp", cfg.API.Address)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer lAPI.Close()
 	a := api.NewAPI(ctx, db, cfg.Indexd, cfg.Mode, server.Stats)
-	apiSrv := &http.Server{Handler: api.BasicAuth(cfg.API.Password)(a)}
+	apiSrv := &http.Server{Handler: api.Ratelimit(ctx)(api.BasicAuth(cfg.API.Password)(a))}
 	go apiSrv.Serve(lAPI)
 	log.Printf("API: listening at %s ...\n", lAPI.Addr())
 
