@@ -83,8 +83,7 @@ type fakeClient struct {
 
 // stagedPart is a part the backend has taken and not yet put into an object.
 type stagedPart struct {
-	offset uint64
-	data   []byte
+	data []byte
 }
 
 func newFakeClient() *fakeClient {
@@ -437,7 +436,7 @@ func (fc *fakeClient) Write(_ context.Context, r io.Reader, path, uploadID strin
 	if fc.uploads[uploadID] == nil {
 		fc.uploads[uploadID] = make(map[int]stagedPart)
 	}
-	fc.uploads[uploadID][number] = stagedPart{offset: offset, data: part}
+	fc.uploads[uploadID][number] = stagedPart{data: part}
 
 	return "etag", nil
 }
@@ -536,7 +535,7 @@ func newSMBTest(t *testing.T) *smbTest {
 
 	h := &smbTest{
 		t:         t,
-		share:     &share{name: "files", maxUses: maxShareUses},
+		share:     &share{name: "files"},
 		files:     newFakeClient(),
 		workgroup: wg.String(),
 	}
@@ -963,8 +962,8 @@ func (cl *testClient) keepFile(fid []byte) ([]byte, error) {
 
 // rename sets FileRenameInformation on a handle.
 func (cl *testClient) rename(fid []byte, to string) ([]byte, error) {
-	//   0: ReplaceIfExists
-	// 8-16: RootDirectory
+	//     0: ReplaceIfExists
+	//  8-16: RootDirectory
 	// 16-20: FileNameLength
 	//   20-: FileName
 	encoded := utils.EncodeStringToBytes(to)

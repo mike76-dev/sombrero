@@ -27,7 +27,6 @@ type treeConnect struct {
 	session       *session
 	share         *share
 	openCount     uint64
-	creationTime  time.Time
 	maximalAccess uint32
 
 	// Resolved at connect time from the share; for indexd these are per-workgroup.
@@ -108,12 +107,6 @@ func (tc *treeConnect) movePersistedTree(from, to string) {
 // the backend already knows about. Only the paths the caller asks for are taken, and only the files
 // the backend has nothing for: the table also holds the state of every file that is merely open,
 // which the backend lists itself.
-//
-// The size and the modification time of a file move under the lock of its state, and the writer of
-// a file settles them there as it goes: read out of the table without it, an upload in progress
-// races every listing of the directory it is going into. The table is let go of before any state is
-// read, so the two locks are never held at once and the order they are taken in cannot matter. want
-// is called while the table is held, so it must not reach for a lock itself.
 func (tc *treeConnect) persistedObjects(want func(path string) bool) []client.ObjectInfo {
 	tc.share.mu.Lock()
 	paths := make([]string, 0, len(tc.share.persisted))
@@ -173,7 +166,6 @@ func newTreeConnectState(tid uint32, ss *session, sh *share, access uint32) *tre
 		treeID:        tid,
 		session:       ss,
 		share:         sh,
-		creationTime:  time.Now(),
 		maximalAccess: access,
 	}
 }

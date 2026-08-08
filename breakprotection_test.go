@@ -12,13 +12,13 @@ import (
 // message whose protection is not decided by the request it answers. Two rules govern it, and
 // they pull in opposite directions.
 //
-// It is not signed. 3.3.4.6 and 3.3.4.7 both say so outright - "The message SHOULD NOT be
-// signed" - and the reason is that every signing rule in 3.3.4.1.1 is conditioned on the request
-// having been signed by the client, which a notification has none of. A session that requires
-// signing for everything else still gets its breaks unsigned.
+// It is not signed. [MS-SMB2] 3.3.4.6 and 3.3.4.7 both say so outright - "The message SHOULD NOT
+// be signed" - and the reason is that every signing rule in 3.3.4.1.1 is conditioned on the
+// request having been signed by the client, which a notification has none of. A session that
+// requires signing for everything else still gets its breaks unsigned.
 //
-// It is encrypted, when the session encrypts. 3.3.4.1.4 puts no such condition on it: everything
-// but NEGOTIATE and SESSION_SETUP goes encrypted once Session.EncryptData is set.
+// It is encrypted, when the session encrypts. [MS-SMB2] 3.3.4.1.4 puts no such condition on it:
+// everything but NEGOTIATE and SESSION_SETUP goes encrypted once Session.EncryptData is set.
 
 func TestIntegrationOplockBreakIsNotSigned(t *testing.T) {
 	h := newSMBTest(t)
@@ -75,9 +75,9 @@ func TestIntegrationLeaseBreakIsNotSigned(t *testing.T) {
 	assertUnsigned(t, note, "lease break")
 }
 
-// assertUnsigned holds a notification to what 3.3.4.6 asks for: no signed flag, and a signature
-// field left at zero. The flag alone is not enough - a server that signed but forgot the flag
-// would still be putting a signature on the wire.
+// assertUnsigned holds a notification to what [MS-SMB2] 3.3.4.6 asks for: no signed flag, and a
+// signature field left at zero. The flag alone is not enough - a server that signed but forgot
+// the flag would still be putting a signature on the wire.
 func assertUnsigned(t *testing.T, note []byte, what string) {
 	t.Helper()
 

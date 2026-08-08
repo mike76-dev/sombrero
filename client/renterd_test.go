@@ -19,7 +19,6 @@ import (
 // recorded is one request as the far end received it, which is the only thing that matters about
 // a client: what actually went out on the wire.
 type recorded struct {
-	method string
 	path   string // the path of the URL, already unescaped by the server
 	rawreq string // the path and query exactly as they arrived
 	query  map[string][]string
@@ -56,7 +55,6 @@ func newFakeRenterd(t *testing.T) *fakeRenterd {
 
 		f.mu.Lock()
 		f.seen = append(f.seen, recorded{
-			method: r.Method,
 			path:   r.URL.Path,
 			rawreq: r.URL.RequestURI(),
 			query:  r.URL.Query(),

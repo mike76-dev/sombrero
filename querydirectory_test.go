@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"slices"
 	"testing"
 	"time"
 
@@ -39,8 +40,16 @@ func queryDirectoryRequest(mid, sid uint64, tid uint32, fid []byte, class uint8,
 func (cl *testClient) queryDirectory(fid []byte, pattern string) []byte {
 	cl.h.t.Helper()
 
+	return cl.queryDirectoryAs(fid, smb2.FILE_DIRECTORY_INFORMATION, pattern)
+}
+
+// queryDirectoryAs is the same search asking for a particular information class, which is what the
+// client chooses and the server has to know how to lay a listing out in.
+func (cl *testClient) queryDirectoryAs(fid []byte, class uint8, pattern string) []byte {
+	cl.h.t.Helper()
+
 	cl.mid++
-	resp, err := cl.send(queryDirectoryRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, smb2.FILE_DIRECTORY_INFORMATION, pattern, 4096))
+	resp, err := cl.send(queryDirectoryRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, class, pattern, 4096))
 	if err != nil {
 		cl.h.t.Fatalf("search of %q: %v", pattern, err)
 	}
@@ -52,9 +61,19 @@ func (cl *testClient) queryDirectory(fid []byte, pattern string) []byte {
 	return cl.recv(20 * time.Second)
 }
 
-// listedNames returns the names carried by a query directory response, which are held one after
-// another in the output buffer, each entry saying how far the next one lies.
+// listedNames returns the names carried by a query directory response laid out as
+// FILE_DIRECTORY_INFORMATION, whose fixed part runs to 64 bytes.
 func listedNames(t *testing.T, buf []byte) []string {
+	t.Helper()
+
+	return listedNamesOfWidth(t, buf, 64)
+}
+
+// listedNamesOfWidth returns the names carried by a query directory response, which are held one
+// after another in the output buffer, each entry saying how far the next one lies. The width is the
+// fixed part of an entry, which differs from one information class to the next; the name follows it.
+// FileNameLength lies at offset 60 in every class here, whatever trails it before the name itself.
+func listedNamesOfWidth(t *testing.T, buf []byte, width uint32) []string {
 	t.Helper()
 
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
@@ -69,13 +88,13 @@ func listedNames(t *testing.T, buf []byte) []string {
 
 	var names []string
 	entries := buf[uint32(off) : uint32(off)+length]
-	for len(entries) >= 64 {
+	for uint32(len(entries)) >= width {
 		nameLen := binary.LittleEndian.Uint32(entries[60:64])
-		if 64+nameLen > uint32(len(entries)) {
-			t.Fatalf("an entry names %d bytes of file name, in %d", nameLen, len(entries)-64)
+		if width+nameLen > uint32(len(entries)) {
+			t.Fatalf("an entry names %d bytes of file name, in %d", nameLen, uint32(len(entries))-width)
 		}
 
-		names = append(names, utils.DecodeToString(entries[64:64+nameLen]))
+		names = append(names, utils.DecodeToString(entries[width:width+nameLen]))
 
 		next := binary.LittleEndian.Uint32(entries[:4])
 		if next == 0 { // The last entry says so by pointing nowhere.
@@ -91,12 +110,7 @@ func listedNames(t *testing.T, buf []byte) []string {
 }
 
 // TestIntegrationQueryDirectoryFindsABracketedName is the file whose name carries the punctuation
-// a shell glob reads as syntax. "[MS-SMB2].pdf" was uploaded and listed, and the client then asked
-// for it by name the way a client does when it refreshes a window - a search whose pattern is the
-// whole name and nothing else. The pattern used to be handed to a glob matcher, which read the
-// brackets as a set of characters to choose one of, found nothing that matched and answered that
-// no such file existed. The file went out of the window on the client while sitting in the store
-// untouched.
+// a shell glob reads as syntax.
 func TestIntegrationQueryDirectoryFindsABracketedName(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")
@@ -158,5 +172,50 @@ func TestIntegrationQueryDirectoryMissesWhatIsNotThere(t *testing.T) {
 	buf := cl.queryDirectory(fid, "M.pdf")
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_NO_SUCH_FILE {
 		t.Errorf("the search for a name the directory does not hold was answered with %#x, want no such file", status)
+	}
+}
+
+// TestIntegrationQueryDirectoryFullDirectoryInformation is the information class a client may ask a
+// listing in that the server used to turn away. The encoder for it was written and complete, and
+// nothing was wired to it: the class was refused with STATUS_NOT_SUPPORTED before it ever reached
+// the layout, and had the refusal been dropped alone the switch behind it would have answered an
+// empty listing instead. Both ends are checked here - the class is accepted, and what comes back
+// carries the files.
+func TestIntegrationQueryDirectoryFullDirectoryInformation(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	h.files.putDir("docs")
+	h.files.put("docs/first.txt", 1024)
+	h.files.put("docs/second.txt", 2048)
+
+	// The listing is held against the class that was already answered, on the same directory. A
+	// search exhausts the handle it runs on, so each of the two gets one of its own.
+	want := listedNames(t, cl.queryDirectory(createdFileID(cl.openDir("docs")), "*"))
+
+	// The fixed part of a FILE_FULL_DIR_INFORMATION entry runs to 68 bytes: FILE_DIRECTORY_INFORMATION
+	// with EaSize inserted ahead of the name ([MS-FSCC] 2.4.14). Reading the names out at that width
+	// is itself the check on the layout - at any other, the names would not come out whole.
+	fid := createdFileID(cl.openDir("docs"))
+	got := listedNamesOfWidth(t, cl.queryDirectoryAs(fid, smb2.FILE_FULL_DIRECTORY_INFORMATION, "*"), 68)
+
+	// The two are held against each other as sets: nothing here fixes the order a listing comes
+	// back in, and the classes differ in their layout rather than in what they enumerate.
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("the listing carries %v, want the %v the answered class gives", got, want)
+	}
+
+	// And the files themselves are in it, so that two classes agreeing on an empty listing cannot
+	// pass for two classes agreeing on the directory.
+	var files int
+	for _, name := range got {
+		if name == "first.txt" || name == "second.txt" {
+			files++
+		}
+	}
+	if files != 2 {
+		t.Errorf("the listing is %v, want both files the directory holds", got)
 	}
 }

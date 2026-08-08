@@ -10,11 +10,7 @@ import (
 // file wherever the file goes. A client that deletes a file it still has open renames it aside first
 // and goes on using the handle it kept, which is where this matters.
 
-// TestIntegrationEveryHandleFollowsARename is the delete-while-open dance. A client that deletes a
-// file it still has open renames it aside first — a macOS client to ".smbdeleteAAA…" — and goes on
-// using the handle it kept. A handle is on the file and not on the name, so it has to follow: left
-// pointing at the old name, its next read reaches for an object the backend has nothing under, which
-// is answered as an I/O error and ends whatever the client was doing.
+// TestIntegrationEveryHandleFollowsARename is the delete-while-open dance.
 func TestIntegrationEveryHandleFollowsARename(t *testing.T) {
 	h := newSMBTest(t)
 	h.files.putData("._clip.mp4", []byte("attributes and a resource fork"))
@@ -63,11 +59,7 @@ func TestIntegrationEveryHandleFollowsARename(t *testing.T) {
 	}
 }
 
-// TestIntegrationADirectoryHoldsNoBytes is the share root that grew. A directory has no size of its
-// own, but the key it is kept under may have one at the backend, and the root's came back as the size
-// of whatever had last been written into it: six kilobytes after a .DS_Store landed, then ten, then
-// fourteen. What a client makes of a directory that reports a length is its own business, and not
-// something to find out the hard way.
+// TestIntegrationADirectoryHoldsNoBytes is the share root that grew.
 func TestIntegrationADirectoryHoldsNoBytes(t *testing.T) {
 	h := newSMBTest(t)
 

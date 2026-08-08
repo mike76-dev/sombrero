@@ -34,15 +34,6 @@ func (cl *testClient) createWithOptions(name string, disposition, options uint32
 
 // TestCreateOptionsDoNotOutliveTheHandleThatCarriedThem is the file that a handle deletes without
 // ever having been asked to.
-//
-// A file that has been created but not yet uploaded is not in the store - nothing empty can be -
-// so the tree connect keeps the open aside under its path, and a later create for that same name
-// is handed the very same open back rather than a new one. The create options came with the create
-// that first made it and were never replaced, so everything the first handle asked for stuck to
-// the name for as long as the tree connect stood. A client that opens a file with delete-on-close,
-// as a client does with the destination of a copy so that a copy it gives up on leaves nothing
-// behind, left that flag on the name: the next handle over that name carried it too, and closing
-// that handle took the file with it.
 func TestCreateOptionsDoNotOutliveTheHandleThatCarriedThem(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")
@@ -87,10 +78,7 @@ func TestDeleteOnCloseStillDeletes(t *testing.T) {
 // TestDeletingAFileThatWasNeverUploadedIsNotAnError is the file created and closed again with
 // nothing written to it in between. Nothing empty can be uploaded, so such a file lives only as
 // the entry the tree connect keeps under its name, and the backend has nothing to delete when the
-// handle goes with delete-on-close set. That is the expected end of a deletion that has already
-// done everything there was to do, and it used to be written to the log as a failure - which is
-// how "Error deleting object ... (status: 404)" came to appear over an upload that was going
-// perfectly well.
+// handle goes with delete-on-close set.
 func TestDeletingAFileThatWasNeverUploadedIsNotAnError(t *testing.T) {
 	var out bytes.Buffer
 	log.SetOutput(&out)

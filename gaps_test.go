@@ -16,8 +16,7 @@ import (
 // TestIntegrationAnOverlappingWriteOutOfOrderIsStillJoinedUp is the queued write that begins behind
 // where the buffering has reached. Writes are worked on one goroutine apiece, so two the client sent
 // in order can be taken in either order, and the second may be queued before the first has been taken
-// in. Matched on where it begins alone, it was never taken at all: it sat in the queue as a hole in a
-// file that had none, and the whole file was refused for it.
+// in.
 func TestIntegrationAnOverlappingWriteOutOfOrderIsStillJoinedUp(t *testing.T) {
 	h := newSMBTest(t)
 

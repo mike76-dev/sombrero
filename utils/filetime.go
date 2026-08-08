@@ -12,7 +12,7 @@ const filetimeOffset = 11644473600
 func UnixToFiletime(t time.Time) uint64 {
 	// A time before the one Filetime counts from cannot be told in Filetime at all, and the zero
 	// time.Time — a timestamp nobody ever set — is the usual way of arriving here with one.
-	// Filetime has its own way of saying that, which MS-FSCC reads as a time not being reported.
+	// Filetime has its own way of saying that, which [MS-FSCC] reads as a time not being reported.
 	// Counted out as it stands the subtraction goes below zero and comes back as an enormous
 	// count, which a client shows as a date some tens of thousands of years from now.
 	secs := t.Unix() + filetimeOffset

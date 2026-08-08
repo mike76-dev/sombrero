@@ -25,8 +25,6 @@ type Session struct {
 
 	clientHandle *rc4.Cipher
 	serverHandle *rc4.Cipher
-
-	infoMap map[uint16][]byte
 }
 
 // SecurityContext represents the context of the user authenticated by the server.

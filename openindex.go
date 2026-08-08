@@ -246,12 +246,6 @@ func (s *server) findReplayableOpen(clientGuid, createGuid [16]byte) *open {
 }
 
 // moveOpensOnFile points every open on the file at its new name, and returns the ones it moved.
-//
-// A handle is on the file it was opened on and not on the name it was opened under, so all of them
-// follow a rename - not only the handle that asked for it. Left behind, a handle reads and writes a
-// name the backend has nothing under any more, which is what a client that deletes a file it still
-// has open does to itself: it renames the file aside to delete it, and the handle it is holding stops
-// working. A macOS client renames to ".smbdeleteAAA..." and reads through the handle it kept.
 func (s *server) moveOpensOnFile(sh *share, path, newName string) []*open {
 	moved := s.opensOn(sh, path, nil)
 	for _, op := range moved {

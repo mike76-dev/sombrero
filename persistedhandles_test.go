@@ -306,13 +306,7 @@ func TestIntegrationLeaseIsRefusedWhenItWasNotOffered(t *testing.T) {
 
 // TestIntegrationAnUnuploadedFileSurvivesTheTreeConnect is what a client sees after the connection
 // it created a file over has gone. A file created and not yet written to has no object behind it —
-// the Sia network takes nothing empty — so the server is the only thing that knows it is there. That
-// state used to be kept on the tree connect, so a client whose connection dropped came back to a
-// share where the file it had just made could not be opened at all: "the file couldn't be found",
-// for a file the client had created seconds earlier and never closed the share on.
-//
-// The state belongs to the share now, under the workgroup whose namespace the file is in, so the
-// file is there for the next tree connect as it was for the last.
+// the Sia network takes nothing empty — so the server is the only thing that knows it is there.
 func TestIntegrationAnUnuploadedFileSurvivesTheTreeConnect(t *testing.T) {
 	h := newSMBTest(t)
 
@@ -471,8 +465,7 @@ func TestIntegrationFlushWaitsForEveryHandlesWrites(t *testing.T) {
 // A client holding a lease on a file and opening that file again — through an ordinary create, with no
 // lease key on it — is asking about the file it already has, so its lease stands. Breaking it deadlocks
 // the two ends: the client will not answer a break until the create that provoked it is answered, and
-// the server will not answer the create until the break is answered. That cost 35 seconds an open, and
-// the acknowledgment arrived the moment the server gave up waiting for it.
+// the server will not answer the create until the break is answered.
 func TestIntegrationKeylessOpenLeavesTheClientsLeaseAlone(t *testing.T) {
 	h := newSMBTest(t)
 	h.files.put("dir/file", 1024)
@@ -715,11 +708,6 @@ func TestIntegrationRenameStoresWhatIsStillBeingWritten(t *testing.T) {
 		t.Error("the upload is still pending after the rename")
 	}
 }
-
-// A file the store has an object for is shared exactly as one it has nothing for: the state on the
-// share is what every handle on the file finds, whoever opened it. These are the tests of what the
-// sharing keeps from happening — two writings of one file going up as two uploads, and a file left
-// at a size the store was never given.
 
 // readData is the bytes a read response carries.
 func readData(t *testing.T, buf []byte) []byte {

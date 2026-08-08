@@ -9,7 +9,7 @@ import (
 
 // A connection that nobody authenticates over is of no use to anybody: nothing can be asked of
 // it, and it still counts against the limit on how many connections one address may hold. After
-// a while the server drops it (3.3.6.3).
+// a while the server drops it ([MS-SMB2] 3.3.6.3).
 
 // connectedAt registers a bare connection that has been open since the given time, carrying no
 // sessions until the test puts one on it.

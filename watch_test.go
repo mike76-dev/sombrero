@@ -85,9 +85,7 @@ func (h *smbTest) armedWatch(cl *testClient, dir string) []byte {
 }
 
 // TestIntegrationDisconnectingTheTreeAnswersTheWatches is the client that would not let go of the
-// share. A tree disconnect is where a watch ends, and the request was left in the list unanswered:
-// nothing came back for it, and the goroutine behind it went on polling the directory it had been
-// armed on for as long as the server ran.
+// share.
 func TestIntegrationDisconnectingTheTreeAnswersTheWatches(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")
@@ -110,10 +108,7 @@ func TestIntegrationDisconnectingTheTreeAnswersTheWatches(t *testing.T) {
 	}
 }
 
-// TestIntegrationClosingTheDirectoryStopsTheWatch is the same watch left running by a close. The
-// close has always answered the request, but nothing told the goroutine behind it: it kept polling,
-// and the next change to the directory sent a second answer to a request the client had long since
-// seen the end of.
+// TestIntegrationClosingTheDirectoryStopsTheWatch is the same watch left running by a close.
 func TestIntegrationClosingTheDirectoryStopsTheWatch(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")
@@ -148,10 +143,7 @@ func TestIntegrationClosingTheDirectoryStopsTheWatch(t *testing.T) {
 	}
 }
 
-// TestIntegrationAWatchStopsWithTheDirectoryItWatched is the watch that outlived its open. Nothing
-// told the goroutine behind a watch that the open it was armed on had gone, so it went on looking at
-// the directory every fifteen seconds for as long as the server ran - and the next change to that
-// directory sent an answer to a request the client had already had the end of.
+// TestIntegrationAWatchStopsWithTheDirectoryItWatched is the watch that outlived its open.
 func TestIntegrationAWatchStopsWithTheDirectoryItWatched(t *testing.T) {
 	h := newSMBTest(t)
 	h.srv.watchInterval = 10 * time.Millisecond

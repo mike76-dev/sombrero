@@ -14,8 +14,7 @@ import (
 // to read the size and the modification time straight out of the open, holding nothing but the
 // lock of the table it found the open in. The writer of that same file moves both fields under
 // the lock of the open itself, once per contiguous chunk it buffers, so a client copying a file
-// into a window it also has open raced on every chunk. The race detector caught it on macOS
-// during an ordinary drag and drop.
+// into a window it also has open raced on every chunk.
 //
 // The two paths are driven directly rather than through the dispatcher, so that what is under
 // test is the locking of the fields and not the ordering of the requests that reach them.

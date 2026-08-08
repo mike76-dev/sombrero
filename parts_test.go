@@ -356,11 +356,7 @@ func TestWritesStopOnceAPartHasFailed(t *testing.T) {
 	}
 }
 
-// TestIntegrationTheFrontOfAFileIsReadableWellIntoTheUpload is how far back a client looks. A macOS
-// client copying an mp4 reads half a megabyte at five and a half megabytes into the file while it is
-// fifty megabytes into writing it — sniffing the media, or making a thumbnail of what it has copied.
-// Beyond what was kept of the front, that read is answered with an error, and the copy ends there:
-// "fcopyfile failed: RPC struct is bad".
+// TestIntegrationTheFrontOfAFileIsReadableWellIntoTheUpload is how far back a client looks.
 func TestIntegrationTheFrontOfAFileIsReadableWellIntoTheUpload(t *testing.T) {
 	// The window shrunk, so that the shape can be tested without writing out the whole of it.
 	was := uploadHeadKept

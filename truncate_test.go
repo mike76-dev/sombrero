@@ -10,9 +10,7 @@ import (
 )
 
 // Setting the end of a file is how a client cuts it short: an editor saving a shorter document does
-// it before it writes, and expects what was beyond the new end to be gone. It used to be recorded as
-// the space the file takes up and nothing else, so the truncation reached neither the store nor
-// anything that read the file afterwards. These are the tests of it reaching both.
+// it before it writes, and expects what was beyond the new end to be gone.
 
 // endOfFile sets the end of the file the handle is on.
 func (cl *testClient) endOfFile(fid []byte, eof uint64) ([]byte, error) {
@@ -237,9 +235,7 @@ func TestIntegrationSettingTheEndBeyondTheFileIsTheAllocation(t *testing.T) {
 	}
 }
 
-// TestIntegrationSettingTheEndOfFileNeedsEightBytes is the request that carries no number. The end of
-// the file used to be read out of whatever arrived, so eight bytes were taken from a buffer that may
-// have held one, which is a panic reachable by anything that can open a file.
+// TestIntegrationSettingTheEndOfFileNeedsEightBytes is the request that carries no number.
 func TestIntegrationSettingTheEndOfFileNeedsEightBytes(t *testing.T) {
 	h := newSMBTest(t)
 	h.files.putData("notes.txt", []byte("another test"))
@@ -468,10 +464,7 @@ func TestIntegrationEmptyingAFileBeingWrittenCallsOffTheUpload(t *testing.T) {
 }
 
 // TestIntegrationARollbackIntoTheLastPartIsHonoured is the rewind a copy does when it loses its
-// place. A macOS client copying with fcopyfile sets the end of the file back by one write and carries
-// on from there — 27 MiB of a file it had written 28 MiB of, which is inside the part that had just
-// gone to the store rather than on the boundary of one. Refused, it tries three more times and gives
-// up with "RPC struct is bad", and the copy is over.
+// place.
 func TestIntegrationARollbackIntoTheLastPartIsHonoured(t *testing.T) {
 	h := newSMBTest(t)
 

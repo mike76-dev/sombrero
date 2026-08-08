@@ -12,7 +12,7 @@ import (
 //
 // The exception is a file on its way out. A client that deletes a file and opens another has no
 // reason to think up a fresh key for it, and refusing would leave it uncached until it did
-// (3.3.5.9.8, 3.3.5.9.11).
+// ([MS-SMB2] 3.3.5.9.8, 3.3.5.9.11).
 
 // A create that takes the file out in order to delete it frees the key straight away: the client
 // need not wait for the handle to go before using it on something else.

@@ -12,10 +12,6 @@ import (
 // own name, and it treats failure to write that sidecar as failure of the copy: refused, it errors,
 // deletes what it had copied, and starts over somewhere else. The same names carry a desktop's folder
 // settings, and somebody's dotfiles, and there is no telling them apart that is worth making.
-
-// TestIntegrationTheSidecarOfACopiedFileCanBeWritten is the copy macOS could not finish. The sidecar
-// was answered with STATUS_NOT_SUPPORTED, which is what ended every copy from a Mac — at a different
-// point each time, since the sidecar is written whenever the client gets to it.
 func TestIntegrationTheSidecarOfACopiedFileCanBeWritten(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")

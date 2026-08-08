@@ -33,16 +33,22 @@ func ntlmMessage(typ uint32, size int) []byte {
 	return msg
 }
 
-// bindingRequest builds the bytes of a session setup request that binds a session to the
-// connection it arrives on, carrying the given authentication token.
-func bindingRequest(mid, sid uint64, token []byte) []byte {
-	msg := sessionSetupRequest(mid, sid, smb2.SESSION_FLAG_BINDING)
+// tokenRequest builds the bytes of a session setup request carrying an authentication token,
+// which trails the fixed part of the body and is pointed at from within it.
+func tokenRequest(mid, sid uint64, flags uint8, token []byte) []byte {
+	msg := sessionSetupRequest(mid, sid, flags)
 
 	body := msg[smb2.SMB2HeaderSize:]
 	binary.LittleEndian.PutUint16(body[12:14], uint16(len(msg)))
 	binary.LittleEndian.PutUint16(body[14:16], uint16(len(token)))
 
 	return append(msg, token...)
+}
+
+// bindingRequest builds the bytes of a session setup request that binds a session to the
+// connection it arrives on, carrying the given authentication token.
+func bindingRequest(mid, sid uint64, token []byte) []byte {
+	return tokenRequest(mid, sid, smb2.SESSION_FLAG_BINDING, token)
 }
 
 // binding turns a message into the session setup request the binding path works with.
@@ -398,7 +404,7 @@ func TestUpdatePreauthHashOnAnOlderDialect(t *testing.T) {
 	c := h.joining(cl)
 
 	sid := cl.ss.sessionID
-	c.preauthSessionTable[sid] = &preauthSession{sessionID: sid, preauthIntegrityHashValue: []byte("as it stood")}
+	c.preauthSessionTable[sid] = &preauthSession{preauthIntegrityHashValue: []byte("as it stood")}
 	c.negotiateDialect = smb2.SMB_DIALECT_302
 
 	c.updatePreauthHash(sid, []byte("a message"))

@@ -64,10 +64,7 @@ func TestIntegrationAReadWhoseHandleGoesIsStillAnswered(t *testing.T) {
 // the answer — and both travel over the one queue, so the order of them is settled the moment the
 // interim is put on it. The work may finish before that happens: then the client is handed the answer
 // to a request it has never been told is pending, and the interim arrives afterwards for a request it
-// has already finished with. A macOS client abandons the file over it, saying "RPC struct is bad".
-//
-// It went wrong about once in every hundred and sixty writes, which is why the copies died wherever
-// they happened to be rather than at any particular place.
+// has already finished with.
 func TestIntegrationTheInterimComesBeforeTheAnswer(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")

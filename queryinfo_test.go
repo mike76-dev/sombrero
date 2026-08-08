@@ -379,9 +379,6 @@ func TestIntegrationQueryInfoRefusesAnUnknownHandle(t *testing.T) {
 // last handle on it closes. A client asks before it decides what to do with the file, so what it
 // is told has to be where the file actually stands — read off the open when the question is put,
 // not settled when the file was opened.
-//
-// Both ways of marking it end up in the same place, and both classes that carry the flag report
-// it: the whole of the information about a file and the standard part of it on its own.
 func TestIntegrationQueryInfoReportsAPendingDeletion(t *testing.T) {
 	for _, tt := range []struct {
 		name string

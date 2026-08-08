@@ -132,7 +132,6 @@ func (op *open) selectConnection(preferred *connection) *connection {
 // and each of them arrives at a different hash. The connection keeps one of these per
 // session being bound instead, and the signing key of the new channel is derived from it.
 type preauthSession struct {
-	sessionID                 uint64
 	preauthIntegrityHashValue []byte
 }
 
@@ -199,7 +198,6 @@ func (c *connection) prepareBinding(ssr smb2.SessionSetupRequest) (*session, uin
 		c.mu.Lock()
 		if _, found := c.preauthSessionTable[sid]; !found {
 			c.preauthSessionTable[sid] = &preauthSession{
-				sessionID:                 sid,
 				preauthIntegrityHashValue: bytes.Clone(c.preauthIntegrityHashValue),
 			}
 		}
@@ -347,9 +345,10 @@ func (c *connection) updatePreauthHash(sid uint64, msg []byte) {
 
 // dropPreauthSession forgets the preauthentication integrity hash of the binding exchange
 // that the connection ran for the given session. It is what a failed exchange calls for
-// (3.3.5.5.3): prepareBinding only starts a hash when none is there, so one left over from a
-// failure would be picked up by the next attempt, which starts its own count from the hash of
-// the connection and would never agree with a count that has the failed exchange folded in.
+// ([MS-SMB2] 3.3.5.5.3): prepareBinding only starts a hash when none is there, so one left over
+// from a failure would be picked up by the next attempt, which starts its own count from the
+// hash of the connection and would never agree with a count that has the failed exchange folded
+// in.
 func (c *connection) dropPreauthSession(sid uint64) {
 	c.mu.Lock()
 	delete(c.preauthSessionTable, sid)

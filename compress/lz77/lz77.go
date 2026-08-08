@@ -1,5 +1,5 @@
 // This is the LZ77 compression algorithm implementation
-// as specified in MS-XCA.
+// as specified in [MS-XCA].
 package lz77
 
 import (

@@ -1686,7 +1686,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			// The uneventful writes are reported now and then rather than every time, and the
 			// ones that went wrong or took long enough for a client to give up on the server
 			// are reported whenever they happen.
-
 			c.releaseOpen(req)
 			c.server.trySendResponse(c, ss, resp)
 		}()
@@ -2509,10 +2508,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 				// The end of the file is where the file ends, and a client that moves it back is
 				// throwing away what is beyond it. Recording it as the space the file takes up and
-				// nothing else left the truncation to whatever happened to be written afterwards:
-				// a file cut short and not written to went on reading as the whole of what the
-				// store held, and one cut short and written over read as the new bytes with the
-				// tail of the old file behind them.
+				// nothing else left the truncation to whatever happened to be written afterwards.
 				if err := op.setEndOfFile(acc, binary.LittleEndian.Uint64(buf)); err != nil {
 					log.Printf("Error setting the end of %s: %v", path, err)
 					status := uint32(smb2.STATUS_UNEXPECTED_NETWORK_ERROR)

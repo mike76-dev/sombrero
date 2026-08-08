@@ -19,7 +19,6 @@ type lease struct {
 	leaseKey   [16]byte
 	clientGuid [16]byte
 	fileName   string
-	version    int
 
 	state        uint32
 	breakToState uint32
@@ -114,8 +113,8 @@ func (s *server) leaseFor(guid [16]byte, req smb2.LeaseRequest, path string) (*l
 
 		// A file on its way out is the exception to a key naming one file: the client may take
 		// the key it was using out on something else, since what it named is about to be gone
-		// (3.3.5.9.8, 3.3.5.9.11). Without this a client that deletes a file and opens another
-		// under the same key is refused until it thinks to pick a new one.
+		// ([MS-SMB2] 3.3.5.9.8, 3.3.5.9.11). Without this a client that deletes a file and opens
+		// another under the same key is refused until it thinks to pick a new one.
 		//
 		// The lease follows the key to the new file. The spec says only that the request is not
 		// to be refused, leaving the lease pointing at a name it no longer covers; moving it
@@ -135,7 +134,6 @@ func (s *server) leaseFor(guid [16]byte, req smb2.LeaseRequest, path string) (*l
 		leaseKey:   req.LeaseKey,
 		clientGuid: guid,
 		fileName:   path,
-		version:    req.Version,
 		epoch:      1,
 		opens:      make(map[uint64]*open),
 	}
@@ -229,7 +227,7 @@ func (op *open) setLeaseDeleteOnClose(pending bool) {
 
 // renameLease points the lease of the open, if it holds one, at the new name of the file it
 // covers. A file that has just been renamed is not on its way out, so the key is tied to it
-// again (3.3.5.21.1).
+// again ([MS-SMB2] 3.3.5.21.1).
 func (op *open) renameLease(path string) {
 	op.mu.Lock()
 	l := op.lease

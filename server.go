@@ -55,17 +55,14 @@ type server struct {
 	cachingMu sync.Mutex
 
 	// openIndexMu guards the two indexes into the global open table: the opens by the file
-	// they are on, and the replayable opens by the create GUID that made them. The lock of an
-	// open may be taken inside it, never the other way round.
+	// they are on, and the replayable opens by the create GUID that made them.
 	openIndexMu     sync.Mutex
 	opensByFile     map[fileKey]map[uint64]*open
 	replayableOpens map[replayKey]*open
 
 	// oplockBreakTimeout and leaseBreakTimeout are how long a client is given to acknowledge a
 	// break before it loses what it held. They are fields carrying the constants rather than
-	// the constants themselves so that a test can wind them down: at 35 seconds apiece, the
-	// waiting is otherwise the only thing a test of the expiry could measure. Nothing outside
-	// of a test changes them.
+	// the constants themselves so that a test can wind them down.
 	oplockBreakTimeout time.Duration
 	leaseBreakTimeout  time.Duration
 

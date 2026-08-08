@@ -13,12 +13,7 @@ import (
 //
 // A file being uploaded is not an object in the store: what has gone up so far are the parts of a
 // multipart upload, and the store has nothing to hand back until that upload is completed, which
-// happens when the file is closed. The read used to go to the store all the same, which answered
-// that the object did not exist - "couldn't fetch object: object not found" - and the client was
-// told the read failed on the device.
-//
-// The data the client is asking about is the data the client just sent, and the upload is still
-// holding it, so that is what answers the read.
+// happens when the file is closed.
 func TestReadDuringUploadIsServedFromTheUploadBuffer(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")

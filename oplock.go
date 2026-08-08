@@ -14,9 +14,6 @@ const oplockBreakTimeout = 35 * time.Second
 
 // oplockEligible reports whether an oplock may be granted for the level asked for, leaving
 // aside who else has the file open.
-//
-// The levels are ordered by how much they promise, and the constants are ordered with them,
-// so a level may be compared against another to see which gives the client more.
 func oplockEligible(requested uint8, tc *treeConnect, isDir bool) bool {
 	switch requested {
 	case smb2.OPLOCK_LEVEL_II, smb2.OPLOCK_LEVEL_EXCLUSIVE, smb2.OPLOCK_LEVEL_BATCH:
@@ -42,11 +39,6 @@ func oplockBreakTarget(sharedOK bool) uint8 {
 
 // createChangesFile reports whether the create itself changes the file it opens, by emptying it
 // or by marking it to be deleted.
-//
-// Asking to be allowed to write does not count. A client that opens a file for writing has not
-// written anything yet, and the read caches the other clients have built up are still good; it
-// is the write, the rename or the truncation that makes them wrong, and each of those breaks
-// them when it happens.
 func createChangesFile(cr smb2.CreateRequest) bool {
 	switch cr.CreateDisposition() {
 	case smb2.FILE_SUPERSEDE, smb2.FILE_OVERWRITE, smb2.FILE_OVERWRITE_IF:
@@ -217,20 +209,8 @@ func startBreaks(opens []*open, to uint8) (waits []chan struct{}, notify []*open
 	return
 }
 
-// holdersIn sorts the opens of a file into what has to give before anybody else may touch it:
-// the opens holding an oplock of their own, and the leases held on the file. Anything belonging
-// to the lease named as own is left out, because a client never breaks its own lease.
-//
-// An open holds either an oplock or a share of a lease, never both, so the two are gathered
-// apart and each lease is named once however many opens it covers.
 // asker is who a create is, for deciding whose promises stand: the client it comes from, the lease
 // it named if that lease is already held, and whether it named a lease key at all.
-//
-// The last of the three is what tells two cases apart that look alike. A create carrying no lease key
-// is another handle in the client's one view of the file, and breaks nothing of its own. A create
-// carrying a key of its own names a second view, held by the same client, and the promises of the
-// first view have to give way to it — a client keeps its views apart by key, and expects the server
-// to as well.
 type asker struct {
 	guid  [16]byte
 	own   *lease
@@ -265,16 +245,6 @@ func (by asker) covers(l *lease) bool {
 }
 
 // sameCacheView reports whether the open belongs to the client that is asking.
-//
-// An oplock is a promise to a client's view of a file rather than to one handle on it, and a
-// second open by that same client is in the same view: nothing it caches has gone stale, so there
-// is nothing to tell it about. [MS-FSA] carries this as the oplock key of an open, "a GUID value
-// that identifies multiple handles belonging to the same client cache view", and an open whose key
-// matches the oplock's does not break it.
-//
-// Nothing on the wire carries that key for an oplock - only a lease has one, in its lease key - so
-// the client the open was made by stands for it. A client that presented no GUID has no view to
-// speak of and matches nothing: the zero value is not an identity.
 func sameCacheView(op *open, guid [16]byte) bool {
 	if guid == ([16]byte{}) {
 		return false
@@ -286,7 +256,7 @@ func sameCacheView(op *open, guid [16]byte) bool {
 	return op.clientGuid == guid
 }
 
-// by is who is asking, whose own promises are left standing. See asker and sameCacheView.
+// holdersIn sorts the opens of a file by is who is asking, whose own promises are left standing.
 func holdersIn(opens []*open, by asker) (oplocks []*open, leases []*lease) {
 	seen := make(map[*lease]struct{})
 	for _, op := range opens {
@@ -373,13 +343,9 @@ func exclusiveHeld(oplocks []*open, leases []*lease) bool {
 // breakHoldersOn cuts back every promise made on a file and waits for the clients that owe an
 // answer. It is what a create has to do before it may look at a file: the holder of an
 // exclusive oplock or a write-caching lease may be sitting on writes it has not sent yet.
-//
 // sharedOK says the create only wants to read, in which case the holders keep their read
 // caches and give up only what lets them write.
-//
-// It must not be called from the goroutine that serves a connection. The wait lasts as long as
-// the acknowledgment timer, and the acknowledgment it is waiting for may be on its way in over
-// that very connection.
+// It must not be called from the goroutine that serves a connection.
 func (s *server) breakHoldersOn(sh *share, path string, except *open, by asker, sharedOK bool) {
 	waits, notify, leaseNotify := s.startHolderBreaks(sh, path, except, by, sharedOK)
 
@@ -464,17 +430,6 @@ func (s *server) hasHoldersOn(sh *share, path string, except *open, by asker) bo
 // breakForChange cuts back every promise on a file that would let a client go on serving data
 // the change about to be made has rendered stale. It is what a write, a truncation, a rename or
 // a delete has to do.
-//
-// Every promise, and not only the ones outside the cache view of whoever is making the change. A
-// second open does not conflict with an oplock of the same client, because opening a file changes
-// nothing about it - but a write, a rename or a delete does, and what the client has cached through
-// its other handles is stale whoever made it so. A client left holding a cached handle on a file
-// that has been deleted goes on thinking it has that file open, which is what it says when it is
-// asked to let the share go.
-//
-// The breaks are not waited for. A read cache has nothing to acknowledge with, and an exclusive
-// promise cannot be standing while the open making the change exists, so there is nothing here
-// worth holding up the connection for.
 func (s *server) breakForChange(op *open) {
 	op.mu.Lock()
 	sh := op.treeConnect.share
@@ -488,11 +443,6 @@ func (s *server) breakForChange(op *open) {
 // grantOplock gives the open the oplock it asked for, and returns the level granted. An
 // exclusive oplock is only granted to an open that has the file to itself, which is what makes
 // a create the only thing that can conflict with one.
-//
-// The decision and the granting happen under the one lock, so that two creates racing for the
-// same file cannot both come out of it holding an oplock. If the file turns out to have been
-// opened elsewhere while this create was under way, nothing is granted, and whoever was
-// granted an oplock before this open appeared has to give it up.
 func (s *server) grantOplock(op *open, requested uint8, tc *treeConnect, path string) uint8 {
 	s.cachingMu.Lock()
 

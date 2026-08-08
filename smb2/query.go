@@ -676,6 +676,8 @@ func QueryDirectoryBuffer(class uint8, entries []client.ObjectInfo, bufSize uint
 		return fileIDExtdDirInfo(info).encode(), num
 	case FILE_ID_FULL_DIRECTORY_INFORMATION:
 		return fileIDFullDirInfo(info).encode(), num
+	case FILE_FULL_DIRECTORY_INFORMATION:
+		return fileFullDirInfo(info).encode(), num
 	default:
 		return
 	}

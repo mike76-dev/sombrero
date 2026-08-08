@@ -74,11 +74,11 @@ type upload struct {
 	lastSent       []byte
 	lastSentOffset uint64
 
-	// head is the first of the file, kept for as long as the upload runs. A client reads the file it
-	// is writing: it sniffs the type of what it has just copied, or something on the machine makes a
-	// thumbnail of it, and it is the front of the file that is read. Everything else is answered out
-	// of buf, which by then begins tens of megabytes in - so without this the read is answered with
-	// an error, and a client that meets an error reading the file it is copying gives the copy up.
+	// head is the front of the file - up to uploadHeadKept of it - held for as long as the upload
+	// runs, because a client reads back what it is writing and what it reads is the front. Without
+	// it such a read is refused, and a client that meets an error reading the file it is copying
+	// gives the copy up. uploadHeadKept has the why of the width, and of what a read that falls
+	// outside every one of these can and cannot be answered from.
 	head []byte
 
 	// A part goes to the backend on a goroutine of its own, so that the write that filled it is
@@ -86,11 +86,6 @@ type upload struct {
 	// however long the network takes, and a client that is left waiting that long for one write
 	// stops sending - it has spent its credits on requests this server has not answered - and gives
 	// the write up altogether once its own patience runs out.
-	//
-	// slots bounds how many are on their way at once, which is what keeps a client that outruns the
-	// backend from buffering the whole file into memory: the write that fills the next part waits
-	// for a slot. inFlight is what a finish waits on, and partErr is the first one that failed,
-	// which the finish answers with - there is nobody to tell by the time it happens.
 	slots    chan struct{}
 	inFlight sync.WaitGroup
 	partErr  error
@@ -107,10 +102,6 @@ type upload struct {
 // could. Only what sits in the contiguous buffer can be answered for: the parts already sent are
 // no longer in memory, and the backend has nothing to offer either, since a multipart upload is
 // not an object until it is completed.
-//
-// The buffer is where a client reading a file it is in the middle of writing looks: an unaligned
-// write that the client has to round out reads the block it is about to write over, and that block
-// is the one just written. Served from here, it is the data the client itself sent.
 func (u *upload) readBuffered(offset, length uint64) ([]byte, bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -178,19 +169,7 @@ func (u *upload) cutTo(n uint64) bool {
 	return true
 }
 
-// uploadHeadKept is how much of the front of a file being written is kept in memory to answer reads
-// of it. A client reads back what it is copying, and what it reads is the front: the type of a file
-// is told from its first bytes, and what makes a thumbnail or an index entry of one reads further in
-// - a macOS client copying an mp4 reads half a megabyte at five and a half megabytes in, while it is
-// fifty megabytes into writing the thing.
-//
-// Everything else about a file being written is answered out of the buffer, which by then begins tens
-// of megabytes further on, or out of the part that went last. A read that falls between them cannot be
-// answered at all: a part that has gone to the store is not readable until the upload is completed. So
-// this is the width of the window a client may look back through, and it is set by what clients do
-// rather than by anything in the protocol.
-//
-// It is a var so that a test can shrink it rather than write out the whole of it.
+// uploadHeadKept is how much of the front of a file being written is kept in memory to answer reads of it.
 var uploadHeadKept uint64 = 8 * 1024 * 1024
 
 // waitingOnTheBackend is how much of the file has been handed to the backend and not yet landed,
@@ -226,7 +205,6 @@ func partsInFlight(partSize uint64) int {
 // keepHead takes what the write carries that belongs to the front of the file, so that a read of the
 // front can be answered for as long as the upload runs. A client that writes over the front again -
 // which is what one that rebuilds a file does - writes over this too.
-//
 // u.mu must be held.
 func (u *upload) keepHead(offset uint64, data []byte) {
 	if offset >= uploadHeadKept {
@@ -251,13 +229,6 @@ func (u *upload) keepHead(offset uint64, data []byte) {
 // keeps going for as long as anything can be. A chunk that starts at or before the end of the
 // contiguous run contributes whatever lies beyond it and is done with; one that starts past the end
 // stays queued, waiting for the gap in front of it to be filled.
-//
-// The overlap is the point of it. Writes are worked on one goroutine apiece, so two that the client
-// sent in order can be taken in either order: the second may be queued while the first is still
-// being taken in, and then begin before the run it is waiting to be joined onto. Matched on where it
-// begins alone, such a chunk is never taken at all - it sits in the queue as a hole in a file that
-// has none, and the finish refuses the whole file for it.
-//
 // u.mu must be held.
 func (u *upload) takePending() {
 	for {
@@ -296,11 +267,6 @@ func (u *upload) takePending() {
 // fillGaps writes zeros over what the client left unwritten, so that what is queued behind a hole can
 // be taken and the file stored. It answers the one thing a hole can mean once no write is in flight:
 // the client wrote a file with nothing in that part of it, which on any file system reads as zeros.
-//
-// There is no other way to store it. An object on either backend is the bytes it is made of, with no
-// holes to be had, and the file was refused outright before this - a client that wrote a sparse file
-// was told its copy had failed after sending the whole of it.
-//
 // u.mu must be held.
 func (u *upload) fillGaps() uint64 {
 	var filled uint64
@@ -335,13 +301,6 @@ func (u *upload) fillGaps() uint64 {
 // cutBackToSent cuts the file down to n bytes where n lies behind what has already gone to the store,
 // by leaving the parts beyond it out of the upload: a multipart upload is completed with the parts
 // named in the completion, so the ones left out are never part of the file.
-//
-// It only works where n falls exactly where a part ends. A part is the smallest thing the store can be
-// told about, so a new end inside one would need that part written again, and its bytes are gone.
-//
-// Nothing may be on its way to the backend when this is called, or a part that lands afterwards is a
-// part beyond the end of the file with nothing to take it back out again.
-//
 // u.mu must be held.
 func (u *upload) cutBackToSent(n uint64) bool {
 	if n == 0 || n >= u.bufOffset {
@@ -415,7 +374,6 @@ type open struct {
 	fileName                        string
 	createOptions                   uint32
 	createGuid                      [16]byte
-	applicationInstanceVersion      [16]byte
 	channelSequence                 uint16
 	outstandingRequestCount         uint32
 	outstandingPreviousRequestCount uint32
@@ -512,8 +470,6 @@ const (
 	// Rough per-open memory budget of the read cache, used to derive maxCacheSize.
 	readCacheBudget = 128 * 1024 * 1024
 
-	// How much of the front of a file being written is kept in memory to answer reads of it.
-
 	// How often a directory that is being watched is looked at again, to see whether anything a
 	// client asked to be told about has changed.
 	watchInterval = 15 * time.Second
@@ -522,18 +478,6 @@ const (
 	// cut into. Going wider is what the throughput of a transfer is made of: the store is far away,
 	// so a part spends most of its time waiting rather than sending, and one at a time leaves the
 	// line idle for almost all of the transfer.
-	//
-	// Wider is not faster past a point, and is worse where it counts. The link carries what it
-	// carries: a hundred parts on their way at once each get a hundredth of it, so every one of them
-	// takes a hundred times as long. The throughput is much the same either way - but a file is not
-	// stored until the last of its parts lands, so the finish waits on the slowest of however many
-	// are outstanding. Running a hundred and twenty-eight of them turned parts that took forty
-	// milliseconds apiece into parts that took forty seconds, and a transfer that had otherwise
-	// finished sat waiting fifteen of them for the stragglers.
-	//
-	// What it bounds is also the memory, since every part on its way holds its bytes until it lands,
-	// and the bound is in bytes because a part is 4 MiB on one backend and a slab of tens of MiB on
-	// the other.
 	partsInFlightBudget = 64 * 1024 * 1024
 	minPartsInFlight    = 4
 	maxPartsInFlight    = 16
@@ -611,15 +555,6 @@ func grantAccess(cr smb2.CreateRequest, tc *treeConnect, ss *session) bool {
 // carrying the file to the backend. An open points at it rather than holding the fields itself, so
 // that a client asking after a file while another of its handles is still uploading it is answered
 // with what the file is now, and not with what the handle was opened on.
-//
-// It is also the record by which an open file is known on the share, so that every handle on it
-// finds the one state whether the backend has an object for the file or not. A file that has none
-// is known by nothing else, so its state stays for as long as the file does; one that has an object
-// is answered for by the store again once the last handle on it is gone. Nothing else about an open
-// is shared: the file ID, the caching promise and the read cache all belong to the handle alone, and
-// every create makes its own.
-//
-// mu guards all of it, and is a leaf: no other lock of the server is taken while it is held.
 type fileState struct {
 	mu sync.Mutex
 
@@ -702,11 +637,6 @@ func (fs *fileState) endWrite() {
 
 // waitForWrites waits until nothing is on its way into the file through any handle, and hands back
 // the upload that is carrying it, if there is one.
-//
-// The waiting does not depend on there being an upload yet. A write starts one, so a write still in
-// flight may not have started it: waiting only while there is one would let a close finish before the
-// write it is racing had begun, and the file would be left with an upload nobody finishes and a client
-// that was told its close succeeded.
 func (fs *fileState) waitForWrites() *upload {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
@@ -1697,17 +1627,6 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readC
 	return chunk
 }
 
-// invalidateReadCache drops everything the read cache is holding. It has to happen the moment
-// the file stops being the one those chunks were downloaded from, which is the moment a write
-// arrives: a write replaces the object wholesale rather than editing it in place, so every chunk
-// of the previous contents is stale from then on. Left in place, the cache answers a read of a
-// region the client has just overwritten with the bytes that were there before.
-//
-// A download still in flight is left to run. Its entry is gone from the table, so no later read
-// finds it, and the read that started it is served the file as it stood when that read began,
-// which is the most that can be said for a read racing a write over the same bytes anyway.
-//
-// op.mu must be held.
 // dropCacheOfOlderGeneration empties the read cache if the file has been written anew since it was
 // filled. op.mu must be held.
 func (op *open) dropCacheOfOlderGeneration(generation uint64) {
@@ -1719,6 +1638,12 @@ func (op *open) dropCacheOfOlderGeneration(generation uint64) {
 	op.cacheGeneration = generation
 }
 
+// invalidateReadCache drops everything the read cache is holding. It has to happen the moment
+// the file stops being the one those chunks were downloaded from, which is the moment a write
+// arrives: a write replaces the object wholesale rather than editing it in place, so every chunk
+// of the previous contents is stale from then on. Left in place, the cache answers a read of a
+// region the client has just overwritten with the bytes that were there before.
+// op.mu must be held.
 func (op *open) invalidateReadCache() {
 	if len(op.buffer) == 0 {
 		return
@@ -1832,17 +1757,10 @@ func (op *open) write(offset uint64, data []byte) error {
 
 	u.keepHead(offset, data)
 
-	// A client may write over what it has already written. An office application builds its file,
-	// then writes the whole of it again from the start - longer the second time, as the last of the
-	// parts is added - and saves. The upload takes the bytes in the order they are to be stored, so a
-	// write landing behind where the buffering has reached is not another chunk to be queued: queued,
-	// it would sit in pending for ever and take the whole file down with it at the flush, as data
-	// that is not contiguous.
-	//
-	// It can be answered as long as the bytes it covers have not gone to the store yet, which is to
-	// say the buffer still begins at or before it. What overlaps is written over, and anything past
-	// the end carries the buffer on. Bytes already sent are beyond recall, and saying so is better
-	// than storing a file that is not the one the client wrote.
+	// A client may write over what it has already written. The upload takes the bytes in the order
+	// they are to be stored, so a write landing behind where the buffering has reached is not another
+	// chunk to be queued: queued, it would sit in pending for ever and take the whole file down with
+	// it at the flush, as data that is not contiguous.
 	if offset < u.nextOffset {
 		// It can be answered as long as the bytes it covers have not gone to the store yet, which is
 		// to say the buffer still begins at or before it. Bytes already sent are beyond recall, and
@@ -1908,10 +1826,6 @@ func (op *open) write(offset uint64, data []byte) error {
 // the older shape, and it waits for a slot first: that wait is the only thing that holds up whoever
 // is sending, and it only comes about while the client is running further ahead than there is room
 // for.
-//
-// Whoever wants to know how it went waits on u.inFlight and reads u.partErr. There is nobody to tell
-// at the time: the write the part came from was answered when its bytes were taken in, and the last
-// part of all is sent by a finish that is about to wait for everything anyway.
 func (op *open) sendPart(u *upload, number int, slab uploadChunk) {
 	if u.slots != nil {
 		u.slots <- struct{}{}
@@ -1963,12 +1877,6 @@ func (op *open) sendPart(u *upload, number int, slab uploadChunk) {
 }
 
 // setEndOfFile carries out a client's setting of the end of the file.
-//
-// Which way it goes is what it means. Cutting the file short changes its contents - what is beyond
-// the new end is gone - so it is carried out. Setting the end beyond what the file holds asks for
-// space rather than for contents, and neither backend can put a hole in an object without writing
-// the whole of it out again, so it is taken as the allocation and the size settles at what is
-// actually stored when the upload is finished. A client that means to have the bytes writes them.
 func (op *open) setEndOfFile(acc stores.Account, eof uint64) error {
 	if eof >= op.file.sizeNow() {
 		op.file.setAllocated(eof)
@@ -2050,10 +1958,6 @@ func (op *open) setEndOfFile(acc stores.Account, eof uint64) error {
 // upload of the same file. There is no shortening an object on either backend, and leaving the store
 // holding the longer one would make the truncation last no longer than the handles on the file: the
 // next create would find the old length, and the bytes behind it.
-//
-// The upload is left pending rather than finished. It is the same state a file being written is in,
-// and the client that has just cut the file short is almost always about to write the new contents
-// over it - which then goes into this upload instead of costing the file a second one.
 func (op *open) retainPrefix(acc stores.Account, n uint64) error {
 	if err := op.startUpload(); err != nil {
 		return err

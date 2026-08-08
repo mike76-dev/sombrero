@@ -37,11 +37,6 @@ type persistedKey struct {
 
 // ensurePersisted makes the table of files that have been created but not yet uploaded, if it is
 // not there yet. sh.mu must be held.
-//
-// It is made here rather than only where a share is built because a share is built in several
-// places, and a table that is missing from one of them is a panic on the first file a client
-// creates over it. A read of a table that is not there answers as an empty one, so only the writers
-// come through here.
 func (sh *share) ensurePersisted() {
 	if sh.persisted == nil {
 		sh.persisted = make(map[persistedKey]*fileState)
@@ -60,12 +55,10 @@ type indexdConn struct {
 // share represents a Share object.
 type share struct {
 	name            string
-	serverName      string
 	connectSecurity map[string]struct{}
 	fileSecurity    map[string]uint32
 	shareType       uint8
 	remark          string
-	maxUses         int
 	currentUses     int
 	encryptData     bool
 	compressData    bool
@@ -82,14 +75,9 @@ type share struct {
 
 	backend string
 	// A file that has been created but not yet uploaded has no object behind it: the Sia network
-	// takes nothing empty. The state of such a file is kept here so that everything on the share
-	// goes on seeing the file until it is written or deleted — it used to be kept on the tree
-	// connect that created it, and a client that lost its connection came back to a share where
-	// the file it had just made was gone.
-	//
-	// The workgroup is part of the key because a share is one namespace per workgroup: two
-	// workgroups may each hold a file of the same name on the same share, and neither may see the
-	// other's.
+	// takes nothing empty. The workgroup is part of the key because a share is one namespace per
+	// workgroup: two workgroups may each hold a file of the same name on the same share, and
+	// neither may see the other's.
 	persisted map[persistedKey]*fileState
 
 	mu sync.Mutex
@@ -107,9 +95,7 @@ func (s *server) RegisterShare(ss stores.Share) error {
 	sh := &share{
 		name:            ss.Name,
 		backend:         ss.Type,
-		serverName:      ss.ServerName,
 		shareType:       smb2.SHARE_TYPE_DISK,
-		maxUses:         maxShareUses,
 		bucket:          ss.Bucket,
 		remark:          ss.Remark,
 		connectSecurity: make(map[string]struct{}),

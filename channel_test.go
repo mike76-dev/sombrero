@@ -10,11 +10,7 @@ import (
 // A read or a write that names a channel other than none is asking for its payload to travel
 // over RDMA rather than in the request itself. This server has no SMB Direct behind it, so there
 // is no way to reach the buffer the client is describing, and the request has to be refused
-// (3.3.5.12, 3.3.5.13).
-//
-// What makes it worth checking rather than ignoring: such a request looks well formed and
-// carries no data. Read as an ordinary one, the read would answer into a buffer the client is
-// not listening on, and the write would report having stored bytes that were never sent.
+// ([MS-SMB2] 3.3.5.12, 3.3.5.13).
 
 func TestIntegrationWriteOverRDMAChannelIsRefused(t *testing.T) {
 	channels := map[string]uint32{
@@ -110,7 +106,7 @@ func TestIntegrationChannelIsIgnoredBeforeSMB3(t *testing.T) {
 
 // Once the data is known to travel in the request itself, it has to start somewhere the request
 // can plausibly have put it. The fixed part ends at 0x70, so everything up to 0x100 is padding
-// the client is free to insert; beyond that the request is malformed (3.3.5.13).
+// the client is free to insert; beyond that the request is malformed ([MS-SMB2] 3.3.5.13).
 func TestIntegrationWriteFromTooFarInIsRefused(t *testing.T) {
 	// The bound is written out here rather than taken from smb2.MaxWriteDataOffset: a test that
 	// derives its boundaries from the constant under test moves along with it, and would pass

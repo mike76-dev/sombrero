@@ -10,10 +10,7 @@ import (
 // TestCloseConnectionTwiceIsHarmless is the connection that more than one thing notices has gone.
 // A connection is torn down by whoever gets to it first, and the callers do not know of each
 // other: the reading loop finds the socket gone, the periodic sweep finds the connection idle,
-// and a ban takes down every connection from the host at once. The teardown used to close the
-// stop channel of every request still being worked on and leave the closed channels in the table,
-// so the second caller closed them again and the server went down with "close of closed channel"
-// while a client was doing nothing more unusual than disconnecting from the share.
+// and a ban takes down every connection from the host at once.
 func TestCloseConnectionTwiceIsHarmless(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")

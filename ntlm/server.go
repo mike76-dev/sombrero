@@ -409,7 +409,6 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 					return errors.New("login failure")
 				}
 			}
-			session.infoMap = infoMap
 		}
 
 		{
