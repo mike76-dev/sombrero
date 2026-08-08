@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -60,7 +61,7 @@ type Store interface {
 type ServerStats struct {
 	Start      time.Time `json:"start"`      // The time the server started
 	FOpens     uint32    `json:"fOpens"`     // The number of total opens
-	SOpens     uint32    `json:"sOpens"`     // The number of sessions established
+	SOpens     uint32    `json:"sOpens"`     // The number of sessions currently established
 	PwErrors   uint32    `json:"pwErrors"`   // The number of password violations
 	PermErrors uint32    `json:"permErrors"` // The number of access permission errors
 	BytesSent  uint64    `json:"bytesSent"`  // The total number of bytes sent
@@ -372,7 +373,10 @@ func (api *API) accountHandlerGET(w http.ResponseWriter, req *http.Request, _ ht
 			return
 		}
 		acc, err = api.store.FindAccount(username, wg.UUID.String())
-		if err != nil {
+		if errors.Is(err, stores.ErrAccountNotFound) {
+			writeError(w, "account not found", http.StatusNotFound)
+			return
+		} else if err != nil {
 			log.Printf("failed to find account: %v", err)
 			writeError(w, "internal error", http.StatusInternalServerError)
 			return
@@ -384,7 +388,10 @@ func (api *API) accountHandlerGET(w http.ResponseWriter, req *http.Request, _ ht
 			return
 		}
 		acc, err = api.store.GetAccountByID(int(id))
-		if err != nil {
+		if errors.Is(err, stores.ErrAccountNotFound) {
+			writeError(w, "account not found", http.StatusNotFound)
+			return
+		} else if err != nil {
 			log.Printf("failed to find account: %v", err)
 			writeError(w, "internal error", http.StatusInternalServerError)
 			return
@@ -904,7 +911,8 @@ func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _
 	}
 
 	u := uuid.New()
-	wg := stores.Workgroup{UUID: u, Name: body.Name}
+	name := stores.NormalizeWorkgroupName(body.Name)
+	wg := stores.Workgroup{UUID: u, Name: name}
 	if err := api.store.AddWorkgroup(wg); err != nil {
 		log.Printf("failed to add workgroup: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -912,7 +920,7 @@ func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _
 	}
 
 	log.Printf("created new workgroup: %s", u)
-	writeJSON(w, WorkgroupResponse{UUID: u, Name: body.Name})
+	writeJSON(w, WorkgroupResponse{UUID: u, Name: name})
 }
 
 // workgroupsHandlerGET handles the GET /workgroups calls.

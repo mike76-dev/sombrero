@@ -31,6 +31,17 @@ func (pd PublicDir) Matches(name string) bool {
 	return strings.EqualFold(pd.Path, name)
 }
 
+// NormalizeWorkgroupName folds a workgroup name to the form it is stored and
+// looked up in. A client sends the workgroup as the NTLM domain, and a domain
+// name is not case-sensitive. Folding on the way in is also what keeps the
+// UNIQUE constraint on the column meaningful, which a comparison that folded
+// only on the way out would not: wrg and WRG would be two workgroups that no
+// client could tell apart, and a lookup for either would have to pick one of
+// them.
+func NormalizeWorkgroupName(name string) string {
+	return strings.ToLower(name)
+}
+
 // Workgroup represents a workgroup that can contain multiple accounts.
 type Workgroup struct {
 	ID         int         `json:"id"`
@@ -269,6 +280,7 @@ func (db *Database) FindWorkgroup(u uuid.UUID) (wg Workgroup, err error) {
 
 // FindWorkgroupByName tries to retrieve the workgroup by its name.
 func (db *Database) FindWorkgroupByName(name string) (wg Workgroup, err error) {
+	name = NormalizeWorkgroupName(name)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
 			SELECT id, uuid
@@ -345,8 +357,8 @@ func (db *Database) AddWorkgroup(wg Workgroup) error {
 			RETURNING id
 		`
 		var name any
-		if wg.Name != "" {
-			name = wg.Name
+		if n := NormalizeWorkgroupName(wg.Name); n != "" {
+			name = n
 		}
 		var id int
 		if err := tx.QueryRow(ctx, query, wg.UUID[:], name).Scan(&id); err != nil {

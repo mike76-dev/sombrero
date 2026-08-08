@@ -13,6 +13,7 @@ var (
 	ErrInvalidHeader = errors.New("lznt1: invalid block header")
 	ErrInvalidOffset = errors.New("lznt1: lookback offset out of bounds")
 	ErrInputTooShort = errors.New("lznt1: input buffer too short for expected data")
+	ErrOutputTooLong = errors.New("lznt1: the stream expands past the size it was said to come to")
 )
 
 const (
@@ -242,9 +243,17 @@ func compressChunk(chunk []byte, output []byte, ctx *context) []byte {
 // Decompress decompresses an entire LZNT1 stream.
 // The input is processed in chunks (headers + data). The function manages
 // output capacity reservation and validates the integrity of chunk headers.
-func Decompress(src []byte) (dst []byte, err error) {
+// Decompress decompresses the input. limit is how many bytes it is expected to come to, and
+// nothing longer than that is built: the input arrives from the far end, and a chunk of it stands
+// for as much as it likes, so without a bound a short message expands until there is no memory
+// left. A limit of zero or less asks for no bound, which is only for a caller that produced the
+// input itself.
+func Decompress(src []byte, limit int) (dst []byte, err error) {
 	// Heuristic capacity reservation to reduce allocation churn.
 	heuristicCap := len(src)
+	if limit > 0 && limit < heuristicCap {
+		heuristicCap = limit
+	}
 	if cap(dst) < len(dst)+heuristicCap {
 		newDst := make([]byte, len(dst), len(dst)+heuristicCap)
 		copy(newDst, dst)
@@ -282,13 +291,17 @@ func Decompress(src []byte) (dst []byte, err error) {
 		blockSlice := src[inPos : inPos+size]
 		if isCompressed {
 			var err error
-			dst, err = decompressBlock(blockSlice, dst)
+			dst, err = decompressBlock(blockSlice, dst, limit)
 			if err != nil {
 				return nil, err
 			}
 		} else {
 			// Raw block: direct copy.
 			dst = append(dst, blockSlice...)
+		}
+
+		if limit > 0 && len(dst) > limit {
+			return nil, ErrOutputTooLong
 		}
 
 		inPos += size
@@ -298,7 +311,7 @@ func Decompress(src []byte) (dst []byte, err error) {
 }
 
 // decompressBlock decompresses a single compressed LZNT1 block.
-func decompressBlock(src []byte, dst []byte) ([]byte, error) {
+func decompressBlock(src []byte, dst []byte, limit int) ([]byte, error) {
 	inIdx := 0
 	end := len(src)
 
@@ -344,6 +357,13 @@ func decompressBlock(src []byte, dst []byte) ([]byte, error) {
 				dst, err = applyMatch(dst, length, offset)
 				if err != nil {
 					return nil, err
+				}
+
+				// A back reference is two bytes of input standing for up to four thousand of
+				// output, so this is where a bound has to be noticed rather than at the end of
+				// the chunk.
+				if limit > 0 && len(dst) > limit {
+					return nil, ErrOutputTooLong
 				}
 			} else {
 				// Literal.

@@ -88,7 +88,11 @@ func (ccm *ccm) Seal(dst, nonce, plaintext, data []byte) []byte {
 
 	xorBytes(S0, S0, T) // T^S0
 
-	return ret[:len(plaintext)+ccm.tagSize]
+	// Room was set aside for a whole block of tag and only as much of it is kept as the tag is
+	// long, so what comes back is cut to what was actually written. The cut is counted from the
+	// end of what the caller handed in: measuring it from the start of the buffer instead would
+	// hand back a message that begins somewhere in the middle of the caller's own bytes.
+	return ret[:len(dst)+len(plaintext)+ccm.tagSize]
 }
 
 func (ccm *ccm) Open(dst, nonce, ciphertext, data []byte) ([]byte, error) {
@@ -96,8 +100,13 @@ func (ccm *ccm) Open(dst, nonce, ciphertext, data []byte) ([]byte, error) {
 		panic("cipher: incorrect nonce length given to CCM")
 	}
 
-	if len(ciphertext) <= ccm.tagSize {
-		panic("cipher: incorrect ciphertext length given to CCM")
+	// A message carrying nothing but its tag is what sealing an empty payload produces, so it has
+	// to open again rather than be turned away; only one that stops before the tag is over is
+	// too short to say anything. The length arrived from the far end, so it is answered with an
+	// error the way the ciphers in the standard library answer it, rather than by giving up on
+	// the process the way a mistake on this side would deserve.
+	if len(ciphertext) < ccm.tagSize {
+		return nil, errors.New("cipher: ciphertext shorter than the tag it should carry")
 	}
 
 	if maxUvarint(15-ccm.nonceSize) < uint64(len(ciphertext)-ccm.tagSize) {

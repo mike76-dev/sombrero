@@ -17,6 +17,7 @@ const (
 	STATUS_NOTIFY_ENUM_DIR                       = 0x0000010c
 	STATUS_BUFFER_OVERFLOW                       = 0x80000005
 	STATUS_NO_MORE_FILES                         = 0x80000006
+	STATUS_UNSUCCESSFUL                          = 0xc0000001
 	STATUS_INFO_LENGTH_MISMATCH                  = 0xc0000004
 	STATUS_INVALID_HANDLE                        = 0xc0000008
 	STATUS_INVALID_PARAMETER                     = 0xc000000d
@@ -32,17 +33,24 @@ const (
 	STATUS_EAS_NOT_SUPPORTED                     = 0xc000004f
 	STATUS_NO_SUCH_USER                          = 0xc0000064
 	STATUS_NONE_MAPPED                           = 0xc0000073
+	STATUS_INSUFFICIENT_RESOURCES                = 0xc000009a
 	STATUS_IO_TIMEOUT                            = 0xc00000b5
 	STATUS_NOT_SUPPORTED                         = 0xc00000bb
+	STATUS_UNEXPECTED_NETWORK_ERROR              = 0xc00000c4
 	STATUS_NETWORK_NAME_DELETED                  = 0xc00000c9
 	STATUS_NETWORK_ACCESS_DENIED                 = 0xc00000ca
 	STATUS_BAD_NETWORK_NAME                      = 0xc00000cc
+	STATUS_REQUEST_NOT_ACCEPTED                  = 0xc00000d0
+	STATUS_INVALID_OPLOCK_PROTOCOL               = 0xc00000e3
 	STATUS_DIRECTORY_NOT_EMPTY                   = 0xc0000101
 	STATUS_CANCELLED                             = 0xc0000120
 	STATUS_FILE_CLOSED                           = 0xc0000128
+	STATUS_INVALID_DEVICE_STATE                  = 0xc0000184
 	STATUS_USER_SESSION_DELETED                  = 0xc0000203
 	STATUS_NOT_FOUND                             = 0xc0000225
 	STATUS_DUPLICATE_OBJECTID                    = 0xc000022a
+	STATUS_NETWORK_SESSION_EXPIRED               = 0xc000035c
+	STATUS_FILE_NOT_AVAILABLE                    = 0xc0000467
 	STATUS_SHARE_UNAVAILABLE                     = 0xc0000480
 	STATUS_SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP = 0xc05d0000
 )
@@ -102,8 +110,14 @@ func NewErrorResponse(req GenericRequest, status uint32, count uint8, data []byt
 	er := &ErrorResponse{}
 	er.FromRequest(req)
 	Header(er.data).SetStatus(status)
+
+	// An interim response is where the credits of the request it holds open are handed back
+	// ([MS-SMB2] 3.3.4.2, which sets the field as 3.3.1.2 has it). Held until the final response,
+	// they are held for as long as the work takes: a client that has spent its credits on requests
+	// the server is still working on has nothing left to send with and waits, however much of the
+	// window it was granted.
 	if status == STATUS_PENDING {
-		Header(er.data).SetCreditResponse(0)
+		Header(er.data).SetCreditResponse(max(req.Header().CreditCharge(), req.Header().CreditRequest()))
 	}
 	er.SetErrorContextCount(count)
 	er.SetErrorData(data)

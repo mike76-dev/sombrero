@@ -411,7 +411,7 @@ func (ic *IndexdClient) Storage(ctx context.Context) (StorageInfo, error) {
 	}, nil
 }
 
-// IsEmpty returns true if the directory contains at least one object.
+// IsEmpty returns true if the directory contains no objects.
 func (ic *IndexdClient) IsEmpty(ctx context.Context, acc stores.Account, path string) (bool, error) {
 	return ic.db.DirectoryEmpty(acc, ic.share, path)
 }

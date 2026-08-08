@@ -16,6 +16,11 @@ const (
 	WRITEFLAG_WRITE_UNBUFFERED = 0x00000002
 )
 
+// MaxWriteDataOffset is how far into an SMB2_WRITE request the data may begin. The fixed part of
+// the request ends well before it, so the rest is padding the client is free to insert; past
+// this the request is malformed rather than padded.
+const MaxWriteDataOffset = 0x100
+
 // WriteRequest represents an SMB2_WRITE request.
 type WriteRequest struct {
 	Request
@@ -35,9 +40,8 @@ func (wr WriteRequest) Validate(supportsMultiCredit bool) error {
 		return ErrWrongFormat
 	}
 
-	off := binary.LittleEndian.Uint16(wr.data[SMB2HeaderSize+2 : SMB2HeaderSize+4])
 	length := binary.LittleEndian.Uint32(wr.data[SMB2HeaderSize+4 : SMB2HeaderSize+8])
-	if uint32(off)+length > uint32(len(wr.data)) {
+	if !fits(uint64(wr.DataOffset()), uint64(length), uint64(len(wr.data))) {
 		return ErrInvalidParameter
 	}
 
@@ -56,6 +60,12 @@ func (wr WriteRequest) Validate(supportsMultiCredit bool) error {
 	return nil
 }
 
+// DataOffset returns the DataOffset field of the SMB2_WRITE request: where the data begins,
+// counted from the start of the SMB2 header.
+func (wr WriteRequest) DataOffset() uint16 {
+	return binary.LittleEndian.Uint16(wr.data[SMB2HeaderSize+2 : SMB2HeaderSize+4])
+}
+
 // Offset returns the Offset field of the SMB2_WRITE request.
 func (wr WriteRequest) Offset() uint64 {
 	return binary.LittleEndian.Uint64(wr.data[SMB2HeaderSize+8 : SMB2HeaderSize+16])
@@ -68,6 +78,12 @@ func (wr WriteRequest) FileID() []byte {
 	return fid
 }
 
+// Channel returns the Channel field of the SMB2_WRITE request. The values it may carry are the
+// SMB2_CHANNEL_* constants, which SMB2_READ shares.
+func (wr WriteRequest) Channel() uint32 {
+	return binary.LittleEndian.Uint32(wr.data[SMB2HeaderSize+32 : SMB2HeaderSize+36])
+}
+
 // Flags returns the Flags field of the SMB2_WRITE request.
 func (wr WriteRequest) Flags() uint32 {
 	return binary.LittleEndian.Uint32(wr.data[SMB2HeaderSize+44 : SMB2HeaderSize+48])
@@ -75,9 +91,13 @@ func (wr WriteRequest) Flags() uint32 {
 
 // Buffer returns the Buffer field of the SMB2_WRITE request.
 func (wr WriteRequest) Buffer() []byte {
-	off := binary.LittleEndian.Uint16(wr.data[SMB2HeaderSize+2 : SMB2HeaderSize+4])
+	off := uint32(wr.DataOffset())
 	length := binary.LittleEndian.Uint32(wr.data[SMB2HeaderSize+4 : SMB2HeaderSize+8])
-	return wr.data[uint32(off) : uint32(off)+length]
+	if !fits(uint64(off), uint64(length), uint64(len(wr.data))) {
+		return nil
+	}
+
+	return wr.data[off : off+length]
 }
 
 // WriteResponse represents an SMB2_WRITE response.

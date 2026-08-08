@@ -28,6 +28,21 @@ var (
 	errShareInUse       = errors.New("share currently in use by one or more clients")
 )
 
+// persistedKey names a file that has been created but not yet uploaded: the workgroup whose
+// namespace it is in, and its path within the share.
+type persistedKey struct {
+	workgroup string
+	path      string
+}
+
+// ensurePersisted makes the table of files that have been created but not yet uploaded, if it is
+// not there yet. sh.mu must be held.
+func (sh *share) ensurePersisted() {
+	if sh.persisted == nil {
+		sh.persisted = make(map[persistedKey]*fileState)
+	}
+}
+
 // indexdConn holds the per-workgroup state for an indexd share connection.
 type indexdConn struct {
 	client        client.Client
@@ -40,12 +55,10 @@ type indexdConn struct {
 // share represents a Share object.
 type share struct {
 	name            string
-	serverName      string
 	connectSecurity map[string]struct{}
 	fileSecurity    map[string]uint32
 	shareType       uint8
 	remark          string
-	maxUses         int
 	currentUses     int
 	encryptData     bool
 	compressData    bool
@@ -61,7 +74,13 @@ type share struct {
 	indexdConns map[string]*indexdConn // keyed by workgroup UUID string
 
 	backend string
-	mu      sync.Mutex
+	// A file that has been created but not yet uploaded has no object behind it: the Sia network
+	// takes nothing empty. The workgroup is part of the key because a share is one namespace per
+	// workgroup: two workgroups may each hold a file of the same name on the same share, and
+	// neither may see the other's.
+	persisted map[persistedKey]*fileState
+
+	mu sync.Mutex
 }
 
 // RegisterShare adds a new share to the SMB server.
@@ -76,13 +95,12 @@ func (s *server) RegisterShare(ss stores.Share) error {
 	sh := &share{
 		name:            ss.Name,
 		backend:         ss.Type,
-		serverName:      ss.ServerName,
 		shareType:       smb2.SHARE_TYPE_DISK,
-		maxUses:         maxShareUses,
 		bucket:          ss.Bucket,
 		remark:          ss.Remark,
 		connectSecurity: make(map[string]struct{}),
 		fileSecurity:    make(map[string]uint32),
+		persisted:       make(map[persistedKey]*fileState),
 		encryptData:     s.encryptData,
 		compressData:    s.compressionSupported,
 	}
@@ -117,30 +135,51 @@ func (s *server) RegisterShare(ss stores.Share) error {
 		if err != nil {
 			return err
 		}
-
-		accs := make(map[int]stores.Account)
-		for _, ar := range ars {
-			if _, exists := accs[ar.AccountID]; !exists {
-				acc, err := s.store.GetAccountByID(ar.AccountID)
-				if err != nil {
-					return err
-				}
-				accs[ar.AccountID] = acc
-			}
+		if err := s.loadAccessRights(sh, ars); err != nil {
+			return err
 		}
-
-		sh.mu.Lock()
-		for _, ar := range ars {
-			acc := accs[ar.AccountID]
-			sh.connectSecurity[acc.Workgroup+"/"+acc.Username] = struct{}{}
-			sh.fileSecurity[acc.Workgroup+"/"+acc.Username] = stores.FlagsFromAccessRights(ar)
-		}
-		sh.mu.Unlock()
 	}
 
 	s.mu.Lock()
 	s.shareList[sh.name] = sh
 	s.mu.Unlock()
+
+	return nil
+}
+
+// loadAccessRights fills the security maps of the share from the stored access rights.
+//
+// A row naming an account that is no longer there is skipped rather than allowed to fail the
+// whole share: one dangling row would otherwise take the share offline for everybody. Skipping
+// is also the safe direction, in that the principal the row describes ends up with no access at
+// all. The foreign key on the accounts table should keep this from arising; it is handled
+// because the share going down is far the worse of the two outcomes if it ever does.
+func (s *server) loadAccessRights(sh *share, ars []stores.AccessRights) error {
+	accs := make(map[int]stores.Account)
+	for _, ar := range ars {
+		if _, exists := accs[ar.AccountID]; exists {
+			continue
+		}
+		acc, err := s.store.GetAccountByID(ar.AccountID)
+		if errors.Is(err, stores.ErrAccountNotFound) {
+			log.Printf("Share %s: skipping access rights of account %d, which no longer exists", sh.name, ar.AccountID)
+			continue
+		} else if err != nil {
+			return err
+		}
+		accs[ar.AccountID] = acc
+	}
+
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	for _, ar := range ars {
+		acc, known := accs[ar.AccountID]
+		if !known {
+			continue
+		}
+		sh.connectSecurity[acc.Workgroup+"/"+acc.Username] = struct{}{}
+		sh.fileSecurity[acc.Workgroup+"/"+acc.Username] = stores.FlagsFromAccessRights(ar)
+	}
 
 	return nil
 }
@@ -194,8 +233,14 @@ func (s *server) UpdateAccessRights(ss stores.Share, ar stores.AccessRights) err
 		return nil
 	}
 
+	// An account that is not there has nothing to be granted and nothing to revoke: there is
+	// no name to key the security maps by. Saying so is better than failing the caller, which
+	// is updating a row that describes somebody who no longer exists.
 	acc, err := s.store.GetAccountByID(ar.AccountID)
-	if err != nil {
+	if errors.Is(err, stores.ErrAccountNotFound) {
+		log.Printf("Share %s: ignoring access rights of account %d, which no longer exists", sh.name, ar.AccountID)
+		return nil
+	} else if err != nil {
 		return err
 	}
 
@@ -338,6 +383,16 @@ func (s *server) RemoveConnection(wg stores.Workgroup, share stores.Share) error
 		}
 		sh.mu.Unlock()
 	}
+
+	// The files the workgroup created and never uploaded go with it: nothing of that workgroup is
+	// on the share any more to ask after them.
+	sh.mu.Lock()
+	for key := range sh.persisted {
+		if key.workgroup == wg.UUID.String() {
+			delete(sh.persisted, key)
+		}
+	}
+	sh.mu.Unlock()
 
 	accs, err := s.store.FindAccounts(wg.UUID.String())
 	if err != nil {

@@ -159,6 +159,11 @@ func (h Header) SetStatus(status uint32) {
 	binary.LittleEndian.PutUint32(h[8:12], status)
 }
 
+// ChannelSequence returns the ChannelSequence field of the SMB2 header.
+func (h Header) ChannelSequence() uint16 {
+	return binary.LittleEndian.Uint16(h[8:10])
+}
+
 // Command returns the Command field of the SMB2 header.
 func (h Header) Command() uint16 {
 	return binary.LittleEndian.Uint16(h[12:14])

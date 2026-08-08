@@ -23,35 +23,35 @@ var testUUID = uuid.MustParse("12345678-1234-1234-1234-123456789abc")
 
 // mockStore implements Store with optional per-method overrides.
 type mockStore struct {
-	isBanned         func(string) (bool, string, error)
-	banHost          func(string, string) error
-	unbanHost        func(string) error
-	clearBans        func() error
-	getAccountByID   func(int) (stores.Account, error)
-	findAccount      func(string, string) (stores.Account, error)
-	addAccount       func(stores.Account) error
-	hasAccount       func(string, string) (bool, error)
-	removeAccount    func(string, string) error
-	findAccounts     func(string) ([]stores.Account, error)
-	removeAccounts   func(string) error
-	addWorkgroup          func(stores.Workgroup) error
-	updateWorkgroup       func(stores.Workgroup) error
-	findWorkgroup         func(uuid.UUID) (stores.Workgroup, error)
-	findWorkgroupByName   func(string) (stores.Workgroup, error)
-	getWorkgroups         func() ([]stores.Workgroup, error)
-	removeWorkgroup       func(stores.Workgroup) error
-	getAccessRights  func(stores.Share, stores.Account) (stores.AccessRights, error)
-	setAccessRights  func(stores.AccessRights) error
-	removeAccess     func(stores.Share, stores.Account) error
-	clearAccess      func(stores.Account) error
-	registerShare    func(stores.Share) error
-	unregisterShare  func(string) error
-	getShare         func(string) (stores.Share, error)
-	getShares        func(stores.Account) ([]stores.Share, error)
-	getAllShares     func() ([]stores.Share, error)
-	getAccounts      func(stores.Share) ([]stores.AccessRights, error)
-	addConnection    func(stores.Workgroup, stores.Share, types.PrivateKey) error
-	removeConnection func(stores.Workgroup, stores.Share) error
+	isBanned            func(string) (bool, string, error)
+	banHost             func(string, string) error
+	unbanHost           func(string) error
+	clearBans           func() error
+	getAccountByID      func(int) (stores.Account, error)
+	findAccount         func(string, string) (stores.Account, error)
+	addAccount          func(stores.Account) error
+	hasAccount          func(string, string) (bool, error)
+	removeAccount       func(string, string) error
+	findAccounts        func(string) ([]stores.Account, error)
+	removeAccounts      func(string) error
+	addWorkgroup        func(stores.Workgroup) error
+	updateWorkgroup     func(stores.Workgroup) error
+	findWorkgroup       func(uuid.UUID) (stores.Workgroup, error)
+	findWorkgroupByName func(string) (stores.Workgroup, error)
+	getWorkgroups       func() ([]stores.Workgroup, error)
+	removeWorkgroup     func(stores.Workgroup) error
+	getAccessRights     func(stores.Share, stores.Account) (stores.AccessRights, error)
+	setAccessRights     func(stores.AccessRights) error
+	removeAccess        func(stores.Share, stores.Account) error
+	clearAccess         func(stores.Account) error
+	registerShare       func(stores.Share) error
+	unregisterShare     func(string) error
+	getShare            func(string) (stores.Share, error)
+	getShares           func(stores.Account) ([]stores.Share, error)
+	getAllShares        func() ([]stores.Share, error)
+	getAccounts         func(stores.Share) ([]stores.AccessRights, error)
+	addConnection       func(stores.Workgroup, stores.Share, types.PrivateKey) error
+	removeConnection    func(stores.Workgroup, stores.Share) error
 }
 
 func (m *mockStore) IsBanned(h string) (bool, string, error) {
@@ -278,9 +278,10 @@ func foundWorkgroup() func(uuid.UUID) (stores.Workgroup, error) {
 	}
 }
 
+// The stores fold the name they are given, so the stand-in for them does too.
 func foundWorkgroupByName() func(string) (stores.Workgroup, error) {
 	return func(name string) (stores.Workgroup, error) {
-		if name == testWorkgroupName {
+		if stores.NormalizeWorkgroupName(name) == testWorkgroupName {
 			return stores.Workgroup{ID: 1, UUID: testUUID, Name: testWorkgroupName}, nil
 		}
 		return stores.Workgroup{}, nil
@@ -429,6 +430,25 @@ func TestAccount(t *testing.T) {
 	t.Run("GET invalid ID returns 400", func(t *testing.T) {
 		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/account?id=0", nil)
 		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("GET by username not found returns 404", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			findAccount: func(string, string) (stores.Account, error) {
+				return stores.Account{}, stores.ErrAccountNotFound
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/account?username=nobody&workgroup="+testUUID.String(), nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("GET by ID not found returns 404", func(t *testing.T) {
+		ms := &mockStore{getAccountByID: func(int) (stores.Account, error) {
+			return stores.Account{}, stores.ErrAccountNotFound
+		}}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/account?id=999999", nil)
+		checkStatus(t, w, http.StatusNotFound)
 	})
 
 	t.Run("GET by username store error", func(t *testing.T) {
@@ -953,6 +973,24 @@ func TestWorkgroups(t *testing.T) {
 		}
 	})
 
+	// A workgroup name is folded before it is stored, because a client sends it as the NTLM
+	// domain and a domain name is not case-sensitive. The response has to carry the name that was
+	// stored rather than the one that was asked for, or the caller is told to log in with a name
+	// that is not the one it will be found under.
+	t.Run("POST folds the workgroup name", func(t *testing.T) {
+		var got stores.Workgroup
+		ms := &mockStore{addWorkgroup: func(wg stores.Workgroup) error { got = wg; return nil }}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", map[string]string{"name": "AcMe"})
+		checkStatus(t, w, http.StatusOK)
+		resp := decodeJSON[WorkgroupResponse](t, w)
+		if resp.Name != "acme" {
+			t.Errorf("name: want %q, got %q", "acme", resp.Name)
+		}
+		if got.Name != "acme" {
+			t.Errorf("stored name: want %q, got %q", "acme", got.Name)
+		}
+	})
+
 	t.Run("POST store error", func(t *testing.T) {
 		ms := &mockStore{addWorkgroup: func(stores.Workgroup) error { return errStore }}
 		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", nil)
@@ -972,6 +1010,18 @@ func TestWorkgroups(t *testing.T) {
 	t.Run("GET returns workgroup by name", func(t *testing.T) {
 		ms := &mockStore{findWorkgroupByName: foundWorkgroupByName()}
 		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/"+testWorkgroupName, nil)
+		checkStatus(t, w, http.StatusOK)
+		wg := decodeJSON[stores.Workgroup](t, w)
+		if wg.Name != testWorkgroupName {
+			t.Errorf("name: want %q, got %q", testWorkgroupName, wg.Name)
+		}
+	})
+
+	// A name that is not a UUID has to take the name branch of the lookup whatever case it is in,
+	// and reach the store as it arrived for the store to fold.
+	t.Run("GET returns workgroup by name in any case", func(t *testing.T) {
+		ms := &mockStore{findWorkgroupByName: foundWorkgroupByName()}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/workgroup/AcMe", nil)
 		checkStatus(t, w, http.StatusOK)
 		wg := decodeJSON[stores.Workgroup](t, w)
 		if wg.Name != testWorkgroupName {

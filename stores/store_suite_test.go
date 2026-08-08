@@ -297,6 +297,47 @@ func TestStoreWorkgroups(t *testing.T) {
 	})
 }
 
+// A workgroup name is what a client sends as the NTLM domain, and a domain name is not
+// case-sensitive: WRG\test and wrg\test are the same login, and neither client can be asked to
+// know the case the workgroup was created with. So the name has to be found however it is spelled,
+// and a second workgroup must not be able to take the same name in another case, which would leave
+// two workgroups that no client could choose between.
+func TestStoreWorkgroupNamesAreCaseInsensitive(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store, _ *recordingShares) {
+		u := uuid.New()
+		if err := st.AddWorkgroup(Workgroup{UUID: u, Name: "WrG"}); err != nil {
+			t.Fatalf("AddWorkgroup: %v", err)
+		}
+
+		// The name is folded on the way in, so it reads back in the one form however it was
+		// given. Anything keyed by the name, the SMB server included, sees only that form.
+		wg, err := st.FindWorkgroup(u)
+		if err != nil {
+			t.Fatalf("FindWorkgroup: %v", err)
+		}
+		if wg.Name != "wrg" {
+			t.Fatalf("stored name: want %q, got %q", "wrg", wg.Name)
+		}
+		if byID, err := st.GetWorkgroupByID(wg.ID); err != nil || byID.Name != "wrg" {
+			t.Fatalf("GetWorkgroupByID: %v %+v", err, byID)
+		}
+
+		for _, name := range []string{"wrg", "WRG", "Wrg", "wRG"} {
+			byName, err := st.FindWorkgroupByName(name)
+			if err != nil {
+				t.Fatalf("FindWorkgroupByName(%q): %v", name, err)
+			}
+			if byName.ID != wg.ID || byName.UUID != u {
+				t.Fatalf("FindWorkgroupByName(%q): got %+v", name, byName)
+			}
+		}
+
+		if err := st.AddWorkgroup(Workgroup{UUID: uuid.New(), Name: "WRG"}); err == nil {
+			t.Fatal("AddWorkgroup: a name differing only in case was accepted")
+		}
+	})
+}
+
 // samePublicDirs compares two public folder lists, order included.
 func samePublicDirs(a, b []PublicDir) bool {
 	if len(a) != len(b) {
@@ -512,12 +553,14 @@ func TestStoreAccounts(t *testing.T) {
 			t.Fatal("GetAccountByID: plaintext password must not be returned")
 		}
 
-		// Unknown accounts are returned as zero values, not as errors.
-		if got, err := st.FindAccount("nobody", u); err != nil || got.ID != 0 {
-			t.Fatalf("FindAccount missing: %v %+v", err, got)
+		// An unknown account is reported as an error and never as a zero value. A zero
+		// Account looks usable to a caller that only checks the error, and its nil NTHash
+		// authenticates anybody who computes NTOWFv2 over it.
+		if got, err := st.FindAccount("nobody", u); !errors.Is(err, ErrAccountNotFound) {
+			t.Fatalf("FindAccount missing: got %v, %+v, want ErrAccountNotFound", err, got)
 		}
-		if got, err := st.GetAccountByID(999999); err != nil || got.ID != 0 {
-			t.Fatalf("GetAccountByID missing: %v %+v", err, got)
+		if got, err := st.GetAccountByID(999999); !errors.Is(err, ErrAccountNotFound) {
+			t.Fatalf("GetAccountByID missing: got %v, %+v, want ErrAccountNotFound", err, got)
 		}
 
 		// HasAccount.

@@ -2,6 +2,7 @@ package smb2
 
 import (
 	"encoding/binary"
+	"strings"
 	"time"
 
 	"github.com/mike76-dev/sombrero/client"
@@ -141,7 +142,7 @@ func (qdr QueryDirectoryRequest) Validate(supportsMultiCredit bool) error {
 
 	off := binary.LittleEndian.Uint16(qdr.data[SMB2HeaderSize+24 : SMB2HeaderSize+26])
 	length := binary.LittleEndian.Uint16(qdr.data[SMB2HeaderSize+26 : SMB2HeaderSize+28])
-	if off+length > uint16(len(qdr.data)) {
+	if !fits(uint64(off), uint64(length), uint64(len(qdr.data))) {
 		return ErrInvalidParameter
 	}
 
@@ -192,7 +193,11 @@ func (qdr QueryDirectoryRequest) OutputBufferLength() uint32 {
 func (qdr QueryDirectoryRequest) FileName() string {
 	off := binary.LittleEndian.Uint16(qdr.data[SMB2HeaderSize+24 : SMB2HeaderSize+26])
 	length := binary.LittleEndian.Uint16(qdr.data[SMB2HeaderSize+26 : SMB2HeaderSize+28])
-	return utils.DecodeToString(qdr.data[off : off+length])
+	if !fits(uint64(off), uint64(length), uint64(len(qdr.data))) {
+		return ""
+	}
+
+	return utils.DecodeToString(qdr.data[off : uint32(off)+uint32(length)])
 }
 
 type dirInfo struct {
@@ -631,6 +636,13 @@ func QueryDirectoryBuffer(class uint8, entries []client.ObjectInfo, bufSize uint
 			di.AllocationSize = entry.Size
 		}
 
+		// A name that begins with a dot is hidden where the convention is understood, and carries the
+		// attribute where it is not, so that a listing does not show what no user asked to see.
+		if strings.HasPrefix(name, ".") {
+			di.FileAttributes |= FILE_ATTRIBUTE_HIDDEN
+			di.FileAttributes &^= FILE_ATTRIBUTE_NORMAL
+		}
+
 		hash := blake2b.Sum256([]byte(entry.Key))
 		di.FileID64 = binary.LittleEndian.Uint64(hash[:8])
 		di.FileID128 = make([]byte, 16)
@@ -664,6 +676,8 @@ func QueryDirectoryBuffer(class uint8, entries []client.ObjectInfo, bufSize uint
 		return fileIDExtdDirInfo(info).encode(), num
 	case FILE_ID_FULL_DIRECTORY_INFORMATION:
 		return fileIDFullDirInfo(info).encode(), num
+	case FILE_FULL_DIRECTORY_INFORMATION:
+		return fileFullDirInfo(info).encode(), num
 	default:
 		return
 	}
@@ -729,7 +743,7 @@ func (qir QueryInfoRequest) Validate(supportsMultiCredit bool) error {
 
 	off := binary.LittleEndian.Uint16(qir.data[SMB2HeaderSize+8 : SMB2HeaderSize+10])
 	length := binary.LittleEndian.Uint32(qir.data[SMB2HeaderSize+12 : SMB2HeaderSize+16])
-	if uint32(off)+length > uint32(len(qir.data)) {
+	if !fits(uint64(off), uint64(length), uint64(len(qir.data))) {
 		return ErrInvalidParameter
 	}
 
@@ -768,6 +782,10 @@ func (qir QueryInfoRequest) OutputBufferLength() uint32 {
 func (qir QueryInfoRequest) InputBuffer() []byte {
 	off := binary.LittleEndian.Uint16(qir.data[SMB2HeaderSize+8 : SMB2HeaderSize+10])
 	length := binary.LittleEndian.Uint32(qir.data[SMB2HeaderSize+12 : SMB2HeaderSize+16])
+	if !fits(uint64(off), uint64(length), uint64(len(qir.data))) {
+		return nil
+	}
+
 	return qir.data[off : uint32(off)+length]
 }
 

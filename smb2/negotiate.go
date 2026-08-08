@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	SMBNegotiateRequestMinSize = 5 // Enough to validate a SMB_COM_NEGOTIATE request
+	SMBNegotiateRequestMinSize = 5 // Enough to validate an SMB_COM_NEGOTIATE request
 
 	SMB2NegotiateRequestMinSize       = 36
 	SMB2NegotiateRequestStructureSize = 36
@@ -135,6 +135,33 @@ var (
 // Is3X returns true if the dialect belongs to the 3.x family.
 func Is3X(dialect uint16) bool {
 	return dialect != SMB_DIALECT_UNKNOWN && dialect >= SMB_DIALECT_30
+}
+
+// DialectCapabilities is the set of capabilities a dialect may carry: every flag [MS-SMB2] 3.3.5.4
+// allows the server to put in the Capabilities field of a NEGOTIATE response on that dialect, and
+// no other. It says what the dialect permits rather than what any particular server has - what the
+// server itself supports is a separate set, and a capability is advertised only if it is in both.
+func DialectCapabilities(dialect uint16) uint32 {
+	// DFS is the one capability that predates the rest and belongs to every dialect.
+	caps := uint32(GLOBAL_CAP_DFS)
+
+	// Leasing and large MTU arrived with 2.1: both are held against the dialect being 2.0.2 and
+	// nothing else.
+	if dialect != SMB_DIALECT_202 {
+		caps |= GLOBAL_CAP_LEASING | GLOBAL_CAP_LARGE_MTU
+	}
+
+	if Is3X(dialect) {
+		caps |= GLOBAL_CAP_MULTI_CHANNEL | GLOBAL_CAP_PERSISTENT_HANDLES | GLOBAL_CAP_DIRECTORY_LEASING
+	}
+
+	// Encryption is the exception to 3.x taking everything: 3.1.1 settles a cipher in a negotiate
+	// context instead, so the capability flag belongs to 3.0 and 3.0.2 alone.
+	if dialect == SMB_DIALECT_30 || dialect == SMB_DIALECT_302 {
+		caps |= GLOBAL_CAP_ENCRYPTION
+	}
+
+	return caps
 }
 
 // NegotiateRequest represents an SMB2_NEGOTIATE request.

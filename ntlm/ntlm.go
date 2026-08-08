@@ -2,14 +2,13 @@
 package ntlm
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/binary"
 	"hash"
 	"hash/crc32"
-
-	"golang.org/x/crypto/md4"
 )
 
 //      Version
@@ -64,6 +63,22 @@ const (
 	NtLmAuthenticate = 0x00000003
 )
 
+// ntlmv2ResponseMinSize is the part of an NTLMv2 response that is always there: sixteen bytes of
+// response, and then the fixed head of the client challenge behind it — the two response types,
+// two reserved fields, the timestamp and the challenge the client chose. Only the target
+// information that follows may be of any length. [MS-NLMP] lays both out in 2.2.2.8 and 2.2.2.7.
+const ntlmv2ResponseMinSize = 16 + 28
+
+// IsAuthenticate reports whether the message is an NTLM AUTHENTICATE message, which is what
+// the client sends in the second leg of the authentication exchange.
+func IsAuthenticate(msg []byte) bool {
+	if len(msg) < 12 || !bytes.Equal(msg[:8], signature) {
+		return false
+	}
+
+	return binary.LittleEndian.Uint32(msg[8:12]) == NtLmAuthenticate
+}
+
 const (
 	NTLMSSP_NEGOTIATE_UNICODE = 1 << iota
 	NTLM_NEGOTIATE_OEM
@@ -112,13 +127,6 @@ const (
 	MsvAvTargetName
 	MsvAvChannelBindings
 )
-
-func ntowfv2(USER, password, domain []byte) []byte {
-	h := md4.New()
-	h.Write(password)
-	hash := h.Sum(nil)
-	return ntowfv2Hash(USER, hash, domain)
-}
 
 func ntowfv2Hash(USER, hash, domain []byte) []byte {
 	hm := hmac.New(md5.New, hash)

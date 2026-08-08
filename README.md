@@ -272,7 +272,7 @@ export TEST_DB_USER=sombrero_test_user
 export TEST_DB_PASSWORD=sombrero
 export TEST_DB_NAME=sombrero_test
 export TEST_DB_SSLMODE=disable
-export TEST_INIT_SQL=../init.sql
+export TEST_INIT_SQL=./init.sql
 ```
 3. Run the tests
 ```Bash

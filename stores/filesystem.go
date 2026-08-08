@@ -430,9 +430,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		if force && oldPath != newPath {
 			// A file that belongs to another account and sits in a read-only
-			// folder must not be renamed over. Refuse up front: the delete
-			// below skips such a file, and the rename would then surface an
-			// opaque unique-index violation instead.
+			// folder must not be renamed over.
 			const protectedQuery = `
 				SELECT EXISTS (
 					SELECT 1
@@ -693,9 +691,7 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		if force && oldPath != newPath {
 			// A read-only directory that belongs to another account must not
-			// be renamed over. Refuse up front: the delete below skips such a
-			// directory, and the rename would then surface an opaque
-			// unique-constraint violation instead.
+			// be renamed over.
 			const protectedQuery = `
 				SELECT EXISTS (
 					SELECT 1

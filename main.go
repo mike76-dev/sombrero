@@ -86,17 +86,7 @@ func main() {
 
 	// Start the SMB server.
 	server := newServer(ctx, l, db, cfg.Debug, cfg.Indexd)
-	if smb2.MaxSupportedDialect != smb2.SMB_DIALECT_202 {
-		server.serverCapabilities |= smb2.GLOBAL_CAP_LARGE_MTU
-	}
-	if smb2.Is3X(smb2.MaxSupportedDialect) {
-		server.serverCapabilities |= smb2.GLOBAL_CAP_ENCRYPTION
-		server.encryptData = true
-	}
-	if smb2.MaxSupportedDialect == smb2.SMB_DIALECT_311 {
-		server.compressionSupported = true
-		server.chainedCompressionSupported = true
-	}
+	server.applyCapabilities()
 	db.WithShares(server)
 
 	// Start the API server.

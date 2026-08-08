@@ -1,5 +1,5 @@
 // This is the LZ77 compression algorithm implementation
-// as specified in MS-XCA.
+// as specified in [MS-XCA].
 package lz77
 
 import (
@@ -60,8 +60,11 @@ func Compress(src []byte) []byte {
 		head[h] = i
 	}
 
-	// Output with 4-byte flags placeholder.
-	dst := make([]byte, 4, len(src))
+	// Output with 4-byte flags placeholder. The capacity is a guess at the output being no bigger
+	// than the input, and has to leave room for the placeholder whatever that guess is worth: an
+	// input of one, two or three bytes would otherwise ask for a slice longer than its capacity,
+	// which panics.
+	dst := make([]byte, 4, len(src)+4)
 	flagPos := 0
 	var flags uint32
 	flagCount := 0

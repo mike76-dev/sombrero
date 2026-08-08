@@ -17,7 +17,10 @@ func ExtractFilename(path string) (filepath string, filename string, isDir bool)
 		return "", "", true
 	}
 
-	filepath = path[1:]
+	// The separator is taken off if it is there rather than on the strength of a key always
+	// opening with one. Counting past the first byte regardless eats a character out of any name
+	// that arrives without it, and says nothing while doing so.
+	filepath = strings.TrimPrefix(path, "/")
 	if path[len(path)-1] == '/' {
 		isDir = true
 		filepath = filepath[:len(filepath)-1]
@@ -49,11 +52,14 @@ func TrimName(path string) string {
 
 // FindMinKey finds a key-value pair with the smallest key in the map.
 func FindMinKey[T any](m map[uint64]T) (key uint64, value T) {
+	// The first pair seen is taken whatever it is, rather than only one that beats the key this
+	// starts at. A map holding nothing but the very key at that end would otherwise come back
+	// naming it and carrying no value, the comparison never having been true.
 	key = math.MaxUint64
+	var found bool
 	for k, v := range m {
-		if k < key {
-			key = k
-			value = v
+		if !found || k < key {
+			key, value, found = k, v, true
 		}
 	}
 	return
@@ -61,10 +67,11 @@ func FindMinKey[T any](m map[uint64]T) (key uint64, value T) {
 
 // FindMaxKey finds a key-value pair with the greatest key in the map.
 func FindMaxKey[T any](m map[uint64]T) (key uint64, value T) {
+	// As above, and the key at this end is zero, which is the first message ID of a connection.
+	var found bool
 	for k, v := range m {
-		if k > key {
-			key = k
-			value = v
+		if !found || k > key {
+			key, value, found = k, v, true
 		}
 	}
 	return

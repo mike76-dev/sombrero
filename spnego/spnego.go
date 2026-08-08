@@ -3,6 +3,7 @@ package spnego
 
 import (
 	"encoding/asn1"
+	"errors"
 
 	"github.com/geoffgarside/ber"
 )
@@ -24,16 +25,6 @@ type initialContextToken2 struct { // `asn1:"application,tag:0"`
 	Resp     []NegTokenResp        `asn1:"optional,explict,tag:1"`
 }
 
-// initialContextToken ::= [APPLICATION 0] IMPLICIT SEQUENCE {
-//   ThisMech          MechType
-//   InnerContextToken negotiateToken
-// }
-
-// negotiateToken ::= CHOICE {
-//   NegTokenInit [0] NegTokenInit
-//   NegTokenResp [1] NegTokenResp
-// }
-
 type NegTokenInit struct {
 	MechTypes   []asn1.ObjectIdentifier `asn1:"explicit,optional,tag:0"`
 	ReqFlags    asn1.BitString          `asn1:"explicit,optional,tag:1"`
@@ -49,11 +40,6 @@ var negHints = asn1.RawValue{
 		0x65, 0x5f, 0x69, 0x67, 0x6e, 0x6f, 0x72, 0x65,
 	},
 }
-
-// type NegHint struct {
-// HintName    string `asn1:"optional,explicit,tag:0"` // GeneralString = 27
-// HintAddress []byte `asn1:"optional,explicit,tag:1"`
-// }
 
 type NegTokenInit2 struct {
 	MechTypes   []asn1.ObjectIdentifier `asn1:"explicit,optional,tag:0"`
@@ -76,6 +62,13 @@ func DecodeNegTokenInit2(bs []byte) (*NegTokenInit2, error) {
 	_, err := ber.UnmarshalWithParams(bs, &init, "application,tag:0")
 	if err != nil {
 		return nil, err
+	}
+
+	// The inner token is marked optional, so a token that carries none of it decodes without
+	// complaint and leaves nothing behind. Reaching for the first one regardless is how a peer
+	// sending ten well-formed bytes takes the whole server down with it.
+	if len(init.Init2) == 0 {
+		return nil, errors.New("spnego: the token carries no negTokenInit2")
 	}
 
 	return &init.Init2[0], nil
@@ -127,6 +120,11 @@ func DecodeNegTokenInit(bs []byte) (*NegTokenInit, error) {
 	_, err := ber.UnmarshalWithParams(bs, &init, "application,tag:0")
 	if err != nil {
 		return nil, err
+	}
+
+	// As above: the inner token is optional and may simply not be there.
+	if len(init.Init) == 0 {
+		return nil, errors.New("spnego: the token carries no negTokenInit")
 	}
 
 	return &init.Init[0], nil

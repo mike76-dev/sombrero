@@ -59,6 +59,12 @@ func (req Request) structureSize() uint16 {
 	return binary.LittleEndian.Uint16(req.data[SMB2HeaderSize : SMB2HeaderSize+2])
 }
 
+// fits reports whether a field of the given length, beginning at the given offset, lies inside a
+// message of the given size.
+func fits(off, length, size uint64) bool {
+	return off+length <= size
+}
+
 // GetRequests parses the message body for SMB/SMB2 requests.
 func GetRequests(data []byte, cid uint64, tsid uint64, compressed bool) (reqs []*Request, err error) {
 	req := &Request{
@@ -98,6 +104,14 @@ func GetRequests(data []byte, cid uint64, tsid uint64, compressed bool) (reqs []
 		}
 
 		if next > 0 {
+			// NextCommand comes straight off the wire and says how far along the next request of
+			// the chain begins. A message that points past its own end names bytes that never
+			// arrived, and the sum is worked out wide enough that a value near the top of the
+			// field cannot wrap round and land back inside the message.
+			if uint64(off)+uint64(next) > uint64(len(data)) {
+				return nil, ErrWrongLength
+			}
+
 			req.data = data[off : off+next]
 		}
 

@@ -1,10 +1,9 @@
 package compress
 
 import (
-	"bytes"
-	"compress/flate"
-	"io"
+	"errors"
 
+	"github.com/mike76-dev/sombrero/compress/huffman"
 	"github.com/mike76-dev/sombrero/compress/lz77"
 	"github.com/mike76-dev/sombrero/compress/lznt1"
 	"github.com/mike76-dev/sombrero/smb2"
@@ -28,31 +27,27 @@ func (c *Compressor) Compress(src []byte) ([]byte, error) {
 		return lz77.Compress(src), nil
 
 	case smb2.COMPRESSION_LZ77_HUFFMAN:
-		var buf bytes.Buffer
-		w, err := flate.NewWriter(&buf, flate.DefaultCompression)
+		return huffman.Compress(src), nil
+
+	case smb2.COMPRESSION_LZ4:
+		// A bare LZ4 block, not a frame. The frame format leads with a magic number and a header
+		// carrying the uncompressed size, all of which the SMB2 compression transform header
+		// already says: OriginalCompressedSegmentSize is that size, and the algorithm is named in
+		// the header beside it. A frame here would be a second, redundant header that the peer is
+		// not looking for.
+		if len(src) == 0 {
+			return nil, nil
+		}
+
+		// Sizing the destination at the bound is what makes the compression always succeed, so
+		// there is no incompressible case to answer for here.
+		dst := make([]byte, lz4.CompressBlockBound(len(src)))
+		var c lz4.Compressor
+		n, err := c.CompressBlock(src, dst)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := w.Write(src); err != nil {
-			w.Close()
-			return nil, err
-		}
-		if err := w.Close(); err != nil {
-			return nil, err
-		}
-		return buf.Bytes(), nil
-
-	case smb2.COMPRESSION_LZ4:
-		var buf bytes.Buffer
-		w := lz4.NewWriter(&buf)
-		if _, err := w.Write(src); err != nil {
-			w.Close()
-			return nil, err
-		}
-		if err := w.Close(); err != nil {
-			return nil, err
-		}
-		return buf.Bytes(), nil
+		return dst[:n], nil
 
 	case smb2.COMPRESSION_LZNT1:
 		return lznt1.Compress(src), nil
@@ -69,24 +64,27 @@ func (c *Compressor) Decompress(src []byte, limit int) ([]byte, error) {
 		return lz77.Decompress(src, limit)
 
 	case smb2.COMPRESSION_LZ77_HUFFMAN:
-		r := flate.NewReader(bytes.NewReader(src))
-		defer r.Close()
-		dst, err := io.ReadAll(r)
-		if err != nil {
-			return nil, err
-		}
-		return dst, nil
+		return huffman.Decompress(src, limit)
 
 	case smb2.COMPRESSION_LZ4:
-		r := lz4.NewReader(bytes.NewReader(src))
-		dst, err := io.ReadAll(r)
+		// A bare block, so nothing in the data says how big it decompresses to. The caller knows
+		// it: the transform header carries the uncompressed size, and that is the limit.
+		if len(src) == 0 {
+			return nil, nil
+		}
+		if limit <= 0 {
+			return nil, errors.New("compress: LZ4 needs the uncompressed size")
+		}
+
+		dst := make([]byte, limit)
+		n, err := lz4.UncompressBlock(src, dst)
 		if err != nil {
 			return nil, err
 		}
-		return dst, nil
+		return dst[:n], nil
 
 	case smb2.COMPRESSION_LZNT1:
-		return lznt1.Decompress(src)
+		return lznt1.Decompress(src, limit)
 
 	default:
 		return nil, nil

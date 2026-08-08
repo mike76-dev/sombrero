@@ -128,11 +128,11 @@ func (tcr TreeConnectRequest) Validate(supportsMultiCredit bool) error {
 func (tcr TreeConnectRequest) PathName() string {
 	off := binary.LittleEndian.Uint16(tcr.data[SMB2HeaderSize+4 : SMB2HeaderSize+6])
 	length := binary.LittleEndian.Uint16(tcr.data[SMB2HeaderSize+6 : SMB2HeaderSize+8])
-	if off+length > uint16(len(tcr.data)) {
+	if !fits(uint64(off), uint64(length), uint64(len(tcr.data))) {
 		return ""
 	}
 
-	return utils.DecodeToString(tcr.data[off : off+length])
+	return utils.DecodeToString(tcr.data[off : uint32(off)+uint32(length)])
 }
 
 // TreeConnectResponse represents an SMB2_TREE_CONNECT response.
