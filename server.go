@@ -46,11 +46,8 @@ type server struct {
 	compressionSupported        bool
 	chainedCompressionSupported bool
 	isMultiChannelCapable       bool
-	isLeasingCapable            bool
 
-	// Auxiliary fields.
-	listener net.Listener
-	mu       sync.Mutex
+	mu sync.Mutex
 
 	// cachingMu guards the granting of oplocks and leases. Either is only promised to an open
 	// that has its file to itself, and only this lock keeps two creates racing for the same
@@ -116,10 +113,32 @@ func newServerState(ctx context.Context, db stores.Store, debug bool, cfg stores
 	return s
 }
 
+// applyCapabilities settles what this build of the server can do, which follows from the highest
+// dialect it speaks. It is separate from the tables so that a test can put a server in the state a
+// running one is in without starting one.
+//
+// serverCapabilities is everything the server is able to offer anybody, not what any one client is
+// told. What a client is told is this set narrowed to what its dialect allows, which is settled per
+// connection at the negotiate ([MS-SMB2] 3.3.5.4) - so a capability taken up here reaches only the
+// clients whose dialect has it, and nothing has to remember to hold it back from the rest.
+func (s *server) applyCapabilities() {
+	if smb2.MaxSupportedDialect != smb2.SMB_DIALECT_202 {
+		s.serverCapabilities |= smb2.GLOBAL_CAP_LEASING | smb2.GLOBAL_CAP_LARGE_MTU
+	}
+	if smb2.Is3X(smb2.MaxSupportedDialect) {
+		s.serverCapabilities |= smb2.GLOBAL_CAP_ENCRYPTION | smb2.GLOBAL_CAP_MULTI_CHANNEL
+		s.encryptData = true
+		s.isMultiChannelCapable = true
+	}
+	if smb2.MaxSupportedDialect == smb2.SMB_DIALECT_311 {
+		s.compressionSupported = true
+		s.chainedCompressionSupported = true
+	}
+}
+
 // newServer returns an initialized SMB server, listening and reaping.
 func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool, cfg stores.IndexdConfig) *server {
 	s := newServerState(ctx, db, debug, cfg)
-	s.listener = l
 
 	go s.reapDurableOpens()
 	go s.reapConnections()
@@ -139,6 +158,9 @@ func (s *server) Stats() api.ServerStats {
 //
 // It is the half of newConnection that the tests share; the same reasoning applies as for
 // newServerState.
+//
+// The capabilities are left empty rather than taken from the server: the field is what this client
+// was told, and until it has negotiated a dialect it has been told nothing.
 func (s *server) newConnectionState(clientName string) *connection {
 	c := &connection{
 		commandSequenceWindow: make(map[uint64]struct{}),
@@ -157,7 +179,6 @@ func (s *server) newConnectionState(clientName string) *connection {
 		maxTransactSize:       smb2.MaxTransactSize,
 		maxReadSize:           smb2.MaxReadSize,
 		maxWriteSize:          smb2.MaxWriteSize,
-		serverCapabilities:    s.serverCapabilities,
 		serverSecurityMode:    smb2.NEGOTIATE_SIGNING_ENABLED,
 		server:                s,
 		writeChan:             make(chan []byte),
@@ -347,11 +368,9 @@ func (s *server) trySendResponse(c *connection, ss *session, resp smb2.GenericRe
 	default:
 	}
 
+	// Granted here as well as where a chain is answered: the final response of an asynchronous read
+	// or write goes out this way, and its credits would otherwise stay with the request it answers.
 	c.grantOnResponse(resp)
-
-	// Counted here as well as in writeResponse: the final response of an asynchronous read or write
-	// goes out this way, and a count that missed them would show every one of them as a request the
-	// client is still waiting on.
 
 	buf := s.encodeResponse(c, ss, resp)
 

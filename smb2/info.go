@@ -115,7 +115,7 @@ func (sir *SetInfoResponse) FromRequest(req GenericRequest) {
 	}
 }
 
-// FileRenameInfo contains the information about renaming a file, according to FILE_RENAME_INFORMATION_TYPE_2 (MS-FSCC).
+// FileRenameInfo contains the information about renaming a file, according to FILE_RENAME_INFORMATION_TYPE_2 ([MS-FSCC]).
 type FileRenameInfo struct {
 	ReplaceIfExists bool
 	RootDirectory   uint64

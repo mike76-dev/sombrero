@@ -9,6 +9,7 @@ import (
 	"errors"
 	"hash"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/internal/cmac"
 	"github.com/mike76-dev/sombrero/internal/gmac"
@@ -188,16 +189,70 @@ func TestValidateRequestRefusesAnotherKeysSignature(t *testing.T) {
 	}
 }
 
-// TestValidateRequestPassesOverAnUnsignedRequest is the request that never claimed to be signed.
-// There is nothing to check; whether it was allowed to arrive unsigned is settled elsewhere.
+// TestValidateRequestPassesOverAnUnsignedRequest is the request that never claimed to be signed,
+// on a session that never asked for one. There is nothing to check and nothing to hold it to.
 func TestValidateRequestPassesOverAnUnsignedRequest(t *testing.T) {
 	h := newSMBTest(t)
-	cl := h.dial("alice").signing()
+	cl := h.dial("alice")
 	cl.keyed(0x11)
 
 	req := request(t, echoRequest(1, cl.ss.sessionID, cl.tc.treeID))
 	if err := cl.ss.validateRequest(req, cl.conn); err != nil {
 		t.Fatalf("the server answered %v, want it to leave an unsigned request to the caller", err)
+	}
+}
+
+// TestValidateRequestRefusesAnUnsignedRequestWhenSigningIsRequired is the hole this closes. The
+// server verified a signature whenever one was offered and demanded one from nobody, so a client
+// that simply left the flag clear was served anyway: signing was a thing the client could opt out
+// of one request at a time, on a session whose whole point was that it could not.
+func TestValidateRequestRefusesAnUnsignedRequestWhenSigningIsRequired(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice").signing()
+	cl.keyed(0x11)
+
+	req := request(t, echoRequest(1, cl.ss.sessionID, cl.tc.treeID))
+	if err := cl.ss.validateRequest(req, cl.conn); !errors.Is(err, errUnsignedRequest) {
+		t.Fatalf("the server answered %v, want it to refuse a request that carries no signature", err)
+	}
+}
+
+// TestValidateRequestPassesOverAnUnsignedSessionSetup is the exception to that. A session setup is
+// how a session that has expired authenticates again, and it cannot be held to a requirement that
+// only authenticating establishes - a session that demanded a signature of it could never be
+// authenticated a second time. A binding request, which arrives as a session setup too, is made to
+// carry a signature by the binding path itself.
+func TestValidateRequestPassesOverAnUnsignedSessionSetup(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice").signing()
+	cl.keyed(0x11)
+
+	req := request(t, sessionSetupRequest(1, cl.ss.sessionID, 0))
+	if err := cl.ss.validateRequest(req, cl.conn); err != nil {
+		t.Fatalf("the server answered %v, want the setup of a session let by unsigned", err)
+	}
+}
+
+// TestSetupCommands is the pair of commands that exception covers. A negotiate never reaches the
+// check with a session behind it, since it names none; it is named all the same, so that the
+// exception says what it means rather than happening to hold.
+func TestSetupCommands(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		command uint16
+		want    bool
+	}{
+		{"negotiate", smb2.SMB2_NEGOTIATE, true},
+		{"session setup", smb2.SMB2_SESSION_SETUP, true},
+		{"tree connect", smb2.SMB2_TREE_CONNECT, false},
+		{"echo", smb2.SMB2_ECHO, false},
+		{"write", smb2.SMB2_WRITE, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSetupCommand(tt.command); got != tt.want {
+				t.Errorf("isSetupCommand(%#x) = %v, want %v", tt.command, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -479,7 +534,11 @@ func TestEncryptRoundTrip(t *testing.T) {
 	}{
 		{"3.1.1/GCM", smb2.SMB_DIALECT_311, smb2.AES_128_GCM},
 		{"3.1.1/CCM", smb2.SMB_DIALECT_311, smb2.AES_128_CCM},
-		{"3.0.2", smb2.SMB_DIALECT_302, 0},
+
+		// The dialects before 3.1.1 agree on no cipher, having only ever had the one; the
+		// negotiate writes it down all the same, so that what a connection encrypts with is
+		// read off the connection rather than worked out from its dialect twice over.
+		{"3.0.2", smb2.SMB_DIALECT_302, smb2.AES_128_CCM},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newSMBTest(t)
@@ -542,5 +601,84 @@ func TestDecryptWithoutACipher(t *testing.T) {
 
 	if got := cl.ss.decrypt(sealed, cl.conn); got != nil {
 		t.Fatal("the server opened a message although no cipher was negotiated")
+	}
+}
+
+// TestIntegrationAnUnsignedRequestIsRefusedOnASigningSession is the refusal as the client meets it,
+// through the path that takes a message off the wire rather than through the check alone. The
+// request is turned away with STATUS_ACCESS_DENIED and never reaches the queue, and the connection
+// stays up: an unsigned request says nothing about who sent it, so there is nothing to disconnect
+// over ([MS-SMB2] 3.3.5.2.9).
+func TestIntegrationAnUnsignedRequestIsRefusedOnASigningSession(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice").signing()
+
+	// The window a connection starts with holds message 0 alone, so that is what the first
+	// request off the wire has to carry.
+	if err := cl.conn.acceptRequest(echoRequest(0, cl.ss.sessionID, cl.tc.treeID)); err != nil {
+		t.Fatalf("the connection gave up on the request: %v", err)
+	}
+
+	answer := cl.recv(2 * time.Second)
+	if status := smb2.Header(answer).Status(); status != smb2.STATUS_ACCESS_DENIED {
+		t.Fatalf("the unsigned request was answered with %#x, want it refused", status)
+	}
+
+	cl.conn.mu.Lock()
+	queued := len(cl.conn.requestList)
+	cl.conn.mu.Unlock()
+	if queued != 0 {
+		t.Errorf("the refused request was queued for processing all the same (%d in the list)", queued)
+	}
+
+	select {
+	case <-cl.conn.closeChan:
+		t.Error("the connection was torn down over a request that merely lacked a signature")
+	default:
+	}
+}
+
+// TestIntegrationASignedRequestIsTakenOnASigningSession is the control on that: the same session
+// and the same command, signed, is queued for processing with nothing sent back. Without it, a
+// server that refused every request on a signing session would pass the test above.
+func TestIntegrationASignedRequestIsTakenOnASigningSession(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice").signing()
+
+	msg := signed(t, echoRequest(0, cl.ss.sessionID, cl.tc.treeID), cl.ss.signingKey, smb2.SMB_DIALECT_311, 0)
+	if err := cl.conn.acceptRequest(msg); err != nil {
+		t.Fatalf("the connection gave up on the request: %v", err)
+	}
+
+	cl.quiet(200*time.Millisecond, "a refusal of a request that was signed")
+
+	cl.conn.mu.Lock()
+	_, queued := cl.conn.requestList[0]
+	cl.conn.mu.Unlock()
+	if !queued {
+		t.Error("the signed request was not queued for processing")
+	}
+}
+
+// TestIntegrationAnEncryptedMessageNeedsACipher is the guard on the way in. A connection that
+// settled on no cipher cannot open what arrives sealed, and the message is refused rather than
+// carried to a decryption that has nothing to work with.
+func TestIntegrationAnEncryptedMessageNeedsACipher(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice").encrypting()
+
+	sealed := clientSeal(t, cl.ss, cl.conn, echoRequest(0, cl.ss.sessionID, cl.tc.treeID))
+
+	// The same message, on the connection as it stands before a cipher is agreed.
+	cl.conn.cipherID = 0
+	if err := cl.conn.acceptRequest(sealed); !errors.Is(err, smb2.ErrEncryptedMessage) {
+		t.Fatalf("the server answered %v, want an encrypted message refused with no cipher to open it", err)
+	}
+
+	// And with the cipher back, the same bytes are taken: the refusal is about the cipher and not
+	// about the message.
+	cl.conn.cipherID = smb2.AES_128_GCM
+	if err := cl.conn.acceptRequest(sealed); err != nil {
+		t.Fatalf("the server refused a sealed message it had the cipher for: %v", err)
 	}
 }

@@ -29,8 +29,8 @@ const (
 
 	// sessionExpired is reachable only under an authentication mechanism that hands back an
 	// expiry time. Session.ExpirationTime is whatever GSS returns when the session is set up,
-	// and infinity when it returns nothing (3.3.5.5.3); NTLM returns nothing, and NTLM is the
-	// only mechanism this server offers. So no session here ever expires, and the code that
+	// and infinity when it returns nothing ([MS-SMB2] 3.3.5.5.3); NTLM returns nothing, and NTLM is
+	// the only mechanism this server offers. So no session here ever expires, and the code that
 	// takes an expired one back through authentication is dormant rather than dead: it is what
 	// a Kerberos-authenticated session, whose ticket does have a lifetime, would need.
 	sessionExpired
@@ -39,8 +39,15 @@ const (
 var (
 	errSessionNotFound = errors.New("session not found")
 	errNoSigningKey    = errors.New("no signing key available")
+	errUnsignedRequest = errors.New("request not signed on a session that requires signing")
 	errNoCipher        = errors.New("no cipher negotiated")
 )
+
+// isSetupCommand reports whether the command is one of the two that bring a session up, which are
+// the commands a signing requirement cannot yet be held against.
+func isSetupCommand(command uint16) bool {
+	return command == smb2.SMB2_NEGOTIATE || command == smb2.SMB2_SESSION_SETUP
+}
 
 // session represents a Session object.
 type session struct {
@@ -53,9 +60,7 @@ type session struct {
 	signingRequired           bool
 	openTable                 map[uint64]*open
 	treeConnectTable          map[uint32]*treeConnect
-	expirationTime            time.Time
 	connection                *connection
-	creationTime              time.Time
 	idleTime                  time.Time
 	userName                  string
 	workgroup                 string
@@ -63,7 +68,6 @@ type session struct {
 	signingKey                []byte
 	encryptionKey             []byte
 	decryptionKey             []byte
-	applicationKey            []byte
 	preauthIntegrityHashValue []byte
 	channelList               map[string]*channel
 
@@ -78,7 +82,6 @@ func newSessionState(sid uint64, c *connection) *session {
 		sessionID:        sid,
 		connection:       c,
 		state:            sessionInProgress,
-		creationTime:     time.Now(),
 		idleTime:         time.Now(),
 		openTable:        make(map[uint64]*open),
 		treeConnectTable: make(map[uint32]*treeConnect),
@@ -251,7 +254,6 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 	}
 
 	ss.state = sessionValid
-	ss.expirationTime = time.Now().Add(100 * 365 * 24 * time.Hour) // Impossibly long
 }
 
 // deriveKeys works the signing, application and encryption keys out of the session key, by the
@@ -262,12 +264,10 @@ func (ss *session) deriveKeys() {
 	case smb2.SMB_DIALECT_202, smb2.SMB_DIALECT_21:
 	case smb2.SMB_DIALECT_30, smb2.SMB_DIALECT_302:
 		ss.signingKey = kdf.Kdf(ss.sessionKey, []byte("SMB2AESCMAC\x00"), []byte("SmbSign\x00"))
-		ss.applicationKey = kdf.Kdf(ss.sessionKey, []byte("SMB2APP\x00"), []byte("SmbRpc\x00"))
 		ss.encryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerOut\x00"))
 		ss.decryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMB2AESCCM\x00"), []byte("ServerIn \x00"))
 	case smb2.SMB_DIALECT_311:
 		ss.signingKey = kdf.Kdf(ss.sessionKey, []byte("SMBSigningKey\x00"), ss.preauthIntegrityHashValue)
-		ss.applicationKey = kdf.Kdf(ss.sessionKey, []byte("SMBAppKey\x00"), ss.preauthIntegrityHashValue)
 		ss.encryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMBS2CCipherKey\x00"), ss.preauthIntegrityHashValue)
 		ss.decryptionKey = kdf.Kdf(ss.sessionKey, []byte("SMBC2SCipherKey\x00"), ss.preauthIntegrityHashValue)
 	}
@@ -404,9 +404,29 @@ func (ss *session) verificationKeyFor(c *connection, req *smb2.Request) []byte {
 
 // validateRequest verifies the signature of the request received on the connection. It returns
 // nil if the request is signed correctly, errNoSigningKey if the key needed to verify it is
-// not available, and errInvalidSignature if the signature doesn't match.
+// not available, errUnsignedRequest if the session demands a signature and the request carries
+// none, and errInvalidSignature if the signature doesn't match.
 func (ss *session) validateRequest(req *smb2.Request, c *connection) error {
-	if !req.Header().IsFlagSet(smb2.FLAGS_SIGNED) || req.IsEncrypted() {
+	if req.IsEncrypted() {
+		// Encryption stands in for signing: the transform header is authenticated, so what
+		// arrived under it is as much beyond tampering as a signature would make it.
+		return nil
+	}
+
+	if !req.Header().IsFlagSet(smb2.FLAGS_SIGNED) {
+		// A session that requires signing gets nothing served unsigned ([MS-SMB2] 3.3.5.2.9).
+		// Verifying a signature that is offered is not the same as demanding one: without this
+		// an attacker who can put packets on the wire needs no key to be obeyed, since dropping
+		// the flag was enough to skip the check altogether.
+		//
+		// The two commands of the setup itself are the exception. A NEGOTIATE precedes every
+		// session, and a SESSION_SETUP is how a session that has expired is authenticated again;
+		// neither can be held to the requirement that authenticating establishes. A binding
+		// request is made to carry a signature by the binding path itself.
+		if ss.signingRequired && !isSetupCommand(req.Header().Command()) {
+			return errUnsignedRequest
+		}
+
 		return nil
 	}
 
@@ -479,16 +499,14 @@ func (ss *session) aead(key []byte, c *connection) (cipher.AEAD, error) {
 		return nil, err
 	}
 
-	switch c.negotiateDialect {
-	case smb2.SMB_DIALECT_30, smb2.SMB_DIALECT_302:
+	// The cipher of the connection, whichever dialect settled it: 3.1.1 agrees one in a negotiate
+	// context, and the dialects before it have only ever had AES-128-CCM, which the negotiate
+	// writes down here all the same so that one field answers for both.
+	switch c.cipherID {
+	case smb2.AES_128_CCM:
 		return ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
-	case smb2.SMB_DIALECT_311:
-		switch c.cipherID {
-		case smb2.AES_128_CCM:
-			return ccm.NewCCMWithNonceAndTagSizes(ciph, 11, 16)
-		case smb2.AES_128_GCM:
-			return cipher.NewGCMWithNonceSize(ciph, 12)
-		}
+	case smb2.AES_128_GCM:
+		return cipher.NewGCMWithNonceSize(ciph, 12)
 	}
 
 	return nil, errNoCipher

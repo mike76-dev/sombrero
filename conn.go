@@ -30,11 +30,11 @@ const (
 	staleThreshold = 10 * time.Minute
 
 	// connectionScavengeTimeout is how long a connection is given to get as far as an
-	// authenticated session before it is dropped. Windows uses the same value (note <435>).
+	// authenticated session before it is dropped. Windows uses the same value.
 	connectionScavengeTimeout = 45 * time.Second
 
 	// connectionScavengeInterval is how often the connections that never got that far are
-	// looked for. Windows runs this timer every 45 seconds as well (note <215>).
+	// looked for. Windows runs this timer every 45 seconds as well.
 	connectionScavengeInterval = 45 * time.Second
 )
 
@@ -113,31 +113,10 @@ type connection struct {
 // maxSequenceWindow is the most message IDs a client may hold at once, which is the most credits it
 // may be granted: it may have exactly as many requests outstanding as it has credits, and every credit
 // is an ID this server has to hold open for it.
-//
-// There has to be a limit. A client asks for credits on every request - a macOS client asks for 256
-// apiece - and spends a fraction of what it asks for, so a window that granted every request in full
-// grew by a couple of hundred IDs per request and never gave any of them back, bounded by nothing but
-// the length of the connection.
-//
-// It has to be a high one. This is not how a client is paced - that is done by what each response
-// grants, where the backlog at the store is known - and a limit low enough to be reached in the
-// ordinary course of a transfer paces the client by accident: a macOS client holds a couple of
-// hundred requests open at once and asks for more room on every one of them, and it slows itself
-// down when it stops being given any. What this catches is the growth, not the client.
 const maxSequenceWindow = 65536
 
 // grantCredits increases the number of credits available to the client, up to what it asked for and
 // no further than the window allows, and returns how many it granted.
-//
-// What it may never grant is less than the request spent. A request consumes its charge from the
-// window and is answered with what is granted here, so granting the charge back leaves the client
-// with what it had and granting less leaves it with less - and a client whose credits fall away has
-// fewer requests it may have outstanding, until it is down to one at a time and gives up on what it
-// was doing. That is what a full window used to do: with no room left it granted what was left of the
-// room, which is nothing, and a client that asked for 256 on every request was answered with one.
-//
-// So the window is the limit on growth alone. At the limit the client keeps what it holds, which is
-// as many credits as this server was ever willing to open at once.
 func (c *connection) grantCredits(mid uint64, numCredits, charge uint16) (uint16, error) {
 	if charge == 0 {
 		charge = 1
@@ -186,7 +165,7 @@ func (c *connection) acceptRequest(msg []byte) error {
 	var tsid uint64
 	var size uint32
 	if smb2.Header(msg).ProtocolID() == smb2.PROTOCOL_SMB2_ENCRYPTED {
-		if c.serverCapabilities&smb2.GLOBAL_CAP_ENCRYPTION == 0 {
+		if c.cipherID == 0 {
 			return smb2.ErrEncryptedMessage
 		}
 		if smb2.Header(msg).EncryptionFlags() != 1 {
@@ -310,13 +289,24 @@ func (c *connection) acceptRequest(msg []byte) error {
 
 		var rejectStatus uint32
 		if found {
-			if err := ss.validateRequest(req, c); err != nil {
-				if !errors.Is(err, errNoSigningKey) {
-					return err
-				}
+			switch err := ss.validateRequest(req, c); {
+			case err == nil:
+
+			case errors.Is(err, errNoSigningKey):
 				// The key required to verify the signature is not available. The request
 				// must be failed and not processed any further.
 				rejectStatus = smb2.STATUS_NOT_SUPPORTED
+
+			case errors.Is(err, errUnsignedRequest):
+				// The session requires signing and the request carries none. It is refused
+				// rather than the connection being torn down: nothing here says the client
+				// is an impostor, only that what it sent cannot be acted on.
+				rejectStatus = smb2.STATUS_ACCESS_DENIED
+
+			default:
+				// A signature that does not match is the one case that ends the connection,
+				// since what arrived cannot be trusted to have come from the client at all.
+				return err
 			}
 		}
 
@@ -378,16 +368,7 @@ func dialectName(dialect uint16) string {
 
 // refusesChannel reports whether the Channel field of an SMB2_READ or SMB2_WRITE request names
 // something this server cannot do, so that the request has to be failed with
-// STATUS_INVALID_PARAMETER (3.3.5.12, 3.3.5.13).
-//
-// Before the 3.x dialects the field is reserved: the client sets it to zero and the server is to
-// ignore whatever arrives, so nothing is refused there. From 3.0 on, every value other than NONE
-// asks for the payload to be carried over RDMA rather than in the request, and each of them is
-// refused here for the same reason - this server speaks no SMB Direct, which the spec counts as
-// the underlying connection not being RDMA. An unrecognized value fails by the same rule.
-//
-// Left unchecked, the request would look like an ordinary one with nothing in its buffer: a read
-// would answer with the wrong data and a write would report having stored bytes it never saw.
+// STATUS_INVALID_PARAMETER ([MS-SMB2] 3.3.5.12, 3.3.5.13).
 func (c *connection) refusesChannel(channel uint32) bool {
 	return smb2.Is3X(c.negotiateDialect) && channel != smb2.SMB2_CHANNEL_NONE
 }
@@ -424,9 +405,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 		c.grantCredits(nr.Header().MessageID(), 1, 1) // Grant just one credit
 
-		if dialect != smb2.SMB_DIALECT_202 && c.server.isLeasingCapable {
-			c.serverCapabilities |= smb2.GLOBAL_CAP_LEASING
-		}
+		// A legacy negotiate settles no more than which of the two answers to give, so there is no
+		// client capability to weigh: what goes back is the server's own set, narrowed to the
+		// dialect it names.
+		c.serverCapabilities = c.server.serverCapabilities & smb2.DialectCapabilities(dialect)
 
 		resp := smb2.NewNegotiateResponse(c.server.serverGuid[:], c.ntlmServer, dialect, c.serverCapabilities, uint32(c.maxTransactSize), uint32(c.maxReadSize), uint32(c.maxWriteSize))
 		return resp, nil, nil
@@ -460,24 +442,33 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		c.dialect = dialectName(c.negotiateDialect)
 		if c.negotiateDialect == smb2.SMB_DIALECT_311 {
 			c.clientDialects = nr.Dialects()
-			c.serverCapabilities = c.serverCapabilities &^ smb2.GLOBAL_CAP_ENCRYPTION
 		}
 
-		if smb2.Is3X(c.negotiateDialect) && c.server.isMultiChannelCapable && c.clientCapabilities&smb2.GLOBAL_CAP_MULTI_CHANNEL > 0 {
-			c.serverCapabilities |= smb2.GLOBAL_CAP_MULTI_CHANNEL
+		// What this client is told: everything the server can do, narrowed to what its dialect
+		// allows. Encryption drops out here for 3.1.1, which settles a cipher in a negotiate
+		// context further down instead of carrying the capability.
+		c.serverCapabilities = c.server.serverCapabilities & smb2.DialectCapabilities(c.negotiateDialect)
+
+		// Channels are the one capability that also turns on what the client asked for: there is
+		// no use offering them to a client that never said it could bind one.
+		if c.clientCapabilities&smb2.GLOBAL_CAP_MULTI_CHANNEL == 0 {
+			c.serverCapabilities &^= smb2.GLOBAL_CAP_MULTI_CHANNEL
 		}
 
-		// Leasing turns on the dialect alone. A client does not have to say it wants leases - the
-		// 2.0.2 dialect is simply the one that has none - and it asks for one per create, in the
-		// lease create context, rather than up here.
-		if c.negotiateDialect != smb2.SMB_DIALECT_202 && c.server.isLeasingCapable {
-			c.serverCapabilities |= smb2.GLOBAL_CAP_LEASING
+		// The cipher of the connection is what says whether it encrypts at all, and zero says it
+		// does not. Before 3.1.1 there is nothing to agree on - a dialect that carries the
+		// encryption capability encrypts with AES-128-CCM and no other - so settling it here means
+		// the same field answers the question whichever dialect asked it.
+		if c.serverCapabilities&smb2.GLOBAL_CAP_ENCRYPTION != 0 {
+			c.cipherID = smb2.AES_128_CCM
 		}
 
 		if nr.SecurityMode()&smb2.NEGOTIATE_SIGNING_REQUIRED > 0 {
 			c.shouldSign = true
 		}
 
+		// Multi-credit is the other half of large MTU: a request worth more than a single credit
+		// is how a read or a write grows past 64 KiB, so the dialect that has one has the other.
 		if c.negotiateDialect != smb2.SMB_DIALECT_202 {
 			c.supportsMultiCredit = true
 		} else {
@@ -516,9 +507,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				resp := smb2.NewErrorResponse(nr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 				return resp, nil, nil
 			}
+			// The cipher this dialect settles on, which is none if the client offered nothing the
+			// server has. The capability is deliberately left alone: it was not advertised on
+			// 3.1.1 and must not be taken up afterwards, because the capabilities of the
+			// connection are answered back to the client by FSCTL_VALIDATE_NEGOTIATE_INFO and a
+			// pair that disagrees is what that request exists to catch.
 			if ciphers != nil {
 				c.cipherID = utils.FirstMatch(ciphers, supportedEncryptionAlgos)
-				c.serverCapabilities |= smb2.GLOBAL_CAP_ENCRYPTION
 			}
 
 			flags, compAlgos, err := smb2.GetCompressionCapabilities(ncs)
@@ -647,7 +642,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 			// User successfully authenticated.
 			ss.finalize(ssr)
-			if smb2.Is3X(c.negotiateDialect) && c.server.encryptData && c.serverCapabilities&smb2.GLOBAL_CAP_ENCRYPTION != 0 {
+			if smb2.Is3X(c.negotiateDialect) && c.server.encryptData && c.cipherID != 0 {
 				ss.signingRequired = false
 				ss.encryptData = true
 			} else {
@@ -665,7 +660,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				cl, ok := c.server.globalClientTable[[16]byte(c.clientGuid)]
 				c.server.mu.Unlock()
 				if !ok {
-					cl = &smbClient{[16]byte(c.clientGuid), c.negotiateDialect}
+					cl = &smbClient{dialect: c.negotiateDialect}
 					c.server.mu.Lock()
 					c.server.globalClientTable[[16]byte(c.clientGuid)] = cl
 					c.server.mu.Unlock()
@@ -1284,18 +1279,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		return resp, ss, nil
 
 	// A flush waits for what the client has sent to be taken in, and does not store it.
-	//
-	// [MS-SMB2] 3.3.5.13 has the server push what it has buffered to the store before it answers,
-	// and this server cannot: a file goes to the backend as one multipart upload, and an upload that
-	// has been finished cannot be added to. Storing on a flush would mean finishing the upload and
-	// then, on the next write, uploading the whole file again to append to it - a client that flushes
-	// after every write, which is what an office application does while it saves, would rewrite the
-	// file from the start each time.
-	//
-	// So the guarantee is the weaker one: everything sent so far has been taken into the upload, and
-	// what cannot be stored is reported when the file is closed, which is when the upload is finished.
-	// A write that fails is reported to the write that caused it. Nothing is claimed that is not true;
-	// what is not claimed is durability, which no answer here could honestly give.
 	case smb2.SMB2_FLUSH:
 		fr := smb2.FlushRequest{Request: *req}
 		if err := fr.Validate(c.supportsMultiCredit); err != nil {
@@ -1601,7 +1584,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		// Past this point the data travels in the request itself, so it has to start somewhere
-		// the request can reasonably have put it (3.3.5.13).
+		// the request can reasonably have put it ([MS-SMB2] 3.3.5.13).
 		if wr.DataOffset() > smb2.MaxWriteDataOffset {
 			resp := smb2.NewErrorResponse(wr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 			return resp, ss, nil
@@ -2086,6 +2069,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		switch qdr.FileInformationClass() {
 		case smb2.FILE_BOTH_DIRECTORY_INFORMATION,
 			smb2.FILE_DIRECTORY_INFORMATION,
+			smb2.FILE_FULL_DIRECTORY_INFORMATION,
 			smb2.FILE_ID_64_EXTD_BOTH_DIRECTORY_INFORMATION,
 			smb2.FILE_ID_64_EXTD_DIRECTORY_INFORMATION,
 			smb2.FILE_ID_ALL_EXTD_BOTH_DIRECTORY_INFORMATION,
@@ -2608,7 +2592,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				}
 
 				// Whether the file is on its way out is also what decides whether the lease key
-				// it was taken out under is free for another file (3.3.5.21.1).
+				// it was taken out under is free for another file ([MS-SMB2] 3.3.5.21.1).
 				op.setLeaseDeleteOnClose(pending)
 
 			case smb2.FileRenameInformation:
@@ -2636,10 +2620,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				// to take away. So the upload is finished under the name it was started with, and
 				// the rename moves what it stored. Renaming is metadata on both backends, so this
 				// costs the upload it was always going to cost and nothing besides.
-				//
-				// A client that renames before closing is the one this is for. What Excel does -
-				// write, close, rename - finishes the upload at the close and never comes here with
-				// one pending.
 				if op.file.uploadNow() != nil {
 					if err := op.flush(); err != nil {
 						op.cancelUpload()
@@ -2713,7 +2693,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 					// The opens on the files inside the directory follow their files, and the
 					// lease of each follows its open: a renamed file is not one on its way
-					// out, however it came by its new name (3.3.5.21.1).
+					// out, however it came by its new name ([MS-SMB2] 3.3.5.21.1).
 					if attr&smb2.FILE_ATTRIBUTE_DIRECTORY > 0 {
 						for _, child := range c.server.moveOpensUnder(tc.share, path, newName) {
 							child.mu.Lock()
@@ -2725,7 +2705,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				}
 
 				// The lease follows the file under its new name, and a file that has just been
-				// renamed is not one on its way out (3.3.5.21.1).
+				// renamed is not one on its way out ([MS-SMB2] 3.3.5.21.1).
 				op.renameLease(newName)
 
 			case smb2.FileAllocationInformation:
@@ -2782,9 +2762,9 @@ func (c *connection) processRequests() {
 				return
 			}
 
-			// The credits of the request it answers go back on it, and it is counted as the answer
-			// to that request - here rather than where the message goes out, because a chain goes
-			// out as one message and carries a header of its own for every request in it.
+			// The credits of the request it answers go back on it - here rather than where the
+			// message goes out, because a chain goes out as one message and carries a header of
+			// its own for every request in it.
 			c.grantOnResponse(resp)
 
 			c.mu.Lock()
@@ -2861,25 +2841,6 @@ func (c *connection) sendResponses() {
 // as many requests outstanding as it has credits, so granting fewer is how a server tells it to send
 // less at a time - and it is the only way of doing so that costs the client nothing: every request is
 // answered at once, and the client paces itself.
-//
-// The alternative is to hold a write until the backend has caught up, which is what this server used
-// to do. It works only while the wait is shorter than the client's patience: a write held longer than
-// that is one the client gives up on, and the transfer fails outright rather than slowing down.
-//
-// creditsToGrant is what a write is answered with, given what it charged the window, what it asked
-// for, and how far the backend is behind on the file it belongs to.
-//
-// The measure is what the pipeline holds rather than a fixed number of bytes, because a part is 4 MiB
-// on one backend and a slab of tens of MiB on the other: a figure that leaves room on the first is one
-// that three parts of the second overrun, and a client writing to indexd would be cut back to a
-// request at a time for no reason at all.
-//
-// Well inside what the pipeline holds the client is given what it asked for, so that it may grow its window and
-// run as fast as the link allows. Over half of it the client is given exactly what the write cost,
-// which holds its window where it is. At the whole of it it is given the least a client may be given,
-// which is one: the window falls away with every write and the client is down to a request at a time
-// until the backend has caught up. Never nothing, since a client with no credits can send nothing at
-// all and would wait for a grant that only another request could prompt.
 func creditsToGrant(charge, request uint16, waiting, capacity uint64) uint16 {
 	spent := max(charge, 1)
 
@@ -3135,15 +3096,18 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 	c.mu.Lock()
 	ss, found := c.sessionTable[cr.Header().SessionID()]
 	c.mu.Unlock()
-	if cr.Header().IsFlagSet(smb2.FLAGS_SIGNED) {
-		if found {
-			// An SMB2_CANCEL request is never answered, so a request that cannot be
-			// verified is dropped rather than failed with a status code.
-			if err := ss.validateRequest(req, c); err != nil {
-				return err
-			}
-		} else {
-			return errSessionNotFound
+	if cr.Header().IsFlagSet(smb2.FLAGS_SIGNED) && !found {
+		return errSessionNotFound
+	}
+
+	if found {
+		// An SMB2_CANCEL request is never answered, so a request that cannot be verified is
+		// dropped rather than failed with a status code. That covers the cancel which carries no
+		// signature at all on a session that requires one: a cancel is obeyed without anything
+		// coming back, so an unsigned one would let anybody who can reach the wire stop the work
+		// of a session whose every other request has to be signed.
+		if err := ss.validateRequest(req, c); err != nil {
+			return err
 		}
 	}
 
@@ -3281,10 +3245,10 @@ func (c *connection) isStale() bool {
 // isUnauthenticated reports whether nobody has got as far as an authenticated session over this
 // connection.
 //
-// The spec names three cases (3.3.6.3): no dialect negotiated, a dialect but no sessions, and
-// sessions none of which is Valid or Expired. They come to the same thing, since a session
-// cannot be set up before a dialect is agreed and cannot reach either of those two states
-// without authenticating, so one walk of the table answers all three.
+// The spec names three cases ([MS-SMB2] 3.3.6.3): no dialect negotiated, a dialect but no
+// sessions, and sessions none of which is Valid or Expired. They come to the same thing, since
+// a session cannot be set up before a dialect is agreed and cannot reach either of those two
+// states without authenticating, so one walk of the table answers all three.
 func (c *connection) isUnauthenticated() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
