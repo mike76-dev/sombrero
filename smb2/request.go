@@ -61,12 +61,6 @@ func (req Request) structureSize() uint16 {
 
 // fits reports whether a field of the given length, beginning at the given offset, lies inside a
 // message of the given size.
-//
-// Every offset and length it is asked about was read straight off the wire, so the two are taken
-// as the widest thing they can be counted in rather than in the width the fields themselves are
-// written in. A pair that is added up in its own width can carry past the top of it and come out
-// as a small number, which passes for a field well inside the message and is then used to reach
-// far outside it.
 func fits(off, length, size uint64) bool {
 	return off+length <= size
 }

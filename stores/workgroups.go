@@ -33,13 +33,11 @@ func (pd PublicDir) Matches(name string) bool {
 
 // NormalizeWorkgroupName folds a workgroup name to the form it is stored and
 // looked up in. A client sends the workgroup as the NTLM domain, and a domain
-// name is not case-sensitive: whoever types WRG\test and whoever types wrg\test
-// mean the same workgroup, and neither of them can be asked to guess the case
-// the workgroup happened to be created with. Folding on the way in is also what
-// keeps the UNIQUE constraint on the column meaningful, which a comparison that
-// folded only on the way out would not: wrg and WRG would be two workgroups
-// that no client could tell apart, and a lookup for either would have to pick
-// one of them.
+// name is not case-sensitive. Folding on the way in is also what keeps the
+// UNIQUE constraint on the column meaningful, which a comparison that folded
+// only on the way out would not: wrg and WRG would be two workgroups that no
+// client could tell apart, and a lookup for either would have to pick one of
+// them.
 func NormalizeWorkgroupName(name string) string {
 	return strings.ToLower(name)
 }

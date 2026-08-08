@@ -79,10 +79,6 @@ func putU32(msg []byte, at int, v uint32) {
 // carry past the top of the width they are counted in. Added up in that width the pair comes out
 // as a small number, which passes for a field well inside the message; taken at that word, the
 // bytes it names are reached for far outside it.
-//
-// Every one of these arrived from the network, and the session setup and the tree connect are
-// read before anybody has authenticated. Nothing here may reach outside the message, whether the
-// request is refused on the way in or the field is read as empty.
 func TestRequestFieldsRunningPastTheEnd(t *testing.T) {
 	for _, tt := range []struct {
 		name string

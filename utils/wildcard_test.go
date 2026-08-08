@@ -4,9 +4,7 @@ import "testing"
 
 // TestMatchPatternTakesNamesLiterally is the reason this matcher exists at all: a name is
 // compared character by character, and the punctuation a shell glob would read as syntax means
-// nothing here. "[MS-SMB2].pdf" was uploaded, listed and then looked up by name, and a matcher
-// that read the brackets as a character class answered that no such file existed - so the client
-// took the file away from its window while it sat in the store the whole time.
+// nothing here.
 func TestMatchPatternTakesNamesLiterally(t *testing.T) {
 	tests := []struct {
 		pattern string

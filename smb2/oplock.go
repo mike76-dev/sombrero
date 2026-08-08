@@ -57,8 +57,7 @@ func NewOplockBreakNotification(oplockLevel uint8, fid []byte, sessionID uint64)
 	h.SetCreditResponse(0)
 
 	// The break names the session that holds the open, but not its tree connect: the file ID
-	// alone says which open is meant, and the tree ID is required to be zero. Older Windows
-	// servers left the session at zero as well, so a client cannot be relying on either.
+	// alone says which open is meant, and the tree ID is required to be zero.
 	h.SetSessionID(sessionID)
 	h.SetTreeID(0)
 

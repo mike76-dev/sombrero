@@ -59,9 +59,9 @@ func (ssr SessionSetupRequest) Validate(supportsMultiCredit bool) error {
 	return nil
 }
 
-// Flags returns the Flags field of the SMB2_SESSION_SETUP request. Unlike the other
-// accessors, it may be called before the request is validated, so it checks the length.
+// Flags returns the Flags field of the SMB2_SESSION_SETUP request.
 func (ssr SessionSetupRequest) Flags() uint8 {
+	// This method may be called before the request is validated, so check the length first.
 	if len(ssr.data) < SMB2HeaderSize+SMB2SessionSetupRequestMinSize {
 		return 0
 	}

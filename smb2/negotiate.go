@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	SMBNegotiateRequestMinSize = 5 // Enough to validate a SMB_COM_NEGOTIATE request
+	SMBNegotiateRequestMinSize = 5 // Enough to validate an SMB_COM_NEGOTIATE request
 
 	SMB2NegotiateRequestMinSize       = 36
 	SMB2NegotiateRequestStructureSize = 36
@@ -141,9 +141,6 @@ func Is3X(dialect uint16) bool {
 // allows the server to put in the Capabilities field of a NEGOTIATE response on that dialect, and
 // no other. It says what the dialect permits rather than what any particular server has - what the
 // server itself supports is a separate set, and a capability is advertised only if it is in both.
-//
-// The point of writing it as a mask is that it fails closed. A capability the server takes up and
-// nobody thinks about here is dropped rather than told to a client whose dialect has no such thing.
 func DialectCapabilities(dialect uint16) uint32 {
 	// DFS is the one capability that predates the rest and belongs to every dialect.
 	caps := uint32(GLOBAL_CAP_DFS)

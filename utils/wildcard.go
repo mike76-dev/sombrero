@@ -2,9 +2,7 @@ package utils
 
 // The characters that mean something in a search pattern, as [MS-FSA] 2.1.4.4 lays them out.
 // These five are the whole of it: every other character in a pattern stands for itself,
-// brackets and backslashes included. A general-purpose glob matcher reads "[MS-SMB2].pdf" as a
-// character class followed by ".pdf" and so never finds the file of that name, which is a name
-// a client is perfectly entitled to use.
+// brackets and backslashes included.
 const (
 	wildStar   = '*' // Zero or more characters.
 	wildQM     = '?' // Exactly one character.

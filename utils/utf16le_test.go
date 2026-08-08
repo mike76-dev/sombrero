@@ -146,12 +146,7 @@ func TestNullTerminatedToStringsReadsADialectList(t *testing.T) {
 // TestNullTerminatedToStringsAlwaysComesBack is the reason this function is worth its own test.
 // It is reached from the validation of an SMB1 negotiate, which is the first thing a connection
 // sends and is read before anybody has said who they are, over bytes taken to the end of the
-// packet with nothing checking their shape. Every one of these once went round for ever, holding
-// a core at full tilt and never giving the goroutine back — a few short packets and the server
-// has no capacity left at all.
-//
-// The point here is not the answer but that there is one, so each case is given a hard deadline
-// rather than being left to the timeout of the whole run.
+// packet with nothing checking their shape.
 func TestNullTerminatedToStringsAlwaysComesBack(t *testing.T) {
 	for _, tt := range []struct {
 		name string

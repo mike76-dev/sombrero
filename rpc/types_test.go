@@ -155,13 +155,7 @@ func TestMdsOpenUnmarshal(t *testing.T) {
 }
 
 // TestUnmarshalRefusesWhatRunsPastTheEnd is what these three decoders are really about. Each is
-// handed the payload of a request over a named pipe, and every length in it arrives from the far
-// end. Not one of these buffers was survivable: reading nothing at all crashed all three, a
-// length field of zero crashed all three by taking the terminator off a string that has none, and
-// a length near the top of its own field wrapped round and named a range back inside the buffer.
-//
-// A crash here is not the connection going away. There is no recover anywhere in the read path,
-// so it is the process, and every other client's sessions go with it.
+// handed the payload of a request over a named pipe, and every length in it arrives from the far end.
 func TestUnmarshalRefusesWhatRunsPastTheEnd(t *testing.T) {
 	// A length field of zero, which the slicing then takes the terminator off.
 	zeroed := make([]byte, 64)
@@ -215,10 +209,6 @@ func TestUnmarshalRefusesWhatRunsPastTheEnd(t *testing.T) {
 // turn. Two things have to hold. A prefix short of what the call reads must be reported rather
 // than read past; and once enough has arrived the answer must be the one the whole call gives,
 // since what is left at the end is padding to the next boundary rather than anything read.
-//
-// The point the two meet is a little short of the whole for that reason, and where it falls is
-// not asserted — only that it exists, that nothing below it is accepted, and that nothing above
-// it changes its mind.
 func TestUnmarshalRefusesACallCutShort(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

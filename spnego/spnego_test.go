@@ -137,9 +137,7 @@ func TestFinalNegTokenRespIsAnAcceptance(t *testing.T) {
 
 // TestDecodeNegTokenInitRefusesATokenWithNothingInIt is a token that is well formed and carries
 // no inner token. The field is marked optional, so it decodes without complaint and leaves an
-// empty list behind; reaching for the first entry of it regardless is a panic, and there is no
-// recover anywhere in the read path, so the panic is not the connection going away but the
-// process. Ten bytes off the wire, before anybody has said who they are, took the server down.
+// empty list behind.
 func TestDecodeNegTokenInitRefusesATokenWithNothingInIt(t *testing.T) {
 	// [APPLICATION 0] SEQUENCE { OID spnego } and nothing else.
 	bs := []byte{0x60, 0x08, 0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02}
