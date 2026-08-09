@@ -306,7 +306,7 @@ func (h Header) Nonce() []byte {
 func (h Header) SetNonce(nonce []byte) {
 	n := make([]byte, 16)
 	copy(n, nonce)
-	copy(h[20:36], nonce)
+	copy(h[20:36], n)
 }
 
 // OriginalMessageSize returns the OriginalMessageSize field of the SMB2 TRANSFORM_HEADER.
