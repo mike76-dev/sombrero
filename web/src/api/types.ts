@@ -71,3 +71,27 @@ export interface ConnectRequestResponse {
 export interface ConnectResponse {
   appKey: string
 }
+
+export interface OrphanedSlab {
+  workgroup: string
+  key: string
+  size: number
+  pinnedAt: string
+}
+
+export interface OrphansResponse {
+  slabs: OrphanedSlab[]
+  count: number
+  size: number
+  // The age, in seconds, a slab had to reach to be reported.
+  minAge: number
+  // Keyed by the workgroup whose connection could not be scanned.
+  errors?: Record<string, string>
+}
+
+export interface UnpinOrphansResponse {
+  unpinned: number
+  freed: number
+  failed: number
+  errors?: Record<string, string>
+}

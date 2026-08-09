@@ -496,6 +496,15 @@ func (fc *fakeClient) Rename(_ context.Context, _ stores.Account, from, to strin
 
 func (fc *fakeClient) DeleteAll(context.Context) error { return nil }
 
+// The fake store pins nothing of its own, so it has no orphans to report.
+func (fc *fakeClient) OrphanedSlabs(context.Context, time.Duration) ([]client.OrphanedSlab, error) {
+	return nil, nil
+}
+
+func (fc *fakeClient) UnpinOrphanedSlabs(context.Context, time.Duration) (client.UnpinResult, error) {
+	return client.UnpinResult{}, nil
+}
+
 func (fc *fakeClient) Close() error { return nil }
 
 // smbTest is a server with a single share behind a fake object store, driven by hand-built

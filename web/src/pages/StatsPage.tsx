@@ -1,17 +1,5 @@
 import { getStats } from '../api/endpoints'
-import { Card, ErrorBanner, useApiData } from '../components/common'
-
-function formatBytes(n: number): string {
-  if (n < 1000) return `${n} B`
-  const units = ['KB', 'MB', 'GB', 'TB', 'PB']
-  let value = n
-  let i = -1
-  while (value >= 1000 && i < units.length - 1) {
-    value /= 1000
-    i++
-  }
-  return `${value.toFixed(2)} ${units[i]}`
-}
+import { Card, ErrorBanner, formatBytes, useApiData } from '../components/common'
 
 function formatUptime(start: string): string {
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(start).getTime()) / 1000))
