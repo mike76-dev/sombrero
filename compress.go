@@ -33,7 +33,7 @@ func (c *connection) decompress(msg []byte) ([]byte, error) {
 
 	ocss := smb2.Header(msg).OriginalCompressedSegmentSize()
 
-	if uint64(ocss) > 256+smb2.SMB2CompressionTransformHeaderSize+max(c.maxReadSize, c.maxWriteSize, c.maxTransactSize) {
+	if ocss == 0 || uint64(ocss) > 256+smb2.SMB2CompressionTransformHeaderSize+max(c.maxReadSize, c.maxWriteSize, c.maxTransactSize) {
 		return nil, smb2.ErrInvalidParameter
 	}
 
@@ -178,6 +178,10 @@ func (c *connection) decompress(msg []byte) ([]byte, error) {
 	}
 
 	if uint32(len(output)-start) != ocss {
+		return nil, smb2.ErrWrongLength
+	}
+
+	if len(output) < smb2.SMB2HeaderSize {
 		return nil, smb2.ErrWrongLength
 	}
 

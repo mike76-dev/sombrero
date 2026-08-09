@@ -785,3 +785,49 @@ func TestAChainedPatternPayloadIsMeasuredAgainstItsOwnLength(t *testing.T) {
 		t.Errorf("a two-byte pattern payload failed with %v, want %v", err, smb2.ErrWrongLength)
 	}
 }
+
+// TestASegmentThatComesApartToNothingIsRefused is the size field left at zero. The size is what the
+// decompression is bounded by, and a bound of zero is no bound at all: every algorithm here takes a
+// limit that is not positive to mean it was the caller that produced the input and there is nothing
+// to protect against, so a few bytes from a peer that has authenticated nothing stood for as much
+// output as the peer cared to ask for. Nothing legitimate says zero - what comes out has to be an
+// SMB2 message or it is not read at all.
+func TestASegmentThatComesApartToNothingIsRefused(t *testing.T) {
+	h := newSMBTest(t)
+	c := h.compressing(false, smb2.COMPRESSION_LZ77)
+
+	// Sixty-four mebibytes of one byte, which LZ77 carries in a few thousand.
+	squeezed := squeeze(t, smb2.COMPRESSION_LZ77, bytes.Repeat([]byte{'s'}, 64*1024*1024))
+	if len(squeezed) > 64*1024 {
+		t.Fatalf("the payload is %d bytes on the wire, which is not much of a bomb", len(squeezed))
+	}
+
+	msg := unchained(smb2.COMPRESSION_LZ77, 0, 0, squeezed)
+	if _, err := c.decompress(msg); !errors.Is(err, smb2.ErrInvalidParameter) {
+		t.Errorf("a segment claiming to come apart to nothing failed with %v, want it refused", err)
+	}
+
+	// The same field at zero with nothing behind it, which came apart to an empty buffer that was
+	// then read as an SMB2 header.
+	if _, err := c.decompress(unchained(smb2.COMPRESSION_LZ77, 0, 0, nil)); !errors.Is(err, smb2.ErrInvalidParameter) {
+		t.Errorf("an empty segment failed with %v, want it refused", err)
+	}
+}
+
+// TestASegmentTooShortToBeAMessageIsRefused is what the segment came apart to being shorter than the
+// header it is about to be read as. The size it came to is the peer's to name, so a segment of one
+// byte is a message of one byte, and the four bytes of the protocol ID were read from past the end
+// of it - which the buffer had room for often enough to go unnoticed.
+func TestASegmentTooShortToBeAMessageIsRefused(t *testing.T) {
+	h := newSMBTest(t)
+	c := h.compressing(false, smb2.COMPRESSION_LZ77)
+
+	for _, size := range []int{1, 4, smb2.SMB2HeaderSize - 1} {
+		squeezed := squeeze(t, smb2.COMPRESSION_LZ77, bytes.Repeat([]byte{'s'}, size))
+
+		msg := unchained(smb2.COMPRESSION_LZ77, uint32(size), 0, squeezed)
+		if _, err := c.decompress(msg); !errors.Is(err, smb2.ErrWrongLength) {
+			t.Errorf("a segment of %d bytes failed with %v, want %v", size, err, smb2.ErrWrongLength)
+		}
+	}
+}
