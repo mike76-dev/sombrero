@@ -29,6 +29,18 @@ export function SuccessBanner({ message }: { message: string | null }) {
   return <div className="banner banner-success">{message}</div>
 }
 
+export function formatBytes(n: number): string {
+  if (n < 1000) return `${n} B`
+  const units = ['KB', 'MB', 'GB', 'TB', 'PB']
+  let value = n
+  let i = -1
+  while (value >= 1000 && i < units.length - 1) {
+    value /= 1000
+    i++
+  }
+  return `${value.toFixed(2)} ${units[i]}`
+}
+
 export function Flag({ on, label }: { on: boolean; label: string }) {
   return <span className={on ? 'flag flag-on' : 'flag'}>{label}</span>
 }

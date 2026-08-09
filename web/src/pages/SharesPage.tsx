@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
-import { AccessRights, Account, Share } from '../api/types'
+import { AccessRights, Account, OrphansResponse, Share } from '../api/types'
 import {
   getAccountById,
   getPolicy,
@@ -9,7 +9,9 @@ import {
   registerShare,
   removePolicy,
   removeShare,
+  scanOrphans,
   setPolicy,
+  unpinOrphans,
 } from '../api/endpoints'
 import {
   Card,
@@ -17,6 +19,7 @@ import {
   Field,
   Flag,
   SuccessBanner,
+  formatBytes,
   useApiAction,
   useApiData,
 } from '../components/common'
@@ -128,6 +131,126 @@ interface NamedRights extends AccessRights {
   workgroup?: string
 }
 
+// How many of the found slabs are listed before the rest is summarized. The
+// listing is there to show what the button would drop, not to be read in full.
+const maxListedSlabs = 20
+
+function formatAge(seconds: number): string {
+  if (seconds % 3600 === 0) {
+    const hours = seconds / 3600
+    return hours === 1 ? 'an hour' : `${hours} hours`
+  }
+  if (seconds % 60 === 0) return `${seconds / 60} minutes`
+  return `${seconds} seconds`
+}
+
+// OrphanedSlabsCard scans the share's storage backend for slabs that it pins
+// while no file references them, and offers to unpin them. indexd shares only:
+// renterd keeps its objects in its own database.
+function OrphanedSlabsCard({ share }: { share: Share }) {
+  const { run, busy, error, message, setMessage } = useApiAction()
+  const [scan, setScan] = useState<OrphansResponse | null>(null)
+
+  const failures = scan?.errors ? Object.entries(scan.errors) : []
+
+  return (
+    <div className="stack">
+      <p className="muted">
+        Slabs that this share has pinned and pays for, while no file references them — what an
+        upload interrupted at the wrong moment can leave behind. Slabs pinned within the last
+        hour are never reported: they may belong to an upload still in flight.
+      </p>
+      <div className="row">
+        <button
+          className="btn"
+          disabled={busy}
+          onClick={() =>
+            run(async () => {
+              setScan(await scanOrphans(share.name))
+            })
+          }
+        >
+          {scan ? 'Rescan' : 'Scan for orphaned slabs'}
+        </button>
+        {!!scan?.count && (
+          <button
+            className="btn btn-danger"
+            disabled={busy}
+            onClick={() => {
+              if (
+                !window.confirm(
+                  `Unpin ${scan.count} orphaned slab(s) of ${share.name}, freeing ${formatBytes(
+                    scan.size,
+                  )}? This cannot be undone.`,
+                )
+              )
+                return
+              run(async () => {
+                const res = await unpinOrphans(share.name)
+                // Show what is left rather than what was found before.
+                setScan(await scanOrphans(share.name))
+                setMessage(
+                  `Unpinned ${res.unpinned} slab(s), freeing ${formatBytes(res.freed)}.` +
+                    (res.failed
+                      ? ` ${res.failed} could not be dropped and stay staged for the background retry.`
+                      : ''),
+                )
+              })
+            }}
+          >
+            Unpin all ({scan.count})
+          </button>
+        )}
+      </div>
+      <ErrorBanner error={error} />
+      <SuccessBanner message={message} />
+      {scan &&
+        (scan.count === 0 ? (
+          <p className="muted">
+            No orphaned slabs found
+            {scan.minAge ? ` among the slabs pinned more than ${formatAge(scan.minAge)} ago` : ''}.
+          </p>
+        ) : (
+          <>
+            <div className="banner banner-error">
+              Found <strong>{scan.count}</strong> orphaned slab{scan.count === 1 ? '' : 's'},{' '}
+              {formatBytes(scan.size)} in total.
+            </div>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Slab</th>
+                  <th>Size</th>
+                  <th>Pinned</th>
+                  <th>Workgroup</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scan.slabs.slice(0, maxListedSlabs).map((slab) => (
+                  <tr key={`${slab.workgroup}/${slab.key}`}>
+                    <td className="mono">{slab.key.slice(0, 16)}…</td>
+                    <td>{formatBytes(slab.size)}</td>
+                    <td>{new Date(slab.pinnedAt).toLocaleString()}</td>
+                    <td className="mono muted">{slab.workgroup}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {scan.slabs.length > maxListedSlabs && (
+              <p className="muted">…and {scan.slabs.length - maxListedSlabs} more.</p>
+            )}
+          </>
+        ))}
+      {failures.map(([workgroup, reason]) => (
+        <div className="banner banner-error" key={workgroup}>
+          Workgroup <span className="mono">{workgroup}</span> could not be reached, so its slabs
+          are not counted here: {reason}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function ShareDetails({ share, onChanged }: { share: Share; onChanged: () => void }) {
   const { run, busy, error } = useApiAction()
   const [accounts, setAccounts] = useState<NamedRights[] | null>(null)
@@ -203,6 +326,7 @@ function ShareDetails({ share, onChanged }: { share: Share; onChanged: () => voi
         </button>
       </div>
       <ErrorBanner error={error} />
+      {share.type === 'indexd' && <OrphanedSlabsCard share={share} />}
       {accounts &&
         (accounts.length === 0 ? (
           <p className="muted">No accounts have access to this share.</p>

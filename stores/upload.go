@@ -144,6 +144,63 @@ func (db *Database) SlabReferenced(key types.Hash256) (referenced bool, err erro
 	return
 }
 
+// UnreferencedSlabs returns those of the given slab keys that no metadata
+// entry references, in the order they were given. Unlike the helper of the
+// same purpose used by the deletions, it only reads: the caller is scanning
+// what the storage backend holds, most of which is expected to be referenced
+// and must not be staged for unpinning.
+//
+// A key that is not referenced is not necessarily an orphan. An upload records
+// its slab only after the backend has pinned it, so a slab whose upload is
+// still in flight looks exactly the same from here; it is up to the caller to
+// tell the two apart by age.
+func (db *Database) UnreferencedSlabs(keys []types.Hash256) (unreferenced []types.Hash256, err error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	raw := make([][]byte, len(keys))
+	for i, key := range keys {
+		raw[i] = key[:]
+	}
+
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT u.ord
+			FROM UNNEST($1::BYTEA[]) WITH ORDINALITY AS u(k, ord)
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM metadata m
+				WHERE m.slab_key = u.k
+			)
+			ORDER BY u.ord
+		`
+
+		rows, err := tx.Query(ctx, query, raw)
+		if err != nil {
+			return fmt.Errorf("failed to filter unreferenced slabs: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var ord int64
+			if err := rows.Scan(&ord); err != nil {
+				return fmt.Errorf("failed to scan slab position: %w", err)
+			}
+			if ord < 1 || ord > int64(len(keys)) {
+				return fmt.Errorf("slab position out of range: %d", ord)
+			}
+			unreferenced = append(unreferenced, keys[ord-1])
+		}
+
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
 // StageUnpin lists the given slab for unpinning by the given share and
 // workgroup connection, which is retried until it is confirmed. Staging is
 // idempotent.

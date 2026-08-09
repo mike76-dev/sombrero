@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/julienschmidt/httprouter"
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
 	sdk "go.sia.tech/siastorage"
@@ -59,6 +62,53 @@ type Store interface {
 	RemoveConnection(wg stores.Workgroup, share stores.Share) error
 }
 
+// Server is as much of the running SMB server as the API needs: the statistics
+// it keeps, and the share connections it holds, which is where the storage
+// backend lives.
+type Server interface {
+	// Stats returns a snapshot of the current server statistics.
+	Stats() ServerStats
+
+	// ShareConnections returns the clients of the named share's workgroup
+	// connections, keyed by workgroup UUID, starting the ones that are not
+	// running. failed names the workgroups whose connection could not be
+	// started, keyed the same way.
+	ShareConnections(name string) (conns map[string]client.Client, failed map[string]string, err error)
+}
+
+// OrphanedSlab is one entry of an orphan scan: a slab that the share's
+// connection has pinned and pays for, while no file references it.
+type OrphanedSlab struct {
+	Workgroup string        `json:"workgroup"`
+	Key       types.Hash256 `json:"key"`
+	Size      uint64        `json:"size"`
+	PinnedAt  time.Time     `json:"pinnedAt"`
+}
+
+// OrphansResponse is the response type for GET /share/:name/orphans.
+type OrphansResponse struct {
+	// Slabs is what the scan found, oldest pin first, and Count and Size are
+	// its totals — what the button acts on and what unpinning would reclaim.
+	Slabs []OrphanedSlab `json:"slabs"`
+	Count int            `json:"count"`
+	Size  uint64         `json:"size"`
+
+	// MinAge is the age a slab had to reach to be reported, in seconds.
+	MinAge float64 `json:"minAge"`
+
+	// Errors names the workgroup connections that could not be scanned, if
+	// any. The scan of the others still counts.
+	Errors map[string]string `json:"errors,omitempty"`
+}
+
+// UnpinOrphansResponse is the response type for DELETE /share/:name/orphans.
+type UnpinOrphansResponse struct {
+	Unpinned int               `json:"unpinned"`
+	Freed    uint64            `json:"freed"`
+	Failed   int               `json:"failed"`
+	Errors   map[string]string `json:"errors,omitempty"`
+}
+
 // ServerStats keeps track of the server statistics.
 type ServerStats struct {
 	Start      time.Time `json:"start"`      // The time the server started
@@ -98,22 +148,23 @@ type ConnectResponse struct {
 type API struct {
 	router          httprouter.Router
 	store           Store
+	server          Server
 	cfg             stores.IndexdConfig
 	mode            stores.ServerMode
 	ctx             context.Context
-	stats           func() ServerStats
 	pendingBuilders sync.Map // key: "workgroupUUID/shareName" → *sdk.Builder
 }
 
-// NewAPI returns an initialized API object. stats returns a snapshot
-// of the current server statistics; it may be nil.
-func NewAPI(ctx context.Context, s Store, cfg stores.IndexdConfig, mode stores.ServerMode, stats func() ServerStats) *API {
+// NewAPI returns an initialized API object. srv is the running SMB server and
+// may be nil, in which case the statistics come back empty and the endpoints
+// that need a storage backend report the share as unavailable.
+func NewAPI(ctx context.Context, s Store, srv Server, cfg stores.IndexdConfig, mode stores.ServerMode) *API {
 	api := &API{
-		store: s,
-		cfg:   cfg,
-		mode:  mode,
-		ctx:   ctx,
-		stats: stats,
+		store:  s,
+		server: srv,
+		cfg:    cfg,
+		mode:   mode,
+		ctx:    ctx,
 	}
 	api.buildHTTPRoutes()
 	return api
@@ -202,6 +253,14 @@ func (api *API) buildHTTPRoutes() {
 
 	router.GET("/share/:name/accounts", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.shareAccountsHandlerGET(w, req, ps)
+	})
+
+	router.GET("/share/:name/orphans", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.orphansHandlerGET(w, req, ps)
+	})
+
+	router.DELETE("/share/:name/orphans", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.orphansHandlerDELETE(w, req, ps)
 	})
 
 	router.GET("/share/:name/policy", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -566,6 +625,194 @@ func (api *API) shareAccountsHandlerGET(w http.ResponseWriter, req *http.Request
 	writeJSON(w, ars)
 }
 
+// scanMinAge reads the minimum age a slab must have reached to count as
+// orphaned from the request, given in seconds. It writes the error response
+// itself when the value makes no sense.
+func scanMinAge(w http.ResponseWriter, req *http.Request) (time.Duration, bool) {
+	raw := req.FormValue("minAge")
+	if raw == "" {
+		return client.DefaultOrphanMinAge, true
+	}
+
+	secs, err := strconv.ParseFloat(raw, 64)
+	if err != nil || secs < 0 {
+		writeError(w, "minAge must be a non-negative number of seconds", http.StatusBadRequest)
+		return 0, false
+	}
+	if secs == 0 {
+		// Zero would report the slabs of the uploads that are in flight right
+		// now, which are unreferenced only because they are not finished.
+		writeError(w, "minAge of 0 would report the uploads that are still in flight", http.StatusBadRequest)
+		return 0, false
+	}
+
+	return time.Duration(secs * float64(time.Second)), true
+}
+
+// scannableShare resolves the workgroup connections of the named share, and
+// writes the error response itself when the share cannot be scanned. The
+// connections it could not reach are returned alongside, to be reported with
+// whatever the scan of the others finds.
+func (api *API) scannableShare(w http.ResponseWriter, name string) (map[string]client.Client, map[string]string, bool) {
+	if name == "" {
+		writeError(w, "share name cannot be empty", http.StatusBadRequest)
+		return nil, nil, false
+	}
+
+	share, err := api.store.GetShare(name)
+	if err != nil {
+		log.Printf("failed to find share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return nil, nil, false
+	}
+	if share.Name == "" {
+		writeError(w, "share not found", http.StatusNotFound)
+		return nil, nil, false
+	}
+	if share.Type != "indexd" {
+		writeError(w, client.ErrNoSlabScan.Error(), http.StatusBadRequest)
+		return nil, nil, false
+	}
+
+	if api.server == nil {
+		writeError(w, "the share connections are not available on this server", http.StatusServiceUnavailable)
+		return nil, nil, false
+	}
+
+	conns, failed, err := api.server.ShareConnections(name)
+	if failed == nil {
+		failed = make(map[string]string)
+	}
+	if err != nil {
+		if errors.Is(err, client.ErrNoSlabScan) {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return nil, nil, false
+		}
+		// The share is in the store but the server cannot serve it, which is
+		// not something the caller can tell from the response alone.
+		log.Printf("failed to resolve the connections of share %s: %v", name, err)
+		writeError(w, "share not connected: "+err.Error(), http.StatusNotFound)
+		return nil, nil, false
+	}
+	if len(conns) == 0 {
+		// Nothing is connected, so nothing of this share is pinned right now.
+		// Scanning would report every slab of it as an orphan, which is the
+		// one answer that must never be acted on.
+		writeError(w, "no workgroup is connected to this share", http.StatusConflict)
+		return nil, nil, false
+	}
+
+	return conns, failed, true
+}
+
+// orphansHandlerGET handles the GET /share/:name/orphans calls. It reports the
+// slabs the share's connections have pinned that no file references, without
+// changing anything.
+func (api *API) orphansHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	conns, failed, ok := api.scannableShare(w, ps.ByName("name"))
+	if !ok {
+		return
+	}
+	minAge, ok := scanMinAge(w, req)
+	if !ok {
+		return
+	}
+
+	res := OrphansResponse{
+		Slabs:  []OrphanedSlab{},
+		MinAge: minAge.Seconds(),
+	}
+
+	var scanned int
+	for wg, c := range conns {
+		orphans, err := c.OrphanedSlabs(req.Context(), minAge)
+		if err != nil {
+			log.Printf("failed to scan share %s of workgroup %s for orphaned slabs: %v", ps.ByName("name"), wg, err)
+			failed[wg] = err.Error()
+			continue
+		}
+		scanned++
+		for _, orphan := range orphans {
+			res.Slabs = append(res.Slabs, OrphanedSlab{
+				Workgroup: wg,
+				Key:       orphan.Key,
+				Size:      orphan.Size,
+				PinnedAt:  orphan.PinnedAt,
+			})
+			res.Count++
+			res.Size += orphan.Size
+		}
+	}
+
+	// A connection that could not be reached is reported alongside what the
+	// others found, so that the count is never mistaken for the whole share.
+	// Only a scan that saw nothing at all fails.
+	if scanned == 0 {
+		writeError(w, "failed to scan the share for orphaned slabs", http.StatusInternalServerError)
+		return
+	}
+	if len(failed) > 0 {
+		res.Errors = failed
+	}
+
+	// Oldest pin first across all the workgroups, so that the listing reads
+	// the same way it does per connection.
+	sort.Slice(res.Slabs, func(i, j int) bool {
+		if !res.Slabs[i].PinnedAt.Equal(res.Slabs[j].PinnedAt) {
+			return res.Slabs[i].PinnedAt.Before(res.Slabs[j].PinnedAt)
+		}
+		return bytes.Compare(res.Slabs[i].Key[:], res.Slabs[j].Key[:]) < 0
+	})
+
+	writeJSON(w, res)
+}
+
+// orphansHandlerDELETE handles the DELETE /share/:name/orphans calls. Each
+// connection re-runs the scan and unpins what it finds, so what is dropped is
+// what is orphaned at that moment rather than what a previous scan reported.
+func (api *API) orphansHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	conns, failed, ok := api.scannableShare(w, ps.ByName("name"))
+	if !ok {
+		return
+	}
+	minAge, ok := scanMinAge(w, req)
+	if !ok {
+		return
+	}
+
+	var res UnpinOrphansResponse
+
+	var ran int
+	for wg, c := range conns {
+		unpinned, err := c.UnpinOrphanedSlabs(req.Context(), minAge)
+		if err != nil {
+			log.Printf("failed to unpin the orphaned slabs of share %s of workgroup %s: %v", ps.ByName("name"), wg, err)
+			failed[wg] = err.Error()
+		} else {
+			ran++
+		}
+
+		// A run that failed part of the way through still dropped what it got
+		// to, so its counts are reported either way.
+		res.Unpinned += unpinned.Unpinned
+		res.Freed += unpinned.Freed
+		res.Failed += unpinned.Failed
+	}
+
+	// Unpinning is a change, so a run that got part of the way through is
+	// reported rather than hidden behind an error: those slabs are gone, and
+	// the caller has to know. Only a run that changed nothing at all fails.
+	if ran == 0 && res.Unpinned == 0 {
+		writeError(w, "failed to unpin the orphaned slabs", http.StatusInternalServerError)
+		return
+	}
+	if len(failed) > 0 {
+		res.Errors = failed
+	}
+
+	writeJSON(w, res)
+}
+
 // policyHandlerGET handles the GET /share/:name/policy calls.
 func (api *API) policyHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	shareName := ps.ByName("name")
@@ -901,8 +1148,8 @@ func (api *API) workgroupHandlerDELETE(w http.ResponseWriter, req *http.Request,
 // statsHandlerGET handles the GET /stats calls.
 func (api *API) statsHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	var stats ServerStats
-	if api.stats != nil {
-		stats = api.stats()
+	if api.server != nil {
+		stats = api.server.Stats()
 	}
 
 	writeJSON(w, stats)

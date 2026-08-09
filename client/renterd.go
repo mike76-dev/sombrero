@@ -582,6 +582,19 @@ func (rc *RenterdClient) DeleteAll(ctx context.Context) error {
 	return nil
 }
 
+// OrphanedSlabs is not supported by renterd shares: renterd holds the objects
+// in its own database and drops them together with the files, so there is no
+// pinning of this server's making to reconcile.
+func (rc *RenterdClient) OrphanedSlabs(ctx context.Context, minAge time.Duration) ([]OrphanedSlab, error) {
+	return nil, ErrNoSlabScan
+}
+
+// UnpinOrphanedSlabs is not supported by renterd shares, for the reason given
+// on OrphanedSlabs.
+func (rc *RenterdClient) UnpinOrphanedSlabs(ctx context.Context, minAge time.Duration) (UnpinResult, error) {
+	return UnpinResult{}, ErrNoSlabScan
+}
+
 // Close closes the client and releases all resources.
 func (rc *RenterdClient) Close() error {
 	return nil

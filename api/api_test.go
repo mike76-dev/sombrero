@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
 )
@@ -229,12 +230,55 @@ func (m *mockStore) RemoveConnection(wg stores.Workgroup, s stores.Share) error 
 	return nil
 }
 
+// mockServer stands in for the running SMB server.
+type mockServer struct {
+	stats            ServerStats
+	shareConnections func(string) (map[string]client.Client, map[string]string, error)
+}
+
+func (m *mockServer) Stats() ServerStats { return m.stats }
+
+func (m *mockServer) ShareConnections(name string) (map[string]client.Client, map[string]string, error) {
+	if m.shareConnections != nil {
+		return m.shareConnections(name)
+	}
+	return nil, nil, nil
+}
+
+// mockClient implements only the parts of client.Client that the slab scan
+// uses. The embedded interface is nil, so any other call panics rather than
+// passing unnoticed.
+type mockClient struct {
+	client.Client
+
+	orphans   []client.OrphanedSlab
+	orphanErr error
+
+	unpinned  client.UnpinResult
+	unpinErr  error
+	minAgeGot time.Duration
+}
+
+func (m *mockClient) OrphanedSlabs(ctx context.Context, minAge time.Duration) ([]client.OrphanedSlab, error) {
+	m.minAgeGot = minAge
+	return m.orphans, m.orphanErr
+}
+
+func (m *mockClient) UnpinOrphanedSlabs(ctx context.Context, minAge time.Duration) (client.UnpinResult, error) {
+	m.minAgeGot = minAge
+	return m.unpinned, m.unpinErr
+}
+
 func newTestAPI(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, stores.IndexdConfig{}, stores.ModeNormal, nil)
+	return NewAPI(context.Background(), ms, nil, stores.IndexdConfig{}, stores.ModeNormal)
+}
+
+func newTestAPIWithServer(ms *mockStore, srv Server) *API {
+	return NewAPI(context.Background(), ms, srv, stores.IndexdConfig{}, stores.ModeNormal)
 }
 
 func newTestLiteAPI(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, stores.IndexdConfig{}, stores.ModeLite, nil)
+	return NewAPI(context.Background(), ms, nil, stores.IndexdConfig{}, stores.ModeLite)
 }
 
 func doRequest(api *API, method, path string, body any) *httptest.ResponseRecorder {
@@ -1398,7 +1442,7 @@ func TestStats(t *testing.T) {
 			BytesSent:  1024,
 			BytesRcvd:  2048,
 		}
-		api := NewAPI(context.Background(), &mockStore{}, stores.IndexdConfig{}, stores.ModeNormal, func() ServerStats { return stats })
+		api := newTestAPIWithServer(&mockStore{}, &mockServer{stats: stats})
 		w := doRequest(api, http.MethodGet, "/stats", nil)
 		checkStatus(t, w, http.StatusOK)
 		got := decodeJSON[ServerStats](t, w)
@@ -1414,5 +1458,213 @@ func TestStats(t *testing.T) {
 		if got != (ServerStats{}) {
 			t.Errorf("stats: want zero value, got %+v", got)
 		}
+	})
+}
+
+func slabKey(b byte) types.Hash256 {
+	var h types.Hash256
+	h[0] = b
+	return h
+}
+
+// orphanServer wires one workgroup connection per given client under a share
+// that the store reports as an indexd share.
+func orphanServer(conns map[string]client.Client) *mockServer {
+	return &mockServer{
+		shareConnections: func(string) (map[string]client.Client, map[string]string, error) {
+			return conns, nil, nil
+		},
+	}
+}
+
+// orphanServerWithFailures also reports connections that could not be started.
+func orphanServerWithFailures(conns map[string]client.Client, failed map[string]string) *mockServer {
+	return &mockServer{
+		shareConnections: func(string) (map[string]client.Client, map[string]string, error) {
+			return conns, failed, nil
+		},
+	}
+}
+
+func TestOrphans(t *testing.T) {
+	indexdStore := func() *mockStore {
+		return &mockStore{getShare: foundShare("myshare", "indexd")}
+	}
+
+	t.Run("GET reports the slabs, the count and the total size", func(t *testing.T) {
+		older := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+		newer := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{orphans: []client.OrphanedSlab{
+				{Key: slabKey(2), Size: 300, PinnedAt: newer},
+				{Key: slabKey(1), Size: 700, PinnedAt: older},
+			}},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[OrphansResponse](t, w)
+		if res.Count != 2 || res.Size != 1000 {
+			t.Errorf("totals: want 2 slabs of 1000 bytes, got %d of %d", res.Count, res.Size)
+		}
+		if len(res.Slabs) != 2 || res.Slabs[0].Key != slabKey(1) {
+			t.Fatalf("slabs: want the oldest pin first, got %+v", res.Slabs)
+		}
+		if res.Slabs[0].Workgroup != testUUID.String() {
+			t.Errorf("workgroup: want %s, got %s", testUUID, res.Slabs[0].Workgroup)
+		}
+		if res.MinAge != client.DefaultOrphanMinAge.Seconds() {
+			t.Errorf("minAge: want the default of %v, got %v", client.DefaultOrphanMinAge.Seconds(), res.MinAge)
+		}
+	})
+
+	t.Run("GET aggregates over the workgroup connections", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321").String()
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{orphans: []client.OrphanedSlab{{Key: slabKey(1), Size: 10}}},
+			other:             &mockClient{orphans: []client.OrphanedSlab{{Key: slabKey(2), Size: 20}}},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[OrphansResponse](t, w)
+		if res.Count != 2 || res.Size != 30 {
+			t.Errorf("totals: want 2 slabs of 30 bytes, got %d of %d", res.Count, res.Size)
+		}
+	})
+
+	t.Run("GET passes minAge on", func(t *testing.T) {
+		mc := &mockClient{}
+		srv := orphanServer(map[string]client.Client{testUUID.String(): mc})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/orphans?minAge=90", nil)
+		checkStatus(t, w, http.StatusOK)
+		if mc.minAgeGot != 90*time.Second {
+			t.Errorf("minAge: want 90s, got %v", mc.minAgeGot)
+		}
+	})
+
+	t.Run("GET rejects a minAge that would report uploads in flight", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{testUUID.String(): &mockClient{}})
+		for _, q := range []string{"?minAge=0", "?minAge=-5", "?minAge=soon"} {
+			w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/orphans"+q, nil)
+			checkStatus(t, w, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("GET reports a failed connection but keeps the rest", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321").String()
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{orphans: []client.OrphanedSlab{{Key: slabKey(1), Size: 10}}},
+			other:             &mockClient{orphanErr: errors.New("backend down")},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[OrphansResponse](t, w)
+		if res.Count != 1 {
+			t.Errorf("count: want the surviving connection's 1 slab, got %d", res.Count)
+		}
+		if res.Errors[other] == "" {
+			t.Errorf("errors: want the failed workgroup named, got %+v", res.Errors)
+		}
+	})
+
+	t.Run("GET reports a connection that could not be started", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321").String()
+		srv := orphanServerWithFailures(
+			map[string]client.Client{
+				testUUID.String(): &mockClient{orphans: []client.OrphanedSlab{{Key: slabKey(1), Size: 10}}},
+			},
+			map[string]string{other: "share currently unavailable"},
+		)
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[OrphansResponse](t, w)
+		if res.Count != 1 {
+			t.Errorf("count: want the reachable connection's 1 slab, got %d", res.Count)
+		}
+		if res.Errors[other] == "" {
+			t.Errorf("errors: want the unreachable workgroup named, got %+v", res.Errors)
+		}
+	})
+
+	t.Run("GET fails when no connection could be scanned", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{orphanErr: errors.New("backend down")},
+		})
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("GET refuses a renterd share", func(t *testing.T) {
+		ms := &mockStore{getShare: foundShare("myshare", "renterd")}
+		w := doRequest(newTestAPIWithServer(ms, orphanServer(nil)), http.MethodGet, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("GET refuses an unknown share", func(t *testing.T) {
+		w := doRequest(newTestAPIWithServer(indexdStore(), orphanServer(nil)), http.MethodGet, "/share/other/orphans", nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("GET refuses a share with no workgroup connected", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{})
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusConflict)
+	})
+
+	t.Run("GET reports the share as unavailable without a server", func(t *testing.T) {
+		w := doRequest(newTestAPI(indexdStore()), http.MethodGet, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusServiceUnavailable)
+	})
+
+	t.Run("DELETE sums up what was unpinned", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321").String()
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{unpinned: client.UnpinResult{Unpinned: 2, Freed: 500}},
+			other:             &mockClient{unpinned: client.UnpinResult{Unpinned: 1, Freed: 250, Failed: 1}},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodDelete, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[UnpinOrphansResponse](t, w)
+		if res.Unpinned != 3 || res.Freed != 750 || res.Failed != 1 {
+			t.Errorf("result: want 3 unpinned, 750 freed, 1 failed, got %+v", res)
+		}
+	})
+
+	t.Run("DELETE keeps the counts of a run that failed part way", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{
+				unpinned: client.UnpinResult{Unpinned: 1, Freed: 100},
+				unpinErr: errors.New("backend down"),
+			},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodDelete, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[UnpinOrphansResponse](t, w)
+		if res.Unpinned != 1 || res.Freed != 100 {
+			t.Errorf("result: want the slab it did drop reported, got %+v", res)
+		}
+		if res.Errors[testUUID.String()] == "" {
+			t.Errorf("errors: want the failure reported alongside, got %+v", res.Errors)
+		}
+	})
+
+	t.Run("DELETE fails when nothing could be unpinned", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{unpinErr: errors.New("backend down")},
+		})
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodDelete, "/share/myshare/orphans", nil)
+		checkStatus(t, w, http.StatusInternalServerError)
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -30,12 +31,24 @@ type fakeBackend struct {
 	deleteErr  error
 	uploads    int
 	deletes    int
+
+	// events mirrors the object event log of the real backend: an append-only
+	// record of every pin and unpin, ordered by a timestamp that ticks once
+	// per event so that no two events share one.
+	events []PinnedObject
+	clock  time.Time
 }
+
+// eventEpoch is where the fake backend's clock starts. It is in the past, so
+// that a test that does not deliberately backdate its events still produces
+// slabs old enough for an orphan scan to consider them.
+var eventEpoch = time.Now().Add(-24 * time.Hour)
 
 func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
 		objects: make(map[types.Hash256][]byte),
 		nextID:  1,
+		clock:   eventEpoch,
 	}
 }
 
@@ -43,7 +56,27 @@ func newGatedFakeBackend() *fakeBackend {
 	return &fakeBackend{
 		objects:    make(map[types.Hash256][]byte),
 		nextID:     1,
+		clock:      eventEpoch,
 		uploadGate: make(chan struct{}, 1024),
+	}
+}
+
+// record appends an event to the log. The caller holds the lock.
+func (fb *fakeBackend) record(ev PinnedObject) {
+	fb.clock = fb.clock.Add(time.Second)
+	ev.UpdatedAt = fb.clock
+	fb.events = append(fb.events, ev)
+}
+
+// touch moves the recorded pin of the given object to now, which is what an
+// upload that has only just finished looks like to a scan.
+func (fb *fakeBackend) touch(key types.Hash256) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	for i := range fb.events {
+		if fb.events[i].Key == key {
+			fb.events[i].UpdatedAt = time.Now()
+		}
 	}
 }
 
@@ -134,6 +167,7 @@ func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, pari
 
 	key := fb.nextKey()
 	fb.objects[key] = append([]byte(nil), data...)
+	fb.record(PinnedObject{Key: key, Size: uint64(len(data))})
 	return key, nil
 }
 
@@ -163,6 +197,7 @@ func (fb *fakeBackend) DeleteObject(ctx context.Context, key types.Hash256) erro
 	}
 	fb.deletes++
 	delete(fb.objects, key)
+	fb.record(PinnedObject{Key: key, Deleted: true})
 	return nil
 }
 
@@ -170,19 +205,36 @@ func (fb *fakeBackend) PruneSlabs(ctx context.Context) error {
 	return nil
 }
 
-func (fb *fakeBackend) ListObjectKeys(ctx context.Context, cursor slabs.Cursor, limit int) ([]types.Hash256, error) {
+// ListObjects returns one page of the event log, the way the real backend
+// paginates it: the events strictly after the cursor, oldest first.
+func (fb *fakeBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error) {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 
-	keys := make([]types.Hash256, 0, len(fb.objects))
-	for k := range fb.objects {
-		keys = append(keys, k)
-		if len(keys) >= limit {
+	// The real backend serves the log ordered by (UpdatedAt, Key); a test that
+	// backdates or touches an event may have left this one out of order.
+	log := append([]PinnedObject(nil), fb.events...)
+	sort.Slice(log, func(i, j int) bool {
+		if !log[i].UpdatedAt.Equal(log[j].UpdatedAt) {
+			return log[i].UpdatedAt.Before(log[j].UpdatedAt)
+		}
+		return bytes.Compare(log[i].Key[:], log[j].Key[:]) < 0
+	})
+
+	page := make([]PinnedObject, 0, limit)
+	for _, ev := range log {
+		after := ev.UpdatedAt.After(cursor.After) ||
+			(ev.UpdatedAt.Equal(cursor.After) && bytes.Compare(ev.Key[:], cursor.Key[:]) > 0)
+		if !after {
+			continue
+		}
+		page = append(page, ev)
+		if len(page) >= limit {
 			break
 		}
 	}
 
-	return keys, nil
+	return page, nil
 }
 
 func (fb *fakeBackend) Close() error {
@@ -2343,4 +2395,204 @@ func TestIndexdClient_StrandedPieceRecovery(t *testing.T) {
 	ic.requeueStrandedPieces(suspects)
 	waitForSlabKey(t, db, acc, share.Name, "a.bin", uint64(len(content)))
 	mustReadEquals(t, ctx, c, acc, "a.bin", content)
+}
+
+// pinUnrecorded pins an object that no file references, which is what a slab
+// left behind by an upload the database never recorded looks like.
+func pinUnrecorded(t *testing.T, ctx context.Context, backend *fakeBackend, size int) types.Hash256 {
+	t.Helper()
+	key, err := backend.Upload(ctx, bytes.NewReader(frand.Bytes(size)), 1, 0)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	return key
+}
+
+func TestIndexdClient_OrphanedSlabs(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newFakeBackend()
+	wg := workgroupID(t, db, acc)
+	c := newIndexdClient(db, backend, share.Name, wg, 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// A file uploaded the normal way references its slab, so it is no orphan.
+	content := makeLargeMixedContent()
+	uploadID, err := c.StartUpload(ctx, acc, "kept.bin")
+	if err != nil {
+		t.Fatalf("StartUpload: %v", err)
+	}
+	uploadInThreeChunks(t, ctx, c, "kept.bin", uploadID, content)
+	if err := c.FinishUpload(ctx, "kept.bin", uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload: %v", err)
+	}
+	waitForMixedState(t, db, acc, share.Name, "kept.bin", 2, 1)
+
+	orphans, err := c.OrphanedSlabs(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("OrphanedSlabs: %v", err)
+	}
+	if len(orphans) != 0 {
+		t.Fatalf("orphans: want none while every slab is referenced, got %+v", orphans)
+	}
+
+	// A slab that was pinned but never recorded is one.
+	leaked := pinUnrecorded(t, ctx, backend, 4096)
+
+	orphans, err = c.OrphanedSlabs(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("OrphanedSlabs: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0].Key != leaked {
+		t.Fatalf("orphans: want the unrecorded slab %s, got %+v", leaked, orphans)
+	}
+	if orphans[0].Size != 4096 {
+		t.Errorf("size: want 4096, got %d", orphans[0].Size)
+	}
+
+	// The same slab, pinned just now, is indistinguishable from an upload in
+	// flight and must be left alone.
+	backend.touch(leaked)
+	orphans, err = c.OrphanedSlabs(ctx, time.Hour)
+	if err != nil {
+		t.Fatalf("OrphanedSlabs: %v", err)
+	}
+	if len(orphans) != 0 {
+		t.Fatalf("orphans: want a freshly pinned slab spared, got %+v", orphans)
+	}
+}
+
+func TestIndexdClient_UnpinOrphanedSlabs(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newFakeBackend()
+	wg := workgroupID(t, db, acc)
+	c := newIndexdClient(db, backend, share.Name, wg, 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	first := pinUnrecorded(t, ctx, backend, 1024)
+	second := pinUnrecorded(t, ctx, backend, 2048)
+
+	res, err := c.UnpinOrphanedSlabs(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("UnpinOrphanedSlabs: %v", err)
+	}
+	if res.Unpinned != 2 || res.Freed != 3072 || res.Failed != 0 {
+		t.Fatalf("result: want 2 slabs of 3072 bytes freed, got %+v", res)
+	}
+
+	backend.mu.Lock()
+	_, hasFirst := backend.objects[first]
+	_, hasSecond := backend.objects[second]
+	backend.mu.Unlock()
+	if hasFirst || hasSecond {
+		t.Error("the unpinned slabs are still held by the backend")
+	}
+
+	// Nothing is left staged: every unpin was confirmed.
+	pending, err := db.PendingUnpins(share.Name, wg)
+	if err != nil {
+		t.Fatalf("PendingUnpins: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("pending unpins: want none after a confirmed run, got %v", pending)
+	}
+
+	// A second run has nothing left to do.
+	res, err = c.UnpinOrphanedSlabs(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("UnpinOrphanedSlabs: %v", err)
+	}
+	if res.Unpinned != 0 {
+		t.Errorf("result: want nothing left to unpin, got %+v", res)
+	}
+}
+
+func TestIndexdClient_UnpinOrphanedSlabsKeepsFailuresStaged(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newFakeBackend()
+	wg := workgroupID(t, db, acc)
+	c := newIndexdClient(db, backend, share.Name, wg, 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	leaked := pinUnrecorded(t, ctx, backend, 512)
+	backend.failDeletes(errors.New("backend unreachable"))
+
+	res, err := c.UnpinOrphanedSlabs(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("UnpinOrphanedSlabs: %v", err)
+	}
+	if res.Unpinned != 0 || res.Failed != 1 {
+		t.Fatalf("result: want the unpin counted as failed, got %+v", res)
+	}
+
+	// Staged before the backend was asked, so the periodic retry picks it up.
+	pending, err := db.PendingUnpins(share.Name, wg)
+	if err != nil {
+		t.Fatalf("PendingUnpins: %v", err)
+	}
+	if len(pending) != 1 || pending[0] != leaked {
+		t.Fatalf("pending unpins: want the failed slab %s staged, got %v", leaked, pending)
+	}
+}
+
+func TestIndexdClient_OrphanScanPaginates(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newFakeBackend()
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// More objects than fit in one page of the event log, plus a deletion,
+	// whose event carries no object and must not be counted as a pin.
+	const pinned = objectPageSize*2 + 7
+	for range pinned {
+		pinUnrecorded(t, ctx, backend, 64)
+	}
+	dropped := pinUnrecorded(t, ctx, backend, 64)
+	if err := backend.DeleteObject(ctx, dropped); err != nil {
+		t.Fatalf("DeleteObject: %v", err)
+	}
+
+	orphans, err := c.OrphanedSlabs(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("OrphanedSlabs: %v", err)
+	}
+	if len(orphans) != pinned {
+		t.Fatalf("orphans: want all %d pinned slabs across the pages, got %d", pinned, len(orphans))
+	}
+	for _, orphan := range orphans {
+		if orphan.Key == dropped {
+			t.Fatal("orphans: the slab that was already dropped is reported as still pinned")
+		}
+	}
 }

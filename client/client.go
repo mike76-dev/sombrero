@@ -2,12 +2,46 @@ package client
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
 	"github.com/mike76-dev/sombrero/stores"
+	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/v2/api"
 )
+
+// ErrNoSlabScan is returned by the backends that do not pin slabs of their own.
+// A renterd share keeps its objects in renterd's own database and deletes them
+// with the files, so there is nothing for this server to reconcile.
+var ErrNoSlabScan = errors.New("slab scanning is only supported by indexd shares")
+
+// DefaultOrphanMinAge is how long a slab that nothing references is given
+// before it counts as orphaned. An upload pins its slab before it records it,
+// so a slab that has just appeared is far more likely to belong to an upload
+// in flight than to a deleted file, and unpinning it would destroy the data of
+// a file that is about to reference it.
+const DefaultOrphanMinAge = time.Hour
+
+// OrphanedSlab is a slab that a share's connection has pinned, and pays for,
+// while no file in the database references it.
+type OrphanedSlab struct {
+	Key      types.Hash256 `json:"key"`
+	Size     uint64        `json:"size"`
+	PinnedAt time.Time     `json:"pinnedAt"`
+}
+
+// UnpinResult reports what unpinning a share's orphaned slabs achieved.
+type UnpinResult struct {
+	// Unpinned counts the slabs that were dropped from the backend, and Freed
+	// is what they occupied.
+	Unpinned int    `json:"unpinned"`
+	Freed    uint64 `json:"freed"`
+
+	// Failed counts the slabs the backend would not drop. They stay staged in
+	// the database and are retried in the background, so they are not lost.
+	Failed int `json:"failed"`
+}
 
 // GeneralInfo contains some general information about the share.
 type GeneralInfo struct {
@@ -58,6 +92,14 @@ type Client interface {
 	Rename(ctx context.Context, acc stores.Account, oldName, newName string, isDir, force bool) error
 	MakeDirectory(ctx context.Context, acc stores.Account, path string) error
 	DeleteAll(ctx context.Context) error
+
+	// OrphanedSlabs reports the slabs this connection has pinned that no file
+	// references and that have been pinned for at least minAge, and
+	// UnpinOrphanedSlabs drops exactly what the same scan finds when it runs.
+	// Both return ErrNoSlabScan on the backends that manage their own objects.
+	OrphanedSlabs(ctx context.Context, minAge time.Duration) ([]OrphanedSlab, error)
+	UnpinOrphanedSlabs(ctx context.Context, minAge time.Duration) (UnpinResult, error)
+
 	Close() error
 }
 

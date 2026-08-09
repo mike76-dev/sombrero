@@ -5,9 +5,11 @@ import type {
   ConnectRequestResponse,
   ConnectResponse,
   IsBannedResponse,
+  OrphansResponse,
   PublicDir,
   ServerStats,
   Share,
+  UnpinOrphansResponse,
   Workgroup,
   WorkgroupResponse,
 } from './types'
@@ -63,6 +65,16 @@ export const removeShare = (name: string) =>
 
 export const getShareAccounts = (name: string) =>
   request<AccessRights[] | null>(`/share/${encodeURIComponent(name)}/accounts`)
+
+// Orphaned slabs (indexd shares only)
+
+export const scanOrphans = (share: string) =>
+  request<OrphansResponse>(`/share/${encodeURIComponent(share)}/orphans`)
+
+export const unpinOrphans = (share: string) =>
+  request<UnpinOrphansResponse>(`/share/${encodeURIComponent(share)}/orphans`, {
+    method: 'DELETE',
+  })
 
 // Access policies
 

@@ -279,25 +279,49 @@ func (s *server) RemoveAccess(acc stores.Account) {
 	s.mu.Unlock()
 }
 
+// ensureShare returns the server's state for the given share, registering it
+// first if nothing has used it yet. A share only enters the server's list when
+// it is first reached for — a tree connect, a connection, a slab scan — so a
+// share that exists in the store may still be unknown here.
+func (s *server) ensureShare(ss stores.Share) (*share, error) {
+	s.mu.Lock()
+	sh, found := s.shareList[ss.Name]
+	s.mu.Unlock()
+	if found {
+		return sh, nil
+	}
+
+	if err := s.RegisterShare(ss); err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	sh, found = s.shareList[ss.Name]
+	s.mu.Unlock()
+	if !found {
+		return nil, errShareNotFound
+	}
+
+	return sh, nil
+}
+
 // AddConnection initializes a per-workgroup indexd SDK client and populates
 // the security maps for the connecting workgroup's accounts.
 func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey types.PrivateKey) error {
-	s.mu.Lock()
-	sh, found := s.shareList[share.Name]
-	s.mu.Unlock()
-	if !found {
-		if err := s.RegisterShare(share); err != nil {
-			return err
-		}
-		s.mu.Lock()
-		sh, found = s.shareList[share.Name]
-		s.mu.Unlock()
-		if !found {
-			return errShareNotFound
-		}
+	sh, err := s.ensureShare(share)
+	if err != nil {
+		return err
 	}
 
-	if sh.backend == "indexd" {
+	// A workgroup gets one client per share and no more: a second one would
+	// claim part of the same buffered pieces, leaving neither with enough to
+	// fill a slab. Whoever asks for a connection that is already running —
+	// a tree connect, a slab scan, a repeated /connect — keeps that one.
+	sh.mu.Lock()
+	_, running := sh.indexdConns[wg.UUID.String()]
+	sh.mu.Unlock()
+
+	if sh.backend == "indexd" && !running {
 		db, ok := s.store.(*stores.Database)
 		if !ok {
 			return errors.New("indexd shares require a database-backed store")
@@ -336,9 +360,22 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 			volumeID:      binary.LittleEndian.Uint64(vid),
 		}
 
+		// Another caller may have connected the same workgroup while this
+		// client was being built. Theirs is the one in use, so this one is
+		// closed rather than left running beside it.
 		sh.mu.Lock()
-		sh.indexdConns[wg.UUID.String()] = conn
+		_, taken := sh.indexdConns[wg.UUID.String()]
+		if !taken {
+			sh.indexdConns[wg.UUID.String()] = conn
+		}
 		sh.mu.Unlock()
+
+		if taken {
+			log.Printf("workgroup %s connected to share %s in the meantime, dropping the second client", wg.UUID, share.Name)
+			if err := c.Close(); err != nil {
+				log.Printf("failed to close the redundant client: %v", err)
+			}
+		}
 	}
 
 	accs, err := s.store.FindAccounts(wg.UUID.String())
@@ -361,6 +398,82 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 	sh.mu.Unlock()
 
 	return nil
+}
+
+// ShareConnections returns the clients of the share's workgroup connections,
+// keyed by workgroup UUID. Only indexd shares have them: a renterd share is
+// served by one client that pins nothing of its own, so it is reported as not
+// scannable rather than as an empty set.
+//
+// A connection whose client is not running is started from its stored app key,
+// the same way a tree connect does it, so that what is returned is every
+// workgroup connected to the share rather than only those that happen to have
+// a client right now. failed names the workgroups that could not be started,
+// so that a caller counting what it found can say that it did not see all of
+// it.
+func (s *server) ShareConnections(name string) (map[string]client.Client, map[string]string, error) {
+	share, err := s.store.GetShare(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if share.Name == "" {
+		return nil, nil, errShareNotFound
+	}
+
+	// A share is registered with the server when something first uses it, so
+	// on a server nobody has connected to yet there is nothing to look up.
+	sh, err := s.ensureShare(share)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if sh.backend != "indexd" {
+		return nil, nil, client.ErrNoSlabScan
+	}
+
+	// indexd shares are database-backed, so the connections are there to be
+	// restored even when nothing has used them since the server started.
+	db, ok := s.store.(*stores.Database)
+	if !ok {
+		return nil, nil, errors.New("indexd shares require a database-backed store")
+	}
+	stored, err := db.ShareConnections(name)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	failed := make(map[string]string)
+	for _, conn := range stored {
+		u := conn.Workgroup.String()
+
+		sh.mu.Lock()
+		_, running := sh.indexdConns[u]
+		sh.mu.Unlock()
+		if running {
+			continue
+		}
+
+		wg, err := s.store.FindWorkgroup(conn.Workgroup)
+		if err != nil || wg.ID == 0 {
+			log.Printf("failed to resolve workgroup %s of share %s: %v", u, name, err)
+			failed[u] = "workgroup not found"
+			continue
+		}
+		if err := s.AddConnection(wg, share, conn.AppKey); err != nil {
+			log.Printf("failed to restore the connection of workgroup %s to share %s: %v", u, name, err)
+			failed[u] = err.Error()
+		}
+	}
+
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	conns := make(map[string]client.Client, len(sh.indexdConns))
+	for wg, conn := range sh.indexdConns {
+		conns[wg] = conn.client
+		delete(failed, wg)
+	}
+
+	return conns, failed, nil
 }
 
 // RemoveConnection closes the workgroup's indexd client and removes their

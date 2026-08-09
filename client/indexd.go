@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -77,9 +78,22 @@ type storageBackend interface {
 	Download(ctx context.Context, key types.Hash256, offset, length uint64, w io.Writer) error
 	DeleteObject(ctx context.Context, key types.Hash256) error
 	PruneSlabs(ctx context.Context) error
-	ListObjectKeys(ctx context.Context, cursor slabs.Cursor, limit int) ([]types.Hash256, error)
+	ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error)
 	Close() error
 }
+
+// PinnedObject is one entry of the object event log of the connection's indexd
+// app account: a slab this connection pinned, or the record of one it dropped.
+type PinnedObject struct {
+	Key       types.Hash256
+	Size      uint64
+	UpdatedAt time.Time
+	Deleted   bool
+}
+
+// objectPageSize is how many object events are fetched per request when the
+// whole log is walked.
+const objectPageSize = 100
 
 // objCacheSize is the maximum number of slab objects cached by sdkBackend.
 const objCacheSize = 128
@@ -214,19 +228,29 @@ func (b *sdkBackend) PruneSlabs(ctx context.Context) error {
 	return b.sdk.PruneSlabs(ctx)
 }
 
-// ListObjectKeys returns a slice of object keys instead of objects.
-func (b *sdkBackend) ListObjectKeys(ctx context.Context, cursor slabs.Cursor, limit int) ([]types.Hash256, error) {
-	objs, err := b.sdk.ObjectEvents(ctx, cursor, limit)
+// ListObjects returns one page of the account's object event log, oldest event
+// first. A deleted object is reported as an event without an object, which is
+// how the log keeps a record of what is gone.
+func (b *sdkBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error) {
+	events, err := b.sdk.ObjectEvents(ctx, cursor, limit)
 	if err != nil {
 		return nil, err
 	}
 
-	keys := make([]types.Hash256, 0, len(objs))
-	for _, obj := range objs {
-		keys = append(keys, obj.Object.ID())
+	objs := make([]PinnedObject, 0, len(events))
+	for _, ev := range events {
+		obj := PinnedObject{
+			Key:       ev.Key,
+			UpdatedAt: ev.UpdatedAt,
+			Deleted:   ev.Deleted || ev.Object == nil,
+		}
+		if ev.Object != nil {
+			obj.Size = ev.Object.Size()
+		}
+		objs = append(objs, obj)
 	}
 
-	return keys, nil
+	return objs, nil
 }
 
 // Close calls sdk.Close.
@@ -722,28 +746,61 @@ func (ic *IndexdClient) Rename(ctx context.Context, acc stores.Account, oldName,
 	return ic.db.RenameFile(acc, ic.share, oldName, newName, force)
 }
 
+// pinnedObjects walks the whole object event log of this connection's app
+// account and returns what it currently holds, keyed by slab. The log records
+// every pin and unpin the account ever made, so the events are folded into the
+// latest state of each key and the dropped ones are left out.
+func (ic *IndexdClient) pinnedObjects(ctx context.Context) (map[types.Hash256]PinnedObject, error) {
+	pinned := make(map[types.Hash256]PinnedObject)
+
+	var cursor slabs.Cursor
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		page, err := ic.backend.ListObjects(ctx, cursor, objectPageSize)
+		if err != nil {
+			return nil, fmt.Errorf("couldn't list objects: %v", err)
+		}
+		if len(page) == 0 {
+			return pinned, nil
+		}
+
+		for _, obj := range page {
+			if obj.Deleted {
+				delete(pinned, obj.Key)
+				continue
+			}
+			pinned[obj.Key] = obj
+		}
+
+		// The log is paginated on (UpdatedAt, Key) ascending and read with a
+		// strict "greater than", so the last event of a page is the next
+		// cursor. A backend that returns a page ending where the previous one
+		// did would have this walk go around forever, so it stops instead.
+		last := page[len(page)-1]
+		if !last.UpdatedAt.After(cursor.After) && last.Key == cursor.Key {
+			return pinned, nil
+		}
+		cursor = slabs.Cursor{After: last.UpdatedAt, Key: last.Key}
+	}
+}
+
 // DeleteAll deletes all objects on the share. This is used when a share is removed to ensure
 // that all data is deleted from the Sia network.
 func (ic *IndexdClient) DeleteAll(ctx context.Context) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	pinned, err := ic.pinnedObjects(ctx)
+	if err != nil {
+		return err
+	}
 
-		keys, err := ic.backend.ListObjectKeys(ctx, slabs.Cursor{}, 10)
-		if err != nil {
-			return fmt.Errorf("couldn't list object keys: %v", err)
+	for key := range pinned {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if len(keys) == 0 {
-			break
-		}
-
-		for _, key := range keys {
-			if err := ic.backend.DeleteObject(ctx, key); err != nil {
-				log.Printf("couldn't delete object %s: %v", key, err)
-			}
+		if err := ic.backend.DeleteObject(ctx, key); err != nil {
+			log.Printf("couldn't delete object %s: %v", key, err)
 		}
 	}
 
@@ -752,6 +809,109 @@ func (ic *IndexdClient) DeleteAll(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// OrphanedSlabs reports the slabs this connection has pinned that no file in
+// the database references and that have been pinned for at least minAge. The
+// age is what separates an orphan from an upload in flight: a slab is pinned
+// before it is recorded, so a slab that has just appeared is expected to be
+// unreferenced and must be left alone.
+func (ic *IndexdClient) OrphanedSlabs(ctx context.Context, minAge time.Duration) ([]OrphanedSlab, error) {
+	if minAge <= 0 {
+		minAge = DefaultOrphanMinAge
+	}
+
+	pinned, err := ic.pinnedObjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	cutoff := time.Now().Add(-minAge)
+	keys := make([]types.Hash256, 0, len(pinned))
+	for key, obj := range pinned {
+		if obj.UpdatedAt.After(cutoff) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	unreferenced, err := ic.db.UnreferencedSlabs(keys)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't check slab references: %v", err)
+	}
+
+	orphans := make([]OrphanedSlab, 0, len(unreferenced))
+	for _, key := range unreferenced {
+		orphans = append(orphans, OrphanedSlab{
+			Key:      key,
+			Size:     pinned[key].Size,
+			PinnedAt: pinned[key].UpdatedAt,
+		})
+	}
+
+	// Oldest first: the longest-standing leak is the one worth looking at.
+	sort.Slice(orphans, func(i, j int) bool {
+		if !orphans[i].PinnedAt.Equal(orphans[j].PinnedAt) {
+			return orphans[i].PinnedAt.Before(orphans[j].PinnedAt)
+		}
+		return bytes.Compare(orphans[i].Key[:], orphans[j].Key[:]) < 0
+	})
+
+	return orphans, nil
+}
+
+// UnpinOrphanedSlabs drops the slabs that OrphanedSlabs finds. The scan is run
+// again here rather than taking a list from the caller, so that what is dropped
+// is what is unreferenced and old enough at this moment, not what was when
+// somebody last looked.
+//
+// Each slab is staged in the database before the backend is asked to drop it,
+// so a slab the backend refuses is retried by the periodic unpin retry instead
+// of being forgotten.
+func (ic *IndexdClient) UnpinOrphanedSlabs(ctx context.Context, minAge time.Duration) (UnpinResult, error) {
+	orphans, err := ic.OrphanedSlabs(ctx, minAge)
+	if err != nil {
+		return UnpinResult{}, err
+	}
+	if len(orphans) == 0 {
+		return UnpinResult{}, nil
+	}
+
+	var res UnpinResult
+	for _, orphan := range orphans {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+
+		if err := ic.db.StageUnpin(ic.share, ic.workgroup, orphan.Key); err != nil {
+			log.Printf("failed to stage unpin of orphaned slab %s: %v", orphan.Key, err)
+			res.Failed++
+			continue
+		}
+		if err := ic.backend.DeleteObject(ctx, orphan.Key); err != nil {
+			log.Printf("failed to unpin orphaned slab %s, leaving it staged for retry: %v", orphan.Key, err)
+			res.Failed++
+			continue
+		}
+		if err := ic.db.UnstageUnpin(ic.share, ic.workgroup, orphan.Key); err != nil {
+			log.Printf("failed to confirm unpin of orphaned slab %s: %v", orphan.Key, err)
+		}
+
+		res.Unpinned++
+		res.Freed += orphan.Size
+	}
+
+	if res.Unpinned > 0 {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after unpinning orphans of share %s: %v", ic.share, err)
+		}
+		log.Printf("share %s, workgroup %d: unpinned %d orphaned slab(s), freeing %d bytes", ic.share, ic.workgroup, res.Unpinned, res.Freed)
+	}
+
+	return res, nil
 }
 
 // Close closes the client and releases all resources. The background workers
