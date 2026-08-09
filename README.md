@@ -115,16 +115,16 @@ sudo sombrero --dir=<PATH_TO_SOMBRERO.YML>
 The superuser access is required because of the port 445 that the server is listening on.
 
 Now, you need to register shares and add user accounts that will be accessing these shares.
-The typical workflow is:
+This can be done either from the web UI, which is served at the API address (`http://127.0.0.1:9999` by default), or with the API calls described below. The typical workflow is:
 
 ### 1. Create a workgroup
 A workgroup can contain an arbitrary number of user accounts. Each workgroup can connect to a remote share and have its own storage quota on that share.
 ```Bash
-curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/workgroup"
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/workgroup"
 ```
 or
 ```Bash
-curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/workgroup" -d '{"name":"home"}'
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/workgroup" -d '{"name":"home"}'
 ```
 The difference between the two calls is that the second call allows creating a named workgroup.
 This is only useful when you a running a private server and know for sure that no other workgroup with the same name will ever be created.
@@ -135,28 +135,28 @@ Example of the output:
 ```
 ### 2. Add user account(s) to the workgroup
 ```Bash
-curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/account" -d '{"username":"test","password":"123","workgroup":"8303eeb8-f30e-4607-9eb7-875df2c5bd52"}'
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/account" -d '{"username":"test","password":"123","workgroup":"8303eeb8-f30e-4607-9eb7-875df2c5bd52"}'
 ```
 or
 ```Bash
-curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/account" -d '{"username":"test","password":"123","workgroup":"home"}'
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/account" -d '{"username":"test","password":"123","workgroup":"home"}'
 ```
 ### 3. Register a share
 ```Bash
-curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/share" -d '{"name":"shared-renterd","type":"renterd","serverName":"http://127.0.0.1:9980","password":"1234","bucket":"default","remark":"renterd"}'
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/share" -d '{"name":"shared-renterd","type":"renterd","serverName":"http://127.0.0.1:9980","password":"1234","bucket":"default","remark":"renterd"}'
 ```
 or
 ```Bash
-curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/share" -d '{"name":"shared-indexd","type":"indexd","serverName":"https://sia.storage","remark":"Sia Foundation indexer","dataShards":10,"parityShards":20}'
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/share" -d '{"name":"shared-indexd","type":"indexd","serverName":"https://sia.storage","remark":"Sia Foundation indexer","dataShards":10,"parityShards":20}'
 ```
 ### 4. Connect the workgroup to the share
 In case of a `renterd` share, simply call
 ```Bash
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/connect/home/shared-renterd"
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/home/shared-renterd"
 ```
 Connecting to an `indexd` share is slightly more involved. First, request a connection:
 ```Bash
-curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
 ```
 Example of the output:
 ```Bash
@@ -164,7 +164,7 @@ Example of the output:
 ```
 After visiting the URL provided and accepting the connection, run
 ```Bash
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
 ```
 Example of the output:
 ```Bash
@@ -173,8 +173,24 @@ Example of the output:
 ### 5. Grant access to the share
 To grant an account access to the share, run:
 ```Bash
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/share/shared-indexd/policy?username=test&workgroup=8303eeb8-f30e-4607-9eb7-875df2c5bd52&read=true&write=true&delete=true&execute=true"
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/policy?username=test&workgroup=8303eeb8-f30e-4607-9eb7-875df2c5bd52&read=true&write=true&delete=true&execute=true"
 ```
+## Web UI
+The server ships with a web UI covering the same ground as the API: workgroups, accounts, shares, access policies, bans, and the server statistics. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` when it asks.
+
+The UI is served without a password, while everything under `/api` still requires one. This is deliberate: the UI holds nothing secret, and asking for the password itself makes for a better login than the browser's basic auth prompt.
+
+### Building the UI
+The UI is not built as part of `go build`. Release binaries are built by building the UI first and then the server:
+```Bash
+npm --prefix web install
+npm --prefix web run build
+go build .
+```
+A server built without this step runs normally and serves the API as usual; only the UI is missing, and it says so if you open it in a browser.
+
+To work on the UI itself, run `npm --prefix web run dev` alongside the server. The dev server proxies `/api` through to the server on port 9999, so the URLs match what the embedded build sees. Point the proxy elsewhere with `SOMBRERO_API_URL`.
+
 ## Upload Packing
 A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Both config fields are optional: setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, while `minPackedSlabSize` (for example, `1048576`) holds that upload back until the leftover data of a share is worth a slab. On its own, `minPackedSlabSize` has no effect.
 ## Shared Folders
@@ -182,7 +198,7 @@ It is now possible to define a list of shared folder names for each workgroup. F
 
 To create such list, run:
 ```Bash
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/workgroup/8303eeb8-f30e-4607-9eb7-875df2c5bd52" -d '{"publicDirs":[{"path":"Public"},{"path":"Reports","readOnly":true,"caseSensitive":true}]}'
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/workgroup/8303eeb8-f30e-4607-9eb7-875df2c5bd52" -d '{"publicDirs":[{"path":"Public"},{"path":"Reports","readOnly":true,"caseSensitive":true}]}'
 ```
 Every entry has the following fields:
 
@@ -202,13 +218,19 @@ If you only intend to connect to `renterd` shares, you can run the server in the
 ## Security Considerations
 An open TCP port 445 attracts thousands of attackers and those who look for a free storage. For this reason, guest and anonymous accesses are disabled. Even when the server is running on a private LAN, it should not be a problem to create a password-protected account like described above.
 
+The API administers the whole server, so it listens on `127.0.0.1` unless the config file says otherwise, and the server refuses to start without an API password. Repeated failed logins from the same host are throttled. If you do need to reach the API or the web UI from another machine, prefer an SSH tunnel:
+```Bash
+ssh -N -L 9999:127.0.0.1:9999 <USER>@<SERVER_NET_ADDRESS>
+```
+Binding the API to a public interface exposes the password over plain HTTP; put a reverse proxy with TLS in front of it if you go that way.
+
 The server also has a built-in abuse protection. If 30 or more connections are detected from the same IP address within 10 minutes, this IP is permanently banned. This number of 30 can be configured in the config file (see above).
 
 Also banned are those remote hosts, which continue sending SMB1 requests after receiving the initial SMB2 response from the server.
 
 The bans are saved in the database, and the reason for the ban is provided. If a host ends up banned by mistake, it can be removed manually:
 ```Bash
-curl -u "":<API_PASSWORD> -X DELETE "http://127.0.0.1:9999/bans/<IP_OF_THE_REMOTE_HOST>"
+curl -u "":<API_PASSWORD> -X DELETE "http://127.0.0.1:9999/api/bans/<IP_OF_THE_REMOTE_HOST>"
 ```
 
 ## Connecting to the Server
