@@ -219,6 +219,8 @@ func main() {
 			if num >= cfg.MaxConnections {
 				server.blockHost(host, "too many connections")
 				log.Printf("Blocked host %s for too many connections (%d)\n", host, num)
+				conn.Close()
+				continue
 			}
 
 			// Start serving the connection.
@@ -227,6 +229,7 @@ func main() {
 				enabled := server.enabled
 				server.mu.Unlock()
 				if !enabled {
+					conn.Close()
 					return
 				}
 
