@@ -361,9 +361,9 @@ func GetPreauthIntegrityCapabilities(ncs []NegotiateContext) (hashAlgos []uint16
 			if len(nc.Data) < 6 { // At least one HashAlgorithmID must be present
 				return nil, nil, ErrInvalidParameter
 			}
-			count := binary.LittleEndian.Uint16(nc.Data[:2])
-			length := binary.LittleEndian.Uint16(nc.Data[2:4])
-			if count == 0 || len(nc.Data) < int(2*count+length+4) {
+			count := int(binary.LittleEndian.Uint16(nc.Data[:2]))
+			length := int(binary.LittleEndian.Uint16(nc.Data[2:4]))
+			if count == 0 || len(nc.Data) < 2*count+length+4 {
 				return nil, nil, ErrInvalidParameter
 			}
 			salt = make([]byte, length)
@@ -389,8 +389,8 @@ func GetEncryptionCapabilities(ncs []NegotiateContext) (ciphers []uint16, err er
 			if len(nc.Data) < 4 {
 				return nil, ErrInvalidParameter
 			}
-			count := binary.LittleEndian.Uint16(nc.Data[:2])
-			if count == 0 || len(nc.Data) < int(2*count+2) {
+			count := int(binary.LittleEndian.Uint16(nc.Data[:2]))
+			if count == 0 || len(nc.Data) < 2*count+2 {
 				return nil, ErrInvalidParameter
 			}
 			for i := range count {
@@ -411,8 +411,8 @@ func GetCompressionCapabilities(ncs []NegotiateContext) (flags uint32, algos []u
 			if len(nc.Data) < 8 {
 				return 0, nil, ErrInvalidParameter
 			}
-			count := binary.LittleEndian.Uint16(nc.Data[:2])
-			if count == 0 || len(nc.Data) < int(2*count+8) {
+			count := int(binary.LittleEndian.Uint16(nc.Data[:2]))
+			if count == 0 || len(nc.Data) < 2*count+8 {
 				return 0, nil, ErrInvalidParameter
 			}
 			flags = binary.LittleEndian.Uint32(nc.Data[4:8])
@@ -458,8 +458,8 @@ func RDMATransformCapabilities(ncs []NegotiateContext) (ids []uint16, err error)
 			if len(nc.Data) < 10 { // At least one ID must be present
 				return nil, ErrInvalidParameter
 			}
-			count := binary.LittleEndian.Uint16(nc.Data[:2])
-			if count == 0 || len(nc.Data) < int(2*count+8) {
+			count := int(binary.LittleEndian.Uint16(nc.Data[:2]))
+			if count == 0 || len(nc.Data) < 2*count+8 {
 				return nil, ErrInvalidParameter
 			}
 			for i := range count {
@@ -480,8 +480,8 @@ func GetSigningCapabilities(ncs []NegotiateContext) (algos []uint16, err error) 
 			if len(nc.Data) < 4 { // At least one algo must be present
 				return nil, ErrInvalidParameter
 			}
-			count := binary.LittleEndian.Uint16(nc.Data[:2])
-			if count == 0 || len(nc.Data) < int(2*count+2) {
+			count := int(binary.LittleEndian.Uint16(nc.Data[:2]))
+			if count == 0 || len(nc.Data) < 2*count+2 {
 				return nil, ErrInvalidParameter
 			}
 			for i := range count {
