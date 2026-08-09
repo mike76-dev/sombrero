@@ -502,7 +502,7 @@ func HandleCreateQueryMaximalAccessRequest(ctx []byte, modTime time.Time, maxAcc
 		binary.LittleEndian.PutUint32(resp[4:], maxAccess)
 	} else {
 		timestamp := utils.FiletimeToUnix(binary.LittleEndian.Uint64(ctx[:8]))
-		if timestamp == modTime {
+		if timestamp.Equal(modTime) {
 			binary.LittleEndian.PutUint32(resp[:4], STATUS_NONE_MAPPED)
 		} else {
 			binary.LittleEndian.PutUint32(resp[:4], STATUS_OK)

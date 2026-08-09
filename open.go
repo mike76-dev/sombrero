@@ -1599,9 +1599,6 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readC
 	go func() {
 		var buf bytes.Buffer
 		err := op.treeConnect.client.Read(op.ctx, acc, path, chunkOffset, toRead, &buf)
-		if err != nil {
-		} else {
-		}
 
 		op.mu.Lock()
 		if err != nil {
@@ -1782,9 +1779,6 @@ func (op *open) write(offset uint64, data []byte) error {
 
 		op.file.advanceUpload(u, u.totalSize)
 	} else {
-		if offset > u.nextOffset {
-		}
-
 		buf := make([]byte, len(data))
 		copy(buf, data)
 		u.pending[offset] = &uploadChunk{offset: offset, data: buf}
