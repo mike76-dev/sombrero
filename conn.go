@@ -185,7 +185,13 @@ func (c *connection) acceptRequest(msg []byte) error {
 			return errAccessDenied
 		}
 		msg = ss.decrypt(msg, c)
+		if msg == nil {
+			return errDecryptionError
+		}
 		if uint32(len(msg)) != size {
+			return smb2.ErrWrongLength
+		}
+		if len(msg) < smb2.SMB2HeaderSize {
 			return smb2.ErrWrongLength
 		}
 	}

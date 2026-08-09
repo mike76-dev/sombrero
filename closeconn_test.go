@@ -102,3 +102,25 @@ func TestAPanicOnAConnectionTakesOnlyThatConnection(t *testing.T) {
 		t.Error("the socket of the connection that panicked is still open")
 	}
 }
+
+// TestAMessageThatDoesNotDecryptIsRefused is the transform header over ciphertext nothing can
+// open. The decryption hands back nothing when it fails, and the only thing measured against that
+// was the size the sender named: a sender naming zero was answered by a nil message carried on into
+// the request path and read there as an SMB2 header.
+func TestAMessageThatDoesNotDecryptIsRefused(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice").encrypting()
+
+	for _, size := range []uint32{0, 64} {
+		msg := make([]byte, smb2.SMB2TransformHeaderSize+64)
+		hdr := smb2.Header(msg)
+		hdr.SetProtocolID(smb2.PROTOCOL_SMB2_ENCRYPTED)
+		hdr.SetEncryptionFlags(1)
+		hdr.SetTransformSessionID(cl.ss.sessionID)
+		hdr.SetOriginalMessageSize(size)
+
+		if err := cl.conn.acceptRequest(msg); err == nil {
+			t.Errorf("a message that does not decrypt, naming %d bytes of plaintext, was accepted", size)
+		}
+	}
+}

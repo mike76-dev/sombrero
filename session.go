@@ -41,6 +41,7 @@ var (
 	errNoSigningKey    = errors.New("no signing key available")
 	errUnsignedRequest = errors.New("request not signed on a session that requires signing")
 	errNoCipher        = errors.New("no cipher negotiated")
+	errDecryptionError = errors.New("decryption failed")
 )
 
 // isSetupCommand reports whether the command is one of the two that bring a session up, which are
