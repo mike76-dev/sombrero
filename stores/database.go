@@ -12,7 +12,13 @@ import (
 
 // Database represents a PostgreSQL-backed store.
 type Database struct {
+	// ctx spans the lifetime of the store and is deliberately not derived from
+	// the context that opened it: that one is the process' signal context, and
+	// tying the transactions to it would fail every database call the moment a
+	// shutdown starts — including the ones a graceful shutdown depends on, like
+	// requeueing an upload that was cut short. Only Close ends it.
 	ctx    context.Context
+	cancel context.CancelFunc
 	pool   *pgxpool.Pool
 	shares Shares
 }
@@ -27,12 +33,16 @@ type Shares interface {
 	RemoveConnection(wg Workgroup, share Share) error
 }
 
-// Close closes the underlying database connection.
+// Close closes the underlying database connection. Whatever is still running a
+// transaction by then is cut off, so the callers that need to finish their work
+// have to be stopped first.
 func (db *Database) Close() {
+	db.cancel()
 	db.pool.Close()
 }
 
-// NewStore returns an initialized Database instance.
+// NewStore returns an initialized Database instance. The given context only
+// bounds the connection setup; the store stays usable until it is closed.
 func NewStore(ctx context.Context, dc DatabaseConfig) (*Database, error) {
 	pool, err := pgxpool.New(ctx, dc.String())
 	if err != nil {
@@ -43,9 +53,11 @@ func NewStore(ctx context.Context, dc DatabaseConfig) (*Database, error) {
 	}
 
 	log.Printf("Connected to SQL database %s, %s:%d\n", dc.Database, dc.Host, dc.Port)
+	lifetime, cancel := context.WithCancel(context.Background())
 	return &Database{
-		ctx:  ctx,
-		pool: pool,
+		ctx:    lifetime,
+		cancel: cancel,
+		pool:   pool,
 	}, nil
 }
 

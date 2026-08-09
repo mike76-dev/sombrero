@@ -62,6 +62,29 @@ func TestDatabaseWorkgroupIDs(t *testing.T) {
 	}
 }
 
+// TestDatabaseOutlivesSetupContext verifies that the store keeps working once
+// the context it was opened with is cancelled. That context is the process'
+// signal context, and a shutdown is exactly when the graceful stop still has
+// work to record: an upload cut short has to be requeued, a slab of a deleted
+// file has to be unpinned. Only Close ends the store.
+func TestDatabaseOutlivesSetupContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	cancel()
+
+	if err := db.RegisterShare(Share{Name: "idx", Type: "indexd", ServerName: "srv"}); err != nil {
+		t.Fatalf("RegisterShare after cancelling the setup context: %v", err)
+	}
+
+	db.Close()
+
+	if err := db.RegisterShare(Share{Name: "idx2", Type: "indexd", ServerName: "srv"}); err == nil {
+		t.Fatal("RegisterShare succeeded after Close")
+	}
+}
+
 func TestFlagsFromAccessRights(t *testing.T) {
 	tests := []struct {
 		ar    AccessRights

@@ -11,10 +11,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/mike76-dev/sombrero/api"
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
@@ -162,18 +164,38 @@ func main() {
 			connection.once.Do(func() { close(connection.closeChan) })
 		}
 
+		// Each client drains what it has in flight before giving up on it, so
+		// they are closed side by side rather than one shutdown timeout after
+		// another.
+		var wg sync.WaitGroup
+		closeClient := func(c client.Client) {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := c.Close(); err != nil {
+					log.Printf("failed to close client: %v", err)
+				}
+			}()
+		}
 		for _, share := range shares {
 			if share.client != nil { // renterd share
-				share.client.Close()
+				closeClient(share.client)
 			}
 			for _, conn := range share.indexdConns { // indexd share
-				conn.client.Close()
+				closeClient(conn.client)
 			}
 		}
+		wg.Wait()
 
 		apiSrv.Close()
 		lAPI.Close()
 		l.Close()
+
+		// Only now, with nothing left that needs the store: the clients spend
+		// their shutdown recording, requeueing and unpinning what they were in
+		// the middle of, and closing the store cuts all of that off.
+		db.Close()
+
 		os.Exit(0)
 	}()
 
