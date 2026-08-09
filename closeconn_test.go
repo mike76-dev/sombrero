@@ -56,3 +56,49 @@ func TestCloseConnectionRacesItself(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestAPanicOnAConnectionTakesOnlyThatConnection is the parsing bug that got through. Every
+// goroutine carrying a connection works on what a peer sent, and a panic on one of them is
+// unrecovered by default: the process goes, and with it every other connection and every open they
+// held. What happens instead is what happens to a connection whose socket is lost - that one is
+// torn down, and the rest carry on.
+func TestAPanicOnAConnectionTakesOnlyThatConnection(t *testing.T) {
+	h := newSMBTest(t)
+	victim := h.dial("alice")
+	bystander := h.dial("bob")
+
+	// A request the server has gone off to work on, which is what the teardown has to tell to stop.
+	_, stop := victim.waiting(1, 42, smb2.SMB2_CHANGE_NOTIFY)
+
+	// One of the goroutines that carry a connection, panicking the way a field nobody measured
+	// against the message would make it panic. Nothing recovers it but the connection itself, so a
+	// panic that got past this takes the test binary with it.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer victim.conn.recoverConnection("testing")
+		panic("a field nobody checked the length of")
+	}()
+	<-done
+
+	if !cancelled(stop) {
+		t.Error("the work behind the request was not told to stop when the connection panicked")
+	}
+
+	h.srv.mu.Lock()
+	_, kept := h.srv.connectionList[victim.conn.clientName]
+	_, carriedOn := h.srv.connectionList[bystander.conn.clientName]
+	h.srv.mu.Unlock()
+
+	if kept {
+		t.Error("the connection that panicked was left in the connection list")
+	}
+	if !carriedOn {
+		t.Error("the connection that panicked took another connection with it")
+	}
+
+	// The socket is what puts the peer out of reach, so it is shut whatever else happened.
+	if _, err := victim.conn.conn.Write([]byte{0}); err == nil {
+		t.Error("the socket of the connection that panicked is still open")
+	}
+}

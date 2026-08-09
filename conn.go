@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -2738,8 +2739,26 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 	}
 }
 
+// recoverConnection turns a panic raised while serving one connection into the loss of that
+// connection rather than of the whole server.
+//
+// The socket is closed first: that takes no lock and is what puts the peer out of reach, while the
+// teardown after it takes the connection lock a panic may have been raised while holding.
+func (c *connection) recoverConnection(where string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+
+	c.conn.Close()
+	log.Printf("panic while %s for %s: %v\n%s", where, c.clientName, r, debug.Stack())
+	c.server.closeConnection(c)
+}
+
 // processRequests pulls requests from the queue one by one and submits them for processing.
 func (c *connection) processRequests() {
+	defer c.recoverConnection("processing requests")
+
 	for {
 		var req *smb2.Request
 		c.mu.Lock()
@@ -2819,6 +2838,8 @@ func (c *connection) processRequests() {
 
 // sendResponses takes an SMB message from the sending queue and writes it to the underlying TCP connection.
 func (c *connection) sendResponses() {
+	defer c.recoverConnection("sending responses")
+
 	for {
 		select {
 		case <-c.closeChan:

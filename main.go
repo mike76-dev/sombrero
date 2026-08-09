@@ -236,6 +236,7 @@ func main() {
 				log.Println("Incoming connection from", conn.RemoteAddr())
 				c := server.newConnection(conn)
 				c.ntlmServer = ntlm.NewServer("SERVER", "", db)
+				defer c.recoverConnection("reading from the connection")
 
 				for {
 					msg, err := readMessage(conn)
