@@ -88,6 +88,7 @@ func (lr LockRequest) Locks() []Lock {
 		}
 
 		locks = append(locks, lock)
+		off += 24
 	}
 
 	return locks
