@@ -18,12 +18,24 @@ import (
 	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
+	"github.com/mike76-dev/sombrero/web"
 	sdk "go.sia.tech/siastorage"
 )
 
 const version = "2.1.0"
 
 var storesDir = flag.String("dir", ".", "directory for storing persistent data")
+
+// newHTTPHandler wires the API and the web UI together. The API lives under
+// /api, behind the password and the ratelimiter. The web UI is served from
+// the root: it holds nothing secret, and asking for the password itself
+// beats leaving it to the browser's basic auth prompt.
+func newHTTPHandler(ctx context.Context, a http.Handler, password string) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/api/", http.StripPrefix("/api", api.Ratelimit(ctx)(api.BasicAuth(password)(a))))
+	mux.Handle("/", web.Handler())
+	return mux
+}
 
 func main() {
 	log.Printf("Starting Sombrero v%s...\n", version)
@@ -101,9 +113,9 @@ func main() {
 	}
 	defer lAPI.Close()
 	a := api.NewAPI(ctx, db, cfg.Indexd, cfg.Mode, server.Stats)
-	apiSrv := &http.Server{Handler: api.Ratelimit(ctx)(api.BasicAuth(cfg.API.Password)(a))}
+	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, cfg.API.Password)}
 	go apiSrv.Serve(lAPI)
-	log.Printf("API: listening at %s ...\n", lAPI.Addr())
+	log.Printf("API and web UI: listening at http://%s ...\n", lAPI.Addr())
 
 	go func() {
 		func() {
