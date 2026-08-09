@@ -742,3 +742,46 @@ func TestAChainThatComesApartToMoreThanItSaysIsRefusedAsItGoes(t *testing.T) {
 			traceBytes(64*ocss), len(msg), err)
 	}
 }
+
+// TestAChainedPayloadTooShortForItsOwnSizeIsRefused is the payload that names an algorithm and then
+// carries less than the four bytes of the size it comes apart to. The length is the payload's own to
+// set, and nothing but the end of the message was ever measured against it, so a length under four
+// left the size read from past the payload and the data behind it taken from a slice whose end lies
+// before its beginning - which is not an error but a panic, on a connection nobody has authenticated.
+func TestAChainedPayloadTooShortForItsOwnSizeIsRefused(t *testing.T) {
+	for _, length := range []int{0, 1, 2, 3} {
+		h := newSMBTest(t)
+		c := h.compressing(true, smb2.COMPRESSION_LZ77)
+
+		msg := chainedMessage(64, chainedPayload(smb2.COMPRESSION_LZ77,
+			smb2.COMPRESSION_CAPABILITIES_FLAG_CHAINED, make([]byte, length)))
+
+		// The message is cut to its own length, so that a slice reaching past the end of it cannot
+		// be answered by whatever the buffer happened to have room for.
+		msg = msg[:len(msg):len(msg)]
+
+		if _, err := c.decompress(msg); !errors.Is(err, smb2.ErrInvalidParameter) {
+			t.Errorf("a payload of %d bytes failed with %v, want it refused", length, err)
+		}
+	}
+}
+
+// TestAChainedPatternPayloadIsMeasuredAgainstItsOwnLength is the pattern payload that says it is
+// shorter than the eight bytes a pattern takes. The run was read from the message rather than from
+// the payload, so a pattern payload of two bytes was made up from the six that follow it - the head
+// of the next payload in the chain, which is nothing the peer said was part of this one.
+func TestAChainedPatternPayloadIsMeasuredAgainstItsOwnLength(t *testing.T) {
+	h := newSMBTest(t)
+	c := h.compressing(true, smb2.COMPRESSION_PATTERN_V1)
+
+	// A two-byte pattern payload, followed by a whole one. Behind the short payload lie the eight
+	// bytes of the second payload's header, which is what the run used to be read out of.
+	msg := chainedMessage(64,
+		chainedPayload(smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_CAPABILITIES_FLAG_CHAINED, make([]byte, 2)),
+		chainedPayload(smb2.COMPRESSION_PATTERN_V1, 0, smb2.PatternV1{Pattern: 's', Repetitions: 64}.Marshal()),
+	)
+
+	if _, err := c.decompress(msg); !errors.Is(err, smb2.ErrWrongLength) {
+		t.Errorf("a two-byte pattern payload failed with %v, want %v", err, smb2.ErrWrongLength)
+	}
+}

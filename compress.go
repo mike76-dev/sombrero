@@ -87,7 +87,7 @@ func (c *connection) decompress(msg []byte) ([]byte, error) {
 
 			case smb2.COMPRESSION_PATTERN_V1:
 				var v1 smb2.PatternV1
-				if err := v1.Unmarshal(ph[smb2.SMB2CompressionPayloadHeaderSize:]); err != nil {
+				if err := v1.Unmarshal(ph[smb2.SMB2CompressionPayloadHeaderSize : smb2.SMB2CompressionPayloadHeaderSize+int(length)]); err != nil {
 					return nil, err
 				}
 				if v1.Repetitions > ocss {
@@ -103,6 +103,9 @@ func (c *connection) decompress(msg []byte) ([]byte, error) {
 				}
 
 			default:
+				if length < 4 {
+					return nil, smb2.ErrInvalidParameter
+				}
 				compressor := compress.New(algo)
 				ops := binary.LittleEndian.Uint32(ph[smb2.SMB2CompressionPayloadHeaderSize : smb2.SMB2CompressionPayloadHeaderSize+4])
 				chunk, err := compressor.Decompress(ph[smb2.SMB2CompressionPayloadHeaderSize+4:smb2.SMB2CompressionPayloadHeaderSize+length], int(ocss))
