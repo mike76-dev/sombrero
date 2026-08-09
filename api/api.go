@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -99,7 +101,6 @@ type API struct {
 	cfg             stores.IndexdConfig
 	mode            stores.ServerMode
 	ctx             context.Context
-	rl              *ratelimiter
 	stats           func() ServerStats
 	pendingBuilders sync.Map // key: "workgroupUUID/shareName" → *sdk.Builder
 }
@@ -112,7 +113,6 @@ func NewAPI(ctx context.Context, s Store, cfg stores.IndexdConfig, mode stores.S
 		cfg:   cfg,
 		mode:  mode,
 		ctx:   ctx,
-		rl:    newRatelimiter(ctx),
 		stats: stats,
 	}
 	api.buildHTTPRoutes()
@@ -120,10 +120,17 @@ func NewAPI(ctx context.Context, s Store, cfg stores.IndexdConfig, mode stores.S
 }
 
 // BasicAuth wraps an http.Handler to force a basic auth with a password.
+// Only the password is checked; the username is ignored.
+// The passwords are hashed before they are compared, so that the comparison
+// runs over a fixed number of bytes and leaks neither the contents nor the
+// length of the configured password.
 func BasicAuth(password string) func(http.Handler) http.Handler {
+	want := sha256.Sum256([]byte(password))
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			if _, p, ok := req.BasicAuth(); !ok || p != password {
+			_, p, ok := req.BasicAuth()
+			got := sha256.Sum256([]byte(p))
+			if !ok || subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
 				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 				return
 			}
@@ -282,11 +289,6 @@ func writeSuccess(w http.ResponseWriter) {
 
 // banHandlerGET handles the GET /ban/:host calls.
 func (api *API) banHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	host := ps.ByName("host")
 	isBanned, reason, err := api.store.IsBanned(host)
 	if err != nil {
@@ -303,11 +305,6 @@ func (api *API) banHandlerGET(w http.ResponseWriter, req *http.Request, ps httpr
 
 // banHandlerPUT handles the PUT /ban/:host calls.
 func (api *API) banHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	host := ps.ByName("host")
 	reason := req.FormValue("reason")
 	if err := api.store.BanHost(host, reason); err != nil {
@@ -321,11 +318,6 @@ func (api *API) banHandlerPUT(w http.ResponseWriter, req *http.Request, ps httpr
 
 // banHandlerDELETE handles the DELETE /ban/:host calls.
 func (api *API) banHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	host := ps.ByName("host")
 	if err := api.store.UnbanHost(host); err != nil {
 		log.Printf("failed to unban host: %v", err)
@@ -338,11 +330,6 @@ func (api *API) banHandlerDELETE(w http.ResponseWriter, req *http.Request, ps ht
 
 // bansHandlerDELETE handles the DELETE /bans calls.
 func (api *API) bansHandlerDELETE(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	if err := api.store.ClearBans(); err != nil {
 		log.Printf("failed to clear bans: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -354,11 +341,6 @@ func (api *API) bansHandlerDELETE(w http.ResponseWriter, req *http.Request, _ ht
 
 // accountHandlerGET handles the GET /account calls.
 func (api *API) accountHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	var acc stores.Account
 	var err error
 	idValue := req.FormValue("id")
@@ -403,11 +385,6 @@ func (api *API) accountHandlerGET(w http.ResponseWriter, req *http.Request, _ ht
 
 // accountHandlerPOST handles the POST /account calls.
 func (api *API) accountHandlerPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	var acc stores.Account
 	if err := json.NewDecoder(req.Body).Decode(&acc); err != nil {
 		writeError(w, "invalid account structure", http.StatusBadRequest)
@@ -432,11 +409,6 @@ func (api *API) accountHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 
 // accountHandlerDELETE handles the DELETE /account calls.
 func (api *API) accountHandlerDELETE(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	username := strings.ToLower(req.FormValue("username"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
@@ -459,11 +431,6 @@ func (api *API) accountHandlerDELETE(w http.ResponseWriter, req *http.Request, _
 
 // accountsHandlerGET handles the GET /accounts calls.
 func (api *API) accountsHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
 	if !ok {
 		return
@@ -481,11 +448,6 @@ func (api *API) accountsHandlerGET(w http.ResponseWriter, req *http.Request, _ h
 
 // accountsHandlerDELETE handles the DELETE /accounts calls.
 func (api *API) accountsHandlerDELETE(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	wg, ok := api.resolveWorkgroup(w, req.FormValue("workgroup"))
 	if !ok {
 		return
@@ -502,11 +464,6 @@ func (api *API) accountsHandlerDELETE(w http.ResponseWriter, req *http.Request, 
 
 // shareHandlerPOST handles the POST /share calls.
 func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	var share stores.Share
 	if err := json.NewDecoder(req.Body).Decode(&share); err != nil {
 		writeError(w, "invalid share structure", http.StatusBadRequest)
@@ -534,11 +491,6 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 
 // sharesHandlerGET handles the GET /shares calls.
 func (api *API) sharesHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	shares, err := api.store.GetAllShares()
 	if err != nil {
 		log.Printf("failed to retrieve shares: %v", err)
@@ -555,11 +507,6 @@ func (api *API) sharesHandlerGET(w http.ResponseWriter, req *http.Request, _ htt
 
 // shareHandlerGET handles the GET /share/:name calls.
 func (api *API) shareHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	shareName := ps.ByName("name")
 	if shareName == "" {
 		writeError(w, "share name cannot be empty", http.StatusBadRequest)
@@ -579,11 +526,6 @@ func (api *API) shareHandlerGET(w http.ResponseWriter, req *http.Request, ps htt
 
 // shareHandlerDELETE handles the DELETE /share/:name calls.
 func (api *API) shareHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	shareName := ps.ByName("name")
 	if shareName == "" {
 		writeError(w, "share name cannot be empty", http.StatusBadRequest)
@@ -601,11 +543,6 @@ func (api *API) shareHandlerDELETE(w http.ResponseWriter, req *http.Request, ps 
 
 // shareAccountsHandlerGET handles the GET /share/:name/accounts calls.
 func (api *API) shareAccountsHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	shareName := ps.ByName("name")
 	if shareName == "" {
 		writeError(w, "share name cannot be empty", http.StatusBadRequest)
@@ -631,11 +568,6 @@ func (api *API) shareAccountsHandlerGET(w http.ResponseWriter, req *http.Request
 
 // policyHandlerGET handles the GET /share/:name/policy calls.
 func (api *API) policyHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	shareName := ps.ByName("name")
 	if shareName == "" {
 		writeError(w, "share name cannot be empty", http.StatusBadRequest)
@@ -679,11 +611,6 @@ func (api *API) policyHandlerGET(w http.ResponseWriter, req *http.Request, ps ht
 
 // policyHandlerPUT handles the PUT /share/:name/policy calls.
 func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	shareName := ps.ByName("name")
 	if shareName == "" {
 		writeError(w, "share name cannot be empty", http.StatusBadRequest)
@@ -745,11 +672,6 @@ func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps ht
 
 // policyHandlerDELETE handles the DELETE /share/:name/policy calls.
 func (api *API) policyHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	shareName := ps.ByName("name")
 	if shareName == "" {
 		writeError(w, "share name cannot be empty", http.StatusBadRequest)
@@ -792,11 +714,6 @@ func (api *API) policyHandlerDELETE(w http.ResponseWriter, req *http.Request, ps
 
 // accountSharesHandlerGET handles the GET /account/shares calls.
 func (api *API) accountSharesHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	username := strings.ToLower(req.FormValue("username"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
@@ -831,11 +748,6 @@ func (api *API) accountSharesHandlerGET(w http.ResponseWriter, req *http.Request
 
 // accountPolicyHandlerDELETE handles the DELETE /account/policy calls.
 func (api *API) accountPolicyHandlerDELETE(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	username := strings.ToLower(req.FormValue("username"))
 	if username == "" {
 		writeError(w, "username cannot be empty", http.StatusBadRequest)
@@ -895,11 +807,6 @@ func (api *API) resolveWorkgroup(w http.ResponseWriter, param string) (stores.Wo
 
 // workgroupHandlerPOST handles the POST /workgroup calls.
 func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	var body struct {
 		Name string `json:"name,omitempty"`
 	}
@@ -925,11 +832,6 @@ func (api *API) workgroupHandlerPOST(w http.ResponseWriter, req *http.Request, _
 
 // workgroupsHandlerGET handles the GET /workgroups calls.
 func (api *API) workgroupsHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	wgs, err := api.store.GetWorkgroups()
 	if err != nil {
 		log.Printf("failed to retrieve workgroups: %v", err)
@@ -943,11 +845,6 @@ func (api *API) workgroupsHandlerGET(w http.ResponseWriter, req *http.Request, _
 // workgroupHandlerGET handles the GET /workgroup/:id calls.
 // :id may be a UUID or a workgroup name.
 func (api *API) workgroupHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	wg, ok := api.resolveWorkgroup(w, ps.ByName("id"))
 	if !ok {
 		return
@@ -960,11 +857,6 @@ func (api *API) workgroupHandlerGET(w http.ResponseWriter, req *http.Request, ps
 // It replaces the list of public folders of an existing workgroup.
 // :id may be a UUID or a workgroup name.
 func (api *API) workgroupHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	wg, ok := api.resolveWorkgroup(w, ps.ByName("id"))
 	if !ok {
 		return
@@ -992,11 +884,6 @@ func (api *API) workgroupHandlerPUT(w http.ResponseWriter, req *http.Request, ps
 // workgroupHandlerDELETE handles the DELETE /workgroup/:id calls.
 // :id may be a UUID or a workgroup name.
 func (api *API) workgroupHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	wg, ok := api.resolveWorkgroup(w, ps.ByName("id"))
 	if !ok {
 		return
@@ -1013,11 +900,6 @@ func (api *API) workgroupHandlerDELETE(w http.ResponseWriter, req *http.Request,
 
 // statsHandlerGET handles the GET /stats calls.
 func (api *API) statsHandlerGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	var stats ServerStats
 	if api.stats != nil {
 		stats = api.stats()
@@ -1031,11 +913,6 @@ func (api *API) statsHandlerGET(w http.ResponseWriter, req *http.Request, _ http
 // to the indexer and returning the URL the admin must visit to approve it.
 // :workgroup may be a UUID or a workgroup name.
 func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	wg, ok := api.resolveWorkgroup(w, ps.ByName("workgroup"))
 	if !ok {
 		return
@@ -1092,11 +969,6 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 //
 // :workgroup may be a UUID or a workgroup name.
 func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	wg, ok := api.resolveWorkgroup(w, ps.ByName("workgroup"))
 	if !ok {
 		return
@@ -1185,11 +1057,6 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 // connectHandlerDELETE handles the DELETE /connect/:workgroup/:share calls.
 // :workgroup may be a UUID or a workgroup name.
 func (api *API) connectHandlerDELETE(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	if api.rl.limitExceeded(getRemoteHost(req)) {
-		writeError(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	wg, ok := api.resolveWorkgroup(w, ps.ByName("workgroup"))
 	if !ok {
 		return

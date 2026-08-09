@@ -55,9 +55,15 @@ func (m *ServerMode) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// defaultAPIAddress is where the API listens when the config does not say.
+const defaultAPIAddress = "127.0.0.1:9999"
+
 // APIConfig lists the API-related fields.
 type APIConfig struct {
-	Port     int    `yaml:"port"`
+	// Address is the address the API and the web UI listen on. It defaults
+	// to localhost: the API administers the whole server, so it is not
+	// exposed to the network unless it is asked for explicitly.
+	Address  string `yaml:"address"`
 	Password string `yaml:"password"`
 }
 
@@ -170,7 +176,15 @@ func ReadConfig(dir string) (cfg Config, err error) {
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
 
-	err = dec.Decode(&cfg)
+	if err = dec.Decode(&cfg); err != nil {
+		return
+	}
+
+	// An unset address must not fall back to binding every interface.
+	if cfg.API.Address == "" {
+		cfg.API.Address = defaultAPIAddress
+	}
+
 	return
 }
 
