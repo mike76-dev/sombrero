@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/smb2"
 )
@@ -106,4 +107,48 @@ func closedChan() chan struct{} {
 	close(ch)
 
 	return ch
+}
+
+// TestAZeroLengthReadIsAnsweredAtOnce is the read that asks for nothing. The range it covers is
+// worked out as offset..offset+length-1, and a length of zero takes that subtraction below zero:
+// counted in sixty-four bits it comes back as the whole address space, so the read walks the file in
+// chunks from the front of it to a last chunk some eighteen quintillion bytes in. Every turn of that
+// walk puts another chunk in the cache and sends another goroutine to the store for it, asking for a
+// length that has underflowed the same way. One read of no bytes, from anyone who can read the file
+// at all, is enough.
+func TestAZeroLengthReadIsAnsweredAtOnce(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	h.files.putData("clip.mp4", bytes.Repeat([]byte("O"), 4096))
+	created := cl.createWithOptions("clip.mp4", smb2.FILE_OPEN, 0)
+	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
+
+	for _, offset := range []uint64{0, 1024} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+
+			if data, err := file.read(offset, 0); err != nil || len(data) != 0 {
+				t.Errorf("the read at %d gave back %d bytes, err=%v, want nothing and no error", offset, len(data), err)
+			}
+			if data, ok := file.tryReadCached(offset, 0); !ok || len(data) != 0 {
+				t.Errorf("the cached read at %d gave back %d bytes, ok=%v, want nothing", offset, len(data), ok)
+			}
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the read of no bytes at offset %d did not come back", offset)
+		}
+	}
+
+	// Nothing was fetched and nothing was cached on the strength of a read of no bytes.
+	file.mu.Lock()
+	cached := len(file.buffer)
+	file.mu.Unlock()
+	if cached != 0 {
+		t.Errorf("the read of no bytes left %d chunk(s) in the cache", cached)
+	}
 }

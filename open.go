@@ -1412,6 +1412,10 @@ func (op *open) tryReadCached(offset, length uint64) ([]byte, bool) {
 	if offset+length >= size {
 		length = size - offset
 	}
+	if length == 0 {
+		op.mu.Unlock()
+		return nil, true
+	}
 
 	firstChunk := (offset / chunkSize) * chunkSize
 	lastChunk := ((offset + length - 1) / chunkSize) * chunkSize
@@ -1510,6 +1514,9 @@ func (op *open) read(offset, length uint64) ([]byte, error) {
 
 	if offset+length >= size {
 		length = size - offset
+	}
+	if length == 0 {
+		return nil, nil
 	}
 
 	// A file that is being uploaded is not an object in the store yet, so there is nothing there
