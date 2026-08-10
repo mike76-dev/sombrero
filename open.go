@@ -56,7 +56,13 @@ type sentPart struct {
 
 // upload holds the information about an active multipart upload.
 type upload struct {
-	uploadID   string
+	uploadID string
+
+	// path is the key the multipart upload was started against, and it is what every part of it is
+	// sent to. The open it began on can be renamed while the upload runs, and the parts belong to
+	// the key the backend knows the upload by rather than to whatever the open is called now.
+	path string
+
 	partCount  int
 	parts      []sentPart
 	totalSize  uint64
@@ -1714,6 +1720,7 @@ func (op *open) startUpload() error {
 
 	op.file.startUpload(&upload{
 		uploadID:   id,
+		path:       path,
 		pending:    make(map[uint64]*uploadChunk),
 		nextOffset: 0,
 		bufOffset:  0,
@@ -1839,7 +1846,7 @@ func (op *open) sendPart(u *upload, number int, slab uploadChunk) {
 		eTag, err := op.treeConnect.client.Write(
 			op.ctx,
 			bytes.NewReader(slab.data),
-			op.pathName,
+			u.path,
 			u.uploadID,
 			number,
 			slab.offset,
@@ -2094,7 +2101,7 @@ func (op *open) flush() error {
 		parts = append(parts, api.MultipartCompletedPart{PartNumber: p.number, ETag: p.eTag})
 	}
 
-	if err := op.treeConnect.client.FinishUpload(op.ctx, op.pathName, uploadID, parts); err != nil {
+	if err := op.treeConnect.client.FinishUpload(op.ctx, u.path, uploadID, parts); err != nil {
 		return err
 	}
 
@@ -2122,5 +2129,5 @@ func (op *open) cancelUpload() {
 	uploadID := u.uploadID
 	u.mu.Unlock()
 
-	_ = op.treeConnect.client.AbortUpload(op.ctx, op.pathName, uploadID)
+	_ = op.treeConnect.client.AbortUpload(op.ctx, u.path, uploadID)
 }

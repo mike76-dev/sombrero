@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -481,5 +482,61 @@ func TestTheLastPartGoesBeforeTheOthersAreWaitedFor(t *testing.T) {
 	want = append(want, bytes.Repeat([]byte("z"), 1024)...)
 	if got := h.files.dataOf("big.bin"); !bytes.Equal(got, want) {
 		t.Errorf("the store holds %d bytes, want %d", len(got), len(want))
+	}
+}
+
+// TestIntegrationARenameDuringAnUploadDoesNotRaceIt is the file renamed while its parts are still
+// going to the store. A part is sent on a goroutine of its own, and the name it was sent to was read
+// off the open at that moment, without the lock every other reader of the name takes - so a rename
+// landing at the same time was both a data race on the name and a part sent to a key the multipart
+// upload was never opened on. The upload is keyed by the path it was started against, and that is
+// what its parts belong to whatever the open is called by the time they go.
+func TestIntegrationARenameDuringAnUploadDoesNotRaceIt(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	cl.tc.maxUploadSize = 1024
+
+	handle, _ := cl.create("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(handle).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+	fid := createdFileID(handle)
+
+	cl.ss.mu.Lock()
+	var op *open
+	for _, o := range cl.ss.openTable {
+		op = o
+	}
+	cl.ss.mu.Unlock()
+	if op == nil {
+		t.Fatal("the handle has no open behind it")
+	}
+
+	// Enough of both that the two land on top of each other: every block fills a part, and each
+	// part is a goroutine reaching for the name while the renames are changing it.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		filling(t, cl, fid, 1024, 300)
+	}()
+	go func() {
+		defer wg.Done()
+		for i := range 3000 {
+			if i%2 == 0 {
+				h.srv.moveOpen(op, "renamed.bin")
+			} else {
+				h.srv.moveOpen(op, "big.bin")
+			}
+		}
+	}()
+	wg.Wait()
+
+	// The upload is started by the first write, so which of the two names it was opened on depends
+	// on whether a rename got in first. Either is right; what matters is that it is keyed on a name
+	// the open actually had, and on the same one from the first part to the last.
+	if u := op.file.uploadNow(); u != nil && u.path != "big.bin" && u.path != "renamed.bin" {
+		t.Errorf("the upload is keyed on %q, which is neither name the open went by", u.path)
 	}
 }
