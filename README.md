@@ -176,9 +176,7 @@ To grant an account access to the share, run:
 curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/policy?username=test&workgroup=8303eeb8-f30e-4607-9eb7-875df2c5bd52&read=true&write=true&delete=true&execute=true"
 ```
 ## Web UI
-The server ships with a web UI covering the same ground as the API: workgroups, accounts, shares, access policies, bans, and the server statistics. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` when it asks.
-
-The UI is served without a password, while everything under `/api` still requires one. This is deliberate: the UI holds nothing secret, and asking for the password itself makes for a better login than the browser's basic auth prompt.
+The server ships with a web UI covering the same ground as the API: workgroups, accounts, shares, access policies, bans, and the server statistics. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` on the Settings page.
 
 ### Building the UI
 The UI is not built as part of `go build`. Release binaries are built by building the UI first and then the server:
@@ -189,12 +187,10 @@ go build .
 ```
 A server built without this step runs normally and serves the API as usual; only the UI is missing, and it says so if you open it in a browser.
 
-To work on the UI itself, run `npm --prefix web run dev` alongside the server. The dev server proxies `/api` through to the server on port 9999, so the URLs match what the embedded build sees. Point the proxy elsewhere with `SOMBRERO_API_URL`.
-
 ## Upload Packing
 A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Both config fields are optional: setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, while `minPackedSlabSize` (for example, `1048576`) holds that upload back until the leftover data of a share is worth a slab. On its own, `minPackedSlabSize` has no effect.
 ## Shared Folders
-It is now possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup. Only working on `indexd` shares.
+It is possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup. Only working on `indexd` shares.
 
 To create such list, run:
 ```Bash
@@ -222,7 +218,7 @@ The API administers the whole server, so it listens on `127.0.0.1` unless the co
 ```Bash
 ssh -N -L 9999:127.0.0.1:9999 <USER>@<SERVER_NET_ADDRESS>
 ```
-Binding the API to a public interface exposes the password over plain HTTP; put a reverse proxy with TLS in front of it if you go that way.
+Binding the API to a public interface exposes the password over plain HTTP; put a reverse proxy with TLS in front of it if you go that way, and see [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy) below.
 
 The server also has a built-in abuse protection. If 30 or more connections are detected from the same IP address within 10 minutes, this IP is permanently banned. This number of 30 can be configured in the config file (see above).
 
@@ -232,6 +228,45 @@ The bans are saved in the database, and the reason for the ban is provided. If a
 ```Bash
 curl -u "":<API_PASSWORD> -X DELETE "http://127.0.0.1:9999/api/bans/<IP_OF_THE_REMOTE_HOST>"
 ```
+
+## Running Behind a Reverse Proxy
+The API and the web UI are served over plain HTTP, so reaching them from another machine calls for a reverse proxy that terminates TLS. The proxy has to run on the same machine as the server, and the API has to keep listening on `127.0.0.1:9999`, so that the proxy is the only way in. Below are the recommendations for Apache2.
+
+Enable the modules the setup needs:
+```Bash
+sudo a2enmod proxy proxy_http ssl headers
+```
+
+Then create a virtual host, e.g. in `/etc/apache2/sites-available/sombrero.conf`:
+```ApacheConf
+<VirtualHost *:80>
+    ServerName sombrero.example.com
+    Redirect permanent / https://sombrero.example.com/
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName sombrero.example.com
+
+    SSLEngine on
+    SSLCertificateFile    /etc/letsencrypt/live/sombrero.example.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/sombrero.example.com/privkey.pem
+
+    RequestHeader unset X-Forwarded-For
+
+    ProxyPreserveHost On
+    ProxyPass        / http://127.0.0.1:9999/
+    ProxyPassReverse / http://127.0.0.1:9999/
+</VirtualHost>
+```
+
+Enable the site and reload:
+```Bash
+sudo a2ensite sombrero
+sudo apache2ctl configtest
+sudo systemctl reload apache2
+```
+
+If Apache is itself behind another proxy or a CDN, configure [mod_remoteip](https://httpd.apache.org/docs/current/mod/mod_remoteip.html) with the addresses of those front-ends, so that the entry Apache appends is the real client rather than the hop in front of it.
 
 ## Connecting to the Server
 In the guides below, `<SERVER_NET_ADDRESS>` stands for the network address of the SMB server, while `<SHARE_NAME>` is the name of the share registered earlier.
