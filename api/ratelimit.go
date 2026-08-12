@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -124,14 +125,34 @@ func Ratelimit(ctx context.Context) func(http.Handler) http.Handler {
 	}
 }
 
-// getRemoteHost returns the address of the remote host.
+// getRemoteHost returns the address of the remote host. A reverse proxy on the
+// same machine makes every request arrive from loopback, and the client it was
+// made for is the last entry of X-Forwarded-For: a proxy appends the peer it
+// saw to whatever the client sent, so that entry is the only one the client
+// cannot write. Coming from anywhere else the header is the client's own to
+// make up, and is ignored.
 func getRemoteHost(r *http.Request) (host string) {
 	host, _, _ = net.SplitHostPort(r.RemoteAddr)
-	if host == "127.0.0.1" || host == "localhost" {
-		xff := r.Header.Values("X-Forwarded-For")
-		if len(xff) > 0 {
-			host = xff[0]
-		}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return
 	}
-	return
+
+	xff := r.Header.Values("X-Forwarded-For")
+	if len(xff) == 0 {
+		return
+	}
+
+	last := xff[len(xff)-1]
+	if i := strings.LastIndex(last, ","); i >= 0 {
+		last = last[i+1:]
+	}
+	last = strings.TrimSpace(last)
+	if h, _, err := net.SplitHostPort(last); err == nil {
+		last = h
+	}
+	if net.ParseIP(last) == nil {
+		return
+	}
+
+	return last
 }
