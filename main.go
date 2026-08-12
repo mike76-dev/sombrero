@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log"
 	"net"
@@ -10,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -18,7 +16,6 @@ import (
 	"github.com/mike76-dev/sombrero/api"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/ntlm"
-	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/web"
 	sdk "go.sia.tech/siastorage"
@@ -236,37 +233,7 @@ func main() {
 				log.Println("Incoming connection from", conn.RemoteAddr())
 				c := server.newConnection(conn)
 				c.ntlmServer = ntlm.NewServer("SERVER", "", db)
-				defer c.recoverConnection("reading from the connection")
-
-				for {
-					msg, err := readMessage(conn)
-					if err != nil && strings.Contains(err.Error(), "EOF") {
-						time.Sleep(100 * time.Millisecond)
-						continue
-					} else if err != nil {
-						if !strings.Contains(err.Error(), "use of closed network connection") {
-							log.Println("Error reading message:", err)
-						}
-						server.closeConnection(c)
-						return
-					}
-
-					server.mu.Lock()
-					server.stats.BytesRcvd += uint64(len(msg))
-					server.mu.Unlock()
-
-					if err := c.acceptRequest(msg); err != nil {
-						log.Println("couldn't accept request:", err)
-						server.closeConnection(c)
-						if errors.Is(err, smb2.ErrWrongProtocol) {
-							// Ban the remote host if it keeps sending SMB requests after receiving
-							// an SMB2_NEGOTIATE response.
-							server.blockHost(host, "old protocol")
-							log.Printf("Blocked host %s for using old protocol\n", host)
-						}
-						return
-					}
-				}
+				c.readLoop(host)
 			}()
 		}
 	}

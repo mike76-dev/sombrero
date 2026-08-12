@@ -6,6 +6,7 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -2777,6 +2778,45 @@ func (c *connection) recoverConnection(where string) {
 	c.conn.Close()
 	log.Printf("panic while %s for %s: %v\n%s", where, c.clientName, r, debug.Stack())
 	c.server.closeConnection(c)
+}
+
+// readLoop serves one connection, taking the messages off the socket and handing them to the
+// request path until the peer goes or the connection is torn down under it.
+func (c *connection) readLoop(host string) {
+	defer c.recoverConnection("reading from the connection")
+
+	for {
+		msg, err := readMessage(c.conn)
+		if err != nil {
+			// A peer that has gone and a socket this server has closed itself are the connection
+			// ending rather than anything to report. Whichever it is, there is nothing further to
+			// read: the end of a stream is the end of it, and a read that finds one finds it again
+			// every time it is asked.
+			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, net.ErrClosed) {
+				log.Println("Error reading message:", err)
+			}
+			c.server.closeConnection(c)
+
+			return
+		}
+
+		c.server.mu.Lock()
+		c.server.stats.BytesRcvd += uint64(len(msg))
+		c.server.mu.Unlock()
+
+		if err := c.acceptRequest(msg); err != nil {
+			log.Println("couldn't accept request:", err)
+			c.server.closeConnection(c)
+			if errors.Is(err, smb2.ErrWrongProtocol) {
+				// Ban the remote host if it keeps sending SMB requests after receiving
+				// an SMB2_NEGOTIATE response.
+				c.server.blockHost(host, "old protocol")
+				log.Printf("Blocked host %s for using old protocol\n", host)
+			}
+
+			return
+		}
+	}
 }
 
 // processRequests pulls requests from the queue one by one and submits them for processing.

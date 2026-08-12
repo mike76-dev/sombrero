@@ -15,7 +15,7 @@ func readMessage(conn net.Conn) ([]byte, error) {
 	buf := make([]byte, 4)
 	n, err := io.ReadFull(conn, buf)
 	if err != nil {
-		return nil, fmt.Errorf("error reading TCP header: %v", err)
+		return nil, fmt.Errorf("error reading TCP header: %w", err)
 	}
 	if n < 4 {
 		return nil, fmt.Errorf("supposed to read 4 bytes but got %d", n)
@@ -29,7 +29,7 @@ func readMessage(conn net.Conn) ([]byte, error) {
 
 	n, err = io.ReadFull(conn, msg)
 	if err != nil {
-		return nil, fmt.Errorf("error reading message: %v", err)
+		return nil, fmt.Errorf("error reading message: %w", err)
 	}
 	if n < int(length) {
 		return nil, fmt.Errorf("supposed to read %d bytes but got %d", length, n)

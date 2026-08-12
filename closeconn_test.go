@@ -1,8 +1,10 @@
 package main
 
 import (
+	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/smb2"
 )
@@ -178,5 +180,37 @@ func TestABackendThatPanicsOnAPartIsAnswered(t *testing.T) {
 	other := h.dial("bob")
 	if _, err := other.createErr("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN); err != nil {
 		t.Fatalf("the server stopped serving after the backend came apart: %v", err)
+	}
+}
+
+// TestAPeerThatHasGoneEndsTheConnection is the client that closes its socket. The end of a stream is
+// the end of it — a read that finds one finds it again every time it is asked — so a loop that took
+// it for something to wait out sat there at ten reads a second, holding the connection, its sessions
+// and its opens, until the sweep came round minutes later and shut the socket under it.
+func TestAPeerThatHasGoneEndsTheConnection(t *testing.T) {
+	h := newSMBTest(t)
+
+	peer, sock := net.Pipe()
+	c := h.srv.newConnection(sock)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.readLoop("10.0.0.1")
+	}()
+
+	peer.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read loop was still going long after the peer had gone")
+	}
+
+	h.srv.mu.Lock()
+	_, kept := h.srv.connectionList[c.clientName]
+	h.srv.mu.Unlock()
+	if kept {
+		t.Error("the connection was left in the connection list after the peer had gone")
 	}
 }
