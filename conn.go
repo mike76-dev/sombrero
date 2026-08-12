@@ -1040,6 +1040,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		interim := c.expectInterim(req.Header().MessageID())
 		go func() {
+			defer c.recoverConnection("creating a file")
+
 			c.server.breakHoldersOn(tc.share, path, nil, asking, sharedOK)
 
 			resp := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
@@ -1486,6 +1488,8 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		interim := c.expectInterim(rr.Header().MessageID())
 		go func() {
+			defer c.recoverConnection("reading a file")
+
 			var resp smb2.GenericResponse
 			data, err := op.read(rr.Offset(), length)
 			if err != nil {
@@ -1657,6 +1661,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		interim := c.expectInterim(wr.Header().MessageID())
 		op.file.beginWrite()
 		go func() {
+			// Deferred before the write is ended, so that a panic still ends it: a write left
+			// counted is a write the next flush waits for and never sees.
+			defer c.recoverConnection("writing to a file")
 			defer op.file.endWrite()
 			var resp smb2.GenericResponse
 
@@ -2745,6 +2752,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 	}
 }
 
+// recoverGoroutine turns a panic raised on a goroutine that answers to no one connection into the
+// loss of whatever that goroutine was doing rather than of the whole server.
+func recoverGoroutine(where string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+
+	log.Printf("panic while %s: %v\n%s", where, r, debug.Stack())
+}
+
 // recoverConnection turns a panic raised while serving one connection into the loss of that
 // connection rather than of the whole server.
 //
@@ -3326,7 +3344,10 @@ func (s *server) reapConnections() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			s.scavengeConnections()
+			func() {
+				defer recoverGoroutine("scavenging the connections")
+				s.scavengeConnections()
+			}()
 		}
 	}
 }

@@ -310,7 +310,12 @@ func (s *server) reapDurableOpens() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			s.sweepDurableOpens()
+			// Recovered per sweep rather than around the loop, so that a sweep that panics
+			// costs that sweep and not every one after it.
+			func() {
+				defer recoverGoroutine("sweeping the durable opens")
+				s.sweepDurableOpens()
+			}()
 		}
 	}
 }

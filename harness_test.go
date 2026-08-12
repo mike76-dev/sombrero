@@ -59,6 +59,12 @@ type fakeClient struct {
 	// something to happen to the handle while a read on it is still being worked on.
 	readGate chan struct{}
 
+	// readPanic and writePanic make the backend panic rather than answer. A backend is reached
+	// from goroutines nobody is left waiting on, so what the server does when one of them comes
+	// apart is worth being able to reach.
+	readPanic  bool
+	writePanic bool
+
 	// partGate holds up the part uploads a test names — every one of them if partHeld is zero — so
 	// that a test can see what the server does while a part is still on its way to the backend.
 	partGate chan struct{}
@@ -189,6 +195,21 @@ func (fc *fakeClient) holdReads() func() {
 	return func() { close(gate) }
 }
 
+// panicOnReads and panicOnWrites make the backend come apart rather than answer, from here on.
+func (fc *fakeClient) panicOnReads() {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.readPanic = true
+}
+
+func (fc *fakeClient) panicOnWrites() {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.writePanic = true
+}
+
 // failDeletion makes every deletion fail from here on.
 func (fc *fakeClient) failDeletion(err error) {
 	fc.mu.Lock()
@@ -297,11 +318,15 @@ func (fc *fakeClient) Parents(context.Context, stores.Account, string) (client.F
 // reads as nothing, as it did before any test cared what came back.
 func (fc *fakeClient) Read(_ context.Context, _ stores.Account, path string, offset, length uint64, w io.Writer) error {
 	fc.mu.Lock()
-	gate := fc.readGate
+	gate, boom := fc.readGate, fc.readPanic
 	fc.mu.Unlock()
 
 	if gate != nil {
 		<-gate
+	}
+
+	if boom {
+		panic("the backend came apart on a read")
 	}
 
 	fc.mu.Lock()
@@ -412,11 +437,16 @@ func (fc *fakeClient) FinishUpload(_ context.Context, path, uploadID string, giv
 func (fc *fakeClient) Write(_ context.Context, r io.Reader, path, uploadID string, number int, offset, length uint64) (string, error) {
 	fc.mu.Lock()
 	gate, held, err := fc.partGate, fc.partHeld, fc.writeErr
+	boom := fc.writePanic
 	fc.partsWritten = append(fc.partsWritten, number)
 	fc.mu.Unlock()
 
 	if gate != nil && (held == 0 || held == number) {
 		<-gate
+	}
+
+	if boom {
+		panic("the backend came apart on a part")
 	}
 
 	if err != nil {

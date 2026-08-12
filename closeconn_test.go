@@ -124,3 +124,59 @@ func TestAMessageThatDoesNotDecryptIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestABackendThatPanicsOnAReadIsAnswered is the download that comes apart rather than returning.
+// It runs on a goroutine of its own, with the read that asked for it waiting on the chunk it was
+// filling: a panic there took the whole server, and had it not, it would have left every reader of
+// that chunk waiting for a fill that was never going to come.
+func TestABackendThatPanicsOnAReadIsAnswered(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putData("notes.txt", []byte("another test"))
+	h.files.panicOnReads()
+
+	cl := h.dial("alice")
+	handle, _ := cl.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+
+	read, err := cl.readOver(createdFileID(handle), 12, smb2.SMB2_CHANNEL_NONE)
+	if err != nil {
+		t.Fatalf("the read was never answered: %v", err)
+	}
+	if status := smb2.Header(read).Status(); status != smb2.STATUS_DATA_ERROR {
+		t.Errorf("the read was answered with %#x, want the I/O error %#x", status, smb2.STATUS_DATA_ERROR)
+	}
+
+	// And the server is still there for everybody else, which is the whole of what containment means.
+	other := h.dial("bob")
+	if _, err := other.createErr("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN); err != nil {
+		t.Fatalf("the server stopped serving after the backend came apart: %v", err)
+	}
+}
+
+// TestABackendThatPanicsOnAPartIsAnswered is the same for the way out. A part goes to the backend
+// long after the write it came from was answered, so a panic on the way has nobody left to tell:
+// unrecovered it took the server, and the close that waits on the part would have waited for good.
+func TestABackendThatPanicsOnAPartIsAnswered(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	cl.tc.maxUploadSize = 1024
+
+	handle, _ := cl.create("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	fid := createdFileID(handle)
+
+	h.files.panicOnWrites()
+
+	// Two parts' worth, so that a part is sent while the handle is still open.
+	if _, err := cl.write(fid, 0, make([]byte, 2048)); err != nil {
+		t.Fatalf("the write was never answered: %v", err)
+	}
+
+	if _, err := cl.closeHandle(fid); err != nil {
+		t.Fatalf("the close was never answered: %v", err)
+	}
+
+	other := h.dial("bob")
+	if _, err := other.createErr("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN); err != nil {
+		t.Fatalf("the server stopped serving after the backend came apart: %v", err)
+	}
+}

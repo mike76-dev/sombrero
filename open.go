@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -1296,6 +1298,8 @@ func (op *open) directorySnapshot(acc stores.Account) ([]byte, error) {
 // that a directory that cannot be looked at at all is answered synchronously rather than armed
 // and left to fail behind an interim response.
 func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc stores.Account, snapshot []byte, stopChan chan struct{}) {
+	defer c.recoverConnection("watching a directory")
+
 	op.mu.Lock()
 	ctx := op.ctx
 	op.mu.Unlock()
@@ -1611,7 +1615,9 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readC
 
 	go func() {
 		var buf bytes.Buffer
-		err := op.treeConnect.client.Read(op.ctx, acc, path, chunkOffset, toRead, &buf)
+		err := recoverAsError("reading "+path, func() error {
+			return op.treeConnect.client.Read(op.ctx, acc, path, chunkOffset, toRead, &buf)
+		})
 
 		op.mu.Lock()
 		if err != nil {
@@ -1850,15 +1856,20 @@ func (op *open) sendPart(u *upload, number int, slab uploadChunk) {
 			defer func() { <-u.slots }()
 		}
 
-		eTag, err := op.treeConnect.client.Write(
-			op.ctx,
-			bytes.NewReader(slab.data),
-			u.path,
-			u.uploadID,
-			number,
-			slab.offset,
-			uint64(len(slab.data)),
-		)
+		var eTag string
+		err := recoverAsError("sending a part of "+u.path, func() (err error) {
+			eTag, err = op.treeConnect.client.Write(
+				op.ctx,
+				bytes.NewReader(slab.data),
+				u.path,
+				u.uploadID,
+				number,
+				slab.offset,
+				uint64(len(slab.data)),
+			)
+
+			return
+		})
 
 		u.mu.Lock()
 		defer u.mu.Unlock()
@@ -1882,6 +1893,23 @@ func (op *open) sendPart(u *upload, number int, slab uploadChunk) {
 	}
 
 	go send()
+}
+
+// recoverAsError turns a panic raised by fn into the error fn would have returned. The backend is
+// reached from goroutines whose callers have already been answered, and what waits on one of them
+// waits on the answer it leaves behind: a goroutine that dies without leaving one strands them.
+func recoverAsError(what string, fn func() error) (err error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+
+		err = fmt.Errorf("panic while %s: %v", what, r)
+		log.Printf("panic while %s: %v\n%s", what, r, debug.Stack())
+	}()
+
+	return fn()
 }
 
 // setEndOfFile carries out a client's setting of the end of the file.

@@ -475,6 +475,8 @@ func (s *server) grantLease(op *open, l *lease, requested uint32, tc *treeConnec
 	// and a promise made this late was made while the file stood free, so its holder cannot be
 	// sitting on anything the create should have seen.
 	go func() {
+		defer recoverGoroutine("sending the breaks")
+
 		for _, other := range notify {
 			s.sendOplockBreak(other)
 		}

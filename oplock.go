@@ -383,6 +383,8 @@ func (s *server) tellHoldersOn(sh *share, path string, except *open, by asker, s
 	}
 
 	go func() {
+		defer recoverGoroutine("sending the breaks")
+
 		for _, op := range notify {
 			s.sendOplockBreak(op)
 		}
@@ -503,6 +505,8 @@ func (s *server) grantOplock(op *open, requested uint8, tc *treeConnect, path st
 	// file stood free, so its holder cannot be sitting on anything the create should have seen.
 	// All that matters is that the holder is told, which starting the break does.
 	go func() {
+		defer recoverGoroutine("sending the breaks")
+
 		for _, other := range notify {
 			s.sendOplockBreak(other)
 		}
