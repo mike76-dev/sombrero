@@ -2069,6 +2069,9 @@ func (op *open) flush() error {
 		lastNumber = u.partCount
 		last = uploadChunk{offset: u.bufOffset, data: u.buf}
 		u.buf = nil
+		// The buffer starts where it now ends: the bytes it held are the part above, and a cut
+		// reaching for them from here would be reaching into a buffer that no longer has them.
+		u.bufOffset = u.nextOffset
 	}
 
 	finalSize := u.totalSize

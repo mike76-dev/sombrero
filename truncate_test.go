@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/smb2"
 )
@@ -531,4 +532,75 @@ func firstDifference(a, b []byte) int {
 	}
 
 	return min(len(a), len(b))
+}
+
+// TestIntegrationATruncateDuringAFinishIsAnswered is the cut that lands while another handle's close
+// has the file in the backend. The finish hands the last of the buffer over as a part and lets go of
+// the buffer, and the offsets left behind still said those bytes were in it: a cut reaching for them
+// sliced a buffer that was no longer there, and the connection it came in on was lost to the panic.
+// What the cut is answered with is the upload's business; that it is answered at all is this one's.
+func TestIntegrationATruncateDuringAFinishIsAnswered(t *testing.T) {
+	h := newSMBTest(t)
+
+	writer := h.dial("alice")
+	writer.tc.maxUploadSize = 4096
+
+	handle, _ := writer.create("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	fid := createdFileID(handle)
+
+	// Two full parts and a piece of a third, so that the finish has a buffer to hand over at all.
+	for i := range 2 {
+		if _, err := writer.write(fid, uint64(i)*4096, bytes.Repeat([]byte{byte('a' + i)}, 4096)); err != nil {
+			t.Fatalf("the write of block %d failed: %v", i, err)
+		}
+	}
+	if _, err := writer.write(fid, 8192, bytes.Repeat([]byte("z"), 1024)); err != nil {
+		t.Fatalf("the write of the tail failed: %v", err)
+	}
+
+	// The cut comes in on a connection of its own. Behind the close on the same one it would only be
+	// looked at once the close was over, which is not the moment this is about.
+	cutter := h.dial("alice")
+	other, _ := cutter.create("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	otherFid := createdFileID(other)
+
+	// The last part is held on its way to the store, which leaves the finish standing where it has
+	// given the buffer up and the upload is still the file's.
+	release := h.files.holdParts(3)
+
+	closed := make(chan error, 1)
+	go func() {
+		_, err := writer.closeHandle(fid)
+		closed <- err
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		h.files.mu.Lock()
+		sent := len(h.files.partsWritten)
+		h.files.mu.Unlock()
+		if sent == 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Into the bytes the finish has just handed over.
+	cut := make(chan error, 1)
+	go func() {
+		_, err := cutter.endOfFile(otherFid, 8704)
+		cut <- err
+	}()
+
+	// The cut has to have reached the upload before the part is let go of: released first, the
+	// finish is over and there is no longer a window to land in.
+	time.Sleep(50 * time.Millisecond)
+	release()
+
+	if err := <-closed; err != nil {
+		t.Fatalf("the close failed: %v", err)
+	}
+	if err := <-cut; err != nil {
+		t.Fatalf("the cut was never answered, which is the connection going down under it: %v", err)
+	}
 }
