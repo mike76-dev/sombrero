@@ -115,3 +115,92 @@ func TestIntegrationAHoleThatIsFilledBeforeTheCloseIsNotZeroed(t *testing.T) {
 		t.Errorf("the store holds %q, want the file as it was written", got)
 	}
 }
+
+// TestIntegrationAHoleWiderThanTheServerWillFillIsRefused is the write a long way past the end of the
+// file. The offset of a write is a 64-bit number of the client's choosing, and the hole in front of
+// it used to be written out in one allocation of exactly that width: named just above the memory of
+// the machine, that is an out-of-memory the runtime cannot recover from, and named lower it is that
+// many zeros bought from the backend.
+func TestIntegrationAHoleWiderThanTheServerWillFillIsRefused(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	handle, _ := cl.create("sparse.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	fid := createdFileID(handle)
+
+	if _, err := cl.write(fid, 0, bytes.Repeat([]byte("h"), 16)); err != nil {
+		t.Fatalf("the write of the head failed: %v", err)
+	}
+
+	// The hole is named far enough out that the allocation it used to ask for fails at once rather
+	// than being attempted: a regression here should be a refusal this test can report, not the
+	// memory of the machine running the tests.
+	if _, err := cl.write(fid, 1<<62, []byte("t")); err != nil {
+		t.Fatalf("the write past the end failed: %v", err)
+	}
+
+	closed, err := cl.closeHandle(fid)
+	if err != nil {
+		t.Fatalf("the close failed outright: %v", err)
+	}
+	if status := smb2.Header(closed).Status(); status == smb2.STATUS_OK {
+		t.Error("the close was answered with success, want the file refused")
+	}
+
+	// Refused rather than half-stored: what the backend holds is nothing at all.
+	if got := h.files.dataOf("sparse.bin"); len(got) > 0 {
+		t.Errorf("the store holds %d bytes of a file that was refused", len(got))
+	}
+
+	// And the server is still there, which is the whole of what the limit is for.
+	other := h.dial("bob")
+	if _, err := other.createErr("sparse.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN); err != nil {
+		t.Fatalf("the server stopped serving: %v", err)
+	}
+}
+
+// TestIntegrationAHoleIsFilledAPartAtATime is the hole the server does fill. The zeros go to the
+// backend as parts of the size every other part has, rather than as one part as wide as the hole,
+// which is what holds the memory a hole costs to the size of a part.
+func TestIntegrationAHoleIsFilledAPartAtATime(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	cl.tc.maxUploadSize = 1024
+
+	handle, _ := cl.create("sparse.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	fid := createdFileID(handle)
+
+	head := bytes.Repeat([]byte("h"), 16)
+	if _, err := cl.write(fid, 0, head); err != nil {
+		t.Fatalf("the write of the head failed: %v", err)
+	}
+
+	// Four parts' worth of nothing between the two.
+	const tailAt = 16 + 4*1024
+	tail := bytes.Repeat([]byte("t"), 16)
+	if _, err := cl.write(fid, tailAt, tail); err != nil {
+		t.Fatalf("the write of the tail failed: %v", err)
+	}
+
+	closed, err := cl.closeHandle(fid)
+	if err != nil {
+		t.Fatalf("the close failed outright: %v", err)
+	}
+	if status := smb2.Header(closed).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the close was answered with %#x, want the file stored", status)
+	}
+
+	want := append(append(append([]byte{}, head...), make([]byte, 4*1024)...), tail...)
+	if got := h.files.dataOf("sparse.bin"); !bytes.Equal(got, want) {
+		t.Errorf("the store holds %d bytes, want the %d written with the hole as zeros", len(got), len(want))
+	}
+
+	// The zeros arrived as parts of the ordinary size, so there are several of them.
+	h.files.mu.Lock()
+	parts := len(h.files.partsFinished)
+	h.files.mu.Unlock()
+	if parts < 4 {
+		t.Errorf("the file was put together from %d part(s), want the hole spread over several", parts)
+	}
+}

@@ -177,6 +177,12 @@ func (u *upload) cutTo(n uint64) bool {
 	return true
 }
 
+// maxGapFilled is the most of a file the server will write zeros over to make it whole. A client
+// that leaves a hole behind meant the zeros, so they are written - but the offset of a write is a
+// 64-bit number of the client's choosing, and the hole in front of what it queues is an upload of
+// that many bytes to a backend that charges for them. Past this the file is refused instead.
+const maxGapFilled = 1 << 30 // 1GiB
+
 // uploadHeadKept is how much of the front of a file being written is kept in memory to answer reads of it.
 var uploadHeadKept uint64 = 8 * 1024 * 1024
 
@@ -272,38 +278,74 @@ func (u *upload) takePending() {
 	}
 }
 
-// fillGaps writes zeros over what the client left unwritten, so that what is queued behind a hole can
-// be taken and the file stored. It answers the one thing a hole can mean once no write is in flight:
-// the client wrote a file with nothing in that part of it, which on any file system reads as zeros.
+// gapAhead is how much of the file the client has left unwritten in front of the queued write that
+// comes first. It is measured rather than filled and then counted, because the width is the whole of
+// what there is to decide on: the offset of a write is a 64-bit number of the client's choosing, so
+// the hole in front of what it leaves queued can be as wide as one.
 // u.mu must be held.
-func (u *upload) fillGaps() uint64 {
-	var filled uint64
-	for len(u.pending) > 0 {
-		lowest := ^uint64(0)
-		for offset := range u.pending {
-			if offset < lowest {
-				lowest = offset
-			}
-		}
-
-		if lowest <= u.nextOffset {
-			// takePending would have taken it, so there is no gap in front of it to fill.
-			return filled
-		}
-
-		hole := lowest - u.nextOffset
-		if len(u.buf) == 0 {
-			u.bufOffset = u.nextOffset
-		}
-		u.buf = append(u.buf, make([]byte, hole)...)
-		u.nextOffset += hole
-		u.totalSize = u.nextOffset
-		filled += hole
-
-		u.takePending()
+func (u *upload) gapAhead() uint64 {
+	if len(u.pending) == 0 {
+		return 0
 	}
 
-	return filled
+	lowest := ^uint64(0)
+	for offset := range u.pending {
+		if offset < lowest {
+			lowest = offset
+		}
+	}
+
+	// takePending would have taken it, so there is no gap in front of it to fill.
+	if lowest <= u.nextOffset {
+		return 0
+	}
+
+	return lowest - u.nextOffset
+}
+
+// fillGap writes zeros over the front of the hole that stands in the way of what is queued - a part's
+// worth of them at most - and takes whatever that lets it take. It answers the one thing a hole can
+// mean once no write is in flight: the client wrote a file with nothing in that part of it, which on
+// any file system reads as zeros. Going a part at a time is what holds the memory it costs to the
+// size of a part, whatever the hole in front of it measures.
+// u.mu must be held.
+func (u *upload) fillGap(gap uint64) uint64 {
+	hole := min(gap, u.maxLength)
+	if hole == 0 {
+		return 0
+	}
+
+	if len(u.buf) == 0 {
+		u.bufOffset = u.nextOffset
+	}
+	u.buf = append(u.buf, make([]byte, hole)...)
+	u.nextOffset += hole
+	u.totalSize = u.nextOffset
+
+	u.takePending()
+
+	return hole
+}
+
+// takeSlabs detaches the parts that have filled up from the front of the buffer, and hands them back
+// with the numbers they go to the backend under. They are sent once the lock is released, so that
+// whoever else is writing to the file can carry on buffering in the meantime.
+// u.mu must be held.
+func (u *upload) takeSlabs() (slabs []uploadChunk, numbers []int) {
+	for uint64(len(u.buf)) >= u.maxLength {
+		u.partCount++
+		slab := uploadChunk{offset: u.bufOffset, data: u.buf[:u.maxLength:u.maxLength]}
+		slabs = append(slabs, slab)
+		numbers = append(numbers, u.partCount)
+		u.buf = u.buf[u.maxLength:]
+		u.bufOffset += u.maxLength
+
+		// The most recent part is the one a rollback lands in, so its bytes are kept until the
+		// next part takes its place.
+		u.lastSent, u.lastSentOffset = slab.data, slab.offset
+	}
+
+	return
 }
 
 // cutBackToSent cuts the file down to n bytes where n lies behind what has already gone to the store,
@@ -1810,20 +1852,7 @@ func (op *open) write(offset uint64, data []byte) error {
 	// Detach any complete slabs while holding the lock, then upload them
 	// after releasing it, so that concurrent writes to the same file can
 	// keep buffering in the meantime.
-	var slabs []uploadChunk
-	var partNumbers []int
-	for uint64(len(u.buf)) >= u.maxLength {
-		u.partCount++
-		slab := uploadChunk{offset: u.bufOffset, data: u.buf[:u.maxLength:u.maxLength]}
-		slabs = append(slabs, slab)
-		partNumbers = append(partNumbers, u.partCount)
-		u.buf = u.buf[u.maxLength:]
-		u.bufOffset += u.maxLength
-
-		// The most recent part is the one a rollback lands in, so its bytes are kept until the
-		// next part takes its place.
-		u.lastSent, u.lastSentOffset = slab.data, slab.offset
-	}
+	slabs, partNumbers := u.takeSlabs()
 	u.mu.Unlock()
 
 	// Each part goes on its own, so that this write is answered as soon as its bytes are in hand.
@@ -2076,9 +2105,42 @@ func (op *open) flush() error {
 	u.takePending()
 
 	// Nothing is in flight, so anything still queued is behind a part of the file the client never
-	// wrote. Those bytes are zeros, and writing them is what lets the rest be stored.
-	if len(u.pending) > 0 {
-		u.fillGaps()
+	// wrote. Those bytes are zeros, and writing them is what lets the rest be stored. They go a part
+	// at a time, each one sent before the next is made, so that what the server holds of a hole is a
+	// part of it rather than the whole.
+	var filled uint64
+	for {
+		gap := u.gapAhead()
+		if gap == 0 {
+			break
+		}
+
+		// Measured before any of it is written, so that a hole nobody would store costs the
+		// measurement rather than the filling. The remaining budget is what it is compared
+		// against, since the two of them added up is a sum a wide enough hole carries past
+		// the top of the count.
+		if gap > maxGapFilled-filled {
+			u.mu.Unlock()
+
+			return errors.New("flush: the file leaves more unwritten than the server will fill in")
+		}
+
+		hole := u.fillGap(gap)
+		if hole == 0 {
+			break
+		}
+		filled += hole
+
+		slabs, numbers := u.takeSlabs()
+		if len(slabs) == 0 {
+			continue
+		}
+
+		u.mu.Unlock()
+		for i, slab := range slabs {
+			op.sendPart(u, numbers[i], slab)
+		}
+		u.mu.Lock()
 	}
 
 	if len(u.pending) != 0 {
