@@ -459,3 +459,45 @@ func TestIsStale(t *testing.T) {
 		})
 	}
 }
+
+// TestIntegrationACancelledCreateIsNotAnsweredTwice is a create the client gives up on while it
+// waits for somebody else's oplock to be broken. The cancel answers it, so the work behind it must
+// not answer it again: two responses to the one message ID is not a protocol a client can follow,
+// and it drops the connection rather than try.
+func TestIntegrationACancelledCreateIsNotAnsweredTwice(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+	timeout := h.impatient(300 * time.Millisecond)
+
+	// Alice holds the file, so bob's create has to wait for her to give it up. She never answers,
+	// which is what leaves the create outstanding long enough to be cancelled.
+	alice := h.dial("alice")
+	if _, async := alice.create("dir/file", smb2.OPLOCK_LEVEL_BATCH, smb2.FILE_OPEN); async {
+		t.Fatal("alice's own create had to wait for something")
+	}
+
+	bob := h.dial("bob")
+	bob.mid++
+	interim, err := bob.send(createRequest(bob.mid, bob.ss.sessionID, bob.tc.treeID, "dir/file",
+		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, nil))
+	if err != nil {
+		t.Fatalf("the server gave up on the create: %v", err)
+	}
+	if status := interim.Header().Status(); status != smb2.STATUS_PENDING {
+		t.Fatalf("the create was answered %#x, want it held open behind the break", status)
+	}
+
+	// Bob gives up on it.
+	if err := bob.cancel(asyncCancelRequest(interim.Header().AsyncID(), bob.ss.sessionID, bob.tc.treeID)); err != nil {
+		t.Fatalf("the server gave up on the cancel: %v", err)
+	}
+
+	answer := bob.recv(5 * time.Second)
+	if status := smb2.Header(answer).Status(); status != smb2.STATUS_CANCELLED {
+		t.Fatalf("the create was answered %#x, want it cancelled", status)
+	}
+
+	// The break runs out while nobody is waiting on it any more, and the work finishes. What it
+	// worked out has nowhere to go: the request it answers has been answered.
+	bob.quiet(4*timeout, "the cancelled create was answered a second time")
+}

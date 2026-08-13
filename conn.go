@@ -1031,13 +1031,20 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		if !c.server.needsBreakWait(tc.share, path, nil, asking, sharedOK) {
 			c.server.tellHoldersOn(tc.share, path, nil, asking, sharedOK)
-			return c.createFile(req, cr, ss, tc, acc, contexts, path, lr), ss, nil
+			resp, _ := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
+			return resp, ss, nil
 		}
 
 		// The create is answered with an interim response and finished on a goroutine of its own.
 		aid := make([]byte, 8)
 		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
+
+		// The request carries the ID it is now known by, and says that it is being worked on
+		// asynchronously. A cancel names the request by that ID and cleans up by it, so a request
+		// left unmarked is one a cancel answers without ever finding the work behind it.
+		req.Header().SetAsyncID(asyncID)
+		req.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
 		c.mu.Lock()
 		c.asyncCommandList[asyncID] = req
 		c.mu.Unlock()
@@ -1048,16 +1055,23 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 			c.server.breakHoldersOn(tc.share, path, nil, asking, sharedOK)
 
-			resp := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
+			resp, made := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
 
 			c.awaitInterim(interim)
 
 			finalAsync(resp, asyncID)
 
-			c.mu.Lock()
-			delete(c.requestList, resp.Header().MessageID())
-			delete(c.asyncCommandList, asyncID)
-			c.mu.Unlock()
+			if !c.claimAnswer(asyncID, resp.Header().MessageID()) {
+				// The client gave up on the create and has been answered. Whatever the file was
+				// opened as, it can never be told which handle it got, so the handle is closed
+				// here rather than left holding the file until the session goes.
+				if made != nil {
+					c.server.closeOpen(made)
+				}
+				c.releaseOpen(req)
+
+				return
+			}
 
 			c.releaseOpen(req)
 			c.server.writeResponse(c, ss, resp)
@@ -1479,6 +1493,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		aid := make([]byte, 8)
 		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
+
+		// The request carries the ID it is now known by, and says that it is being worked on
+		// asynchronously. A cancel names the request by that ID and cleans up by it, so a request
+		// left unmarked is one a cancel answers without ever finding the work behind it.
+		req.Header().SetAsyncID(asyncID)
+		req.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
 		c.mu.Lock()
 		c.asyncCommandList[asyncID] = req
 		c.mu.Unlock()
@@ -1509,10 +1529,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 			finalAsync(resp, asyncID)
 
-			c.mu.Lock()
-			delete(c.requestList, resp.Header().MessageID())
-			delete(c.asyncCommandList, asyncID)
-			c.mu.Unlock()
+			if !c.claimAnswer(asyncID, resp.Header().MessageID()) {
+				// The client gave up on it and has been answered already.
+				c.releaseOpen(req)
+
+				return
+			}
 
 			// The handle may have gone while the work was being done, and what was worked out
 			// is of no use if it has. The client is still waiting on the request either way, so
@@ -1639,6 +1661,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		aid := make([]byte, 8)
 		frand.Read(aid)
 		asyncID := binary.LittleEndian.Uint64(aid)
+
+		// The request carries the ID it is now known by, and says that it is being worked on
+		// asynchronously. A cancel names the request by that ID and cleans up by it, so a request
+		// left unmarked is one a cancel answers without ever finding the work behind it.
+		req.Header().SetAsyncID(asyncID)
+		req.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
 		c.mu.Lock()
 		c.asyncCommandList[asyncID] = req
 		c.mu.Unlock()
@@ -1682,10 +1710,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				finalAsync(resp, asyncID)
 			}
 
-			c.mu.Lock()
-			delete(c.requestList, resp.Header().MessageID())
-			delete(c.asyncCommandList, asyncID)
-			c.mu.Unlock()
+			if !c.claimAnswer(asyncID, resp.Header().MessageID()) {
+				// The client gave up on it and has been answered already.
+				c.releaseOpen(req)
+
+				return
+			}
 
 			// The handle may have gone while the work was being done, and what was worked out
 			// is of no use if it has. The client is still waiting on the request either way, so
@@ -2966,6 +2996,24 @@ func (c *connection) interimQueued(mid uint64) {
 	}
 }
 
+// claimAnswer reports whether the work behind an asynchronous request still owes its client an
+// answer, taking the request off the async command list if so. A cancel answers the request and
+// takes it off that same list, so whichever of the two gets there first is the one that answers:
+// two responses to the one message ID is not a protocol a client can follow, and it drops the
+// connection rather than try.
+func (c *connection) claimAnswer(asyncID, mid uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.requestList, mid)
+	if _, owed := c.asyncCommandList[asyncID]; !owed {
+		return false
+	}
+	delete(c.asyncCommandList, asyncID)
+
+	return true
+}
+
 // finalAsync marks the response as the final one of an asynchronous command. It carries the async ID
 // and flag in every case, errors included, and grants no credits: those were handed back with the
 // interim response, when the work was taken on. Granted twice for the one request, they would leave
@@ -3388,7 +3436,7 @@ func (s *server) reapConnections() {
 // It is kept apart from the dispatcher because a create that has to revoke somebody else's
 // oplock first can only finish once the break is over, which is too long to keep the
 // connection waiting, so it runs on a goroutine of its own.
-func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *session, tc *treeConnect, acc stores.Account, contexts map[uint32][]byte, path string, lr *smb2.LeaseRequest) smb2.GenericResponse {
+func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *session, tc *treeConnect, acc stores.Account, contexts map[uint32][]byte, path string, lr *smb2.LeaseRequest) (smb2.GenericResponse, *open) {
 	// A lease key is bound to the file it was first used for. Naming the same key on another
 	// file is the one thing a client may not do with one, and is settled before the open is
 	// made, so that a refusal leaves nothing behind.
@@ -3396,7 +3444,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	if lr != nil {
 		l, matches := c.server.leaseFor([16]byte(c.clientGuid), *lr, path)
 		if !matches {
-			return smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil), nil
 		}
 		own = l
 	}
@@ -3421,14 +3469,14 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			c.server.stats.PermErrors++
 			c.server.mu.Unlock()
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
-			return resp
+			return resp, nil
 		}
 	} else {
 		info, err = tc.client.Object(ctx, acc, path)
 		if err != nil && errors.Is(err, context.DeadlineExceeded) {
 			cancel()
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_IO_TIMEOUT, 0, nil)
-			return resp
+			return resp, nil
 		}
 		stored = err == nil
 
@@ -3463,7 +3511,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 				if !restored {
 					cancel()
 					resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
-					return resp
+					return resp, nil
 				} else {
 					result = smb2.FILE_OPENED
 				}
@@ -3484,21 +3532,21 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 						cancel()
 						if errors.Is(err, stores.ErrDirectoryExists) {
 							resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
-							return resp
+							return resp, nil
 						} else {
 							// The store failed the call, which is not the same as the name not
 							// being there: answering that it is not there has the client tell
 							// whoever asked that the folder they are making no longer exists.
 							log.Printf("Couldn't create directory %s: %v\n", path, err)
 							resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
-							return resp
+							return resp, nil
 						}
 					}
 				}
 			} else {
 				cancel()
 				resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
-				return resp
+				return resp, nil
 			}
 		case smb2.FILE_OPEN_IF:
 			if err != nil {
@@ -3516,12 +3564,12 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 							cancel()
 							if errors.Is(err, stores.ErrDirectoryExists) {
 								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
-								return resp
+								return resp, nil
 							} else {
 								// As above: the store failing is not the name being absent.
 								log.Printf("Couldn't create directory %s: %v\n", path, err)
 								resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
-								return resp
+								return resp, nil
 							}
 						}
 					}
@@ -3537,7 +3585,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 				if !restored {
 					cancel()
 					resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
-					return resp
+					return resp, nil
 				} else {
 					result = smb2.FILE_OVERWRITTEN
 				}
@@ -3560,12 +3608,12 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 							cancel()
 							if errors.Is(err, stores.ErrDirectoryExists) {
 								resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_COLLISION, 0, nil)
-								return resp
+								return resp, nil
 							} else {
 								// As above: the store failing is not the name being absent.
 								log.Printf("Couldn't create directory %s: %v\n", path, err)
 								resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
-								return resp
+								return resp, nil
 							}
 						}
 					}
@@ -3601,7 +3649,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	if op == nil {
 		cancel()
 		resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
-		return resp
+		return resp, nil
 	}
 
 	// The state answers for the file for as long as it is open, and the share is where every handle
@@ -3627,7 +3675,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		switch id {
 		case smb2.CREATE_EA_BUFFER: // renterd doesn't support extended file attributes, so why should we?
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_EAS_NOT_SUPPORTED, 0, nil)
-			return resp
+			return resp, nil
 		case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
 			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, createdModified, op.grantedAccess)
 		case smb2.CREATE_QUERY_ON_DISK_ID:
@@ -3715,5 +3763,5 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		resp.SetOpenID(op.id())
 	}
 
-	return resp
+	return resp, op
 }

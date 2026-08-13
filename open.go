@@ -1399,18 +1399,24 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc
 			// the entire directory tree underneath. This is a lot of effort. Fortunately, there is a
 			// way to catch just any change and respond with the status STATUS_NOTIFY_ENUM_DIR, which
 			// will simply trigger a rescan of the directory, exactly what we need.
+			// The request is claimed before anything is sent. An answered request leaves the
+			// async command list, or the close of the open would find it there and answer it a
+			// second time with STATUS_NOTIFY_CLEANUP - and so would a cancel arriving just now.
+			if !c.claimAnswer(req.Header().AsyncID(), req.Header().MessageID()) {
+				c.releaseOpen(&req.Request)
+				return
+			}
+
 			resp := &smb2.ChangeNotifyResponse{}
 			resp.FromRequest(req)
 			resp.Header().SetStatus(smb2.STATUS_NOTIFY_ENUM_DIR)
+
 			// The bookkeeping of the request belongs to the connection it arrived on, but
-			// the response itself may travel over any channel of the session. An answered
-			// request leaves the async command list as well, or the close of the open would
-			// find it there and answer it a second time with STATUS_NOTIFY_CLEANUP.
+			// the response itself may travel over any channel of the session.
 			c.releaseOpen(&req.Request)
 			conn := op.selectConnection(c)
 			conn.server.writeResponse(conn, op.session, resp)
 			c.mu.Lock()
-			delete(c.asyncCommandList, req.Header().AsyncID())
 			delete(c.stopChans, req.CancelRequestID())
 			c.mu.Unlock()
 			return
