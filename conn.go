@@ -103,12 +103,13 @@ type connection struct {
 	writeChan  chan []byte
 	closeChan  chan struct{}
 	once       sync.Once
-	stopChans  map[uint64]chan struct{}
+
+	// stopChans holds the channel that tells the work behind a request to give up, keyed by the
+	// message ID of that request.
+	stopChans map[uint64]chan struct{}
 
 	// requestOpens maps the message ID of an in-flight request that carries a FileId
-	// to the Open it refers to. It lets the outstanding request counters of the Open
-	// be decremented when the response to that request is sent, no matter whether the
-	// Open is still in the tables by then (an SMB2_CLOSE removes it before responding).
+	// to the Open it refers to.
 	requestOpens map[uint64]*open
 }
 
@@ -159,10 +160,6 @@ func (c *connection) acceptRequest(msg []byte) error {
 		return smb2.ErrWrongLength
 	}
 
-	// Assign a random cancel ID.
-	cid := make([]byte, 8)
-	frand.Read(cid)
-
 	// Check for encryption.
 	var tsid uint64
 	var size uint32
@@ -208,7 +205,7 @@ func (c *connection) acceptRequest(msg []byte) error {
 		compressed = true
 	}
 
-	reqs, err := smb2.GetRequests(msg, binary.LittleEndian.Uint64(cid), tsid, compressed)
+	reqs, err := smb2.GetRequests(msg, tsid, compressed)
 	if err != nil {
 		return err
 	}

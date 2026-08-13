@@ -167,3 +167,65 @@ func TestIntegrationAWatchStopsWithTheDirectoryItWatched(t *testing.T) {
 
 	cl.quiet(200*time.Millisecond, "an answer to a watch whose directory had been closed")
 }
+
+// TestIntegrationTwoWatchesInOneMessageAreStoppedApart arms two watches in a single compound
+// message and cancels one of them. The two arrive together, so the cancel ID that files their stop
+// channels has to belong to the request rather than to the message carrying it. Shared between
+// them, one watch overwrites the other, and cancelling the first stops the second - leaving the
+// first still watching a directory whose client has already been told the watch is over, and the
+// second waiting on an answer that never comes.
+func TestIntegrationTwoWatchesInOneMessageAreStoppedApart(t *testing.T) {
+	h := newSMBTest(t)
+	h.srv.watchInterval = 10 * time.Millisecond
+	h.files.putDir("dir")
+	h.files.put("dir/file", 1024)
+
+	alice := h.dial("alice")
+	handle := alice.openDir("dir")
+	if status := smb2.Header(handle).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the directory was answered with %#x", status)
+	}
+	fid := createdFileID(handle)
+
+	first := changeNotifyRequest(1000, alice.ss.sessionID, alice.tc.treeID, fid)
+	second := changeNotifyRequest(1001, alice.ss.sessionID, alice.tc.treeID, fid)
+	smb2.Header(first).SetNextCommand(uint32(len(first)))
+
+	reqs, err := smb2.GetRequests(append(first, second...), 0, false)
+	if err != nil {
+		t.Fatalf("the chain did not parse as a request: %v", err)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("the chain parsed as %d request(s), want the two watches", len(reqs))
+	}
+
+	for _, r := range reqs {
+		resp, _, err := alice.conn.processRequest(r)
+		if err != nil {
+			t.Fatalf("the watch failed outright: %v", err)
+		}
+		if status := resp.Header().Status(); status != smb2.STATUS_PENDING {
+			t.Fatalf("the watch was answered with %#x, want it held open", status)
+		}
+		alice.conn.interimQueued(resp.Header().MessageID())
+	}
+
+	if got := alice.watchesOn(); got != 2 {
+		t.Fatalf("the connection holds %d watch(es), want the two just armed", got)
+	}
+
+	// The first watch is called off. The second is a different request and goes on watching.
+	if err := alice.cancel(cancelRequestFor(1000, alice.ss.sessionID, alice.tc.treeID)); err != nil {
+		t.Fatalf("the cancel failed: %v", err)
+	}
+	if mid := smb2.Header(alice.recv(5 * time.Second)).MessageID(); mid != 1000 {
+		t.Fatalf("the cancel was answered for message %d, want the watch it named", mid)
+	}
+
+	// The directory changes, which is what the watch still standing is waiting for.
+	h.files.put("dir/another", 1024)
+
+	if mid := smb2.Header(alice.recv(5 * time.Second)).MessageID(); mid != 1001 {
+		t.Errorf("the change was reported for message %d, want the watch that was never cancelled", mid)
+	}
+}

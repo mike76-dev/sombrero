@@ -221,7 +221,7 @@ func TestAReplayThatRacesTheLeaseOfItsCreateIsAnswered(t *testing.T) {
 	msg := createRequest(alice.mid, alice.ss.sessionID, alice.tc.treeID, "dir/file",
 		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, durableContext(replayGuid, 30_000))
 	smb2.Header(msg).SetFlag(smb2.FLAGS_REPLAY_OPERATION)
-	reqs, err := smb2.GetRequests(msg, 0, 0, false)
+	reqs, err := smb2.GetRequests(msg, 0, false)
 	if err != nil {
 		t.Fatalf("the replay did not parse as a request: %v", err)
 	}

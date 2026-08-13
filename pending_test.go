@@ -79,7 +79,7 @@ func TestIntegrationTheInterimComesBeforeTheAnswer(t *testing.T) {
 	// does, it may not answer before the interim has been queued.
 	cl.mid++
 	msg := writeRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, 0, bytes.Repeat([]byte("s"), 4096))
-	reqs, err := smb2.GetRequests(msg, 0, 0, false)
+	reqs, err := smb2.GetRequests(msg, 0, false)
 	if err != nil {
 		t.Fatalf("the write did not parse: %v", err)
 	}

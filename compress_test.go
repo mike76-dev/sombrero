@@ -536,7 +536,7 @@ func TestDecompressTakesAPatternThatFitsTheSegment(t *testing.T) {
 func readResponse(t *testing.T, data []byte) []byte {
 	t.Helper()
 
-	reqs, err := smb2.GetRequests(readRequest(1, 1, 1, make([]byte, 16), 0, uint32(len(data))), 0, 0, false)
+	reqs, err := smb2.GetRequests(readRequest(1, 1, 1, make([]byte, 16), 0, uint32(len(data))), 0, false)
 	if err != nil || len(reqs) != 1 {
 		t.Fatalf("could not build the read request: %v", err)
 	}

@@ -30,7 +30,7 @@ func TestGetRequestsRefusesAChainRunningPastTheEnd(t *testing.T) {
 		{"as far as the field goes", ^uint32(0) &^ 7},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := GetRequests(header(tt.next), 0, 0, false); err == nil {
+			if _, err := GetRequests(header(tt.next), 0, false); err == nil {
 				t.Fatal("a chain that runs past the end of the message was accepted")
 			}
 		})
@@ -42,7 +42,7 @@ func TestGetRequestsRefusesAChainRunningPastTheEnd(t *testing.T) {
 func TestGetRequestsTakesAWholeChain(t *testing.T) {
 	msg := append(header(SMB2HeaderSize), header(0)...)
 
-	reqs, err := GetRequests(msg, 0, 0, false)
+	reqs, err := GetRequests(msg, 0, false)
 	if err != nil {
 		t.Fatalf("a chain that fits was refused: %v", err)
 	}
@@ -289,7 +289,7 @@ func FuzzGetRequests(f *testing.F) {
 	f.Add([]byte{})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		reqs, err := GetRequests(data, 0, 0, false)
+		reqs, err := GetRequests(data, 0, false)
 		if err != nil {
 			return
 		}

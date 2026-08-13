@@ -65,10 +65,18 @@ func fits(off, length, size uint64) bool {
 	return off+length <= size
 }
 
+// newCancelID returns the identifier a request is cancelled by.
+func newCancelID() uint64 {
+	cid := make([]byte, 8)
+	frand.Read(cid)
+
+	return binary.LittleEndian.Uint64(cid)
+}
+
 // GetRequests parses the message body for SMB/SMB2 requests.
-func GetRequests(data []byte, cid uint64, tsid uint64, compressed bool) (reqs []*Request, err error) {
+func GetRequests(data []byte, tsid uint64, compressed bool) (reqs []*Request, err error) {
 	req := &Request{
-		cancelRequestID:    cid,
+		cancelRequestID:    newCancelID(),
 		data:               data,
 		isEncrypted:        tsid != 0,
 		transformSessionID: tsid,
@@ -122,7 +130,7 @@ func GetRequests(data []byte, cid uint64, tsid uint64, compressed bool) (reqs []
 
 		off += next
 		req = &Request{
-			cancelRequestID:    cid,
+			cancelRequestID:    newCancelID(),
 			data:               data[off:],
 			isEncrypted:        tsid != 0,
 			transformSessionID: tsid,

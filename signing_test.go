@@ -97,7 +97,7 @@ func signed(t *testing.T, msg, key []byte, dialect, algo uint16) []byte {
 func request(t *testing.T, msg []byte) *smb2.Request {
 	t.Helper()
 
-	reqs, err := smb2.GetRequests(msg, 0, 0, false)
+	reqs, err := smb2.GetRequests(msg, 0, false)
 	if err != nil {
 		t.Fatalf("the message did not parse as a request: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestValidateRequestPassesOverAnEncryptedRequest(t *testing.T) {
 	msg := echoRequest(1, cl.ss.sessionID, cl.tc.treeID)
 	smb2.Header(msg).SetFlag(smb2.FLAGS_SIGNED)
 
-	reqs, err := smb2.GetRequests(msg, 0, cl.ss.sessionID, false)
+	reqs, err := smb2.GetRequests(msg, cl.ss.sessionID, false)
 	if err != nil {
 		t.Fatalf("the message did not parse as a request: %v", err)
 	}

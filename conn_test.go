@@ -25,7 +25,7 @@ func newTestRequest(t *testing.T, command uint16, cs uint16, replay bool) *smb2.
 		h.SetFlag(smb2.FLAGS_REPLAY_OPERATION)
 	}
 
-	reqs, err := smb2.GetRequests(buf, 0, 0, false)
+	reqs, err := smb2.GetRequests(buf, 0, false)
 	if err != nil {
 		t.Fatalf("couldn't build request: %v", err)
 	}

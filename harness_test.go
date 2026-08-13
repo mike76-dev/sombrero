@@ -825,7 +825,7 @@ func (cl *testClient) speaking(dialect uint16) *testClient {
 // send hands a message to the dispatcher the way the reading loop would. It reports an error
 // rather than failing the test, so that it may be called from a goroutine of its own.
 func (cl *testClient) send(msg []byte) (smb2.GenericResponse, error) {
-	reqs, err := smb2.GetRequests(msg, 0, 0, false)
+	reqs, err := smb2.GetRequests(msg, 0, false)
 	if err != nil {
 		return nil, fmt.Errorf("the message did not parse as a request: %w", err)
 	}
