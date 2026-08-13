@@ -320,3 +320,39 @@ func TestPacingScalesWithThePartSize(t *testing.T) {
 		t.Errorf("with no pipeline to measure against the client was granted %d credit(s), want what it asked for", got)
 	}
 }
+
+// TestTheSequenceWindowDoesNotGrowWithEveryRequest is the client sending ordinary small requests,
+// which charge nothing: a request that fits in a single credit carries a CreditCharge of zero. The
+// window opens by one ID for each of them, because granting reads a charge of zero as one, so it
+// has to close by one as well. Closing by the charge as it stands takes nothing back at all, and
+// the window grows by an entry for every request the connection ever serves.
+func TestTheSequenceWindowDoesNotGrowWithEveryRequest(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	// What every dialect above 2.0.2 negotiates, and what decides which of the two ways the
+	// window is closed again.
+	cl.conn.supportsMultiCredit = true
+
+	cl.conn.mu.Lock()
+	before := len(cl.conn.commandSequenceWindow)
+	cl.conn.mu.Unlock()
+
+	const requests = 2000
+	for n := range requests {
+		msg := echoRequest(uint64(n), cl.ss.sessionID, cl.tc.treeID)
+		smb2.Header(msg).SetCreditCharge(0)
+		if err := cl.conn.acceptRequest(msg); err != nil {
+			t.Fatalf("request %d was not accepted: %v", n, err)
+		}
+	}
+
+	cl.conn.mu.Lock()
+	after := len(cl.conn.commandSequenceWindow)
+	cl.conn.mu.Unlock()
+
+	if after > before+16 {
+		t.Errorf("the window holds %d IDs after %d requests, up from %d: it keeps one of each",
+			after, requests, before)
+	}
+}

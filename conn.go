@@ -319,11 +319,16 @@ func (c *connection) acceptRequest(msg []byte) error {
 		c.mu.Lock()
 		if c.negotiateDialect == smb2.SMB_DIALECT_202 || !c.supportsMultiCredit {
 			delete(c.commandSequenceWindow, mid)
-		} else { // Remove as many IDs as the CreditCharge field
+		} else {
+			// As many IDs as the request charged for, and a request that charges nothing still
+			// costs the one it was sent under: granting reads a charge of zero as one, which is
+			// what a client sends for anything that fits in a single credit, and a window handing
+			// an ID out without taking one back grows for as long as the connection lives.
+			charge := max(req.Header().CreditCharge(), 1)
 			var count uint16
 			i := mid
 			m, _ := utils.FindMaxKey(c.commandSequenceWindow)
-			for i <= m && count < req.Header().CreditCharge() {
+			for i <= m && count < charge {
 				if _, found := c.commandSequenceWindow[i]; found {
 					delete(c.commandSequenceWindow, i)
 					count++
