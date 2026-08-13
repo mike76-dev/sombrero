@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
@@ -402,5 +403,51 @@ func TestIntegrationNegotiateSettlesACipher(t *testing.T) {
 				t.Errorf("the connection settled on cipher %#x, want %#x", c.cipherID, tt.want)
 			}
 		})
+	}
+}
+
+// TestAChainWhoseLastRequestIsTurnedAwayIsStillAnswered is the compound chain that loses its last
+// request to a signature it cannot prove. The chain is assembled as its requests are answered and
+// goes out when the last of them arrives, so a last request that never reaches the dispatcher
+// leaves the whole chain sitting unsent: the requests before it are answered by nobody, and what
+// was assembled for them is held for as long as the connection lives.
+func TestAChainWhoseLastRequestIsTurnedAwayIsStillAnswered(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice").signing()
+
+	// Two related requests. The first is signed and the second is not, on a session that has
+	// every request signed, so the second is turned away where it is read.
+	first := append(echoRequest(0, cl.ss.sessionID, cl.tc.treeID), make([]byte, 4)...)
+	second := echoRequest(1, cl.ss.sessionID, cl.tc.treeID)
+	smb2.Header(second).SetFlag(smb2.FLAGS_RELATED_OPERATIONS)
+	smb2.Header(first).SetNextCommand(uint32(len(first)))
+	signed(t, first, cl.ss.signingKey, smb2.SMB_DIALECT_311, 0)
+
+	go cl.conn.processRequests()
+
+	if err := cl.conn.acceptRequest(append(first, second...)); err != nil {
+		t.Fatalf("the chain was not accepted: %v", err)
+	}
+
+	answered := make(map[uint64]uint32)
+	for range 2 {
+		buf := cl.recv(5 * time.Second)
+		answered[smb2.Header(buf).MessageID()] = smb2.Header(buf).Status()
+	}
+
+	if status, ok := answered[1]; !ok || status != smb2.STATUS_ACCESS_DENIED {
+		t.Errorf("the unsigned request was answered %#x (present: %v), want it turned away", status, ok)
+	}
+	if status, ok := answered[0]; !ok || status != smb2.STATUS_OK {
+		t.Errorf("the request before it was answered %#x (present: %v), want it answered", status, ok)
+	}
+
+	cl.conn.mu.Lock()
+	defer cl.conn.mu.Unlock()
+	if n := len(cl.conn.pendingResponses); n != 0 {
+		t.Errorf("%d chain(s) left assembled and unsent", n)
+	}
+	if n := len(cl.conn.chainRemaining); n != 0 {
+		t.Errorf("%d chain(s) still counted as outstanding", n)
 	}
 }

@@ -166,6 +166,7 @@ func (s *server) newConnectionState(clientName string) *connection {
 		requestList:           make(map[uint64]*smb2.Request),
 		asyncCommandList:      make(map[uint64]*smb2.Request),
 		pendingResponses:      make(map[uint64]smb2.GenericResponse),
+		chainRemaining:        make(map[uint64]int),
 		requestOpens:          make(map[uint64]*open),
 		sessionTable:          make(map[uint64]*session),
 		preauthSessionTable:   make(map[uint64]*preauthSession),

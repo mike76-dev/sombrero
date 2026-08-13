@@ -67,9 +67,16 @@ type connection struct {
 	// holds back for credits it has already been given. The first response to carry the grant takes
 	// it, which for a command answered with an interim response is that interim: the final response
 	// of an asynchronous command grants nothing.
-	creditsGranted             map[uint64]uint16
-	requestList                map[uint64]*smb2.Request
-	pendingResponses           map[uint64]smb2.GenericResponse
+	creditsGranted   map[uint64]uint16
+	requestList      map[uint64]*smb2.Request
+	pendingResponses map[uint64]smb2.GenericResponse
+
+	// chainRemaining is how many requests of a compound chain are still to be dealt with, by the
+	// group ID of the chain. The chain goes out when the count reaches zero rather than when its
+	// last request is answered: a request turned away before it ever reaches the dispatcher is
+	// dealt with all the same, and a chain waiting for one of those waits for as long as the
+	// connection lives, with everything already assembled for it unsent.
+	chainRemaining             map[uint64]int
 	clientCapabilities         uint32
 	negotiateDialect           uint16
 	asyncCommandList           map[uint64]*smb2.Request
@@ -210,6 +217,16 @@ func (c *connection) acceptRequest(msg []byte) error {
 		return err
 	}
 
+	// The whole of a chain is counted before any of it is dealt with, so that the count cannot
+	// reach zero on a chain whose later requests have yet to be read out of the message.
+	c.mu.Lock()
+	for _, req := range reqs {
+		if gid := req.GroupID(); gid > 0 {
+			c.chainRemaining[gid]++
+		}
+	}
+	c.mu.Unlock()
+
 	var ss *session
 	var found bool
 	for i, req := range reqs {
@@ -258,6 +275,10 @@ func (c *connection) acceptRequest(msg []byte) error {
 			if req.Header().Command() == smb2.SMB2_CANCEL { // SMB2_CANCEL requests are handled separately
 				if err := c.cancelRequest(req); err != nil {
 					log.Printf("Couldn't cancel request %d:, %v\n", req.Header().Command(), err)
+				}
+
+				if chain := c.chainMemberDone(req.GroupID()); chain != nil {
+					c.server.writeResponse(c, ss, chain)
 				}
 
 				continue
@@ -346,6 +367,13 @@ func (c *connection) acceptRequest(msg []byte) error {
 			resp.Header().ClearFlag(smb2.FLAGS_SIGNED)
 			resp.Header().WipeSignature()
 			c.server.writeResponse(c, ss, resp)
+
+			// The request is dealt with, however it was dealt with, so the chain it belonged to
+			// is no longer waiting on it.
+			if chain := c.chainMemberDone(req.GroupID()); chain != nil {
+				c.server.writeResponse(c, ss, chain)
+			}
+
 			continue
 		}
 
@@ -2845,6 +2873,28 @@ func (c *connection) readLoop(host string) {
 	}
 }
 
+// chainMemberDone counts off a request of a compound chain and returns the chain to send if that
+// was the last of them, or nil if the chain is still being assembled or there is no chain at all.
+func (c *connection) chainMemberDone(gid uint64) smb2.GenericResponse {
+	if gid == 0 {
+		return nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.chainRemaining[gid]--
+	if c.chainRemaining[gid] > 0 {
+		return nil
+	}
+	delete(c.chainRemaining, gid)
+
+	chain := c.pendingResponses[gid]
+	delete(c.pendingResponses, gid)
+
+	return chain
+}
+
 // processRequests pulls requests from the queue one by one and submits them for processing.
 func (c *connection) processRequests() {
 	defer c.recoverConnection("processing requests")
@@ -2881,23 +2931,17 @@ func (c *connection) processRequests() {
 			c.mu.Unlock()
 
 			if resp.Header().Command() == smb2.SMB2_CHANGE_NOTIFY { // Send the chain if it's complete, then the response
-				if pendingResp != nil && req.Header().NextCommand() == 0 {
-					pendingResp.Header().SetCreditResponse(1)
-					c.server.writeResponse(c, ss, pendingResp)
-					c.mu.Lock()
-					delete(c.pendingResponses, resp.GroupID())
-					c.mu.Unlock()
+				if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
+					chain.Header().SetCreditResponse(1)
+					c.server.writeResponse(c, ss, chain)
 				}
 				c.server.writeResponse(c, ss, resp)
 			} else if pendingResp != nil { // Add the response to the chain, then send the chain if it's complete
 				pendingResp.Append(resp)
-				if req.Header().NextCommand() == 0 {
-					c.server.writeResponse(c, ss, pendingResp)
-					c.mu.Lock()
-					delete(c.pendingResponses, resp.GroupID())
-					c.mu.Unlock()
+				if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
+					c.server.writeResponse(c, ss, chain)
 				}
-			} else if resp.GroupID() == 0 || req.Header().NextCommand() == 0 { // A standalone response, send it
+			} else if resp.GroupID() == 0 { // A standalone response, send it
 				c.server.writeResponse(c, ss, resp)
 			} else { // Start the response chain
 				c.mu.Lock()
@@ -2905,6 +2949,11 @@ func (c *connection) processRequests() {
 				resp.SetTreeID(resp.Header().TreeID())
 				c.pendingResponses[resp.GroupID()] = resp
 				c.mu.Unlock()
+
+				// A chain of one is complete as soon as it is started.
+				if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
+					c.server.writeResponse(c, ss, chain)
+				}
 			}
 
 			// Whatever is going out for this request is on the queue now, so the work behind an
