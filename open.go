@@ -476,17 +476,17 @@ type open struct {
 	lastSearch    string
 	searchResults []client.ObjectInfo
 
-	// To speed up the downloads, read buffering is implemented. The buffer consists of several
-	// caches, because the SMB2_READ requests may come out of order. Chunks are downloaded in the
-	// background, so an entry may still be in flight; readers wait on its done channel. When the
-	// reads look sequential, the next few chunks are prefetched so the network transfer overlaps
-	// with serving cached data.
 	// cacheGeneration is which writing of the file the cache below was filled in. The cache
 	// belongs to this handle, and a write through another handle on the same file has to reach
 	// it: the generation of the file moves on when it is written anew, and a cache left behind
 	// is dropped rather than served.
 	cacheGeneration uint64
 
+	// To speed up the downloads, read buffering is implemented. The buffer consists of several
+	// caches, because the SMB2_READ requests may come out of order. Chunks are downloaded in the
+	// background, so an entry may still be in flight; readers wait on its done channel. When the
+	// reads look sequential, the next few chunks are prefetched so the network transfer overlaps
+	// with serving cached data.
 	buffer       map[uint64]*readChunk
 	cacheOrder   []uint64
 	chunkSize    uint64
@@ -1394,11 +1394,6 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc
 		}
 
 		if !bytes.Equal(newSnapshot, snapshot) {
-			// Normally, the server should monitor the changes according to the filter specified in each
-			// SMB2_CHANGE_NOTIFY request. If the WATCH_TREE flag is set, the server should also monitor
-			// the entire directory tree underneath. This is a lot of effort. Fortunately, there is a
-			// way to catch just any change and respond with the status STATUS_NOTIFY_ENUM_DIR, which
-			// will simply trigger a rescan of the directory, exactly what we need.
 			// The request is claimed before anything is sent. An answered request leaves the
 			// async command list, or the close of the open would find it there and answer it a
 			// second time with STATUS_NOTIFY_CLEANUP - and so would a cancel arriving just now.
@@ -1407,6 +1402,11 @@ func (op *open) checkForChanges(req smb2.ChangeNotifyRequest, c *connection, acc
 				return
 			}
 
+			// Normally, the server should monitor the changes according to the filter specified in each
+			// SMB2_CHANGE_NOTIFY request. If the WATCH_TREE flag is set, the server should also monitor
+			// the entire directory tree underneath. This is a lot of effort. Fortunately, there is a
+			// way to catch just any change and respond with the status STATUS_NOTIFY_ENUM_DIR, which
+			// will simply trigger a rescan of the directory, exactly what we need.
 			resp := &smb2.ChangeNotifyResponse{}
 			resp.FromRequest(req)
 			resp.Header().SetStatus(smb2.STATUS_NOTIFY_ENUM_DIR)
