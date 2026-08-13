@@ -65,6 +65,7 @@ func (op *open) startOplockBreak(to uint8) (chan struct{}, bool) {
 
 		op.oplockState = smb2.OplockBreaking
 		op.oplockBreakTo = to
+		op.oplockBreakSeq++
 		op.oplockBreak = make(chan struct{})
 		return op.oplockBreak, true
 
@@ -90,6 +91,28 @@ func (op *open) completeOplockBreak(level uint8) bool {
 	op.mu.Lock()
 	defer op.mu.Unlock()
 
+	return op.finishOplockBreak(level)
+}
+
+// expireOplockBreak is completeOplockBreak for the wait that was started along with a break: it
+// ends that break and no other. A break that has been acknowledged and a later one that has taken
+// its place are two different breaks, and the wait that belonged to the first has nothing to say
+// about the second - the client is owed the whole of its time to answer the notification it was
+// sent, not what is left of the time granted for one it already answered.
+func (op *open) expireOplockBreak(seq uint64, level uint8) bool {
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
+	if op.oplockBreakSeq != seq {
+		return false
+	}
+
+	return op.finishOplockBreak(level)
+}
+
+// finishOplockBreak ends the break in flight and releases whoever was waiting for it, reporting
+// whether there was one to end. op.mu must be held.
+func (op *open) finishOplockBreak(level uint8) bool {
 	if op.oplockState != smb2.OplockBreaking {
 		return false
 	}
@@ -155,6 +178,7 @@ func (s *server) sendOplockBreak(op *open) {
 	fid := op.id()
 	to := op.oplockBreakTo
 	held := op.oplockLevel
+	seq := op.oplockBreakSeq
 	op.mu.Unlock()
 
 	notification := smb2.NewOplockBreakNotification(to, fid, ss.sessionID)
@@ -185,7 +209,7 @@ func (s *server) sendOplockBreak(op *open) {
 
 	time.AfterFunc(s.oplockBreakTimeout, func() {
 		// A client that never answered keeps nothing: the file has been waiting on it.
-		if op.completeOplockBreak(smb2.OPLOCK_LEVEL_NONE) && s.debug {
+		if op.expireOplockBreak(seq, smb2.OPLOCK_LEVEL_NONE) && s.debug {
 			log.Printf("Oplock break on %s was not acknowledged in time", path)
 		}
 	})

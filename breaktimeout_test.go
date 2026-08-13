@@ -154,3 +154,68 @@ func TestIntegrationLeaseGoesWhenTheClientNeverAnswers(t *testing.T) {
 		t.Errorf("the lease of a client that never answered holds %#x, want none", state)
 	}
 }
+
+// TestIntegrationATimerDoesNotEndTheBreakThatFollowedItsOwn takes one lease through two breaks.
+// The first is acknowledged at once, which leaves the wait started for it with nothing to end -
+// but a wait cannot be called back, so it fires all the same, in the middle of the second break.
+// Finding a break in flight is not reason enough to end one: the client is owed the whole of the
+// time it was given to answer the notification it was actually sent, not what is left of the time
+// granted for one it already answered.
+func TestIntegrationATimerDoesNotEndTheBreakThatFollowedItsOwn(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+	timeout := h.impatient(time.Second)
+
+	alice := h.dial("alice")
+	held, _ := alice.createLeased("dir/file", aliceKey, rwh, 2, smb2.FILE_OPEN)
+	if state, _ := createdLeaseState(held); state != rwh {
+		t.Fatalf("alice was granted %#x rather than a full lease", state)
+	}
+
+	// The first break. Bob opens the file without asking for anything of his own, which takes the
+	// write caching off alice's lease and leaves her the rest. She answers at once, so the wait
+	// started for this break is left with nothing to end and most of a timeout still to run.
+	answered := make(chan []byte, 1)
+	go func() {
+		select {
+		case note := <-alice.sent:
+			alice.ackLeaseBreak(brokenLeaseKey(note), rh)
+			answered <- note
+		case <-time.After(20 * time.Second):
+			answered <- nil
+		}
+	}()
+
+	bob := h.dial("bob")
+	if _, async := bob.create("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN); !async {
+		t.Error("bob's create did not wait for the first break")
+	}
+	if note := <-answered; note == nil {
+		t.Fatal("the first break never reached alice")
+	}
+
+	// Far enough into the timeout that the wait left over from the first break fires while the
+	// second one is in flight, and not so far that it fires before there is a second one to end.
+	time.Sleep(timeout * 7 / 10)
+
+	// The second break. Bob empties the file, which takes the rest of the lease, and this time
+	// alice says nothing at all: the break has to run its own course.
+	start := time.Now()
+	buf, async := bob.create("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	waited := time.Since(start)
+
+	if !async {
+		t.Error("bob's second create did not wait for the second break")
+	}
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("bob's second create failed with %#x", status)
+	}
+
+	// The point of the test. Ended by the wait left over from the first break, the second one
+	// would have let bob through with whatever remained of it rather than after a timeout of
+	// alice's own.
+	if waited < timeout*2/3 {
+		t.Errorf("bob waited %v for the second break, want the whole of the %v alice had to answer it in",
+			waited, timeout)
+	}
+}

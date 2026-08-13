@@ -38,6 +38,12 @@ type lease struct {
 	// once it has answered, the wait has run out, or the last open has gone.
 	breakDone chan struct{}
 
+	// breakSeq counts the breaks the lease has been through, and tells one from the next. The
+	// wait for an acknowledgment outlives the break it belongs to - a timer cannot be called
+	// back once the client has answered - so what it finds in flight when it fires need not be
+	// the break it was started for.
+	breakSeq uint64
+
 	mu sync.Mutex
 }
 
@@ -326,6 +332,7 @@ func (l *lease) startBreak(to uint32) (chan struct{}, bool) {
 	l.breaking = true
 	l.breakToState = to
 	l.epoch++
+	l.breakSeq++
 	l.breakDone = make(chan struct{})
 
 	return l.breakDone, true
@@ -338,6 +345,28 @@ func (l *lease) completeBreak(state uint32) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	return l.finishBreak(state)
+}
+
+// expireBreak is completeBreak for the wait that was started along with a break: it ends that
+// break and no other. A break that has been acknowledged and a later one that has taken its place
+// are two different breaks, and the wait that belonged to the first has nothing to say about the
+// second - the client is owed the whole of its time to answer the notification it was sent, not
+// what is left of the time granted for one it already answered.
+func (l *lease) expireBreak(seq uint64, state uint32) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.breakSeq != seq {
+		return false
+	}
+
+	return l.finishBreak(state)
+}
+
+// finishBreak ends the break in flight and releases whoever was waiting for it, reporting whether
+// there was one to end. l.mu must be held.
+func (l *lease) finishBreak(state uint32) bool {
 	if !l.breaking {
 		return false
 	}
@@ -374,6 +403,7 @@ func (s *server) sendLeaseBreak(l *lease) {
 	l.mu.Lock()
 	key, guid := l.leaseKey, l.clientGuid
 	current, to, epoch := l.state, l.breakToState, l.epoch
+	seq := l.breakSeq
 	path := l.fileName
 	opens := make([]*open, 0, len(l.opens))
 	for _, op := range l.opens {
@@ -420,7 +450,7 @@ func (s *server) sendLeaseBreak(l *lease) {
 	}
 
 	time.AfterFunc(s.leaseBreakTimeout, func() {
-		if l.completeBreak(smb2.SMB2_LEASE_NONE) && s.debug {
+		if l.expireBreak(seq, smb2.SMB2_LEASE_NONE) && s.debug {
 			log.Printf("Lease break on %s was not acknowledged in time", path)
 		}
 	})
