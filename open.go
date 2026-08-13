@@ -1085,6 +1085,21 @@ func (op *open) releaseFile() {
 	op.treeConnect.forgetPersistedFile(path)
 }
 
+// takeSearchResults builds the answer to a directory search out of the results the search left on
+// the open, and takes what went into it off the front. How much went in is worked out from the
+// very slice it is then taken off, under the one lock: read first and taken afterwards, a second
+// search on the same handle - another channel of the session continuing the enumeration, or
+// restarting it - leaves a count standing for a slice that no longer holds that much.
+func (op *open) takeSearchResults(class uint8, bufSize uint32, single, root bool, dir, parent client.FileInfo) []byte {
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
+	buf, num := smb2.QueryDirectoryBuffer(class, op.searchResults, bufSize, single, root, dir, parent)
+	op.searchResults = op.searchResults[num:]
+
+	return buf
+}
+
 // queryDirectory performs a search within the directory using the provided pattern.
 // Wildcards are supported.
 func (op *open) queryDirectory(acc stores.Account, pattern string) error {

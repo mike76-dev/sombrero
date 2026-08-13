@@ -2142,27 +2142,28 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		searchPath := qdr.FileName()
 		single := qdr.Flags()&smb2.RETURN_SINGLE_ENTRY > 0
 		var buf []byte
+
+		// Whether this carries on the search the handle already ran, and whether that search has
+		// anything left to send, are decided together: read apart, a search restarting on another
+		// channel lands between them and this one carries on into results it never ran for.
 		op.mu.Lock()
-		ls := op.lastSearch
-		res := op.searchResults
+		carryOn := op.lastSearch != "" && op.lastSearch == searchPath && qdr.Flags()&smb2.RESTART_SCANS == 0
+		exhausted := carryOn && len(op.searchResults) == 0
+		if exhausted {
+			op.lastSearch = ""
+		}
 		op.mu.Unlock()
-		if ls != "" && ls == searchPath && qdr.Flags()&smb2.RESTART_SCANS == 0 {
+
+		if carryOn {
 			// If the search has already run with the same parameters, and all results have been sent
 			// to the client, respond with the status STATUS_NO_MORE_FILES.
-			if len(res) == 0 {
-				op.mu.Lock()
-				op.lastSearch = ""
-				op.mu.Unlock()
+			if exhausted {
 				resp := smb2.NewErrorResponse(qdr, smb2.STATUS_NO_MORE_FILES, 0, nil)
 				return resp, ss, nil
 			}
 
 			// Send as many search results as the buffer length allows.
-			var num int
-			buf, num = smb2.QueryDirectoryBuffer(qdr.FileInformationClass(), res, qdr.OutputBufferLength(), single, false, client.FileInfo{}, client.FileInfo{})
-			op.mu.Lock()
-			op.searchResults = op.searchResults[num:]
-			op.mu.Unlock()
+			buf = op.takeSearchResults(qdr.FileInformationClass(), qdr.OutputBufferLength(), single, false, client.FileInfo{}, client.FileInfo{})
 		} else {
 			// Run a new search.
 			if err := op.queryDirectory(acc, searchPath); err != nil && searchPath != "*" {
@@ -2188,15 +2189,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			// answer is built out of what the handle held beforehand carries nothing at all,
 			// and a client that reads an empty buffer as the end of the enumeration never sees
 			// the file it asked about.
-			op.mu.Lock()
-			res = op.searchResults
-			op.mu.Unlock()
-
-			var num int
-			buf, num = smb2.QueryDirectoryBuffer(qdr.FileInformationClass(), res, qdr.OutputBufferLength(), single, qdr.FileName() == "*", dir, parentDir)
-			op.mu.Lock()
-			op.searchResults = op.searchResults[num:]
-			op.mu.Unlock()
+			buf = op.takeSearchResults(qdr.FileInformationClass(), qdr.OutputBufferLength(), single, qdr.FileName() == "*", dir, parentDir)
 		}
 
 		resp := &smb2.QueryDirectoryResponse{}

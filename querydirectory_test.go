@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -217,5 +219,94 @@ func TestIntegrationQueryDirectoryFullDirectoryInformation(t *testing.T) {
 	}
 	if files != 2 {
 		t.Errorf("the listing is %v, want both files the directory holds", got)
+	}
+}
+
+// TestIntegrationTwoSearchesOnOneHandleDoNotOvertakeEachOther carries one enumeration on from two
+// places at once, as two channels of a session may. What each search sends has to be taken off the
+// handle by the same act that works out how much to send: counted against the results as they were
+// read and taken off them afterwards, the second search takes a count that the first has already
+// made too large, and either sends a name twice or takes more than is there.
+func TestIntegrationTwoSearchesOnOneHandleDoNotOvertakeEachOther(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putDir("dir")
+	for i := range 200 {
+		h.files.put(fmt.Sprintf("dir/file%03d", i), 1024)
+	}
+
+	alice := h.dial("alice")
+	handle := alice.openDir("dir")
+	if status := smb2.Header(handle).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the directory was answered with %#x", status)
+	}
+	fid := createdFileID(handle)
+
+	// What the enumeration comes to with nothing racing it, read on a handle of its own.
+	want := make(map[string]int)
+	ref := createdFileID(alice.openDir("dir"))
+	for range 100 {
+		answer := alice.queryDirectory(ref, "*")
+		if smb2.Header(answer).Status() != smb2.STATUS_OK {
+			break
+		}
+		for _, name := range listedNames(t, answer) {
+			want[name]++
+		}
+	}
+
+	// The first search runs the enumeration and leaves what would not fit on the handle.
+	seen := make(map[string]int)
+	for _, name := range listedNames(t, alice.queryDirectory(fid, "*")) {
+		seen[name]++
+	}
+
+	// Two searches carry it on at the same moment, each with room for everything that is left.
+	reqs := make([]*smb2.Request, 2)
+	for i := range reqs {
+		alice.mid++
+		msg := queryDirectoryRequest(alice.mid, alice.ss.sessionID, alice.tc.treeID, fid,
+			smb2.FILE_DIRECTORY_INFORMATION, "*", 65536)
+		parsed, err := smb2.GetRequests(msg, 0, false)
+		if err != nil {
+			t.Fatalf("the search did not parse as a request: %v", err)
+		}
+		reqs[i] = parsed[0]
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	answers := make([][]byte, len(reqs))
+	for i, r := range reqs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if resp, _, err := alice.conn.processRequest(r); err == nil {
+				answers[i] = resp.Encode()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, answer := range answers {
+		if answer == nil {
+			t.Fatalf("the server gave up on search %d", i)
+		}
+		if status := smb2.Header(answer).Status(); status != smb2.STATUS_OK {
+			continue // One of the two may find the enumeration already finished.
+		}
+		for _, name := range listedNames(t, answer) {
+			seen[name]++
+		}
+	}
+
+	for name, n := range seen {
+		if n != 1 {
+			t.Errorf("%s was listed %d times, want once", name, n)
+		}
+	}
+	if len(seen) != len(want) {
+		t.Errorf("the enumeration listed %d entries, want the %d it holds", len(seen), len(want))
 	}
 }
