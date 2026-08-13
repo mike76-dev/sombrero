@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/smb2"
 )
@@ -188,5 +189,80 @@ func TestIntegrationReclaimAndRequestTogetherAreRefused(t *testing.T) {
 	}
 	if status := resp.Header().Status(); status != smb2.STATUS_INVALID_PARAMETER {
 		t.Errorf("Status = %#x, want %#x", status, smb2.STATUS_INVALID_PARAMETER)
+	}
+}
+
+// TestAReplayThatRacesTheLeaseOfItsCreateIsAnswered pins a replay between the moment it reads the
+// lease of the open it answers for and the moment it builds the answer, and gives the open a lease
+// in between. A replay carrying no lease context of its own has nothing to build a lease context
+// out of, so an answer built from a second look at the open - one that finds a lease the first look
+// did not - is an answer built out of a request that was never made.
+func TestAReplayThatRacesTheLeaseOfItsCreateIsAnswered(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+
+	alice := h.dial("alice")
+	first, _ := alice.createDurable("dir/file", replayGuid, false)
+	if status := smb2.Header(first).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the first create failed with %#x", status)
+	}
+
+	h.srv.mu.Lock()
+	op := h.srv.globalOpenTable[openIDOf(createdFileID(first))]
+	h.srv.mu.Unlock()
+	if op == nil {
+		t.Fatal("the create made no open for a replay to answer for")
+	}
+
+	// The create the client sends again when the answer never reached it, carrying no lease
+	// context. It is built here rather than in the goroutine below, which must not touch the
+	// test at all.
+	alice.mid++
+	msg := createRequest(alice.mid, alice.ss.sessionID, alice.tc.treeID, "dir/file",
+		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, durableContext(replayGuid, 30_000))
+	smb2.Header(msg).SetFlag(smb2.FLAGS_REPLAY_OPERATION)
+	reqs, err := smb2.GetRequests(msg, 0, 0, false)
+	if err != nil {
+		t.Fatalf("the replay did not parse as a request: %v", err)
+	}
+
+	// Reading the file is the first thing the answer does, so holding it here stops the replay
+	// with the checks behind it and the answer still ahead.
+	op.file.mu.Lock()
+
+	type answer struct {
+		resp smb2.GenericResponse
+		err  error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		resp, _, err := alice.conn.processRequest(reqs[0])
+		done <- answer{resp, err}
+	}()
+
+	// Long enough for the replay to reach the file and stop there. Too short only lets it past
+	// the lease before there is one, which is the case that was never in question.
+	time.Sleep(50 * time.Millisecond)
+
+	l := &lease{
+		leaseKey:   [16]byte{0x7a},
+		clientGuid: [16]byte(alice.conn.clientGuid),
+		fileName:   "dir/file",
+		epoch:      1,
+		opens:      make(map[uint64]*open),
+	}
+	l.join(h.srv.leaseTableFor(l.clientGuid), op, smb2.SMB2_LEASE_READ_CACHING)
+
+	op.file.mu.Unlock()
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("the server gave up on the replay: %v", got.err)
+	}
+	if status := got.resp.Header().Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the replay was answered %#x, want the open it asked for", status)
+	}
+	if _, found := createdContext(got.resp.Encode(), smb2.CREATE_REQUEST_LEASE); found {
+		t.Error("the replay was answered with a lease it never asked for")
 	}
 }

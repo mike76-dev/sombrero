@@ -3627,6 +3627,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	_, _, _, createdModified, _ := op.file.stat()
 
 	respContexts := make(map[uint32][]byte)
+	var replayable bool
 	for id, ctx := range contexts {
 		switch id {
 		case smb2.CREATE_EA_BUFFER: // renterd doesn't support extended file attributes, so why should we?
@@ -3652,8 +3653,9 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			respContexts[id] = smb2.HandleCreateDurableHandleRequestV2(op.grantDurability(dh))
 
 			// A create that was granted durability is one the client may replay if the answer
-			// never reaches it, so the open is left able to answer for it until it is used.
-			c.server.markReplayEligible(op, tc)
+			// never reaches it. The open is not offered up for that yet: it is still being
+			// built, and what it is still to gain is exactly what a replay would answer with.
+			replayable = true
 		}
 	}
 
@@ -3685,6 +3687,15 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 
 	case oplockEligible(cr.RequestedOplockLevel(), tc, isDir):
 		oplockLevel = c.server.grantOplock(op, cr.RequestedOplockLevel(), tc, path)
+	}
+
+	// The open is finished, caching promise and all, so it can now answer for the create that
+	// made it. Offered up any earlier - while the lease was still being granted, as it was - a
+	// replay arriving over another channel would answer out of an open that was still being
+	// put together, and tell the client it holds nothing on a file it is about to be given a
+	// lease on.
+	if replayable {
+		c.server.markReplayEligible(op, tc)
 	}
 
 	resp := &smb2.CreateResponse{}

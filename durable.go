@@ -101,11 +101,16 @@ func (c *connection) replayCreate(cr smb2.CreateRequest, ss *session, tc *treeCo
 	op.connection = c
 	op.mu.Unlock()
 
-	return c.replayResponse(op, cr, tc, contexts, lr), true
+	return c.replayResponse(op, held, cr, tc, contexts, lr), true
 }
 
 // replayResponse builds the answer to a replayed create out of the open the first attempt made.
-func (c *connection) replayResponse(op *open, cr smb2.CreateRequest, tc *treeConnect, contexts map[uint32][]byte, lr *smb2.LeaseRequest) smb2.GenericResponse {
+//
+// The lease is the one its caller read rather than one read again here, so that the check the
+// caller made and the response built from it are the same observation. Read a second time, an
+// open that gained a lease in between would be answered with a lease context taken from a request
+// that carried none - which is to say, from a nil pointer.
+func (c *connection) replayResponse(op *open, held *lease, cr smb2.CreateRequest, tc *treeConnect, contexts map[uint32][]byte, lr *smb2.LeaseRequest) smb2.GenericResponse {
 	size, allocated, _, modified, attr := op.file.stat()
 	op.mu.Lock()
 	access := op.grantedAccess
@@ -113,7 +118,6 @@ func (c *connection) replayResponse(op *open, cr smb2.CreateRequest, tc *treeCon
 	fileID, durableFileID := op.fileID, op.durableFileID
 	timeout := uint32(op.durableTimeout / time.Millisecond)
 	oplockLevel := op.oplockLevel
-	held := op.lease
 	op.mu.Unlock()
 
 	respContexts := make(map[uint32][]byte)
