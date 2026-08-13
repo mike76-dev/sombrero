@@ -310,3 +310,41 @@ func TestIntegrationTwoSearchesOnOneHandleDoNotOvertakeEachOther(t *testing.T) {
 		t.Errorf("the enumeration listed %d entries, want the %d it holds", len(seen), len(want))
 	}
 }
+
+// TestAnErrorOnALiveSessionIsStillEncrypted is the account that disappears while its session is
+// still running. The request fails, but it fails on a session that encrypts everything it carries,
+// so the answer has to be encrypted as well: answered as though there were no session at all, it
+// goes out in the clear on a session whose client will not read it that way.
+func TestAnErrorOnALiveSessionIsStillEncrypted(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putDir("dir")
+	h.files.put("dir/file", 1024)
+
+	alice := h.dial("alice").encrypting()
+	fid := createdFileID(alice.openDir("dir"))
+
+	// The account behind the session is no longer one the store knows, which is what the search
+	// is about to fail on.
+	alice.ss.userName = "nobody"
+
+	alice.mid++
+	msg := queryDirectoryRequest(alice.mid, alice.ss.sessionID, alice.tc.treeID, fid,
+		smb2.FILE_DIRECTORY_INFORMATION, "*", 4096)
+	reqs, err := smb2.GetRequests(msg, 0, false)
+	if err != nil {
+		t.Fatalf("the search did not parse as a request: %v", err)
+	}
+
+	resp, ss, err := alice.conn.processRequest(reqs[0])
+	if err != nil {
+		t.Fatalf("the server gave up on the search: %v", err)
+	}
+	if status := resp.Header().Status(); status != smb2.STATUS_USER_SESSION_DELETED {
+		t.Fatalf("the search was answered %#x, want it failed on the missing account", status)
+	}
+
+	buf := h.srv.encodeResponse(alice.conn, ss, resp)
+	if id := smb2.Header(buf).ProtocolID(); id != smb2.PROTOCOL_SMB2_ENCRYPTED {
+		t.Errorf("the answer carries protocol ID %#x, want it encrypted like the rest of the session", id)
+	}
+}

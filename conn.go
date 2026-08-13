@@ -884,7 +884,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
 		if err != nil {
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+			return resp, ss, nil
 		}
 
 		contexts, err := cr.CreateContexts()
@@ -1171,7 +1171,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
 		if err != nil {
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -2106,7 +2106,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
 		if err != nil {
 			resp := smb2.NewErrorResponse(qdr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -2221,7 +2221,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
 		if err != nil {
 			resp := smb2.NewErrorResponse(cnr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -2465,7 +2465,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
 		if err != nil {
 			resp := smb2.NewErrorResponse(sir, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
