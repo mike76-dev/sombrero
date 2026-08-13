@@ -266,3 +266,40 @@ func TestAReplayThatRacesTheLeaseOfItsCreateIsAnswered(t *testing.T) {
 		t.Error("the replay was answered with a lease it never asked for")
 	}
 }
+
+// TestAReplayOverAnotherShareIsRefused sends the replay over a tree connect to a share other than
+// the one the create was made on. The open belongs to the share it was made on, as a durable handle
+// taken up again does, so the GUID is one the client is reusing rather than replaying.
+func TestAReplayOverAnotherShareIsRefused(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+
+	alice := h.dial("alice")
+	first, _ := alice.createDurable("dir/file", replayGuid, false)
+	if status := smb2.Header(first).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the first create failed with %#x", status)
+	}
+
+	// A second share, connected on the same session as the first: everything the replay is
+	// checked against holds except the share it arrives over.
+	other := &share{name: "other"}
+	h.srv.shareList[other.name] = other
+	tc := newTreeConnectState(2, alice.ss, other, shareAccess)
+	alice.ss.mu.Lock()
+	alice.ss.treeConnectTable[tc.treeID] = tc
+	alice.ss.mu.Unlock()
+
+	alice.mid++
+	msg := createRequest(alice.mid, alice.ss.sessionID, tc.treeID, "dir/file",
+		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, durableContext(replayGuid, 30_000))
+	smb2.Header(msg).SetFlag(smb2.FLAGS_REPLAY_OPERATION)
+
+	resp, err := alice.send(msg)
+	if err != nil {
+		t.Fatalf("the server gave up on the replay: %v", err)
+	}
+
+	if status := resp.Header().Status(); status != smb2.STATUS_DUPLICATE_OBJECTID {
+		t.Errorf("the replay was answered %#x, want the handle kept to the share it was made on", status)
+	}
+}

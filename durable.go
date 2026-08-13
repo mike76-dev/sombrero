@@ -78,6 +78,7 @@ func (c *connection) replayCreate(cr smb2.CreateRequest, ss *session, tc *treeCo
 	op.mu.Lock()
 	owner := op.session
 	held := op.lease
+	onShare := op.treeConnect.share
 	op.mu.Unlock()
 
 	// The handle goes back to the user who made it and to nobody else, and a client that held
@@ -92,6 +93,13 @@ func (c *connection) replayCreate(cr smb2.CreateRequest, ss *session, tc *treeCo
 	// A replay belongs to the session the open was made on. The same user on another session
 	// is a different client as far as the handle is concerned.
 	if owner.sessionID != ss.sessionID {
+		return smb2.NewErrorResponse(cr, smb2.STATUS_DUPLICATE_OBJECTID, 0, nil), true
+	}
+
+	// It belongs to the share it was made on as well, as a handle taken up again does. A GUID
+	// that names an open on another share is one being reused rather than replayed, and answering
+	// it would hand a handle on one share back through a tree connect to a different one.
+	if onShare != tc.share {
 		return smb2.NewErrorResponse(cr, smb2.STATUS_DUPLICATE_OBJECTID, 0, nil), true
 	}
 
