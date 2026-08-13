@@ -657,6 +657,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				ss.signingRequired = true
 				ss.encryptData = false
 			}
+			ss.activate()
 
 			ss.mu.Lock()
 			ss.idleTime = time.Now()
@@ -707,7 +708,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		var flags uint16
-		if ss.state == sessionValid {
+		if ss.stateNow() == sessionValid {
 			switch strings.ToLower(ss.userName) {
 			case "":
 				flags = smb2.SESSION_FLAG_IS_NULL
@@ -3335,11 +3336,7 @@ func (c *connection) isUnauthenticated() bool {
 	defer c.mu.Unlock()
 
 	for _, ss := range c.sessionTable {
-		ss.mu.Lock()
-		state := ss.state
-		ss.mu.Unlock()
-
-		if state == sessionValid || state == sessionExpired {
+		if state := ss.stateNow(); state == sessionValid || state == sessionExpired {
 			return false
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"encoding/asn1"
 	"encoding/binary"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mike76-dev/sombrero/kdf"
@@ -895,5 +896,59 @@ func TestBindSessionRefusesTheWrongPassword(t *testing.T) {
 	c.mu.Unlock()
 	if joined {
 		t.Fatal("the session was joined by a client that did not know the password")
+	}
+}
+
+// TestABindingThatRacesTheSetupSeesAFinishedSession puts the two halves of a session setup against
+// each other: one connection finishing the authentication while a second one asks to join. A
+// session becomes valid with a single write, and everything the session is made of - who is behind
+// it, its keys, whether it signs - is written before that. So a binding that reads the state
+// through the lock the write is taken under either finds a session that is not ready yet and is
+// turned away, or finds one that is ready in full. Reading it any other way is a data race, and one
+// that hands a channel to a session with nobody behind it yet.
+func TestABindingThatRacesTheSetupSeesAFinishedSession(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice").signing()
+
+	// Built once and only read from here on, so that the goroutine sending it does nothing to the
+	// test itself.
+	msg := signed(t, bindingRequest(1, cl.ss.sessionID, nil), cl.ss.signingKey, smb2.SMB_DIALECT_311, 0)
+	req := binding(t, msg)
+
+	for i := range 50 {
+		c := h.joining(cl)
+
+		// Back to where the session stands while its first connection is still authenticating.
+		cl.ss.state = sessionInProgress
+
+		var (
+			wg     sync.WaitGroup
+			start  = make(chan struct{})
+			ss     *session
+			status uint32
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			cl.ss.activate()
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			ss, status = c.prepareBinding(req)
+		}()
+		close(start)
+		wg.Wait()
+
+		switch status {
+		case smb2.STATUS_OK:
+			if ss.userName == "" {
+				t.Fatalf("round %d: the binding was accepted against a session with nobody behind it", i)
+			}
+		case smb2.STATUS_REQUEST_NOT_ACCEPTED: // The setup had not finished yet.
+		default:
+			t.Fatalf("round %d: the server answered %#x, want the binding taken or turned away", i, status)
+		}
 	}
 }

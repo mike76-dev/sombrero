@@ -308,7 +308,7 @@ func (s *server) encodeResponse(c *connection, ss *session, resp smb2.GenericRes
 
 	buf := resp.Encode()
 
-	if ss != nil && ss.state == sessionValid { // A session exists, sign if required
+	if ss != nil && ss.stateNow() == sessionValid { // A session exists, sign if required
 		if resp.ShouldEncrypt() {
 			wipeSignatures(buf)
 			if resp.MayCompress() {

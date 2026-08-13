@@ -123,10 +123,12 @@ func (s *server) registerSession(connection *connection, req smb2.SessionSetupRe
 		if !found {
 			return nil, false, errSessionNotFound
 		}
+		ss.mu.Lock()
 		if ss.state == sessionExpired {
 			ss.state = sessionInProgress
 			ss.securityContext = ntlm.SecurityContext{}
 		}
+		ss.mu.Unlock()
 	}
 	return ss, found, nil
 }
@@ -200,7 +202,9 @@ func (s *server) deregisterSession(conn *connection, sid uint64) (*session, erro
 	return ss, nil
 }
 
-// finalize finalizes the session after successfully authenticating the user.
+// finalize finalizes the session after successfully authenticating the user. It does not make
+// the session valid: the caller has settings of its own to apply and calls activate once it is
+// done, so that everything the session is made of is in place before anybody else can find it.
 func (ss *session) finalize(req smb2.SessionSetupRequest) {
 	ss.securityContext = ss.connection.ntlmServer.Session().GetSecurityContext()
 	ss.userName = ss.connection.ntlmServer.Session().User()
@@ -253,8 +257,29 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 			ss.connection.server.mu.Unlock()
 		}
 	}
+}
+
+// activate marks the session authenticated, which is the point from which another connection
+// may bind a channel to it and start serving requests over it.
+//
+// Everything the session is made of - who is behind it, the keys, whether it signs or encrypts -
+// is written once during the setup and only read afterwards, so none of it is guarded on its own.
+// What makes that safe is this write being the last of them and being taken under the lock that
+// stateNow reads it under: a session found valid through that lock was built in full beforehand.
+// Setting anything after this point puts it back in the race.
+func (ss *session) activate() {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
 
 	ss.state = sessionValid
+}
+
+// stateNow returns the state the session is in.
+func (ss *session) stateNow() int {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	return ss.state
 }
 
 // deriveKeys works the signing, application and encryption keys out of the session key, by the

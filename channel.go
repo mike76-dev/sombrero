@@ -167,7 +167,7 @@ func (c *connection) prepareBinding(ssr smb2.SessionSetupRequest) (*session, uin
 		return nil, smb2.STATUS_USER_SESSION_DELETED
 	}
 
-	switch ss.state {
+	switch ss.stateNow() {
 	case sessionInProgress:
 		// The session is still being authenticated on its first connection, so there is
 		// nothing to bind to yet.
