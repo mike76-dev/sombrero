@@ -102,14 +102,16 @@ func (cr *CloseResponse) FromRequest(req GenericRequest) {
 		Header(cr.data).SetCreditResponse(0)
 	}
 
-	if req.(CloseRequest).Flags() == CLOSE_FLAG_POSTQUERY_ATTRIB {
+	// The attributes are asked for by a bit, not by the whole field: a client that carries anything
+	// else beside it is still asking ([MS-SMB2] 3.3.5.10).
+	if req.(CloseRequest).Flags()&CLOSE_FLAG_POSTQUERY_ATTRIB != 0 {
 		cr.SetFlags(CLOSE_FLAG_POSTQUERY_ATTRIB)
 	}
 }
 
 // Generate populates the fields of the SMB2_CLOSE response.
 func (cr *CloseResponse) Generate(modTime time.Time, size, allocated uint64, fa uint32) {
-	if binary.LittleEndian.Uint16(cr.data[SMB2HeaderSize+2:SMB2HeaderSize+4]) == CLOSE_FLAG_POSTQUERY_ATTRIB {
+	if binary.LittleEndian.Uint16(cr.data[SMB2HeaderSize+2:SMB2HeaderSize+4])&CLOSE_FLAG_POSTQUERY_ATTRIB != 0 {
 		cr.SetFileTime(modTime, modTime, modTime, modTime)
 		cr.SetFileAttributes(fa)
 		if fa&FILE_ATTRIBUTE_DIRECTORY == 0 {
