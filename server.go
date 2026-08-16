@@ -345,7 +345,13 @@ func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResp
 		c.updatePreauthHash(resp.Header().SessionID(), buf)
 	}
 
-	c.writeChan <- buf
+	// Nothing drains the queue of a connection whose sender has stopped, so a message handed over
+	// after that would be waited on for as long as the process lives.
+	select {
+	case c.writeChan <- buf:
+	case <-c.closeChan:
+		return
+	}
 
 	s.mu.Lock()
 	s.stats.BytesSent += uint64(len(buf))
