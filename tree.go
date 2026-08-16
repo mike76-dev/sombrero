@@ -212,7 +212,9 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			if err := c.server.RegisterShare(s); err != nil {
 				return nil, err
 			} else {
+				c.server.mu.Lock()
 				sh, exists = c.server.shareList[name]
+				c.server.mu.Unlock()
 				if !exists {
 					return nil, errNoShare
 				}
@@ -250,7 +252,7 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			}
 		}
 
-		access, exists = sh.fileSecurity[ss.workgroup+"/"+ss.userName]
+		access, exists = sh.fileAccess(ss.workgroup, ss.userName)
 		if !exists {
 			return nil, errAccessDenied
 		}

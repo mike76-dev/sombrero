@@ -1,8 +1,10 @@
 package main
 
 import (
+	"sync"
 	"testing"
 
+	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
 )
 
@@ -131,4 +133,82 @@ func TestUpdateAccessRightsGrantsALiveAccount(t *testing.T) {
 	if !h.canConnect("alice") {
 		t.Error("alice was granted no access by rights that name her")
 	}
+}
+
+// The security maps of a share are rewritten by the API - an operator granting or revoking access -
+// while connections are reading them to answer creates and tree connects. The two run on different
+// goroutines, and a map read against a map write is not a stale answer but a crash.
+
+// TestShareSecurityIsReadSafelyWhileItChanges races the read paths against the API that rewrites
+// them. It is a race detector test: what it asserts is that nothing was reported.
+func TestShareSecurityIsReadSafelyWhileItChanges(t *testing.T) {
+	h := newSMBTest(t)
+	h.share.connectSecurity = make(map[string]struct{})
+	h.share.fileSecurity = make(map[string]uint32)
+
+	cl := h.dial("alice")
+	id := h.accountID("alice")
+
+	// A create for grantAccess to weigh, of the kind a client sends.
+	req := request(t, createRequest(1, cl.ss.sessionID, cl.tc.treeID, "file", smb2.OPLOCK_LEVEL_NONE,
+		smb2.FILE_OPEN, writeAccess, nil))
+	cr := smb2.CreateRequest{Request: *req}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := range 300 {
+			rights := fullRights(id)
+			if i%2 == 0 { // Revoked, then granted again.
+				rights = stores.AccessRights{ShareName: "files", AccountID: id}
+			}
+			if err := h.srv.UpdateAccessRights(stores.Share{Name: h.share.name}, rights); err != nil {
+				t.Errorf("updating the access rights failed: %v", err)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for range 300 {
+			grantAccess(cr, cl.tc, cl.ss)
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestEnumSharesIsReadSafelyWhileSharesChange is the same for the share list, which a client walks
+// through the srvsvc pipe while shares are registered and removed under it.
+func TestEnumSharesIsReadSafelyWhileSharesChange(t *testing.T) {
+	h := newSMBTest(t)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := range 500 {
+			// What RegisterShare and RemoveShare do to the list, without the store behind them.
+			h.srv.mu.Lock()
+			if i%2 == 0 {
+				h.srv.shareList["other"] = &share{name: "other", remark: "another share"}
+			} else {
+				delete(h.srv.shareList, "other")
+			}
+			h.srv.mu.Unlock()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for range 500 {
+			h.srv.enumShares()
+		}
+	}()
+
+	wg.Wait()
 }

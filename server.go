@@ -395,6 +395,7 @@ func (s *server) trySendResponse(c *connection, ss *session, resp smb2.GenericRe
 // enumShares generates a NetShareInfo Type 1 structure for each available share.
 func (s *server) enumShares() []rpc.NetShareInfo1 {
 	var shares []rpc.NetShareInfo1
+	s.mu.Lock()
 	for _, sh := range s.shareList {
 		share := rpc.NetShareInfo1{
 			Share:   sh.name,
@@ -404,6 +405,7 @@ func (s *server) enumShares() []rpc.NetShareInfo1 {
 
 		shares = append(shares, share)
 	}
+	s.mu.Unlock()
 
 	// Add the "imaginary" IPC (Inter-Protocol Communication) share.
 	shares = append(shares, rpc.NetShareInfo1{
