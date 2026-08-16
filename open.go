@@ -1538,16 +1538,11 @@ func (op *open) tryReadCached(offset, length uint64) ([]byte, bool) {
 
 	result := make([]byte, 0, length)
 	for i, chunk := range chunks {
-		chunkOffset := firstChunk + uint64(i)*chunkSize
-		start := uint64(0)
-		if offset > chunkOffset {
-			start = offset - chunkOffset
+		part, ok := chunkSlice(chunk.data, firstChunk+uint64(i)*chunkSize, offset, length)
+		if !ok {
+			break
 		}
-		end := uint64(len(chunk.data))
-		if chunkOffset+end > offset+length {
-			end = offset + length - chunkOffset
-		}
-		result = append(result, chunk.data[start:end]...)
+		result = append(result, part...)
 	}
 	op.mu.Unlock()
 
@@ -1633,20 +1628,36 @@ func (op *open) read(offset, length uint64) ([]byte, error) {
 			return nil, chunk.err
 		}
 
-		chunkOffset := firstChunk + uint64(i)*chunkSize
-		start := uint64(0)
-		if offset > chunkOffset {
-			start = offset - chunkOffset
-		}
-		end := uint64(len(chunk.data))
-		if chunkOffset+end > offset+length {
-			end = offset + length - chunkOffset
+		part, ok := chunkSlice(chunk.data, firstChunk+uint64(i)*chunkSize, offset, length)
+		if !ok {
+			break
 		}
 
-		result = append(result, chunk.data[start:end]...)
+		result = append(result, part...)
 	}
 
 	return result, nil
+}
+
+// chunkSlice returns the part of a downloaded chunk that falls inside the requested range, and
+// whether the chunk reaches into that range at all. A backend that answers with less than the chunk
+// was asked for puts the end of the file before the size the state records, and what has been
+// gathered by then is all there is to send.
+func chunkSlice(data []byte, chunkOffset, offset, length uint64) ([]byte, bool) {
+	var start uint64
+	if offset > chunkOffset {
+		start = offset - chunkOffset
+	}
+	if start >= uint64(len(data)) {
+		return nil, false
+	}
+
+	end := uint64(len(data))
+	if chunkOffset+end > offset+length {
+		end = offset + length - chunkOffset
+	}
+
+	return data[start:end], true
 }
 
 // touchChunk moves the chunk to the back of the eviction queue. op.mu must be held.
