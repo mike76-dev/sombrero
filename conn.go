@@ -940,6 +940,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// Extended attributes are not supported, and a create asking for them is refused here:
+		// nothing has been made yet, so the refusal leaves nothing behind.
+		if _, found := contexts[smb2.CREATE_EA_BUFFER]; found {
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_EAS_NOT_SUPPORTED, 0, nil)
+			return resp, ss, nil
+		}
+
 		// A reconnect claims a handle that already exists, so it is answered from the open
 		// that was kept aside rather than by resolving the path and going to the backend.
 		if ctx, found := contexts[smb2.SMB2_CREATE_DURABLE_HANDLE_RECONNECT_V2]; found {
@@ -3745,9 +3752,6 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	var replayable bool
 	for id, ctx := range contexts {
 		switch id {
-		case smb2.CREATE_EA_BUFFER: // renterd doesn't support extended file attributes, so why should we?
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_EAS_NOT_SUPPORTED, 0, nil)
-			return resp, nil
 		case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
 			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, createdModified, op.grantedAccess)
 		case smb2.CREATE_QUERY_ON_DISK_ID:

@@ -9,6 +9,54 @@ import (
 	"github.com/mike76-dev/sombrero/smb2"
 )
 
+// TestIntegrationARefusedCreateMakesNothing is the create that asks for extended attributes, which
+// this server does not support. The refusal has to leave the share as it found it: an open that
+// outlives the create it was made for holds the file until the session goes, and a path left
+// persisted is a file the client is told it never got and can open all the same.
+func TestIntegrationARefusedCreateMakesNothing(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	ctx := createContext(smb2.CREATE_EA_BUFFER, make([]byte, 8))
+	buf, err := cl.createWith("ea.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE, ctx)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_EAS_NOT_SUPPORTED {
+		t.Fatalf("Status = %#x, want %#x", status, smb2.STATUS_EAS_NOT_SUPPORTED)
+	}
+
+	h.srv.mu.Lock()
+	opens := len(h.srv.globalOpenTable)
+	h.srv.mu.Unlock()
+	if opens != 0 {
+		t.Errorf("%d open(s) left behind by a create that was refused", opens)
+	}
+
+	cl.ss.mu.Lock()
+	held := len(cl.ss.openTable)
+	cl.ss.mu.Unlock()
+	if held != 0 {
+		t.Errorf("the session is holding %d handle(s) for a create that was refused", held)
+	}
+
+	cl.tc.share.mu.Lock()
+	persisted := len(cl.tc.share.persisted)
+	cl.tc.share.mu.Unlock()
+	if persisted != 0 {
+		t.Errorf("%d file(s) left on the share by a create that was refused", persisted)
+	}
+
+	// And the file the client was told it did not get is not there to open.
+	again, err := cl.createErr("ea.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if err != nil {
+		t.Fatalf("opening the file afterwards: %v", err)
+	}
+	if status := smb2.Header(again).Status(); status != smb2.STATUS_OBJECT_NAME_NOT_FOUND {
+		t.Errorf("opening the file the refused create was asked for answered %#x, want it absent", status)
+	}
+}
+
 func TestIntegrationCreateGrantsOplock(t *testing.T) {
 	h := newSMBTest(t)
 	h.files.put("dir/file", 1024)
