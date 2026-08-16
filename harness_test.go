@@ -1543,3 +1543,22 @@ func createdLeaseState(buf []byte) (uint32, bool) {
 
 	return binary.LittleEndian.Uint32(data[16:20]), true
 }
+
+// treeConnectRequest builds the bytes of an SMB2_TREE_CONNECT request for the given share path.
+func treeConnectRequest(mid, sid uint64, path string) []byte {
+	enc := utils.EncodeStringToBytes(path)
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2TreeConnectRequestMinSize+len(enc))
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_TREE_CONNECT)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetCreditCharge(1)
+
+	body := msg[smb2.SMB2HeaderSize:]
+	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2TreeConnectRequestStructureSize)
+	binary.LittleEndian.PutUint16(body[4:6], uint16(smb2.SMB2HeaderSize+smb2.SMB2TreeConnectRequestMinSize))
+	binary.LittleEndian.PutUint16(body[6:8], uint16(len(enc)))
+	copy(msg[smb2.SMB2HeaderSize+smb2.SMB2TreeConnectRequestMinSize:], enc)
+
+	return msg
+}

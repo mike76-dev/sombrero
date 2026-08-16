@@ -386,6 +386,45 @@ func (c *connection) acceptRequest(msg []byte) error {
 	return nil
 }
 
+// windsDownSession reports whether the command is one that a session serves even when nobody has
+// authenticated over it yet, or nobody does any longer ([MS-SMB2] 3.3.5.2.9).
+func windsDownSession(command uint16) bool {
+	switch command {
+	case smb2.SMB2_LOGOFF, smb2.SMB2_CLOSE, smb2.SMB2_LOCK:
+		return true
+	}
+
+	return false
+}
+
+// sessionFor resolves the session a request names, and returns the status to fail the request with
+// ([MS-SMB2] 3.3.5.2.9). The session table holds a session from the moment the setup starts, and the
+// client is told its ID in the very first response, so being in the table is not the same as having
+// authenticated: until it has, the session serves only the commands that wind it down.
+func (c *connection) sessionFor(req *smb2.Request) (*session, uint32) {
+	c.mu.Lock()
+	ss, found := c.sessionTable[req.Header().SessionID()]
+	c.mu.Unlock()
+
+	if !found {
+		return nil, smb2.STATUS_USER_SESSION_DELETED
+	}
+
+	if windsDownSession(req.Header().Command()) {
+		return ss, smb2.STATUS_OK
+	}
+
+	switch ss.stateNow() {
+	case sessionInProgress:
+		// The spec leaves the code to the implementation here.
+		return ss, smb2.STATUS_INVALID_PARAMETER
+	case sessionExpired:
+		return ss, smb2.STATUS_NETWORK_SESSION_EXPIRED
+	}
+
+	return ss, smb2.STATUS_OK
+}
+
 // retireMessageID takes the IDs a request spent back out of the command sequence window.
 func (c *connection) retireMessageID(mid uint64, charge uint16) {
 	c.mu.Lock()
@@ -852,12 +891,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[tcr.Header().SessionID()]
-		c.mu.Unlock()
-		if !found {
-			resp := smb2.NewErrorResponse(tcr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(tcr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -895,13 +932,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[tdr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(tdr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(tdr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -929,13 +963,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[cr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(cr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -1160,13 +1191,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// their structure size alone.
 		lbr := smb2.LeaseBreakRequest{Request: *req}
 		if lbr.Validate(c.supportsMultiCredit) == nil {
-			c.mu.Lock()
-			ss, found := c.sessionTable[lbr.Header().SessionID()]
-			c.mu.Unlock()
-
-			if !found {
-				resp := smb2.NewErrorResponse(lbr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-				return resp, nil, nil
+			ss, status := c.sessionFor(req)
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(lbr, status, 0, nil)
+				return resp, ss, nil
 			}
 
 			ss.mu.Lock()
@@ -1203,13 +1231,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[obr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(obr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(obr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -1247,13 +1272,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[cr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(cr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
@@ -1386,13 +1408,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[fr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(fr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(fr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		if op, status := c.findOpen(ss, fr.FileID(), req); status == smb2.STATUS_OK {
@@ -1419,13 +1438,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			rr.SetCompressReply(true)
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[rr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(rr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(rr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -1636,13 +1652,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[wr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(wr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(wr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -1826,13 +1839,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[lr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(lr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(lr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		resp := &smb2.LockResponse{}
@@ -1851,13 +1861,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[ir.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(ir, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(ir, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -2147,15 +2154,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		var ss *session
-		var found bool
 		if er.Header().SessionID() != 0 || er.Header().IsFlagSet(smb2.FLAGS_SIGNED) {
-			c.mu.Lock()
-			ss, found = c.sessionTable[er.Header().SessionID()]
-			c.mu.Unlock()
-
-			if !found {
-				resp := smb2.NewErrorResponse(er, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-				return resp, nil, nil
+			var status uint32
+			ss, status = c.sessionFor(req)
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(er, status, 0, nil)
+				return resp, ss, nil
 			}
 
 			ss.mu.Lock()
@@ -2179,13 +2183,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[qdr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(qdr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(qdr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		switch qdr.FileInformationClass() {
@@ -2319,13 +2320,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[cnr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(cnr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(cnr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
@@ -2411,13 +2409,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[qir.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(qir, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(qir, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -2554,13 +2549,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[sir.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(sir, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(sir, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
