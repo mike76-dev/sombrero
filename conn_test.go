@@ -506,3 +506,74 @@ func TestAChainWhoseLastRequestIsTurnedAwayIsStillAnswered(t *testing.T) {
 		t.Errorf("%d chain(s) still counted as outstanding", n)
 	}
 }
+
+// TestAChainMemberInheritsTheFailureBeforeIt is the compound chain whose first operation fails. The
+// operations after it name no handle of their own — they take the one the operation before them
+// used — so a create that failed leaves them with nothing to work on. [MS-SMB2] 3.3.5.2.7.2 has
+// them answered with the error the create gave, and with STATUS_INVALID_HANDLE when the operation
+// before them produced no handle at all. Answering STATUS_FILE_CLOSED instead tells the client a
+// handle it never got has been closed.
+func TestAChainMemberInheritsTheFailureBeforeIt(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	// A create that fails, and a query on the handle it did not make.
+	first := createRequest(0, cl.ss.sessionID, cl.tc.treeID, "missing.bin", smb2.OPLOCK_LEVEL_NONE,
+		smb2.FILE_OPEN, writeAccess, nil)
+	first = append(first, make([]byte, utils.Roundup(len(first), 8)-len(first))...)
+	second := closeRequest(1, cl.ss.sessionID, cl.tc.treeID, make([]byte, 16))
+	smb2.Header(second).SetFlag(smb2.FLAGS_RELATED_OPERATIONS)
+	smb2.Header(first).SetNextCommand(uint32(len(first)))
+
+	go cl.conn.processRequests()
+
+	if err := cl.conn.acceptRequest(append(first, second...)); err != nil {
+		t.Fatalf("the chain was not accepted: %v", err)
+	}
+
+	buf := cl.recv(5 * time.Second)
+
+	// The chain goes out as one message: the create's answer, then the close's behind it.
+	createStatus := smb2.Header(buf).Status()
+	if createStatus == smb2.STATUS_OK {
+		t.Fatalf("the create of a file that is not there succeeded")
+	}
+
+	next := smb2.Header(buf).NextCommand()
+	if next == 0 || uint64(next)+smb2.SMB2HeaderSize > uint64(len(buf)) {
+		t.Fatalf("the chain carries no second response (NextCommand %d of %d bytes)", next, len(buf))
+	}
+
+	if status := smb2.Header(buf[next:]).Status(); status != createStatus {
+		t.Errorf("the operation after the failed create was answered %#x, want the %#x the create gave",
+			status, createStatus)
+	}
+}
+
+// TestAMismatchedPersistentIDIsRefused is the handle whose two halves disagree. A FileId names an
+// open by its volatile half and proves it with the persistent one, and [MS-SMB2] 3.3.5.10 refuses
+// the request when the two do not agree — the check that keeps a reused volatile ID from being
+// taken for the handle that held it before.
+func TestAMismatchedPersistentIDIsRefused(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	fid := createdFileID(created)
+
+	// The volatile half of a handle that exists, with a persistent half that belongs to nothing.
+	forged := make([]byte, 16)
+	copy(forged, fid)
+	binary.LittleEndian.PutUint64(forged[8:], binary.LittleEndian.Uint64(fid[8:])^0xdeadbeef)
+
+	cl.mid++
+	resp, err := cl.send(closeRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, forged))
+	if err != nil {
+		t.Fatalf("the close failed: %v", err)
+	}
+
+	if status := resp.Header().Status(); status != smb2.STATUS_FILE_CLOSED {
+		t.Errorf("a handle whose persistent half does not match was answered %#x, want STATUS_FILE_CLOSED", status)
+	}
+}

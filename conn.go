@@ -3136,6 +3136,10 @@ func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open,
 	ss.mu.Unlock()
 
 	if !found || op.durableFileID != dfid {
+		// Whatever the volatile half found, the persistent half does not agree, so it is not the
+		// handle the request names. A chain member is allowed to name none and take the one the
+		// operation before it used.
+		op = nil
 		if req.GroupID() > 0 {
 			op = c.findOpenByGroupID(req.GroupID())
 		}
@@ -3146,6 +3150,16 @@ func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open,
 	}
 
 	if op == nil {
+		// A chain member has no handle of its own, so what became of the operation before it is
+		// what answers for this one ([MS-SMB2] 3.3.5.2.7.2).
+		if req.GroupID() > 0 {
+			if status := c.chainFailure(req.GroupID()); status != smb2.STATUS_OK {
+				return nil, status
+			}
+
+			return nil, smb2.STATUS_INVALID_HANDLE
+		}
+
 		return nil, smb2.STATUS_FILE_CLOSED
 	}
 
@@ -3286,6 +3300,39 @@ func (c *connection) completeWatches(ss *session, id []byte) {
 		resp.Header().SetAsyncID(aid)
 		c.releaseOpen(r)
 		c.server.trySendResponse(c, ss, resp)
+	}
+}
+
+// chainFailure returns the status the last response assembled for a chain carried, or STATUS_OK if
+// nothing has been assembled for it yet and if what was assembled went well. An interim response is
+// not a failure: the work behind it is still running.
+func (c *connection) chainFailure(gid uint64) uint32 {
+	c.mu.Lock()
+	resp, found := c.pendingResponses[gid]
+	c.mu.Unlock()
+
+	if !found {
+		return smb2.STATUS_OK
+	}
+
+	buf := resp.Encode()
+	var off uint32
+	for {
+		if uint64(off)+smb2.SMB2HeaderSize > uint64(len(buf)) {
+			return smb2.STATUS_OK
+		}
+
+		h := smb2.Header(buf[off:])
+		next := h.NextCommand()
+		if next == 0 {
+			if status := h.Status(); status != smb2.STATUS_OK && status != smb2.STATUS_PENDING {
+				return status
+			}
+
+			return smb2.STATUS_OK
+		}
+
+		off += next
 	}
 }
 
