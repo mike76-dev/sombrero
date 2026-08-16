@@ -111,6 +111,10 @@ type connection struct {
 	closeChan  chan struct{}
 	once       sync.Once
 
+	// wakeChan tells the dispatcher that a request has been put in the queue. It holds one signal:
+	// the dispatcher empties the queue before it waits again.
+	wakeChan chan struct{}
+
 	// stopChans holds the channel that tells the work behind a request to give up, keyed by the
 	// message ID of that request.
 	stopChans map[uint64]chan struct{}
@@ -380,9 +384,19 @@ func (c *connection) acceptRequest(msg []byte) error {
 		// Put request in the queue.
 		c.requestList[mid] = req
 		c.mu.Unlock()
+
+		c.wake()
 	}
 
 	return nil
+}
+
+// wake tells the dispatcher there is something to pick up, without waiting for it to listen.
+func (c *connection) wake() {
+	select {
+	case c.wakeChan <- struct{}{}:
+	default:
+	}
 }
 
 // dialectName is how a negotiated dialect is written down: the spelling the spec uses when a
@@ -2907,64 +2921,73 @@ func (c *connection) processRequests() {
 		}
 		c.mu.Unlock()
 
-		if req != nil {
-			resp, ss, err := c.processRequest(req)
-			if err != nil {
-				if c.server.debug {
-					log.Printf("Error processing request (Message ID: %d, Command: %d): %v", req.Header().MessageID(), req.Header().Command(), err)
-				}
-				c.server.closeConnection(c)
+		// Nothing to do: wait to be told rather than looking again.
+		if req == nil {
+			select {
+			case <-c.closeChan:
 				return
+			case <-c.wakeChan:
 			}
 
-			// The credits of the request it answers go back on it - here rather than where the
-			// message goes out, because a chain goes out as one message and carries a header of
-			// its own for every request in it.
-			c.grantOnResponse(resp)
+			continue
+		}
 
+		resp, ss, err := c.processRequest(req)
+		if err != nil {
+			if c.server.debug {
+				log.Printf("Error processing request (Message ID: %d, Command: %d): %v", req.Header().MessageID(), req.Header().Command(), err)
+			}
+			c.server.closeConnection(c)
+			return
+		}
+
+		// The credits of the request it answers go back on it - here rather than where the
+		// message goes out, because a chain goes out as one message and carries a header of
+		// its own for every request in it.
+		c.grantOnResponse(resp)
+
+		c.mu.Lock()
+		delete(c.requestList, resp.Header().MessageID())
+		var pendingResp smb2.GenericResponse
+		if resp.GroupID() > 0 { // This response is a part of a chain, pull the chain
+			pendingResp = c.pendingResponses[resp.GroupID()]
+		}
+		c.mu.Unlock()
+
+		if resp.Header().Command() == smb2.SMB2_CHANGE_NOTIFY { // Send the chain if it's complete, then the response
+			if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
+				chain.Header().SetCreditResponse(1)
+				c.server.writeResponse(c, ss, chain)
+			}
+			c.server.writeResponse(c, ss, resp)
+		} else if pendingResp != nil { // Add the response to the chain, then send the chain if it's complete
+			pendingResp.Append(resp)
+			if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
+				c.server.writeResponse(c, ss, chain)
+			}
+		} else if resp.GroupID() == 0 { // A standalone response, send it
+			c.server.writeResponse(c, ss, resp)
+		} else { // Start the response chain
 			c.mu.Lock()
-			delete(c.requestList, resp.Header().MessageID())
-			var pendingResp smb2.GenericResponse
-			if resp.GroupID() > 0 { // This response is a part of a chain, pull the chain
-				pendingResp = c.pendingResponses[resp.GroupID()]
-			}
+			resp.SetSessionID(resp.Header().SessionID())
+			resp.SetTreeID(resp.Header().TreeID())
+			c.pendingResponses[resp.GroupID()] = resp
 			c.mu.Unlock()
 
-			if resp.Header().Command() == smb2.SMB2_CHANGE_NOTIFY { // Send the chain if it's complete, then the response
-				if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
-					chain.Header().SetCreditResponse(1)
-					c.server.writeResponse(c, ss, chain)
-				}
-				c.server.writeResponse(c, ss, resp)
-			} else if pendingResp != nil { // Add the response to the chain, then send the chain if it's complete
-				pendingResp.Append(resp)
-				if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
-					c.server.writeResponse(c, ss, chain)
-				}
-			} else if resp.GroupID() == 0 { // A standalone response, send it
-				c.server.writeResponse(c, ss, resp)
-			} else { // Start the response chain
-				c.mu.Lock()
-				resp.SetSessionID(resp.Header().SessionID())
-				resp.SetTreeID(resp.Header().TreeID())
-				c.pendingResponses[resp.GroupID()] = resp
-				c.mu.Unlock()
-
-				// A chain of one is complete as soon as it is started.
-				if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
-					c.server.writeResponse(c, ss, chain)
-				}
+			// A chain of one is complete as soon as it is started.
+			if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
+				c.server.writeResponse(c, ss, chain)
 			}
+		}
 
-			// Whatever is going out for this request is on the queue now, so the work behind an
-			// asynchronous one may answer.
-			c.interimQueued(resp.Header().MessageID())
+		// Whatever is going out for this request is on the queue now, so the work behind an
+		// asynchronous one may answer.
+		c.interimQueued(resp.Header().MessageID())
 
-			// An interim response doesn't complete the request: the counters are
-			// decremented when the asynchronous command sends its final response.
-			if resp.Header().Status() != smb2.STATUS_PENDING {
-				c.releaseOpen(req)
-			}
+		// An interim response doesn't complete the request: the counters are
+		// decremented when the asynchronous command sends its final response.
+		if resp.Header().Status() != smb2.STATUS_PENDING {
+			c.releaseOpen(req)
 		}
 
 		select {

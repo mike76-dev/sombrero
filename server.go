@@ -181,6 +181,7 @@ func (s *server) newConnectionState(clientName string) *connection {
 		server:                s,
 		writeChan:             make(chan []byte),
 		closeChan:             make(chan struct{}),
+		wakeChan:              make(chan struct{}, 1),
 		stopChans:             make(map[uint64]chan struct{}),
 	}
 

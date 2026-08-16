@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/binary"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -403,6 +405,59 @@ func TestIntegrationNegotiateSettlesACipher(t *testing.T) {
 				t.Errorf("the connection settled on cipher %#x, want %#x", c.cipherID, tt.want)
 			}
 		})
+	}
+}
+
+// dispatcherState returns the scheduler state of the goroutine running processRequests, as the
+// runtime writes it in a stack dump: "select", "chan receive", "runnable" and so on.
+func dispatcherState(t *testing.T) string {
+	t.Helper()
+
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if !strings.Contains(g, "processRequests") {
+			continue
+		}
+		_, rest, ok := strings.Cut(g, "[")
+		if !ok {
+			continue
+		}
+		state, _, _ := strings.Cut(rest, "]")
+
+		// The state carries how long it has been in it once that gets long enough to mention.
+		state, _, _ = strings.Cut(state, ",")
+
+		return state
+	}
+
+	return ""
+}
+
+// TestTheDispatcherWaitsInsteadOfPolling is what an idle connection costs. The dispatcher used to
+// look at the queue in a loop with nothing to make it wait, so a connection with no traffic on it
+// spun a core for as long as it lived. It has to be parked on a channel when there is nothing to do.
+func TestTheDispatcherWaitsInsteadOfPolling(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	go cl.conn.processRequests()
+
+	// Give it a moment to work through anything the dial left and settle.
+	time.Sleep(100 * time.Millisecond)
+
+	if state := dispatcherState(t); state != "select" {
+		t.Errorf("the dispatcher of an idle connection is %q, want it parked in a select", state)
+	}
+
+	// And it still picks up what arrives once it is parked.
+	mid := cl.conn.window()[0]
+	if err := cl.conn.acceptRequest(echoRequest(mid, cl.ss.sessionID, cl.tc.treeID)); err != nil {
+		t.Fatalf("the request was not accepted: %v", err)
+	}
+	if buf := cl.recv(5 * time.Second); smb2.Header(buf).Status() != smb2.STATUS_OK {
+		t.Errorf("the parked dispatcher answered %#x, want it woken and the request served", smb2.Header(buf).Status())
 	}
 }
 
