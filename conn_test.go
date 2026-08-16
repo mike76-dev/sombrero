@@ -577,3 +577,53 @@ func TestAMismatchedPersistentIDIsRefused(t *testing.T) {
 		t.Errorf("a handle whose persistent half does not match was answered %#x, want STATUS_FILE_CLOSED", status)
 	}
 }
+
+// TestUnbufferedReadIsRefusedOnEveryPipe is the read that asks for its data to bypass the buffers.
+// [MS-SMB2] 3.3.5.12 refuses it on a named pipe, whichever pipe it is; the check sat inside the
+// branch that serves srvsvc, so lsarpc and mdssvc took the flag and read on.
+func TestUnbufferedReadIsRefusedOnEveryPipe(t *testing.T) {
+	for _, pipe := range []string{"srvsvc", "lsarpc", "mdssvc"} {
+		t.Run(pipe, func(t *testing.T) {
+			h := newSMBTest(t)
+			cl := h.dial("alice")
+
+			// One of the two dialects the rule names, and the one whose tree connect asks for no
+			// signature of its own.
+			cl.conn.negotiateDialect = smb2.SMB_DIALECT_302
+			cl.conn.dialect = dialectName(cl.conn.negotiateDialect)
+
+			// The pipes live on IPC$, which is not the share the harness connects to.
+			resp, _, err := cl.conn.processRequest(request(t,
+				treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\IPC$`)))
+			if err != nil {
+				t.Fatalf("the tree connect to IPC$ failed: %v", err)
+			}
+			if status := resp.Header().Status(); status != smb2.STATUS_OK {
+				t.Fatalf("the tree connect to IPC$ was answered %#x", status)
+			}
+			tid := resp.Header().TreeID()
+
+			created, _, err := cl.conn.processRequest(request(t, createRequest(1, cl.ss.sessionID, tid,
+				pipe, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, nil)))
+			if err != nil {
+				t.Fatalf("opening %s failed: %v", pipe, err)
+			}
+			if status := created.Header().Status(); status != smb2.STATUS_OK {
+				t.Fatalf("opening %s was answered %#x", pipe, status)
+			}
+			fid := createdFileID(created.Encode())
+
+			msg := readRequest(2, cl.ss.sessionID, tid, fid, 0, 1024)
+			msg[smb2.SMB2HeaderSize+3] = smb2.READFLAG_READ_UNBUFFERED
+
+			read, _, err := cl.conn.processRequest(request(t, msg))
+			if err != nil {
+				t.Fatalf("the read failed: %v", err)
+			}
+			if status := read.Header().Status(); status != smb2.STATUS_INVALID_PARAMETER {
+				t.Errorf("an unbuffered read of the %s pipe was answered %#x, want STATUS_INVALID_PARAMETER",
+					pipe, status)
+			}
+		})
+	}
+}

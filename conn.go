@@ -1469,6 +1469,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// A read on a named pipe cannot ask for the data to go unbuffered, whichever pipe it is
+		// ([MS-SMB2] 3.3.5.12). The share is what says the handle is on one.
+		if (c.negotiateDialect == smb2.SMB_DIALECT_302 || c.negotiateDialect == smb2.SMB_DIALECT_311) &&
+			op.treeConnect.share.shareType == smb2.SHARE_TYPE_PIPE &&
+			rr.Flags()&smb2.READFLAG_READ_UNBUFFERED != 0 {
+			resp := smb2.NewErrorResponse(rr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp, ss, nil
+		}
+
 		if c.refusesChannel(rr.Channel()) {
 			resp := smb2.NewErrorResponse(rr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 			return resp, ss, nil
@@ -1477,12 +1486,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// A special case: some clients use the SRVSVC named pipe for writing requests to it
 		// and reading responses from it. Usually, an SMB2_IOCTL request serves this purpose.
 		if strings.ToLower(name) == "srvsvc" {
-			if c.negotiateDialect == smb2.SMB_DIALECT_302 || c.negotiateDialect == smb2.SMB_DIALECT_311 {
-				if rr.Flags()&smb2.READFLAG_READ_UNBUFFERED != 0 {
-					resp := smb2.NewErrorResponse(rr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
-					return resp, ss, nil
-				}
-			}
 			op.mu.Lock()
 			data := bytes.Clone(op.srvsvcData)
 			op.mu.Unlock()
