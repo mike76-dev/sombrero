@@ -266,6 +266,32 @@ func (c *connection) acceptRequest(msg []byte) error {
 				}
 			}
 			mid = req.Header().MessageID()
+
+			if req.Header().Command() == smb2.SMB2_CANCEL { // SMB2_CANCEL requests are handled separately
+				// A cancel neither spends a sequence number nor earns a credit ([MS-SMB2] 3.3.1.1,
+				// 3.3.4.1.2, 3.3.5.16): it reuses the message ID of the request it cancels, which
+				// has been retired already, or carries zero alongside an async ID. So the window is
+				// left exactly as it stands - granting against a cancel opened an ID per cancel that
+				// nothing would ever close, and retiring its ID would take one the client still has.
+				if err := c.cancelRequest(req); err != nil {
+					log.Printf("Couldn't cancel request %d:, %v\n", req.Header().Command(), err)
+				}
+
+				if chain := c.chainMemberDone(req.GroupID()); chain != nil {
+					// A cancel that opens a chain is the one request of it that never looks the
+					// session up below, so the chain would go out for nobody.
+					if ss == nil {
+						c.mu.Lock()
+						ss = c.sessionTable[req.Header().SessionID()]
+						c.mu.Unlock()
+					}
+
+					c.server.writeResponse(c, ss, chain)
+				}
+
+				continue
+			}
+
 			credits := max(req.Header().CreditCharge(), req.Header().CreditRequest()) // Grant whatever the CreditRequest is. If CreditCharge is greater, grant that much.
 			if credits == 0 {                                                         // The number of credits cannot be zero
 				credits = 1
@@ -275,18 +301,6 @@ func (c *connection) acceptRequest(msg []byte) error {
 			granted, _ := c.grantCredits(mid, credits, req.Header().CreditCharge())
 			c.creditsGranted[mid] = granted
 			c.mu.Unlock()
-
-			if req.Header().Command() == smb2.SMB2_CANCEL { // SMB2_CANCEL requests are handled separately
-				if err := c.cancelRequest(req); err != nil {
-					log.Printf("Couldn't cancel request %d:, %v\n", req.Header().Command(), err)
-				}
-
-				if chain := c.chainMemberDone(req.GroupID()); chain != nil {
-					c.server.writeResponse(c, ss, chain)
-				}
-
-				continue
-			}
 		}
 
 		c.mu.Lock()
@@ -341,29 +355,9 @@ func (c *connection) acceptRequest(msg []byte) error {
 		}
 
 		// Request processed; this message ID is not allowed anymore.
-		c.mu.Lock()
-		if c.negotiateDialect == smb2.SMB_DIALECT_202 || !c.supportsMultiCredit {
-			delete(c.commandSequenceWindow, mid)
-		} else {
-			// As many IDs as the request charged for, and a request that charges nothing still
-			// costs the one it was sent under: granting reads a charge of zero as one, which is
-			// what a client sends for anything that fits in a single credit, and a window handing
-			// an ID out without taking one back grows for as long as the connection lives.
-			charge := max(req.Header().CreditCharge(), 1)
-			var count uint16
-			i := mid
-			m, _ := utils.FindMaxKey(c.commandSequenceWindow)
-			for i <= m && count < charge {
-				if _, found := c.commandSequenceWindow[i]; found {
-					delete(c.commandSequenceWindow, i)
-					count++
-				}
-				i++
-			}
-		}
+		c.retireMessageID(mid, req.Header().CreditCharge())
 
 		if rejectStatus != 0 {
-			c.mu.Unlock()
 			// The response carries a copy of the request header, so the signature of the
 			// client has to be cleared: the response cannot be signed, since the key to
 			// sign it with is the one that couldn't be found.
@@ -382,6 +376,7 @@ func (c *connection) acceptRequest(msg []byte) error {
 		}
 
 		// Put request in the queue.
+		c.mu.Lock()
 		c.requestList[mid] = req
 		c.mu.Unlock()
 
@@ -389,6 +384,31 @@ func (c *connection) acceptRequest(msg []byte) error {
 	}
 
 	return nil
+}
+
+// retireMessageID takes the IDs a request spent back out of the command sequence window.
+func (c *connection) retireMessageID(mid uint64, charge uint16) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.negotiateDialect == smb2.SMB_DIALECT_202 || !c.supportsMultiCredit {
+		delete(c.commandSequenceWindow, mid)
+		return
+	}
+
+	// As many IDs as the request charged for, and a request that charges nothing still
+	// costs the one it was sent under: granting reads a charge of zero as one, which is
+	// what a client sends for anything that fits in a single credit, and a window handing
+	// an ID out without taking one back grows for as long as the connection lives.
+	charge = max(charge, 1)
+	var count uint16
+	m, _ := utils.FindMaxKey(c.commandSequenceWindow)
+	for i := mid; i <= m && count < charge; i++ {
+		if _, found := c.commandSequenceWindow[i]; found {
+			delete(c.commandSequenceWindow, i)
+			count++
+		}
+	}
 }
 
 // wake tells the dispatcher there is something to pick up, without waiting for it to listen.
@@ -2924,7 +2944,11 @@ func (c *connection) processRequests() {
 		var req *smb2.Request
 		c.mu.Lock()
 		if len(c.requestList) > 0 {
-			_, req = utils.FindMinKey(c.requestList)
+			// Taken off the queue as it is picked up, so that what is left in the queue is what
+			// nothing has started on. A cancel answers out of the queue and relies on that.
+			var mid uint64
+			mid, req = utils.FindMinKey(c.requestList)
+			delete(c.requestList, mid)
 		}
 		c.mu.Unlock()
 
@@ -2954,7 +2978,6 @@ func (c *connection) processRequests() {
 		c.grantOnResponse(resp)
 
 		c.mu.Lock()
-		delete(c.requestList, resp.Header().MessageID())
 		var pendingResp smb2.GenericResponse
 		if resp.GroupID() > 0 { // This response is a part of a chain, pull the chain
 			pendingResp = c.pendingResponses[resp.GroupID()]
@@ -3349,6 +3372,10 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
 		resp.Header().SetCreditResponse(0)
 		resp.Header().SetAsyncID(target.Header().AsyncID())
+	} else {
+		// A target taken out of the queue was never answered with an interim, so this is the
+		// response its credits go back on.
+		owner.grantOnResponse(resp)
 	}
 
 	// The request is answered and cleaned up on the connection that carries it, which is
@@ -3382,10 +3409,19 @@ func (c *connection) findCancelTarget(cr smb2.CancelRequest, ss *session) (*smb2
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
+		// Taken on asynchronously, but cancelled before the client saw the interim response.
 		for _, r := range c.asyncCommandList {
 			if r != nil && r.Header().MessageID() == mid {
 				return r, c
 			}
+		}
+
+		// Still waiting its turn ([MS-SMB2] 3.3.5.16). Removing it here is what keeps the
+		// dispatcher from answering it too. A member of a compound chain is left to be processed:
+		// the chain is answered as one, and a cancel may come to nothing.
+		if r, found := c.requestList[mid]; found && r.GroupID() == 0 {
+			delete(c.requestList, mid)
+			return r, c
 		}
 
 		return nil, nil
