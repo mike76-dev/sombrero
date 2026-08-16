@@ -1696,7 +1696,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
-		if (length <= size && ga&(smb2.FILE_WRITE_DATA|smb2.GENERIC_WRITE) == 0) || ga&(smb2.FILE_APPEND_DATA|smb2.GENERIC_WRITE) == 0 {
+		// Which right the write needs is decided by the range it covers, not by both at once
+		// ([MS-SMB2] 3.3.5.13): one that stays inside the file needs FILE_WRITE_DATA, and one that
+		// carries the file past its end needs FILE_APPEND_DATA. The comparison is written so that
+		// an offset beyond the end of the file cannot wrap it round.
+		extends := wr.Offset() > size || length > size-wr.Offset()
+		if (!extends && ga&(smb2.FILE_WRITE_DATA|smb2.GENERIC_WRITE) == 0) ||
+			(extends && ga&(smb2.FILE_APPEND_DATA|smb2.GENERIC_WRITE) == 0) {
 			resp := smb2.NewErrorResponse(wr, smb2.STATUS_ACCESS_DENIED, 0, nil)
 			return resp, ss, nil
 		}

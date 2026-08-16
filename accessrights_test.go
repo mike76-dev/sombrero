@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
@@ -211,4 +213,59 @@ func TestEnumSharesIsReadSafelyWhileSharesChange(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+// TestWriteAccessFollowsTheRangeWritten is which right a write has to hold. [MS-SMB2] 3.3.5.13 asks
+// for FILE_WRITE_DATA on a range that stays inside the file and FILE_APPEND_DATA on one that
+// carries it past the end - one or the other, chosen by the range. Demanding both refuses every
+// write through a handle that holds only one of them, and comparing the length of the write against
+// the size of the file instead of the range it covers picks the wrong one.
+func TestWriteAccessFollowsTheRangeWritten(t *testing.T) {
+	const (
+		writeOnly  = smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA
+		appendOnly = smb2.FILE_READ_DATA | smb2.FILE_APPEND_DATA
+	)
+
+	for _, tt := range []struct {
+		what   string
+		access uint32
+		offset uint64
+		want   uint32
+	}{
+		// The file is 1024 bytes, and each write carries 512.
+		{"inside the file, holding write access", writeOnly, 0, smb2.STATUS_OK},
+		{"past the end, holding write access alone", writeOnly, 768, smb2.STATUS_ACCESS_DENIED},
+		{"past the end, holding append access", appendOnly, 768, smb2.STATUS_OK},
+		{"inside the file, holding append access alone", appendOnly, 0, smb2.STATUS_ACCESS_DENIED},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+			h.files.put("file", 1024)
+
+			cl := h.dial("alice")
+
+			// The rights of the share are what a handle on one of its files is granted.
+			cl.tc.maximalAccess = tt.access
+
+			handle, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			fid := createdFileID(handle)
+
+			cl.mid++
+			resp, err := cl.send(writeRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid,
+				tt.offset, bytes.Repeat([]byte("w"), 512)))
+			if err != nil {
+				t.Fatalf("the write failed: %v", err)
+			}
+
+			answer := resp.Encode()
+			if resp.Header().Status() == smb2.STATUS_PENDING {
+				answer = cl.recv(20 * time.Second)
+			}
+
+			if status := smb2.Header(answer).Status(); status != tt.want {
+				t.Errorf("a write of 512 bytes at %d was answered %#x, want %#x",
+					tt.offset, status, tt.want)
+			}
+		})
+	}
 }
