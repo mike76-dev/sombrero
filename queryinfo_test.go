@@ -449,3 +449,45 @@ func TestIntegrationQueryInfoReportsADeletionCalledOff(t *testing.T) {
 		t.Error("the file is still reported as being on its way out")
 	}
 }
+
+// TestASecurityDescriptorTooBigForTheBufferIsRefused is the query whose buffer will not hold the
+// answer. A security descriptor is never sent in part, so the client is told how much room it needs
+// and asks again — and [MS-SMB2] 3.3.5.20.3 names the one status this must not carry:
+// STATUS_BUFFER_OVERFLOW is what says a truncated answer follows, and there is none.
+func TestASecurityDescriptorTooBigForTheBufferIsRefused(t *testing.T) {
+	for _, tt := range []struct {
+		what    string
+		dialect uint16
+	}{
+		{"3.1.1, which carries the size in an error context", smb2.SMB_DIALECT_311},
+		{"3.0, which carries it on its own", smb2.SMB_DIALECT_30},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+			h.files.put("file", 1024)
+
+			cl := h.dial("alice")
+			cl.conn.negotiateDialect = tt.dialect
+			cl.conn.dialect = dialectName(tt.dialect)
+
+			created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			fid := createdFileID(created)
+
+			// A buffer of one byte, which no descriptor fits in.
+			cl.mid++
+			resp, err := cl.send(queryInfoRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid,
+				smb2.INFO_SECURITY, 0, 1))
+			if err != nil {
+				t.Fatalf("the query failed: %v", err)
+			}
+
+			status := resp.Header().Status()
+			if status == smb2.STATUS_BUFFER_OVERFLOW {
+				t.Fatal("the query was answered STATUS_BUFFER_OVERFLOW, which promises a truncated descriptor")
+			}
+			if status != smb2.STATUS_BUFFER_TOO_SMALL {
+				t.Errorf("the query was answered %#x, want STATUS_BUFFER_TOO_SMALL", status)
+			}
+		})
+	}
+}

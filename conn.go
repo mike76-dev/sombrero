@@ -2519,14 +2519,18 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		case smb2.INFO_SECURITY:
 			info = smb2.NewSecInfo(ss.securityContext, qir.AdditionalInformation(), ga)
+
+			// A security descriptor is never sent in part: the client is told how much room it
+			// takes and asks again. [MS-SMB2] 3.3.5.20.3 names STATUS_BUFFER_OVERFLOW as the one
+			// answer this must not carry, because that is what says a truncated answer follows.
 			if qir.OutputBufferLength() < uint32(len(info)) {
 				if c.negotiateDialect == smb2.SMB_DIALECT_311 {
 					ecd := smb2.ErrorContextData(0, binary.LittleEndian.AppendUint32(nil, uint32(len(info))))
-					resp := smb2.NewErrorResponse(qir, smb2.STATUS_BUFFER_OVERFLOW, 1, ecd)
+					resp := smb2.NewErrorResponse(qir, smb2.STATUS_BUFFER_TOO_SMALL, 1, ecd)
 					return resp, ss, nil
 				} else {
 					ecd := binary.LittleEndian.AppendUint32(nil, uint32(len(info)))
-					resp := smb2.NewErrorResponse(qir, smb2.STATUS_BUFFER_OVERFLOW, 0, ecd)
+					resp := smb2.NewErrorResponse(qir, smb2.STATUS_BUFFER_TOO_SMALL, 0, ecd)
 					return resp, ss, nil
 				}
 			}
