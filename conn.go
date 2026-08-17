@@ -2450,6 +2450,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		var info []byte
 		switch qir.InfoType() {
 		case smb2.INFO_FILE:
+			// The classes that answer with the attributes of the file are only served to a handle
+			// that was opened to read them ([MS-SMB2] 3.3.5.20.1).
+			switch qir.FileInfoClass() {
+			case smb2.FileBasicInformation, smb2.FileAllInformation,
+				smb2.FileNetworkOpenInformation, smb2.FileAttributeTagInformation:
+				if ga&(smb2.FILE_READ_ATTRIBUTES|smb2.GENERIC_READ) == 0 {
+					resp := smb2.NewErrorResponse(qir, smb2.STATUS_ACCESS_DENIED, 0, nil)
+					return resp, ss, nil
+				}
+			}
+
 			switch qir.FileInfoClass() {
 			case smb2.FileAllInformation:
 				info = op.fileAllInformation()

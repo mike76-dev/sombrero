@@ -676,8 +676,12 @@ const (
 
 	// shareAccess is what the share grants over a file: everything a test may want to do with
 	// one. It is what a tree connect on the test share carries as its maximal access.
-	shareAccess = smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA |
-		smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
+	//
+	// FILE_READ_ATTRIBUTES comes with reading on a real share - the stored rights hand out
+	// 0x80120089 for read access, which carries it - so a fixture that grants FILE_READ_DATA
+	// without it is a handle no share ever issues.
+	shareAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES | smb2.FILE_WRITE_DATA |
+		smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
 )
 
 // smbTestClients counts the clients built across a test binary, so that each gets a name and a

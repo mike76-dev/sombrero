@@ -491,3 +491,44 @@ func TestASecurityDescriptorTooBigForTheBufferIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestQueryingAttributesNeedsReadAttributes is the handle opened to write and nothing else. The
+// classes that answer with the attributes of a file are only for a handle that may read them
+// ([MS-SMB2] 3.3.5.20.1), and nothing checked: a principal granted write access alone — which the
+// stored rights hand out without FILE_READ_ATTRIBUTES — could read the timestamps, the size and the
+// attributes of every file on the share.
+func TestQueryingAttributesNeedsReadAttributes(t *testing.T) {
+	// What FlagsFromAccessRights gives a principal granted write access and nothing else.
+	const writeOnly = smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA |
+		smb2.FILE_WRITE_ATTRIBUTES | smb2.GENERIC_WRITE
+
+	for _, tt := range []struct {
+		what   string
+		class  uint8
+		access uint32
+		want   uint32
+	}{
+		{"all information, write access alone", smb2.FileAllInformation, writeOnly, smb2.STATUS_ACCESS_DENIED},
+		{"network open information, write access alone", smb2.FileNetworkOpenInformation, writeOnly, smb2.STATUS_ACCESS_DENIED},
+
+		// The control: the same queries through a handle that may read the attributes.
+		{"all information, holding read access", smb2.FileAllInformation, shareAccess, smb2.STATUS_OK},
+		{"network open information, holding read access", smb2.FileNetworkOpenInformation, shareAccess, smb2.STATUS_OK},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+			h.files.put("file", 1024)
+
+			cl := h.dial("alice")
+			cl.tc.maximalAccess = tt.access
+
+			created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			fid := createdFileID(created)
+
+			buf := cl.queryInfo(fid, tt.class, 4096)
+			if status := smb2.Header(buf).Status(); status != tt.want {
+				t.Errorf("the query was answered %#x, want %#x", status, tt.want)
+			}
+		})
+	}
+}
