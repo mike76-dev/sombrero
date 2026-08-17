@@ -309,3 +309,90 @@ func TestIntegrationBreakEndsWhenHandleIsClosed(t *testing.T) {
 		}
 	})
 }
+
+// TestValidPath is the names a request may act on. The backends key their objects by string, so
+// ".." is a segment like any other down there rather than a walk up a tree — which is exactly why
+// it has to be turned away here, before the name reaches them ([MS-SMB2] 3.3.5.9).
+func TestValidPath(t *testing.T) {
+	for _, tt := range []struct {
+		path string
+		want bool
+	}{
+		// The share root, which a client opens to ask about the volume.
+		{"", true},
+
+		{"file", true},
+		{"dir/file", true},
+		{"dir/sub/file", true},
+		{".hidden", true},
+		{"a..b", true}, // dots inside a name are part of it
+		{"...", true},  // and a name of nothing but dots is still a name
+		{"file.", true},
+
+		// Walking out of the share, at every position.
+		{"..", false},
+		{"../file", false},
+		{"dir/../../file", false},
+		{"dir/..", false},
+
+		// Naming the same file twice over.
+		{".", false},
+		{"./file", false},
+		{"dir/./file", false},
+
+		// Absolute, and empty components.
+		{"/file", false},
+		{"dir//file", false},
+		{"dir/", false},
+	} {
+		if got := validPath(tt.path); got != tt.want {
+			t.Errorf("validPath(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+// TestIntegrationACreateCannotWalkOutOfTheShare is the name reaching the dispatcher. Nothing looked
+// at the components of a create's path: it went from the wire to the backend as a key.
+func TestIntegrationACreateCannotWalkOutOfTheShare(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	for _, path := range []string{`..\secrets`, `dir\..\..\secrets`, `\absolute`, `.\file`} {
+		buf, err := cl.createErr(path, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN_IF)
+		if err != nil {
+			t.Fatalf("create of %q: %v", path, err)
+		}
+		if status := smb2.Header(buf).Status(); status != smb2.STATUS_INVALID_PARAMETER {
+			t.Errorf("a create of %q was answered %#x, want STATUS_INVALID_PARAMETER", path, status)
+		}
+	}
+
+	// Nothing was made on the way to refusing them.
+	cl.tc.share.mu.Lock()
+	persisted := len(cl.tc.share.persisted)
+	cl.tc.share.mu.Unlock()
+	if persisted != 0 {
+		t.Errorf("%d file(s) left on the share by creates that were refused", persisted)
+	}
+}
+
+// TestIntegrationARenameCannotWalkOutOfTheShare is the same name arriving the other way. A rename
+// names the file it is moving to, and that name was joined to nothing and passed straight on.
+func TestIntegrationARenameCannotWalkOutOfTheShare(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	fid := createdFileID(created)
+
+	for _, name := range []string{`..\stolen`, `dir\..\..\stolen`, `\absolute`, ``} {
+		buf, err := cl.rename(fid, name)
+		if err != nil {
+			t.Fatalf("rename to %q: %v", name, err)
+		}
+		if status := smb2.Header(buf).Status(); status != smb2.STATUS_INVALID_PARAMETER {
+			t.Errorf("a rename to %q was answered %#x, want STATUS_INVALID_PARAMETER", name, status)
+		}
+	}
+}

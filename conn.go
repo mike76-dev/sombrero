@@ -386,6 +386,30 @@ func (c *connection) acceptRequest(msg []byte) error {
 	return nil
 }
 
+// validPath reports whether a path a request names is one the server may act on. The components
+// have to resolve inside the share ([MS-SMB2] 3.3.5.9): a name that walks out of it, or that names
+// the same file two ways, is refused rather than handed to the backend, where the key is a string
+// and ".." is a segment like any other. The empty path is the root of the share, which a client
+// opens to ask about the volume.
+func validPath(path string) bool {
+	if path == "" {
+		return true
+	}
+
+	if strings.HasPrefix(path, "/") {
+		return false
+	}
+
+	for _, part := range strings.Split(path, "/") {
+		switch part {
+		case "", ".", "..":
+			return false
+		}
+	}
+
+	return true
+}
+
 // windsDownSession reports whether the command is one that a session serves even when nobody has
 // authenticated over it yet, or nobody does any longer ([MS-SMB2] 3.3.5.2.9).
 func windsDownSession(command uint16) bool {
@@ -1069,6 +1093,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		path := strings.ReplaceAll(cr.Filename(), "\\", "/")
+		if !validPath(path) {
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp, ss, nil
+		}
 
 		co := cr.CreateOptions()
 		if co&smb2.FILE_DELETE_ON_CLOSE > 0 && (tc.maximalAccess&(smb2.DELETE|smb2.GENERIC_ALL|smb2.GENERIC_EXECUTE|smb2.GENERIC_READ|smb2.GENERIC_WRITE) == 0) {
@@ -2742,8 +2770,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					return resp, ss, nil
 				}
 
-				// Rename the file or the directory.
+				// Rename the file or the directory. The name it is moving to has to resolve
+				// inside the share, exactly as the one it was created under did.
 				newName := strings.ReplaceAll(fri.FileName, "\\", "/")
+				if newName == "" || !validPath(newName) {
+					resp := smb2.NewErrorResponse(sir, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+					return resp, ss, nil
+				}
 
 				// A rename moves what the store holds, and a file still being written is not held
 				// by it yet: the bytes are in the upload buffer, under a name the rename is about
