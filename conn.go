@@ -2469,6 +2469,14 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			case smb2.FileNetworkOpenInformation:
 				info = op.fileNetworkOpenInformation()
 			case smb2.FileNormalizedNameInformation:
+				// The class belongs to 3.1.1 alone. [MS-SMB2] 3.3.5.20.1 names 2.0.2, 2.1 and
+				// 3.0.2 as the dialects that must refuse it and leaves 3.0 out of that list,
+				// which reads as an oversight rather than a dialect that carries it.
+				if c.negotiateDialect != smb2.SMB_DIALECT_311 {
+					resp := smb2.NewErrorResponse(qir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
+					return resp, ss, nil
+				}
+
 				info = op.fileNormalizedNameInformation()
 			case smb2.FileEaInformation:
 				info = op.fileEaInformation()

@@ -532,3 +532,39 @@ func TestQueryingAttributesNeedsReadAttributes(t *testing.T) {
 		})
 	}
 }
+
+// TestNormalizedNameIsAnsweredOnlyOn311 is the information class only the last dialect carries. It
+// was answered on every dialect, so a client that asked on an earlier one was told something its
+// dialect has no way to have asked for. [MS-SMB2] 3.3.5.20.1 names 2.0.2, 2.1 and 3.0.2 as the
+// dialects that must refuse it and leaves 3.0 out, which is taken here as an oversight.
+func TestNormalizedNameIsAnsweredOnlyOn311(t *testing.T) {
+	for _, tt := range []struct {
+		dialect uint16
+		want    uint32
+	}{
+		{smb2.SMB_DIALECT_202, smb2.STATUS_NOT_SUPPORTED},
+		{smb2.SMB_DIALECT_21, smb2.STATUS_NOT_SUPPORTED},
+		{smb2.SMB_DIALECT_30, smb2.STATUS_NOT_SUPPORTED},
+		{smb2.SMB_DIALECT_302, smb2.STATUS_NOT_SUPPORTED},
+
+		// The one dialect that carries it.
+		{smb2.SMB_DIALECT_311, smb2.STATUS_OK},
+	} {
+		t.Run(dialectName(tt.dialect), func(t *testing.T) {
+			h := newSMBTest(t)
+			h.files.put("file", 1024)
+
+			cl := h.dial("alice")
+			cl.conn.negotiateDialect = tt.dialect
+			cl.conn.dialect = dialectName(tt.dialect)
+
+			created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			fid := createdFileID(created)
+
+			buf := cl.queryInfo(fid, smb2.FileNormalizedNameInformation, 4096)
+			if status := smb2.Header(buf).Status(); status != tt.want {
+				t.Errorf("the query was answered %#x, want %#x", status, tt.want)
+			}
+		})
+	}
+}
