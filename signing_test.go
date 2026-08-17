@@ -762,3 +762,55 @@ func TestAnUnauthenticatedSessionServesAlmostNothing(t *testing.T) {
 		t.Errorf("the logoff of a half-finished session was answered %#x, want it served", status)
 	}
 }
+
+// TestTreeConnectSigningExemptsSessionsWithoutAKey is the signature 3.1.1 asks a tree connect for.
+// [MS-SMB2] 3.3.5.7 exempts the anonymous and the guest session from it, and the reason is plain:
+// neither holds a signing key, so a server that demands one of them drops the connection of every
+// client it ever admits that way.
+func TestTreeConnectSigningExemptsSessionsWithoutAKey(t *testing.T) {
+	for _, tt := range []struct {
+		what      string
+		anonymous bool
+		guest     bool
+		wantDrop  bool
+	}{
+		{"a session with a user behind it", false, false, true},
+		{"an anonymous session", true, false, false},
+		{"a guest session", false, true, false},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+
+			// A real tree connect resolves the access of the session against the share, which the
+			// harness leaves empty because dial builds its tree connect directly.
+			h.restrictTo("alice")
+
+			cl := h.dial("alice")
+
+			// The flags alone, so that the exemption is what decides. The user behind the session
+			// is left in place, or the tree connect would be refused for want of access before the
+			// signature is ever weighed.
+			cl.ss.isAnonymous = tt.anonymous
+			cl.ss.isGuest = tt.guest
+
+			// Unsigned and unencrypted, which is all such a session can send.
+			resp, _, err := cl.conn.processRequest(request(t,
+				treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\files`)))
+
+			if tt.wantDrop {
+				if err == nil {
+					t.Fatalf("an unsigned tree connect was answered %#x, want the connection dropped",
+						resp.Header().Status())
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("the connection was dropped over a signature the session cannot make: %v", err)
+			}
+			if status := resp.Header().Status(); status != smb2.STATUS_OK {
+				t.Errorf("the tree connect was answered %#x, want it served", status)
+			}
+		})
+	}
+}

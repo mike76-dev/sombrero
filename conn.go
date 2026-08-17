@@ -905,20 +905,23 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		// Validate signature or encryption.
-		if c.negotiateDialect == smb2.SMB_DIALECT_311 {
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(tcr, status, 0, nil)
+			return resp, ss, nil
+		}
+
+		// Validate signature or encryption. An anonymous or guest session is exempt: it holds no
+		// key to sign with, so demanding a signature of it is demanding the impossible ([MS-SMB2]
+		// 3.3.5.7). The session has to be in hand before that can be asked, which is why this
+		// follows the lookup rather than leading it.
+		if c.negotiateDialect == smb2.SMB_DIALECT_311 && !ss.isAnonymous && !ss.isGuest {
 			if !tcr.Header().IsFlagSet(smb2.FLAGS_SIGNED) && !tcr.IsEncrypted() {
 				if c.server.debug {
 					log.Println("Unsigned or unencrypted SMB2_TREE_CONNECT request")
 				}
 				return nil, nil, smb2.ErrWrongSecurity
 			}
-		}
-
-		ss, status := c.sessionFor(req)
-		if status != smb2.STATUS_OK {
-			resp := smb2.NewErrorResponse(tcr, status, 0, nil)
-			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
