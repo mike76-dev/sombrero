@@ -1003,6 +1003,18 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// A pipe is only opened over an anonymous session if that pipe allows anonymous callers,
+		// and this server offers none that do ([MS-SMB2] 3.3.5.9). It is refused as the permission
+		// matter it is, ahead of the account lookup below, which would otherwise answer that the
+		// session is gone when what is missing is the right to open the pipe.
+		if tc.share.name == "ipc$" && ss.isAnonymous {
+			c.server.mu.Lock()
+			c.server.stats.PermErrors++
+			c.server.mu.Unlock()
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
+			return resp, ss, nil
+		}
+
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
 		if err != nil {
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)

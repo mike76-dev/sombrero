@@ -396,3 +396,52 @@ func TestIntegrationARenameCannotWalkOutOfTheShare(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegrationAnAnonymousSessionOpensNoPipe is the session with nobody behind it reaching for
+// the IPC$ share. [MS-SMB2] 3.3.5.9 lets an anonymous caller open only those pipes that allow one,
+// and this server offers none; the check was missing altogether, and what stood in for it was the
+// account lookup failing, which answers that the session is gone rather than that the caller may
+// not have the pipe.
+func TestIntegrationAnAnonymousSessionOpensNoPipe(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	// One of the two dialects whose tree connect asks for no signature of its own.
+	cl.conn.negotiateDialect = smb2.SMB_DIALECT_302
+	cl.conn.dialect = dialectName(cl.conn.negotiateDialect)
+
+	resp, _, err := cl.conn.processRequest(request(t,
+		treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\IPC$`)))
+	if err != nil {
+		t.Fatalf("the tree connect to IPC$ failed: %v", err)
+	}
+	if status := resp.Header().Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the tree connect to IPC$ was answered %#x", status)
+	}
+	tid := resp.Header().TreeID()
+
+	// The flag alone, which is the condition the rule is written against. An anonymous session
+	// authenticated for real also carries an empty user name, and the account lookup further down
+	// the create path happens to refuse that - but it refuses it as a session that is gone rather
+	// than as a caller without the right, and it counts nothing. The flag is what decides here.
+	cl.ss.isAnonymous = true
+
+	before := h.srv.Stats().PermErrors
+
+	for _, pipe := range []string{"srvsvc", "lsarpc", "mdssvc"} {
+		created, _, err := cl.conn.processRequest(request(t, createRequest(1, cl.ss.sessionID, tid,
+			pipe, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, nil)))
+		if err != nil {
+			t.Fatalf("opening %s: %v", pipe, err)
+		}
+		if status := created.Header().Status(); status != smb2.STATUS_ACCESS_DENIED {
+			t.Errorf("an anonymous session opening %s was answered %#x, want STATUS_ACCESS_DENIED",
+				pipe, status)
+		}
+	}
+
+	// A refusal on grounds of permission is counted as one.
+	if got := h.srv.Stats().PermErrors - before; got != 3 {
+		t.Errorf("the refusals raised the permission error count by %d, want 3", got)
+	}
+}
