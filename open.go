@@ -1203,8 +1203,10 @@ func (op *open) fileAllInformation() []byte {
 		AccessInfo: smb2.FileAccessInfo{
 			AccessFlags: op.grantedAccess,
 		},
+		// Where the file pointer sits, which is not the length of the file: this server keeps no
+		// pointer per handle, and [MS-SMB2] 3.3.5.20.1 has the offset answered as zero.
 		PositionInfo: smb2.FilePositionInfo{
-			CurrentByteOffset: size,
+			CurrentByteOffset: 0,
 		},
 		ModeInfo: smb2.FileModeInfo{
 			Mode: op.createOptions,

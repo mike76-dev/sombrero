@@ -140,8 +140,12 @@ func TestIntegrationQueryAllInformation(t *testing.T) {
 	if access := binary.LittleEndian.Uint32(info[76:80]); access != shareAccess {
 		t.Errorf("the handle carries access %#x, want %#x", access, uint32(shareAccess))
 	}
-	if pos := binary.LittleEndian.Uint64(info[80:88]); pos != 4096 {
-		t.Errorf("the handle stands at %d, want the end of the file", pos)
+
+	// The position is where the file pointer sits, not how long the file is. This server keeps no
+	// pointer per handle, and [MS-SMB2] 3.3.5.20.1 has it answered as zero; carrying the size of
+	// the file there tells a client that has just opened it that it is already at the end.
+	if pos := binary.LittleEndian.Uint64(info[80:88]); pos != 0 {
+		t.Errorf("the handle stands at %d, want the start of the file", pos)
 	}
 
 	// The name is last, and is the name of the file rather than the path to it.
