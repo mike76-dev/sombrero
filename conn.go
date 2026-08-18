@@ -1073,7 +1073,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			// server cannot vouch for must not be blessed.
 			_, _, _, modified, _ := op.file.stat()
 			op.mu.Lock()
-			access := op.grantedAccess
 			handle := op.handle
 			op.mu.Unlock()
 
@@ -1081,7 +1080,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			for id, ctx := range contexts {
 				switch id {
 				case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
-					respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, modified, access)
+					// What the user may do with the file, which is the access of the tree
+					// connect rather than the narrower one this handle was given.
+					respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, modified, tc.maximalAccess)
 				case smb2.CREATE_QUERY_ON_DISK_ID:
 					respContexts[id] = smb2.HandleCreateQueryOnDiskID(handle, tc.volumeID)
 				}
@@ -3936,7 +3937,9 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	for id, ctx := range contexts {
 		switch id {
 		case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
-			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, createdModified, op.grantedAccess)
+			// What the user may do with the file, which is the access of the tree connect
+			// rather than the narrower one this handle was given.
+			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, createdModified, tc.maximalAccess)
 		case smb2.CREATE_QUERY_ON_DISK_ID:
 			respContexts[id] = smb2.HandleCreateQueryOnDiskID(op.handle, tc.volumeID)
 		case smb2.CREATE_ALLOCATION_SIZE: // The file is about to be uploaded, we just got its size

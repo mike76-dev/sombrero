@@ -588,11 +588,15 @@ func newSMBTest(t *testing.T) *smbTest {
 	h.srv = newServerState(ctx, store, false, stores.IndexdConfig{})
 	h.srv.shareList[h.share.name] = h.share
 
+	// A share holds security for whoever may use it, and grants nothing to anybody else, so the
+	// accounts the tests dial with are on it from the start.
+	h.restrictTo("alice", "bob")
+
 	return h
 }
 
 // restrictTo limits the share to the named users, so that everybody else is turned away by the
-// access check. A share with no security set at all lets everybody in.
+// access check.
 func (h *smbTest) restrictTo(users ...string) {
 	h.share.connectSecurity = make(map[string]struct{})
 	h.share.fileSecurity = make(map[string]uint32)
@@ -671,17 +675,25 @@ const (
 	// writeAccess is what a client asks for when it means to change the file, and readAccess
 	// when it only means to look at it. Which of the two a create asks for is what decides
 	// whether the read caches of the other clients survive it.
-	writeAccess = smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA
-	readAccess  = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES
+	//
+	// A handle is granted what its create asked for, so what is asked for here has to cover
+	// everything the tests then do through the handle - writing it, setting information on it,
+	// renaming it and marking it for deletion - the way the ask of a client that means to
+	// change a file does.
+	writeAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES | smb2.FILE_WRITE_DATA |
+		smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
+	readAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES
 
 	// shareAccess is what the share grants over a file: everything a test may want to do with
 	// one. It is what a tree connect on the test share carries as its maximal access.
 	//
-	// FILE_READ_ATTRIBUTES comes with reading on a real share - the stored rights hand out
-	// 0x80120089 for read access, which carries it - so a fixture that grants FILE_READ_DATA
-	// without it is a handle no share ever issues.
-	shareAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES | smb2.FILE_WRITE_DATA |
-		smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
+	// FILE_READ_ATTRIBUTES and FILE_READ_EA come with reading on a real share - the stored
+	// rights hand out 0x80120089 for read access, which carries both - so a fixture that grants
+	// FILE_READ_DATA without them is a handle no share ever issues, and refuses the client that
+	// asks for its reading in generic terms.
+	shareAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES | smb2.FILE_READ_EA |
+		smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA |
+		smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
 )
 
 // smbTestClients counts the clients built across a test binary, so that each gets a name and a
@@ -1202,6 +1214,23 @@ func leaseContext(key [16]byte, state uint32, version int) []byte {
 	binary.LittleEndian.PutUint32(data[16:20], state)
 
 	return createContext(smb2.CREATE_REQUEST_LEASE, data)
+}
+
+// maximalAccessContext formats an SMB2_CREATE_QUERY_MAXIMAL_ACCESS_REQUEST create context, in the
+// form that carries no timestamp and so is always answered.
+func maximalAccessContext() []byte {
+	return createContext(smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST, nil)
+}
+
+// createdMaximalAccess returns the access the create response reports over the file, and whether
+// it carried the context at all.
+func createdMaximalAccess(buf []byte) (uint32, bool) {
+	data, found := createdContext(buf, smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST)
+	if !found || len(data) < 8 {
+		return 0, false
+	}
+
+	return binary.LittleEndian.Uint32(data[4:8]), true
 }
 
 // durableContext formats an SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2 create context, ready to be

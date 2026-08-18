@@ -136,9 +136,10 @@ func TestIntegrationQueryAllInformation(t *testing.T) {
 		t.Error("the file is marked as a directory")
 	}
 
-	// The access the create granted is carried back at 76, and the position at 80.
-	if access := binary.LittleEndian.Uint32(info[76:80]); access != shareAccess {
-		t.Errorf("the handle carries access %#x, want %#x", access, uint32(shareAccess))
+	// The access the create granted is carried back at 76, and the position at 80. A handle is
+	// granted what its create asked for, which is what this one has to carry.
+	if access := binary.LittleEndian.Uint32(info[76:80]); access != writeAccess {
+		t.Errorf("the handle carries access %#x, want %#x", access, uint32(writeAccess))
 	}
 
 	// The position is where the file pointer sits, not how long the file is. This server keeps no
