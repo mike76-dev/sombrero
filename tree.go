@@ -205,9 +205,10 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 		sh, exists = c.server.shareList[name]
 		c.server.mu.Unlock()
 		if !exists {
+			// A store with no such share answers with a zero-valued one rather than an error.
 			s, err := c.server.store.GetShare(name)
-			if err != nil {
-				return nil, errNoShare
+			if err != nil || s.Name != name {
+				return nil, errShareNotFound
 			}
 			if err := c.server.RegisterShare(s); err != nil {
 				return nil, err
@@ -216,7 +217,7 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 				sh, exists = c.server.shareList[name]
 				c.server.mu.Unlock()
 				if !exists {
-					return nil, errNoShare
+					return nil, errShareNotFound
 				}
 			}
 		}

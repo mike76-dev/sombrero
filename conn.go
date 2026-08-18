@@ -930,16 +930,21 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		tc, err := c.newTreeConnect(ss, tcr.PathName())
 		if err != nil {
-			if errors.Is(err, errAccessDenied) {
-				resp := smb2.NewErrorResponse(tcr, smb2.STATUS_ACCESS_DENIED, 0, nil)
-				return resp, ss, nil
-			} else if errors.Is(err, errNoShare) {
-				resp := smb2.NewErrorResponse(tcr, smb2.STATUS_SHARE_UNAVAILABLE, 0, nil)
-				return resp, ss, nil
-			} else {
-				resp := smb2.NewErrorResponse(tcr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
-				return resp, ss, nil
+			// Status codes per [MS-SMB2] 3.3.5.7: a malformed path is a parameter error, a
+			// missing share is a name error, and hitting the use limit is a refusal.
+			status := uint32(smb2.STATUS_INVALID_PARAMETER)
+			switch {
+			case errors.Is(err, errAccessDenied):
+				status = smb2.STATUS_ACCESS_DENIED
+			case errors.Is(err, errShareNotFound):
+				status = smb2.STATUS_BAD_NETWORK_NAME
+			case errors.Is(err, errTooManyUses):
+				status = smb2.STATUS_REQUEST_NOT_ACCEPTED
+			case errors.Is(err, errShareUnavailable):
+				status = smb2.STATUS_SHARE_UNAVAILABLE
 			}
+			resp := smb2.NewErrorResponse(tcr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		resp := &smb2.TreeConnectResponse{}
