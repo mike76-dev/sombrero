@@ -878,8 +878,21 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		ss, err := c.server.deregisterSession(c, req.Header().SessionID())
-		if err != nil {
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(lr, status, 0, nil)
+			return resp, nil, nil
+		}
+
+		// The durable handles are set aside before the session is torn down around them:
+		// [MS-SMB2] 3.3.5.6 detaches them and leaves them to the scavenger, and closes only the
+		// rest. The tree connects go with the session either way, which is why the handle is
+		// reattached to whichever one the reclaim arrives over.
+		if n := ss.orphanDurableOpens(); n > 0 && c.server.debug {
+			log.Printf("Keeping %d durable handle(s) of session %d for reclaiming", n, ss.sessionID)
+		}
+
+		if _, err := c.server.deregisterSession(c, ss.sessionID); err != nil {
 			if errors.Is(err, errSessionNotFound) {
 				resp := smb2.NewErrorResponse(lr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
 				return resp, nil, nil

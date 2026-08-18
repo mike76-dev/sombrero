@@ -1612,6 +1612,30 @@ func createdLeaseState(buf []byte) (uint32, bool) {
 	return binary.LittleEndian.Uint32(data[16:20]), true
 }
 
+// logoffRequest builds the bytes of an SMB2_LOGOFF request.
+func logoffRequest(mid, sid uint64) []byte {
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2LogoffRequestMinSize)
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_LOGOFF)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetCreditCharge(1)
+	binary.LittleEndian.PutUint16(msg[smb2.SMB2HeaderSize:smb2.SMB2HeaderSize+2], smb2.SMB2LogoffRequestStructureSize)
+
+	return msg
+}
+
+// logoff ends the session of the client the way a client that is done with it does.
+func (cl *testClient) logoff() ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(logoffRequest(cl.mid, cl.ss.sessionID))
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Encode(), nil
+}
+
 // treeConnectRequest builds the bytes of an SMB2_TREE_CONNECT request for the given share path.
 func treeConnectRequest(mid, sid uint64, path string) []byte {
 	enc := utils.EncodeStringToBytes(path)
