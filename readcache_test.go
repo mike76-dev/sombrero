@@ -152,3 +152,45 @@ func TestAZeroLengthReadIsAnsweredAtOnce(t *testing.T) {
 		t.Errorf("the read of no bytes left %d chunk(s) in the cache", cached)
 	}
 }
+
+// TestAShortChunkEndsTheReadInsteadOfPanicking is the object that turns out smaller than the state
+// says. The chunk is sliced at the offset the read starts from, so a chunk that does not reach that
+// far took the slice out of range: on the reading goroutine that is a panic, contained only by
+// losing the connection. The file ends where the bytes end, and a short read is the answer.
+func TestAShortChunkEndsTheReadInsteadOfPanicking(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	// The state records a file of one chunk, and the store holds far fewer bytes than that.
+	h.files.putData("clip.mp4", bytes.Repeat([]byte("O"), 64))
+
+	created := cl.createWithOptions("clip.mp4", smb2.FILE_OPEN, 0)
+	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
+	file.file.setAllocated(4096)
+	file.file.mu.Lock()
+	file.file.size = 4096
+	file.file.mu.Unlock()
+
+	// A read starting past the last byte the store actually holds.
+	got, err := file.read(1024, 1024)
+	if err != nil {
+		t.Fatalf("the read failed: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("the read gave back %d bytes from beyond the end of the object", len(got))
+	}
+
+	// And the same range off the cache the read just filled.
+	if data, ok := file.tryReadCached(1024, 1024); ok && len(data) != 0 {
+		t.Errorf("the cached read gave back %d bytes from beyond the end of the object", len(data))
+	}
+
+	// A read that does reach the bytes still gets them, cut off where they end.
+	got, err = file.read(32, 1024)
+	if err != nil {
+		t.Fatalf("the read of the bytes that are there failed: %v", err)
+	}
+	if want := 32; len(got) != want {
+		t.Errorf("the read gave back %d bytes, want the %d the object holds past the offset", len(got), want)
+	}
+}

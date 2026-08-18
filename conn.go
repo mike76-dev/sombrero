@@ -111,6 +111,10 @@ type connection struct {
 	closeChan  chan struct{}
 	once       sync.Once
 
+	// wakeChan tells the dispatcher that a request has been put in the queue. It holds one signal:
+	// the dispatcher empties the queue before it waits again.
+	wakeChan chan struct{}
+
 	// stopChans holds the channel that tells the work behind a request to give up, keyed by the
 	// message ID of that request.
 	stopChans map[uint64]chan struct{}
@@ -262,6 +266,32 @@ func (c *connection) acceptRequest(msg []byte) error {
 				}
 			}
 			mid = req.Header().MessageID()
+
+			if req.Header().Command() == smb2.SMB2_CANCEL { // SMB2_CANCEL requests are handled separately
+				// A cancel neither spends a sequence number nor earns a credit ([MS-SMB2] 3.3.1.1,
+				// 3.3.4.1.2, 3.3.5.16): it reuses the message ID of the request it cancels, which
+				// has been retired already, or carries zero alongside an async ID. So the window is
+				// left exactly as it stands - granting against a cancel opened an ID per cancel that
+				// nothing would ever close, and retiring its ID would take one the client still has.
+				if err := c.cancelRequest(req); err != nil {
+					log.Printf("Couldn't cancel request %d:, %v\n", req.Header().Command(), err)
+				}
+
+				if chain := c.chainMemberDone(req.GroupID()); chain != nil {
+					// A cancel that opens a chain is the one request of it that never looks the
+					// session up below, so the chain would go out for nobody.
+					if ss == nil {
+						c.mu.Lock()
+						ss = c.sessionTable[req.Header().SessionID()]
+						c.mu.Unlock()
+					}
+
+					c.server.writeResponse(c, ss, chain)
+				}
+
+				continue
+			}
+
 			credits := max(req.Header().CreditCharge(), req.Header().CreditRequest()) // Grant whatever the CreditRequest is. If CreditCharge is greater, grant that much.
 			if credits == 0 {                                                         // The number of credits cannot be zero
 				credits = 1
@@ -271,18 +301,6 @@ func (c *connection) acceptRequest(msg []byte) error {
 			granted, _ := c.grantCredits(mid, credits, req.Header().CreditCharge())
 			c.creditsGranted[mid] = granted
 			c.mu.Unlock()
-
-			if req.Header().Command() == smb2.SMB2_CANCEL { // SMB2_CANCEL requests are handled separately
-				if err := c.cancelRequest(req); err != nil {
-					log.Printf("Couldn't cancel request %d:, %v\n", req.Header().Command(), err)
-				}
-
-				if chain := c.chainMemberDone(req.GroupID()); chain != nil {
-					c.server.writeResponse(c, ss, chain)
-				}
-
-				continue
-			}
 		}
 
 		c.mu.Lock()
@@ -337,29 +355,9 @@ func (c *connection) acceptRequest(msg []byte) error {
 		}
 
 		// Request processed; this message ID is not allowed anymore.
-		c.mu.Lock()
-		if c.negotiateDialect == smb2.SMB_DIALECT_202 || !c.supportsMultiCredit {
-			delete(c.commandSequenceWindow, mid)
-		} else {
-			// As many IDs as the request charged for, and a request that charges nothing still
-			// costs the one it was sent under: granting reads a charge of zero as one, which is
-			// what a client sends for anything that fits in a single credit, and a window handing
-			// an ID out without taking one back grows for as long as the connection lives.
-			charge := max(req.Header().CreditCharge(), 1)
-			var count uint16
-			i := mid
-			m, _ := utils.FindMaxKey(c.commandSequenceWindow)
-			for i <= m && count < charge {
-				if _, found := c.commandSequenceWindow[i]; found {
-					delete(c.commandSequenceWindow, i)
-					count++
-				}
-				i++
-			}
-		}
+		c.retireMessageID(mid, req.Header().CreditCharge())
 
 		if rejectStatus != 0 {
-			c.mu.Unlock()
 			// The response carries a copy of the request header, so the signature of the
 			// client has to be cleared: the response cannot be signed, since the key to
 			// sign it with is the one that couldn't be found.
@@ -378,11 +376,110 @@ func (c *connection) acceptRequest(msg []byte) error {
 		}
 
 		// Put request in the queue.
+		c.mu.Lock()
 		c.requestList[mid] = req
 		c.mu.Unlock()
+
+		c.wake()
 	}
 
 	return nil
+}
+
+// validPath reports whether a path a request names is one the server may act on. The components
+// have to resolve inside the share ([MS-SMB2] 3.3.5.9): a name that walks out of it, or that names
+// the same file two ways, is refused rather than handed to the backend, where the key is a string
+// and ".." is a segment like any other. The empty path is the root of the share, which a client
+// opens to ask about the volume.
+func validPath(path string) bool {
+	if path == "" {
+		return true
+	}
+
+	if strings.HasPrefix(path, "/") {
+		return false
+	}
+
+	for _, part := range strings.Split(path, "/") {
+		switch part {
+		case "", ".", "..":
+			return false
+		}
+	}
+
+	return true
+}
+
+// windsDownSession reports whether the command is one that a session serves even when nobody has
+// authenticated over it yet, or nobody does any longer ([MS-SMB2] 3.3.5.2.9).
+func windsDownSession(command uint16) bool {
+	switch command {
+	case smb2.SMB2_LOGOFF, smb2.SMB2_CLOSE, smb2.SMB2_LOCK:
+		return true
+	}
+
+	return false
+}
+
+// sessionFor resolves the session a request names, and returns the status to fail the request with
+// ([MS-SMB2] 3.3.5.2.9). The session table holds a session from the moment the setup starts, and the
+// client is told its ID in the very first response, so being in the table is not the same as having
+// authenticated: until it has, the session serves only the commands that wind it down.
+func (c *connection) sessionFor(req *smb2.Request) (*session, uint32) {
+	c.mu.Lock()
+	ss, found := c.sessionTable[req.Header().SessionID()]
+	c.mu.Unlock()
+
+	if !found {
+		return nil, smb2.STATUS_USER_SESSION_DELETED
+	}
+
+	if windsDownSession(req.Header().Command()) {
+		return ss, smb2.STATUS_OK
+	}
+
+	switch ss.stateNow() {
+	case sessionInProgress:
+		// The spec leaves the code to the implementation here.
+		return ss, smb2.STATUS_INVALID_PARAMETER
+	case sessionExpired:
+		return ss, smb2.STATUS_NETWORK_SESSION_EXPIRED
+	}
+
+	return ss, smb2.STATUS_OK
+}
+
+// retireMessageID takes the IDs a request spent back out of the command sequence window.
+func (c *connection) retireMessageID(mid uint64, charge uint16) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.negotiateDialect == smb2.SMB_DIALECT_202 || !c.supportsMultiCredit {
+		delete(c.commandSequenceWindow, mid)
+		return
+	}
+
+	// As many IDs as the request charged for, and a request that charges nothing still
+	// costs the one it was sent under: granting reads a charge of zero as one, which is
+	// what a client sends for anything that fits in a single credit, and a window handing
+	// an ID out without taking one back grows for as long as the connection lives.
+	charge = max(charge, 1)
+	var count uint16
+	m, _ := utils.FindMaxKey(c.commandSequenceWindow)
+	for i := mid; i <= m && count < charge; i++ {
+		if _, found := c.commandSequenceWindow[i]; found {
+			delete(c.commandSequenceWindow, i)
+			count++
+		}
+	}
+}
+
+// wake tells the dispatcher there is something to pick up, without waiting for it to listen.
+func (c *connection) wake() {
+	select {
+	case c.wakeChan <- struct{}{}:
+	default:
+	}
 }
 
 // dialectName is how a negotiated dialect is written down: the spelling the spec uses when a
@@ -781,8 +878,21 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		ss, err := c.server.deregisterSession(c, req.Header().SessionID())
-		if err != nil {
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(lr, status, 0, nil)
+			return resp, nil, nil
+		}
+
+		// The durable handles are set aside before the session is torn down around them:
+		// [MS-SMB2] 3.3.5.6 detaches them and leaves them to the scavenger, and closes only the
+		// rest. The tree connects go with the session either way, which is why the handle is
+		// reattached to whichever one the reclaim arrives over.
+		if n := ss.orphanDurableOpens(); n > 0 && c.server.debug {
+			log.Printf("Keeping %d durable handle(s) of session %d for reclaiming", n, ss.sessionID)
+		}
+
+		if _, err := c.server.deregisterSession(c, ss.sessionID); err != nil {
 			if errors.Is(err, errSessionNotFound) {
 				resp := smb2.NewErrorResponse(lr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
 				return resp, nil, nil
@@ -808,8 +918,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		// Validate signature or encryption.
-		if c.negotiateDialect == smb2.SMB_DIALECT_311 {
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(tcr, status, 0, nil)
+			return resp, ss, nil
+		}
+
+		// Validate signature or encryption. An anonymous or guest session is exempt: it holds no
+		// key to sign with, so demanding a signature of it is demanding the impossible ([MS-SMB2]
+		// 3.3.5.7). The session has to be in hand before that can be asked, which is why this
+		// follows the lookup rather than leading it.
+		if c.negotiateDialect == smb2.SMB_DIALECT_311 && !ss.isAnonymous && !ss.isGuest {
 			if !tcr.Header().IsFlagSet(smb2.FLAGS_SIGNED) && !tcr.IsEncrypted() {
 				if c.server.debug {
 					log.Println("Unsigned or unencrypted SMB2_TREE_CONNECT request")
@@ -818,30 +937,27 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[tcr.Header().SessionID()]
-		c.mu.Unlock()
-		if !found {
-			resp := smb2.NewErrorResponse(tcr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
-		}
-
 		ss.mu.Lock()
 		ss.idleTime = time.Now()
 		ss.mu.Unlock()
 
 		tc, err := c.newTreeConnect(ss, tcr.PathName())
 		if err != nil {
-			if errors.Is(err, errAccessDenied) {
-				resp := smb2.NewErrorResponse(tcr, smb2.STATUS_ACCESS_DENIED, 0, nil)
-				return resp, ss, nil
-			} else if errors.Is(err, errNoShare) {
-				resp := smb2.NewErrorResponse(tcr, smb2.STATUS_SHARE_UNAVAILABLE, 0, nil)
-				return resp, ss, nil
-			} else {
-				resp := smb2.NewErrorResponse(tcr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
-				return resp, ss, nil
+			// Status codes per [MS-SMB2] 3.3.5.7: a malformed path is a parameter error, a
+			// missing share is a name error, and hitting the use limit is a refusal.
+			status := uint32(smb2.STATUS_INVALID_PARAMETER)
+			switch {
+			case errors.Is(err, errAccessDenied):
+				status = smb2.STATUS_ACCESS_DENIED
+			case errors.Is(err, errShareNotFound):
+				status = smb2.STATUS_BAD_NETWORK_NAME
+			case errors.Is(err, errTooManyUses):
+				status = smb2.STATUS_REQUEST_NOT_ACCEPTED
+			case errors.Is(err, errShareUnavailable):
+				status = smb2.STATUS_SHARE_UNAVAILABLE
 			}
+			resp := smb2.NewErrorResponse(tcr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		resp := &smb2.TreeConnectResponse{}
@@ -861,13 +977,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[tdr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(tdr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(tdr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -895,13 +1008,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[cr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(cr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -914,6 +1024,18 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// A pipe is only opened over an anonymous session if that pipe allows anonymous callers,
+		// and this server offers none that do ([MS-SMB2] 3.3.5.9). It is refused as the permission
+		// matter it is, ahead of the account lookup below, which would otherwise answer that the
+		// session is gone when what is missing is the right to open the pipe.
+		if tc.share.name == "ipc$" && ss.isAnonymous {
+			c.server.mu.Lock()
+			c.server.stats.PermErrors++
+			c.server.mu.Unlock()
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
+			return resp, ss, nil
+		}
+
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
 		if err != nil {
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
@@ -923,6 +1045,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		contexts, err := cr.CreateContexts()
 		if err != nil {
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp, ss, nil
+		}
+
+		// Extended attributes are not supported, and a create asking for them is refused here:
+		// nothing has been made yet, so the refusal leaves nothing behind.
+		if _, found := contexts[smb2.CREATE_EA_BUFFER]; found {
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_EAS_NOT_SUPPORTED, 0, nil)
 			return resp, ss, nil
 		}
 
@@ -957,7 +1086,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			// server cannot vouch for must not be blessed.
 			_, _, _, modified, _ := op.file.stat()
 			op.mu.Lock()
-			access := op.grantedAccess
 			handle := op.handle
 			op.mu.Unlock()
 
@@ -965,7 +1093,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			for id, ctx := range contexts {
 				switch id {
 				case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
-					respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, modified, access)
+					// What the user may do with the file, which is the access of the tree
+					// connect rather than the narrower one this handle was given.
+					respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, modified, tc.maximalAccess)
 				case smb2.CREATE_QUERY_ON_DISK_ID:
 					respContexts[id] = smb2.HandleCreateQueryOnDiskID(handle, tc.volumeID)
 				}
@@ -997,6 +1127,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		path := strings.ReplaceAll(cr.Filename(), "\\", "/")
+		if !validPath(path) {
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp, ss, nil
+		}
 
 		co := cr.CreateOptions()
 		if co&smb2.FILE_DELETE_ON_CLOSE > 0 && (tc.maximalAccess&(smb2.DELETE|smb2.GENERIC_ALL|smb2.GENERIC_EXECUTE|smb2.GENERIC_READ|smb2.GENERIC_WRITE) == 0) {
@@ -1119,13 +1253,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// their structure size alone.
 		lbr := smb2.LeaseBreakRequest{Request: *req}
 		if lbr.Validate(c.supportsMultiCredit) == nil {
-			c.mu.Lock()
-			ss, found := c.sessionTable[lbr.Header().SessionID()]
-			c.mu.Unlock()
-
-			if !found {
-				resp := smb2.NewErrorResponse(lbr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-				return resp, nil, nil
+			ss, status := c.sessionFor(req)
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(lbr, status, 0, nil)
+				return resp, ss, nil
 			}
 
 			ss.mu.Lock()
@@ -1162,13 +1293,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[obr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(obr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(obr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -1206,13 +1334,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[cr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(cr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
@@ -1345,18 +1470,30 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[fr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(fr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(fr, status, 0, nil)
+			return resp, ss, nil
 		}
 
-		if op, status := c.findOpen(ss, fr.FileID(), req); status == smb2.STATUS_OK {
-			op.file.waitForWrites()
+		op, status := c.findOpen(ss, fr.FileID(), req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(fr, status, 0, nil)
+			return resp, ss, nil
 		}
+
+		// [MS-SMB2] 3.3.5.11 asks for the write access that the data being made safe was written
+		// with. The rights a directory is named with, FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY,
+		// are the same two bits, so one test covers both.
+		op.mu.Lock()
+		ga := op.grantedAccess
+		op.mu.Unlock()
+		if ga&(smb2.FILE_WRITE_DATA|smb2.FILE_APPEND_DATA|smb2.GENERIC_WRITE) == 0 {
+			resp := smb2.NewErrorResponse(fr, smb2.STATUS_ACCESS_DENIED, 0, nil)
+			return resp, ss, nil
+		}
+
+		op.file.waitForWrites()
 
 		resp := &smb2.FlushResponse{}
 		resp.FromRequest(fr)
@@ -1378,13 +1515,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			rr.SetCompressReply(true)
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[rr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(rr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(rr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -1412,6 +1546,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// A read on a named pipe cannot ask for the data to go unbuffered, whichever pipe it is
+		// ([MS-SMB2] 3.3.5.12). The share is what says the handle is on one.
+		if (c.negotiateDialect == smb2.SMB_DIALECT_302 || c.negotiateDialect == smb2.SMB_DIALECT_311) &&
+			op.treeConnect.share.shareType == smb2.SHARE_TYPE_PIPE &&
+			rr.Flags()&smb2.READFLAG_READ_UNBUFFERED != 0 {
+			resp := smb2.NewErrorResponse(rr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp, ss, nil
+		}
+
 		if c.refusesChannel(rr.Channel()) {
 			resp := smb2.NewErrorResponse(rr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 			return resp, ss, nil
@@ -1420,12 +1563,6 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// A special case: some clients use the SRVSVC named pipe for writing requests to it
 		// and reading responses from it. Usually, an SMB2_IOCTL request serves this purpose.
 		if strings.ToLower(name) == "srvsvc" {
-			if c.negotiateDialect == smb2.SMB_DIALECT_302 || c.negotiateDialect == smb2.SMB_DIALECT_311 {
-				if rr.Flags()&smb2.READFLAG_READ_UNBUFFERED != 0 {
-					resp := smb2.NewErrorResponse(rr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
-					return resp, ss, nil
-				}
-			}
 			op.mu.Lock()
 			data := bytes.Clone(op.srvsvcData)
 			op.mu.Unlock()
@@ -1595,13 +1732,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[wr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(wr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(wr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -1655,7 +1789,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
-		if (length <= size && ga&(smb2.FILE_WRITE_DATA|smb2.GENERIC_WRITE) == 0) || ga&(smb2.FILE_APPEND_DATA|smb2.GENERIC_WRITE) == 0 {
+		// Which right the write needs is decided by the range it covers, not by both at once
+		// ([MS-SMB2] 3.3.5.13): one that stays inside the file needs FILE_WRITE_DATA, and one that
+		// carries the file past its end needs FILE_APPEND_DATA. The comparison is written so that
+		// an offset beyond the end of the file cannot wrap it round.
+		extends := wr.Offset() > size || length > size-wr.Offset()
+		if (!extends && ga&(smb2.FILE_WRITE_DATA|smb2.GENERIC_WRITE) == 0) ||
+			(extends && ga&(smb2.FILE_APPEND_DATA|smb2.GENERIC_WRITE) == 0) {
 			resp := smb2.NewErrorResponse(wr, smb2.STATUS_ACCESS_DENIED, 0, nil)
 			return resp, ss, nil
 		}
@@ -1779,13 +1919,18 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[lr.Header().SessionID()]
-		c.mu.Unlock()
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(lr, status, 0, nil)
+			return resp, ss, nil
+		}
 
-		if !found {
-			resp := smb2.NewErrorResponse(lr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		// The handle is looked up even though nothing is locked with it, because [MS-SMB2]
+		// 3.3.5.14 answers one that names no open with STATUS_FILE_CLOSED, and a client that is
+		// told its lock was taken on a handle it has already closed has been told a lie.
+		if _, status := c.findOpen(ss, lr.FileID(), req); status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(lr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		resp := &smb2.LockResponse{}
@@ -1804,13 +1949,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[ir.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(ir, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(ir, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -2100,15 +2242,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		var ss *session
-		var found bool
 		if er.Header().SessionID() != 0 || er.Header().IsFlagSet(smb2.FLAGS_SIGNED) {
-			c.mu.Lock()
-			ss, found = c.sessionTable[er.Header().SessionID()]
-			c.mu.Unlock()
-
-			if !found {
-				resp := smb2.NewErrorResponse(er, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-				return resp, nil, nil
+			var status uint32
+			ss, status = c.sessionFor(req)
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(er, status, 0, nil)
+				return resp, ss, nil
 			}
 
 			ss.mu.Lock()
@@ -2132,13 +2271,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[qdr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(qdr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(qdr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		switch qdr.FileInformationClass() {
@@ -2272,13 +2408,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[cnr.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(cnr, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(cnr, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
@@ -2364,13 +2497,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[qir.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(qir, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(qir, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -2405,6 +2535,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		var info []byte
 		switch qir.InfoType() {
 		case smb2.INFO_FILE:
+			// The classes that answer with the attributes of the file are only served to a handle
+			// that was opened to read them ([MS-SMB2] 3.3.5.20.1).
+			switch qir.FileInfoClass() {
+			case smb2.FileBasicInformation, smb2.FileAllInformation,
+				smb2.FileNetworkOpenInformation, smb2.FileAttributeTagInformation:
+				if ga&(smb2.FILE_READ_ATTRIBUTES|smb2.GENERIC_READ) == 0 {
+					resp := smb2.NewErrorResponse(qir, smb2.STATUS_ACCESS_DENIED, 0, nil)
+					return resp, ss, nil
+				}
+			}
+
 			switch qir.FileInfoClass() {
 			case smb2.FileAllInformation:
 				info = op.fileAllInformation()
@@ -2413,6 +2554,14 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			case smb2.FileNetworkOpenInformation:
 				info = op.fileNetworkOpenInformation()
 			case smb2.FileNormalizedNameInformation:
+				// The class belongs to 3.1.1 alone. [MS-SMB2] 3.3.5.20.1 names 2.0.2, 2.1 and
+				// 3.0.2 as the dialects that must refuse it and leaves 3.0 out of that list,
+				// which reads as an oversight rather than a dialect that carries it.
+				if c.negotiateDialect != smb2.SMB_DIALECT_311 {
+					resp := smb2.NewErrorResponse(qir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
+					return resp, ss, nil
+				}
+
 				info = op.fileNormalizedNameInformation()
 			case smb2.FileEaInformation:
 				info = op.fileEaInformation()
@@ -2474,14 +2623,18 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		case smb2.INFO_SECURITY:
 			info = smb2.NewSecInfo(ss.securityContext, qir.AdditionalInformation(), ga)
+
+			// A security descriptor is never sent in part: the client is told how much room it
+			// takes and asks again. [MS-SMB2] 3.3.5.20.3 names STATUS_BUFFER_OVERFLOW as the one
+			// answer this must not carry, because that is what says a truncated answer follows.
 			if qir.OutputBufferLength() < uint32(len(info)) {
 				if c.negotiateDialect == smb2.SMB_DIALECT_311 {
 					ecd := smb2.ErrorContextData(0, binary.LittleEndian.AppendUint32(nil, uint32(len(info))))
-					resp := smb2.NewErrorResponse(qir, smb2.STATUS_BUFFER_OVERFLOW, 1, ecd)
+					resp := smb2.NewErrorResponse(qir, smb2.STATUS_BUFFER_TOO_SMALL, 1, ecd)
 					return resp, ss, nil
 				} else {
 					ecd := binary.LittleEndian.AppendUint32(nil, uint32(len(info)))
-					resp := smb2.NewErrorResponse(qir, smb2.STATUS_BUFFER_OVERFLOW, 0, ecd)
+					resp := smb2.NewErrorResponse(qir, smb2.STATUS_BUFFER_TOO_SMALL, 0, ecd)
 					return resp, ss, nil
 				}
 			}
@@ -2507,13 +2660,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return nil, nil, err
 		}
 
-		c.mu.Lock()
-		ss, found := c.sessionTable[sir.Header().SessionID()]
-		c.mu.Unlock()
-
-		if !found {
-			resp := smb2.NewErrorResponse(sir, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
-			return resp, nil, nil
+		ss, status := c.sessionFor(req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(sir, status, 0, nil)
+			return resp, ss, nil
 		}
 
 		ss.mu.Lock()
@@ -2677,8 +2827,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					return resp, ss, nil
 				}
 
-				// Rename the file or the directory.
+				// Rename the file or the directory. The name it is moving to has to resolve
+				// inside the share, exactly as the one it was created under did.
 				newName := strings.ReplaceAll(fri.FileName, "\\", "/")
+				if newName == "" || !validPath(newName) {
+					resp := smb2.NewErrorResponse(sir, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+					return resp, ss, nil
+				}
 
 				// A rename moves what the store holds, and a file still being written is not held
 				// by it yet: the bytes are in the upload buffer, under a name the rename is about
@@ -2903,68 +3058,80 @@ func (c *connection) processRequests() {
 		var req *smb2.Request
 		c.mu.Lock()
 		if len(c.requestList) > 0 {
-			_, req = utils.FindMinKey(c.requestList)
+			// Taken off the queue as it is picked up, so that what is left in the queue is what
+			// nothing has started on. A cancel answers out of the queue and relies on that.
+			var mid uint64
+			mid, req = utils.FindMinKey(c.requestList)
+			delete(c.requestList, mid)
 		}
 		c.mu.Unlock()
 
-		if req != nil {
-			resp, ss, err := c.processRequest(req)
-			if err != nil {
-				if c.server.debug {
-					log.Printf("Error processing request (Message ID: %d, Command: %d): %v", req.Header().MessageID(), req.Header().Command(), err)
-				}
-				c.server.closeConnection(c)
+		// Nothing to do: wait to be told rather than looking again.
+		if req == nil {
+			select {
+			case <-c.closeChan:
 				return
+			case <-c.wakeChan:
 			}
 
-			// The credits of the request it answers go back on it - here rather than where the
-			// message goes out, because a chain goes out as one message and carries a header of
-			// its own for every request in it.
-			c.grantOnResponse(resp)
+			continue
+		}
 
+		resp, ss, err := c.processRequest(req)
+		if err != nil {
+			if c.server.debug {
+				log.Printf("Error processing request (Message ID: %d, Command: %d): %v", req.Header().MessageID(), req.Header().Command(), err)
+			}
+			c.server.closeConnection(c)
+			return
+		}
+
+		// The credits of the request it answers go back on it - here rather than where the
+		// message goes out, because a chain goes out as one message and carries a header of
+		// its own for every request in it.
+		c.grantOnResponse(resp)
+
+		c.mu.Lock()
+		var pendingResp smb2.GenericResponse
+		if resp.GroupID() > 0 { // This response is a part of a chain, pull the chain
+			pendingResp = c.pendingResponses[resp.GroupID()]
+		}
+		c.mu.Unlock()
+
+		if resp.Header().Command() == smb2.SMB2_CHANGE_NOTIFY { // Send the chain if it's complete, then the response
+			if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
+				chain.Header().SetCreditResponse(1)
+				c.server.writeResponse(c, ss, chain)
+			}
+			c.server.writeResponse(c, ss, resp)
+		} else if pendingResp != nil { // Add the response to the chain, then send the chain if it's complete
+			pendingResp.Append(resp)
+			if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
+				c.server.writeResponse(c, ss, chain)
+			}
+		} else if resp.GroupID() == 0 { // A standalone response, send it
+			c.server.writeResponse(c, ss, resp)
+		} else { // Start the response chain
 			c.mu.Lock()
-			delete(c.requestList, resp.Header().MessageID())
-			var pendingResp smb2.GenericResponse
-			if resp.GroupID() > 0 { // This response is a part of a chain, pull the chain
-				pendingResp = c.pendingResponses[resp.GroupID()]
-			}
+			resp.SetSessionID(resp.Header().SessionID())
+			resp.SetTreeID(resp.Header().TreeID())
+			c.pendingResponses[resp.GroupID()] = resp
 			c.mu.Unlock()
 
-			if resp.Header().Command() == smb2.SMB2_CHANGE_NOTIFY { // Send the chain if it's complete, then the response
-				if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
-					chain.Header().SetCreditResponse(1)
-					c.server.writeResponse(c, ss, chain)
-				}
-				c.server.writeResponse(c, ss, resp)
-			} else if pendingResp != nil { // Add the response to the chain, then send the chain if it's complete
-				pendingResp.Append(resp)
-				if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
-					c.server.writeResponse(c, ss, chain)
-				}
-			} else if resp.GroupID() == 0 { // A standalone response, send it
-				c.server.writeResponse(c, ss, resp)
-			} else { // Start the response chain
-				c.mu.Lock()
-				resp.SetSessionID(resp.Header().SessionID())
-				resp.SetTreeID(resp.Header().TreeID())
-				c.pendingResponses[resp.GroupID()] = resp
-				c.mu.Unlock()
-
-				// A chain of one is complete as soon as it is started.
-				if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
-					c.server.writeResponse(c, ss, chain)
-				}
+			// A chain of one is complete as soon as it is started.
+			if chain := c.chainMemberDone(resp.GroupID()); chain != nil {
+				c.server.writeResponse(c, ss, chain)
 			}
+		}
 
-			// Whatever is going out for this request is on the queue now, so the work behind an
-			// asynchronous one may answer.
-			c.interimQueued(resp.Header().MessageID())
+		// Whatever is going out for this request is on the queue now, so the work behind an
+		// asynchronous one may answer.
+		c.interimQueued(resp.Header().MessageID())
 
-			// An interim response doesn't complete the request: the counters are
-			// decremented when the asynchronous command sends its final response.
-			if resp.Header().Status() != smb2.STATUS_PENDING {
-				c.releaseOpen(req)
-			}
+		// An interim response doesn't complete the request: the counters are
+		// decremented when the asynchronous command sends its final response.
+		if resp.Header().Status() != smb2.STATUS_PENDING {
+			c.releaseOpen(req)
 		}
 
 		select {
@@ -3085,6 +3252,10 @@ func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open,
 	ss.mu.Unlock()
 
 	if !found || op.durableFileID != dfid {
+		// Whatever the volatile half found, the persistent half does not agree, so it is not the
+		// handle the request names. A chain member is allowed to name none and take the one the
+		// operation before it used.
+		op = nil
 		if req.GroupID() > 0 {
 			op = c.findOpenByGroupID(req.GroupID())
 		}
@@ -3095,6 +3266,16 @@ func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open,
 	}
 
 	if op == nil {
+		// A chain member has no handle of its own, so what became of the operation before it is
+		// what answers for this one ([MS-SMB2] 3.3.5.2.7.2).
+		if req.GroupID() > 0 {
+			if status := c.chainFailure(req.GroupID()); status != smb2.STATUS_OK {
+				return nil, status
+			}
+
+			return nil, smb2.STATUS_INVALID_HANDLE
+		}
+
 		return nil, smb2.STATUS_FILE_CLOSED
 	}
 
@@ -3238,6 +3419,39 @@ func (c *connection) completeWatches(ss *session, id []byte) {
 	}
 }
 
+// chainFailure returns the status the last response assembled for a chain carried, or STATUS_OK if
+// nothing has been assembled for it yet and if what was assembled went well. An interim response is
+// not a failure: the work behind it is still running.
+func (c *connection) chainFailure(gid uint64) uint32 {
+	c.mu.Lock()
+	resp, found := c.pendingResponses[gid]
+	c.mu.Unlock()
+
+	if !found {
+		return smb2.STATUS_OK
+	}
+
+	buf := resp.Encode()
+	var off uint32
+	for {
+		if uint64(off)+smb2.SMB2HeaderSize > uint64(len(buf)) {
+			return smb2.STATUS_OK
+		}
+
+		h := smb2.Header(buf[off:])
+		next := h.NextCommand()
+		if next == 0 {
+			if status := h.Status(); status != smb2.STATUS_OK && status != smb2.STATUS_PENDING {
+				return status
+			}
+
+			return smb2.STATUS_OK
+		}
+
+		off += next
+	}
+}
+
 // findOpenByGroupID finds an Open by the group ID of the response.
 func (c *connection) findOpenByGroupID(groupID uint64) *open {
 	c.mu.Lock()
@@ -3319,6 +3533,10 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
 		resp.Header().SetCreditResponse(0)
 		resp.Header().SetAsyncID(target.Header().AsyncID())
+	} else {
+		// A target taken out of the queue was never answered with an interim, so this is the
+		// response its credits go back on.
+		owner.grantOnResponse(resp)
 	}
 
 	// The request is answered and cleaned up on the connection that carries it, which is
@@ -3352,10 +3570,19 @@ func (c *connection) findCancelTarget(cr smb2.CancelRequest, ss *session) (*smb2
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
+		// Taken on asynchronously, but cancelled before the client saw the interim response.
 		for _, r := range c.asyncCommandList {
 			if r != nil && r.Header().MessageID() == mid {
 				return r, c
 			}
+		}
+
+		// Still waiting its turn ([MS-SMB2] 3.3.5.16). Removing it here is what keeps the
+		// dispatcher from answering it too. A member of a compound chain is left to be processed:
+		// the chain is answered as one, and a cancel may come to nothing.
+		if r, found := c.requestList[mid]; found && r.GroupID() == 0 {
+			delete(c.requestList, mid)
+			return r, c
 		}
 
 		return nil, nil
@@ -3722,11 +3949,10 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	var replayable bool
 	for id, ctx := range contexts {
 		switch id {
-		case smb2.CREATE_EA_BUFFER: // renterd doesn't support extended file attributes, so why should we?
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_EAS_NOT_SUPPORTED, 0, nil)
-			return resp, nil
 		case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
-			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, createdModified, op.grantedAccess)
+			// What the user may do with the file, which is the access of the tree connect
+			// rather than the narrower one this handle was given.
+			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, createdModified, tc.maximalAccess)
 		case smb2.CREATE_QUERY_ON_DISK_ID:
 			respContexts[id] = smb2.HandleCreateQueryOnDiskID(op.handle, tc.volumeID)
 		case smb2.CREATE_ALLOCATION_SIZE: // The file is about to be uploaded, we just got its size

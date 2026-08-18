@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"slices"
 	"testing"
@@ -500,4 +501,51 @@ func TestIntegrationACancelledCreateIsNotAnsweredTwice(t *testing.T) {
 	// The break runs out while nobody is waiting on it any more, and the work finishes. What it
 	// worked out has nowhere to go: the request it answers has been answered.
 	bob.quiet(4*timeout, "the cancelled create was answered a second time")
+}
+
+// TestACancelAnswersARequestStillInTheQueue is the request the client gives up on before the server
+// has started it. [MS-SMB2] 3.3.5.16 has a cancel that carries no async ID looked for in the request
+// list, which is where a request sits between arriving and being picked up; only the async command
+// list was searched, so a client that cancelled quickly enough was answered by nothing.
+func TestACancelAnswersARequestStillInTheQueue(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	// A request that arrives and is never picked up: no dispatcher is running on this connection.
+	mid := cl.conn.window()[0]
+	msg := echoRequest(mid, cl.ss.sessionID, cl.tc.treeID)
+	binary.LittleEndian.PutUint16(msg[14:16], 4) // the credits the client asks for
+	if err := cl.conn.acceptRequest(msg); err != nil {
+		t.Fatalf("the request was not accepted: %v", err)
+	}
+
+	cl.conn.mu.Lock()
+	_, queued := cl.conn.requestList[mid]
+	cl.conn.mu.Unlock()
+	if !queued {
+		t.Fatal("the request was not queued, so there is nothing to cancel out of the queue")
+	}
+
+	if err := cl.cancel(cancelRequestFor(mid, cl.ss.sessionID, cl.tc.treeID)); err != nil {
+		t.Fatalf("the cancel was not accepted: %v", err)
+	}
+
+	answer := cl.recv(5 * time.Second)
+	if status := smb2.Header(answer).Status(); status != smb2.STATUS_CANCELLED {
+		t.Errorf("the cancelled request was answered %#x, want STATUS_CANCELLED", status)
+	}
+	if got := smb2.Header(answer).MessageID(); got != mid {
+		t.Errorf("the answer names message %d, want the %d that was cancelled", got, mid)
+	}
+
+	// The credits of a request that never saw an interim response go back on this answer, or the
+	// client is left short of what it spent.
+	if granted := smb2.Header(answer).CreditRequest(); granted == 0 {
+		t.Error("the cancelled request was answered with no credits, leaving the client short")
+	}
+
+	// And the dispatcher must not answer it a second time: two responses under one message ID is
+	// not something a client can follow.
+	go cl.conn.processRequests()
+	cl.quiet(200*time.Millisecond, "the cancelled request was answered a second time")
 }

@@ -136,12 +136,17 @@ func TestIntegrationQueryAllInformation(t *testing.T) {
 		t.Error("the file is marked as a directory")
 	}
 
-	// The access the create granted is carried back at 76, and the position at 80.
-	if access := binary.LittleEndian.Uint32(info[76:80]); access != shareAccess {
-		t.Errorf("the handle carries access %#x, want %#x", access, uint32(shareAccess))
+	// The access the create granted is carried back at 76, and the position at 80. A handle is
+	// granted what its create asked for, which is what this one has to carry.
+	if access := binary.LittleEndian.Uint32(info[76:80]); access != writeAccess {
+		t.Errorf("the handle carries access %#x, want %#x", access, uint32(writeAccess))
 	}
-	if pos := binary.LittleEndian.Uint64(info[80:88]); pos != 4096 {
-		t.Errorf("the handle stands at %d, want the end of the file", pos)
+
+	// The position is where the file pointer sits, not how long the file is. This server keeps no
+	// pointer per handle, and [MS-SMB2] 3.3.5.20.1 has it answered as zero; carrying the size of
+	// the file there tells a client that has just opened it that it is already at the end.
+	if pos := binary.LittleEndian.Uint64(info[80:88]); pos != 0 {
+		t.Errorf("the handle stands at %d, want the start of the file", pos)
 	}
 
 	// The name is last, and is the name of the file rather than the path to it.
@@ -447,5 +452,124 @@ func TestIntegrationQueryInfoReportsADeletionCalledOff(t *testing.T) {
 
 	if info := queriedInfo(t, cl.queryInfo(fid, smb2.FileStandardInformation, 4096)); info[20] != 0 {
 		t.Error("the file is still reported as being on its way out")
+	}
+}
+
+// TestASecurityDescriptorTooBigForTheBufferIsRefused is the query whose buffer will not hold the
+// answer. A security descriptor is never sent in part, so the client is told how much room it needs
+// and asks again — and [MS-SMB2] 3.3.5.20.3 names the one status this must not carry:
+// STATUS_BUFFER_OVERFLOW is what says a truncated answer follows, and there is none.
+func TestASecurityDescriptorTooBigForTheBufferIsRefused(t *testing.T) {
+	for _, tt := range []struct {
+		what    string
+		dialect uint16
+	}{
+		{"3.1.1, which carries the size in an error context", smb2.SMB_DIALECT_311},
+		{"3.0, which carries it on its own", smb2.SMB_DIALECT_30},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+			h.files.put("file", 1024)
+
+			cl := h.dial("alice")
+			cl.conn.negotiateDialect = tt.dialect
+			cl.conn.dialect = dialectName(tt.dialect)
+
+			created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			fid := createdFileID(created)
+
+			// A buffer of one byte, which no descriptor fits in.
+			cl.mid++
+			resp, err := cl.send(queryInfoRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid,
+				smb2.INFO_SECURITY, 0, 1))
+			if err != nil {
+				t.Fatalf("the query failed: %v", err)
+			}
+
+			status := resp.Header().Status()
+			if status == smb2.STATUS_BUFFER_OVERFLOW {
+				t.Fatal("the query was answered STATUS_BUFFER_OVERFLOW, which promises a truncated descriptor")
+			}
+			if status != smb2.STATUS_BUFFER_TOO_SMALL {
+				t.Errorf("the query was answered %#x, want STATUS_BUFFER_TOO_SMALL", status)
+			}
+		})
+	}
+}
+
+// TestQueryingAttributesNeedsReadAttributes is the handle opened to write and nothing else. The
+// classes that answer with the attributes of a file are only for a handle that may read them
+// ([MS-SMB2] 3.3.5.20.1), and nothing checked: a principal granted write access alone — which the
+// stored rights hand out without FILE_READ_ATTRIBUTES — could read the timestamps, the size and the
+// attributes of every file on the share.
+func TestQueryingAttributesNeedsReadAttributes(t *testing.T) {
+	// What FlagsFromAccessRights gives a principal granted write access and nothing else.
+	const writeOnly = smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA |
+		smb2.FILE_WRITE_ATTRIBUTES | smb2.GENERIC_WRITE
+
+	for _, tt := range []struct {
+		what   string
+		class  uint8
+		access uint32
+		want   uint32
+	}{
+		{"all information, write access alone", smb2.FileAllInformation, writeOnly, smb2.STATUS_ACCESS_DENIED},
+		{"network open information, write access alone", smb2.FileNetworkOpenInformation, writeOnly, smb2.STATUS_ACCESS_DENIED},
+
+		// The control: the same queries through a handle that may read the attributes.
+		{"all information, holding read access", smb2.FileAllInformation, shareAccess, smb2.STATUS_OK},
+		{"network open information, holding read access", smb2.FileNetworkOpenInformation, shareAccess, smb2.STATUS_OK},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+			h.files.put("file", 1024)
+
+			cl := h.dial("alice")
+			cl.tc.maximalAccess = tt.access
+
+			created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			fid := createdFileID(created)
+
+			buf := cl.queryInfo(fid, tt.class, 4096)
+			if status := smb2.Header(buf).Status(); status != tt.want {
+				t.Errorf("the query was answered %#x, want %#x", status, tt.want)
+			}
+		})
+	}
+}
+
+// TestNormalizedNameIsAnsweredOnlyOn311 is the information class only the last dialect carries. It
+// was answered on every dialect, so a client that asked on an earlier one was told something its
+// dialect has no way to have asked for. [MS-SMB2] 3.3.5.20.1 names 2.0.2, 2.1 and 3.0.2 as the
+// dialects that must refuse it and leaves 3.0 out, which is taken here as an oversight.
+func TestNormalizedNameIsAnsweredOnlyOn311(t *testing.T) {
+	for _, tt := range []struct {
+		dialect uint16
+		want    uint32
+	}{
+		{smb2.SMB_DIALECT_202, smb2.STATUS_NOT_SUPPORTED},
+		{smb2.SMB_DIALECT_21, smb2.STATUS_NOT_SUPPORTED},
+		{smb2.SMB_DIALECT_30, smb2.STATUS_NOT_SUPPORTED},
+		{smb2.SMB_DIALECT_302, smb2.STATUS_NOT_SUPPORTED},
+
+		// The one dialect that carries it.
+		{smb2.SMB_DIALECT_311, smb2.STATUS_OK},
+	} {
+		t.Run(dialectName(tt.dialect), func(t *testing.T) {
+			h := newSMBTest(t)
+			h.files.put("file", 1024)
+
+			cl := h.dial("alice")
+			cl.conn.negotiateDialect = tt.dialect
+			cl.conn.dialect = dialectName(tt.dialect)
+
+			created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			fid := createdFileID(created)
+
+			buf := cl.queryInfo(fid, smb2.FileNormalizedNameInformation, 4096)
+			if status := smb2.Header(buf).Status(); status != tt.want {
+				t.Errorf("the query was answered %#x, want %#x", status, tt.want)
+			}
+		})
 	}
 }

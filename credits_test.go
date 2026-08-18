@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"slices"
 	"testing"
 	"time"
 
@@ -354,5 +355,58 @@ func TestTheSequenceWindowDoesNotGrowWithEveryRequest(t *testing.T) {
 	if after > before+16 {
 		t.Errorf("the window holds %d IDs after %d requests, up from %d: it keeps one of each",
 			after, requests, before)
+	}
+}
+
+// TestACancelLeavesTheSequenceWindowAlone is the one request that is neither answered nor counted.
+// A cancel reuses the message ID of the request it cancels, or carries zero beside an async ID, so
+// it spends no sequence number and earns no credit ([MS-SMB2] 3.3.1.1, 3.3.4.1.2, 3.3.5.16). The
+// window has to come out of one exactly as it went in: opening an ID per cancel leaves one nothing
+// will ever close, and closing one takes an ID the client is still holding.
+func TestACancelLeavesTheSequenceWindowAlone(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+	cl.conn.supportsMultiCredit = true
+
+	// The credits a run of answered requests would have left the client holding.
+	if _, err := cl.conn.grantCredits(0, 64, 1); err != nil {
+		t.Fatalf("granting credits failed: %v", err)
+	}
+
+	before := cl.conn.window()
+
+	// The message IDs a client puts on a cancel: the one the request it cancels was sent under,
+	// which the server retired when it took that request in, and the zero a Windows client sends
+	// when it names an async ID instead.
+	const cancels = 500
+	for n := range cancels {
+		mid := uint64(0)
+		if n%2 == 0 {
+			mid = uint64(n % 3) // Retired long ago by the dial.
+		}
+		if err := cl.conn.acceptRequest(cancelRequestFor(mid, cl.ss.sessionID, cl.tc.treeID)); err != nil {
+			t.Fatalf("cancel %d was not accepted: %v", n, err)
+		}
+	}
+
+	after := cl.conn.window()
+
+	if !slices.Equal(before, after) {
+		t.Errorf("the window holds %d IDs after %d cancels, from %d before: a cancel must leave it alone",
+			len(after), cancels, len(before))
+	}
+
+	// The lowest ID the client may still send under is the one a cancel would take if it retired
+	// anything, and the client has no way of knowing it was taken.
+	if len(after) > 0 && len(before) > 0 && after[0] != before[0] {
+		t.Errorf("the next ID the client may send under moved from %d to %d", before[0], after[0])
+	}
+
+	// A cancel is never answered, so nothing is ever going to carry credits granted against it.
+	cl.conn.mu.Lock()
+	granted := len(cl.conn.creditsGranted)
+	cl.conn.mu.Unlock()
+	if granted != 0 {
+		t.Errorf("%d cancel(s) left credits recorded against them", granted)
 	}
 }

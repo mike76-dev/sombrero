@@ -570,18 +570,70 @@ func readCacheSize(chunkSize uint64) int {
 	return size
 }
 
-// grantAccess returns true if the user's access rights are sufficient for performing the requested operation(s) on the file.
-func grantAccess(cr smb2.CreateRequest, tc *treeConnect, ss *session) bool {
-	if tc.share.connectSecurity == nil || tc.share.fileSecurity == nil {
-		return true
+// expandGeneric adds to an access mask the specific rights its generic ones stand for ([MS-DTYP]
+// 2.4.3), which is how an access phrased in generic terms is weighed against rights held in
+// specific ones.
+func expandGeneric(access uint32) uint32 {
+	if access&smb2.GENERIC_READ != 0 {
+		access |= smb2.FILE_READ_DATA | smb2.FILE_READ_EA | smb2.FILE_READ_ATTRIBUTES |
+			smb2.READ_CONTROL | smb2.SYNCHRONIZE
+	}
+	if access&smb2.GENERIC_WRITE != 0 {
+		access |= smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA |
+			smb2.FILE_WRITE_ATTRIBUTES | smb2.READ_CONTROL | smb2.SYNCHRONIZE
+	}
+	if access&smb2.GENERIC_EXECUTE != 0 {
+		access |= smb2.FILE_EXECUTE | smb2.FILE_READ_ATTRIBUTES |
+			smb2.READ_CONTROL | smb2.SYNCHRONIZE
 	}
 
-	_, ok := tc.share.connectSecurity[ss.workgroup+"/"+ss.userName]
-	if !ok {
+	return access
+}
+
+// grantedFor returns the access an open is given: what the share allows the user, narrowed to
+// what the create asked for ([MS-SMB2] 3.3.5.9). MAXIMUM_ALLOWED and GENERIC_ALL ask for
+// everything the user may do.
+func grantedFor(desired, maximal uint32) uint32 {
+	if desired&(smb2.MAXIMUM_ALLOWED|smb2.GENERIC_ALL) != 0 {
+		return maximal
+	}
+
+	return expandGeneric(desired) & maximal
+}
+
+// satisfies reports whether rights held cover an access asked for. Every right asked for has to
+// be held, not merely one of them, which is what makes a create that cannot do what it was opened
+// to do fail at the create rather than at the first request that needs the right.
+//
+// SYNCHRONIZE and READ_CONTROL are not weighed. Clients ask for both as a matter of course - they
+// are part of the generic read and write sets - while the stored rights hand out neither with
+// write access, and neither of them names anything this server does with a file.
+func satisfies(held, desired uint32) bool {
+	if desired&(smb2.MAXIMUM_ALLOWED|smb2.GENERIC_ALL) != 0 {
+		return held != 0
+	}
+
+	const notWeighed = smb2.SYNCHRONIZE | smb2.READ_CONTROL
+	const generic = smb2.GENERIC_READ | smb2.GENERIC_WRITE | smb2.GENERIC_EXECUTE
+
+	// The generic bits are dropped once what they stand for is in hand, so that what is weighed
+	// is specific rights alone - the form the rights held are not always in.
+	return expandGeneric(desired)&^generic&^(expandGeneric(held)|notWeighed) == 0
+}
+
+// grantAccess returns true if the user's access rights are sufficient for performing the requested operation(s) on the file.
+func grantAccess(cr smb2.CreateRequest, tc *treeConnect, ss *session) bool {
+	// A share holding no security for the user grants nothing, which is what the tree connect
+	// makes of one and so what a file on it has to make of one as well. Read the other way
+	// round, an empty table would be a share every user has every right over.
+	if !tc.share.mayConnect(ss.workgroup, ss.userName) {
 		return false
 	}
 
-	fs := tc.share.fileSecurity[ss.workgroup+"/"+ss.userName]
+	fs, held := tc.share.fileAccess(ss.workgroup, ss.userName)
+	if !held {
+		return false
+	}
 	write := fs&(smb2.FILE_WRITE_DATA|smb2.FILE_APPEND_DATA|smb2.FILE_WRITE_EA|smb2.FILE_WRITE_ATTRIBUTES) > 0
 	del := fs&(smb2.DELETE|smb2.FILE_DELETE_CHILD) > 0
 
@@ -589,12 +641,23 @@ func grantAccess(cr smb2.CreateRequest, tc *treeConnect, ss *session) bool {
 	co := cr.CreateOptions()
 	da := cr.DesiredAccess()
 
-	if fs&da == 0 {
+	if !satisfies(fs, da) {
 		return false
 	}
 
-	if !write && ((cd&(smb2.FILE_SUPERSEDE|smb2.FILE_CREATE|smb2.FILE_OPEN_IF|smb2.FILE_OVERWRITE|smb2.FILE_OVERWRITE_IF) > 0) || (co&smb2.FILE_WRITE_THROUGH > 0)) {
-		return false
+	// A disposition is one of a numbered set rather than a set of bits, so it is compared and
+	// not masked: the mask made FILE_OPEN, the one disposition that leaves the file as it is,
+	// look like a write, and FILE_SUPERSEDE, which replaces it outright, look like none.
+	if !write {
+		switch cd {
+		case smb2.FILE_SUPERSEDE, smb2.FILE_CREATE, smb2.FILE_OPEN_IF,
+			smb2.FILE_OVERWRITE, smb2.FILE_OVERWRITE_IF:
+			return false
+		}
+
+		if co&smb2.FILE_WRITE_THROUGH > 0 {
+			return false
+		}
 	}
 
 	if !del && (co&smb2.FILE_DELETE_ON_CLOSE > 0) {
@@ -939,7 +1002,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 
 	var filepath, filename string
 	var isDir bool
-	access := tc.maximalAccess
+	access := grantedFor(cr.DesiredAccess(), tc.maximalAccess)
 	name := strings.ToLower(info.Key)
 	switch name {
 	case "lsarpc", "srvsvc", "mdssvc": // Standard named pipes on MacOS, Linux, and Windows
@@ -1204,8 +1267,10 @@ func (op *open) fileAllInformation() []byte {
 		AccessInfo: smb2.FileAccessInfo{
 			AccessFlags: op.grantedAccess,
 		},
+		// Where the file pointer sits, which is not the length of the file: this server keeps no
+		// pointer per handle, and [MS-SMB2] 3.3.5.20.1 has the offset answered as zero.
 		PositionInfo: smb2.FilePositionInfo{
-			CurrentByteOffset: size,
+			CurrentByteOffset: 0,
 		},
 		ModeInfo: smb2.FileModeInfo{
 			Mode: op.createOptions,
@@ -1539,16 +1604,11 @@ func (op *open) tryReadCached(offset, length uint64) ([]byte, bool) {
 
 	result := make([]byte, 0, length)
 	for i, chunk := range chunks {
-		chunkOffset := firstChunk + uint64(i)*chunkSize
-		start := uint64(0)
-		if offset > chunkOffset {
-			start = offset - chunkOffset
+		part, ok := chunkSlice(chunk.data, firstChunk+uint64(i)*chunkSize, offset, length)
+		if !ok {
+			break
 		}
-		end := uint64(len(chunk.data))
-		if chunkOffset+end > offset+length {
-			end = offset + length - chunkOffset
-		}
-		result = append(result, chunk.data[start:end]...)
+		result = append(result, part...)
 	}
 	op.mu.Unlock()
 
@@ -1634,20 +1694,36 @@ func (op *open) read(offset, length uint64) ([]byte, error) {
 			return nil, chunk.err
 		}
 
-		chunkOffset := firstChunk + uint64(i)*chunkSize
-		start := uint64(0)
-		if offset > chunkOffset {
-			start = offset - chunkOffset
-		}
-		end := uint64(len(chunk.data))
-		if chunkOffset+end > offset+length {
-			end = offset + length - chunkOffset
+		part, ok := chunkSlice(chunk.data, firstChunk+uint64(i)*chunkSize, offset, length)
+		if !ok {
+			break
 		}
 
-		result = append(result, chunk.data[start:end]...)
+		result = append(result, part...)
 	}
 
 	return result, nil
+}
+
+// chunkSlice returns the part of a downloaded chunk that falls inside the requested range, and
+// whether the chunk reaches into that range at all. A backend that answers with less than the chunk
+// was asked for puts the end of the file before the size the state records, and what has been
+// gathered by then is all there is to send.
+func chunkSlice(data []byte, chunkOffset, offset, length uint64) ([]byte, bool) {
+	var start uint64
+	if offset > chunkOffset {
+		start = offset - chunkOffset
+	}
+	if start >= uint64(len(data)) {
+		return nil, false
+	}
+
+	end := uint64(len(data))
+	if chunkOffset+end > offset+length {
+		end = offset + length - chunkOffset
+	}
+
+	return data[start:end], true
 }
 
 // touchChunk moves the chunk to the back of the eviction queue. op.mu must be held.

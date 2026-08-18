@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/binary"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -406,6 +408,59 @@ func TestIntegrationNegotiateSettlesACipher(t *testing.T) {
 	}
 }
 
+// dispatcherState returns the scheduler state of the goroutine running processRequests, as the
+// runtime writes it in a stack dump: "select", "chan receive", "runnable" and so on.
+func dispatcherState(t *testing.T) string {
+	t.Helper()
+
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if !strings.Contains(g, "processRequests") {
+			continue
+		}
+		_, rest, ok := strings.Cut(g, "[")
+		if !ok {
+			continue
+		}
+		state, _, _ := strings.Cut(rest, "]")
+
+		// The state carries how long it has been in it once that gets long enough to mention.
+		state, _, _ = strings.Cut(state, ",")
+
+		return state
+	}
+
+	return ""
+}
+
+// TestTheDispatcherWaitsInsteadOfPolling is what an idle connection costs. The dispatcher used to
+// look at the queue in a loop with nothing to make it wait, so a connection with no traffic on it
+// spun a core for as long as it lived. It has to be parked on a channel when there is nothing to do.
+func TestTheDispatcherWaitsInsteadOfPolling(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	go cl.conn.processRequests()
+
+	// Give it a moment to work through anything the dial left and settle.
+	time.Sleep(100 * time.Millisecond)
+
+	if state := dispatcherState(t); state != "select" {
+		t.Errorf("the dispatcher of an idle connection is %q, want it parked in a select", state)
+	}
+
+	// And it still picks up what arrives once it is parked.
+	mid := cl.conn.window()[0]
+	if err := cl.conn.acceptRequest(echoRequest(mid, cl.ss.sessionID, cl.tc.treeID)); err != nil {
+		t.Fatalf("the request was not accepted: %v", err)
+	}
+	if buf := cl.recv(5 * time.Second); smb2.Header(buf).Status() != smb2.STATUS_OK {
+		t.Errorf("the parked dispatcher answered %#x, want it woken and the request served", smb2.Header(buf).Status())
+	}
+}
+
 // TestAChainWhoseLastRequestIsTurnedAwayIsStillAnswered is the compound chain that loses its last
 // request to a signature it cannot prove. The chain is assembled as its requests are answered and
 // goes out when the last of them arrives, so a last request that never reaches the dispatcher
@@ -449,5 +504,126 @@ func TestAChainWhoseLastRequestIsTurnedAwayIsStillAnswered(t *testing.T) {
 	}
 	if n := len(cl.conn.chainRemaining); n != 0 {
 		t.Errorf("%d chain(s) still counted as outstanding", n)
+	}
+}
+
+// TestAChainMemberInheritsTheFailureBeforeIt is the compound chain whose first operation fails. The
+// operations after it name no handle of their own — they take the one the operation before them
+// used — so a create that failed leaves them with nothing to work on. [MS-SMB2] 3.3.5.2.7.2 has
+// them answered with the error the create gave, and with STATUS_INVALID_HANDLE when the operation
+// before them produced no handle at all. Answering STATUS_FILE_CLOSED instead tells the client a
+// handle it never got has been closed.
+func TestAChainMemberInheritsTheFailureBeforeIt(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	// A create that fails, and a query on the handle it did not make.
+	first := createRequest(0, cl.ss.sessionID, cl.tc.treeID, "missing.bin", smb2.OPLOCK_LEVEL_NONE,
+		smb2.FILE_OPEN, writeAccess, nil)
+	first = append(first, make([]byte, utils.Roundup(len(first), 8)-len(first))...)
+	second := closeRequest(1, cl.ss.sessionID, cl.tc.treeID, make([]byte, 16))
+	smb2.Header(second).SetFlag(smb2.FLAGS_RELATED_OPERATIONS)
+	smb2.Header(first).SetNextCommand(uint32(len(first)))
+
+	go cl.conn.processRequests()
+
+	if err := cl.conn.acceptRequest(append(first, second...)); err != nil {
+		t.Fatalf("the chain was not accepted: %v", err)
+	}
+
+	buf := cl.recv(5 * time.Second)
+
+	// The chain goes out as one message: the create's answer, then the close's behind it.
+	createStatus := smb2.Header(buf).Status()
+	if createStatus == smb2.STATUS_OK {
+		t.Fatalf("the create of a file that is not there succeeded")
+	}
+
+	next := smb2.Header(buf).NextCommand()
+	if next == 0 || uint64(next)+smb2.SMB2HeaderSize > uint64(len(buf)) {
+		t.Fatalf("the chain carries no second response (NextCommand %d of %d bytes)", next, len(buf))
+	}
+
+	if status := smb2.Header(buf[next:]).Status(); status != createStatus {
+		t.Errorf("the operation after the failed create was answered %#x, want the %#x the create gave",
+			status, createStatus)
+	}
+}
+
+// TestAMismatchedPersistentIDIsRefused is the handle whose two halves disagree. A FileId names an
+// open by its volatile half and proves it with the persistent one, and [MS-SMB2] 3.3.5.10 refuses
+// the request when the two do not agree — the check that keeps a reused volatile ID from being
+// taken for the handle that held it before.
+func TestAMismatchedPersistentIDIsRefused(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	fid := createdFileID(created)
+
+	// The volatile half of a handle that exists, with a persistent half that belongs to nothing.
+	forged := make([]byte, 16)
+	copy(forged, fid)
+	binary.LittleEndian.PutUint64(forged[8:], binary.LittleEndian.Uint64(fid[8:])^0xdeadbeef)
+
+	cl.mid++
+	resp, err := cl.send(closeRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, forged))
+	if err != nil {
+		t.Fatalf("the close failed: %v", err)
+	}
+
+	if status := resp.Header().Status(); status != smb2.STATUS_FILE_CLOSED {
+		t.Errorf("a handle whose persistent half does not match was answered %#x, want STATUS_FILE_CLOSED", status)
+	}
+}
+
+// TestUnbufferedReadIsRefusedOnEveryPipe is the read that asks for its data to bypass the buffers.
+// [MS-SMB2] 3.3.5.12 refuses it on a named pipe, whichever pipe it is; the check sat inside the
+// branch that serves srvsvc, so lsarpc and mdssvc took the flag and read on.
+func TestUnbufferedReadIsRefusedOnEveryPipe(t *testing.T) {
+	for _, pipe := range []string{"srvsvc", "lsarpc", "mdssvc"} {
+		t.Run(pipe, func(t *testing.T) {
+			h := newSMBTest(t)
+			cl := h.dial("alice")
+
+			// One of the two dialects the rule names, and the one whose tree connect asks for no
+			// signature of its own.
+			cl.conn.negotiateDialect = smb2.SMB_DIALECT_302
+			cl.conn.dialect = dialectName(cl.conn.negotiateDialect)
+
+			// The pipes live on IPC$, which is not the share the harness connects to.
+			resp, _, err := cl.conn.processRequest(request(t,
+				treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\IPC$`)))
+			if err != nil {
+				t.Fatalf("the tree connect to IPC$ failed: %v", err)
+			}
+			if status := resp.Header().Status(); status != smb2.STATUS_OK {
+				t.Fatalf("the tree connect to IPC$ was answered %#x", status)
+			}
+			tid := resp.Header().TreeID()
+
+			created, _, err := cl.conn.processRequest(request(t, createRequest(1, cl.ss.sessionID, tid,
+				pipe, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, nil)))
+			if err != nil {
+				t.Fatalf("opening %s failed: %v", pipe, err)
+			}
+			if status := created.Header().Status(); status != smb2.STATUS_OK {
+				t.Fatalf("opening %s was answered %#x", pipe, status)
+			}
+			fid := createdFileID(created.Encode())
+
+			msg := readRequest(2, cl.ss.sessionID, tid, fid, 0, 1024)
+			msg[smb2.SMB2HeaderSize+3] = smb2.READFLAG_READ_UNBUFFERED
+
+			read, _, err := cl.conn.processRequest(request(t, msg))
+			if err != nil {
+				t.Fatalf("the read failed: %v", err)
+			}
+			if status := read.Header().Status(); status != smb2.STATUS_INVALID_PARAMETER {
+				t.Errorf("an unbuffered read of the %s pipe was answered %#x, want STATUS_INVALID_PARAMETER",
+					pipe, status)
+			}
+		})
 	}
 }

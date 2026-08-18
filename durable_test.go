@@ -359,3 +359,58 @@ func TestIntegrationReconnectAnswersTheContextsItCarries(t *testing.T) {
 		t.Errorf("the client was told it holds %#x, want SMB2_LEASE_NONE", state)
 	}
 }
+
+// TestIntegrationLogoffKeepsTheDurableHandles is what becomes of a durable handle when the client
+// says it is done with the session. [MS-SMB2] 3.3.5.6 detaches it and leaves it to the scavenger,
+// exactly as the loss of the connection does, and closes only the handles that were never made
+// durable. The logoff went straight to the teardown, which cancels every open of the session, so
+// the one thing the client asked to be able to come back to was the one thing it could not.
+func TestIntegrationLogoffKeepsTheDurableHandles(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("dir/file", 1024)
+	h.files.put("dir/other", 1024)
+
+	alice := h.dial("alice")
+
+	held, _ := alice.createDurable("dir/file", testCreateGuid, false)
+	if status := smb2.Header(held).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the durable create failed with %#x", status)
+	}
+	fid := createdFileID(held)
+
+	// A handle of the ordinary kind, which the logoff is to close.
+	ordinary, _ := alice.create("dir/other", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(ordinary).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create failed with %#x", status)
+	}
+	closed := openIDOf(createdFileID(ordinary))
+
+	buf, err := alice.logoff()
+	if err != nil {
+		t.Fatalf("the logoff failed: %v", err)
+	}
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the logoff was answered %#x, want it served", status)
+	}
+
+	h.srv.mu.Lock()
+	_, stillThere := h.srv.globalOpenTable[closed]
+	h.srv.mu.Unlock()
+	if stillThere {
+		t.Error("a handle that was never made durable outlived the session it was opened on")
+	}
+
+	// The same user comes back on a session of its own and claims the handle.
+	again := h.dial("alice")
+	buf, err = again.createWith("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN,
+		reconnectContext(binary.LittleEndian.Uint64(fid[:8]), binary.LittleEndian.Uint64(fid[8:16]), testCreateGuid))
+	if err != nil {
+		t.Fatalf("the reconnect failed: %v", err)
+	}
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the reconnect after a logoff was answered %#x, want the handle back", status)
+	}
+	if !bytes.Equal(createdFileID(buf), fid) {
+		t.Errorf("the reconnect handed back % x, want the handle % x", createdFileID(buf), fid)
+	}
+}

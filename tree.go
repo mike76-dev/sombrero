@@ -205,16 +205,19 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 		sh, exists = c.server.shareList[name]
 		c.server.mu.Unlock()
 		if !exists {
+			// A store with no such share answers with a zero-valued one rather than an error.
 			s, err := c.server.store.GetShare(name)
-			if err != nil {
-				return nil, errNoShare
+			if err != nil || s.Name != name {
+				return nil, errShareNotFound
 			}
 			if err := c.server.RegisterShare(s); err != nil {
 				return nil, err
 			} else {
+				c.server.mu.Lock()
 				sh, exists = c.server.shareList[name]
+				c.server.mu.Unlock()
 				if !exists {
-					return nil, errNoShare
+					return nil, errShareNotFound
 				}
 			}
 		}
@@ -222,13 +225,6 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 		if smb2.Is3X(c.negotiateDialect) && sh.encryptData && c.clientCapabilities&smb2.GLOBAL_CAP_ENCRYPTION == 0 {
 			return nil, errAccessDenied
 		}
-
-		sh.mu.Lock()
-		if sh.currentUses >= maxShareUses {
-			sh.mu.Unlock()
-			return nil, errTooManyUses
-		}
-		sh.mu.Unlock()
 
 		// For indexd, lazily restore a connection from the DB if not yet initialized.
 		if sh.backend == "indexd" {
@@ -250,11 +246,19 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			}
 		}
 
-		access, exists = sh.fileSecurity[ss.workgroup+"/"+ss.userName]
+		access, exists = sh.fileAccess(ss.workgroup, ss.userName)
 		if !exists {
 			return nil, errAccessDenied
 		}
+
+		// The use limit is weighed after the access check, in the order [MS-SMB2] 3.3.5.7 gives
+		// them, and under the lock that claims the use, so that two connects racing for the last
+		// one cannot both take it.
 		sh.mu.Lock()
+		if sh.currentUses >= maxShareUses {
+			sh.mu.Unlock()
+			return nil, errTooManyUses
+		}
 		sh.currentUses++
 		sh.mu.Unlock()
 	}

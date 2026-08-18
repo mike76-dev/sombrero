@@ -9,6 +9,54 @@ import (
 	"github.com/mike76-dev/sombrero/smb2"
 )
 
+// TestIntegrationARefusedCreateMakesNothing is the create that asks for extended attributes, which
+// this server does not support. The refusal has to leave the share as it found it: an open that
+// outlives the create it was made for holds the file until the session goes, and a path left
+// persisted is a file the client is told it never got and can open all the same.
+func TestIntegrationARefusedCreateMakesNothing(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	ctx := createContext(smb2.CREATE_EA_BUFFER, make([]byte, 8))
+	buf, err := cl.createWith("ea.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE, ctx)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_EAS_NOT_SUPPORTED {
+		t.Fatalf("Status = %#x, want %#x", status, smb2.STATUS_EAS_NOT_SUPPORTED)
+	}
+
+	h.srv.mu.Lock()
+	opens := len(h.srv.globalOpenTable)
+	h.srv.mu.Unlock()
+	if opens != 0 {
+		t.Errorf("%d open(s) left behind by a create that was refused", opens)
+	}
+
+	cl.ss.mu.Lock()
+	held := len(cl.ss.openTable)
+	cl.ss.mu.Unlock()
+	if held != 0 {
+		t.Errorf("the session is holding %d handle(s) for a create that was refused", held)
+	}
+
+	cl.tc.share.mu.Lock()
+	persisted := len(cl.tc.share.persisted)
+	cl.tc.share.mu.Unlock()
+	if persisted != 0 {
+		t.Errorf("%d file(s) left on the share by a create that was refused", persisted)
+	}
+
+	// And the file the client was told it did not get is not there to open.
+	again, err := cl.createErr("ea.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if err != nil {
+		t.Fatalf("opening the file afterwards: %v", err)
+	}
+	if status := smb2.Header(again).Status(); status != smb2.STATUS_OBJECT_NAME_NOT_FOUND {
+		t.Errorf("opening the file the refused create was asked for answered %#x, want it absent", status)
+	}
+}
+
 func TestIntegrationCreateGrantsOplock(t *testing.T) {
 	h := newSMBTest(t)
 	h.files.put("dir/file", 1024)
@@ -260,4 +308,140 @@ func TestIntegrationBreakEndsWhenHandleIsClosed(t *testing.T) {
 			t.Errorf("alice could not close the handle: %v", err)
 		}
 	})
+}
+
+// TestValidPath is the names a request may act on. The backends key their objects by string, so
+// ".." is a segment like any other down there rather than a walk up a tree — which is exactly why
+// it has to be turned away here, before the name reaches them ([MS-SMB2] 3.3.5.9).
+func TestValidPath(t *testing.T) {
+	for _, tt := range []struct {
+		path string
+		want bool
+	}{
+		// The share root, which a client opens to ask about the volume.
+		{"", true},
+
+		{"file", true},
+		{"dir/file", true},
+		{"dir/sub/file", true},
+		{".hidden", true},
+		{"a..b", true}, // dots inside a name are part of it
+		{"...", true},  // and a name of nothing but dots is still a name
+		{"file.", true},
+
+		// Walking out of the share, at every position.
+		{"..", false},
+		{"../file", false},
+		{"dir/../../file", false},
+		{"dir/..", false},
+
+		// Naming the same file twice over.
+		{".", false},
+		{"./file", false},
+		{"dir/./file", false},
+
+		// Absolute, and empty components.
+		{"/file", false},
+		{"dir//file", false},
+		{"dir/", false},
+	} {
+		if got := validPath(tt.path); got != tt.want {
+			t.Errorf("validPath(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+// TestIntegrationACreateCannotWalkOutOfTheShare is the name reaching the dispatcher. Nothing looked
+// at the components of a create's path: it went from the wire to the backend as a key.
+func TestIntegrationACreateCannotWalkOutOfTheShare(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	for _, path := range []string{`..\secrets`, `dir\..\..\secrets`, `\absolute`, `.\file`} {
+		buf, err := cl.createErr(path, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN_IF)
+		if err != nil {
+			t.Fatalf("create of %q: %v", path, err)
+		}
+		if status := smb2.Header(buf).Status(); status != smb2.STATUS_INVALID_PARAMETER {
+			t.Errorf("a create of %q was answered %#x, want STATUS_INVALID_PARAMETER", path, status)
+		}
+	}
+
+	// Nothing was made on the way to refusing them.
+	cl.tc.share.mu.Lock()
+	persisted := len(cl.tc.share.persisted)
+	cl.tc.share.mu.Unlock()
+	if persisted != 0 {
+		t.Errorf("%d file(s) left on the share by creates that were refused", persisted)
+	}
+}
+
+// TestIntegrationARenameCannotWalkOutOfTheShare is the same name arriving the other way. A rename
+// names the file it is moving to, and that name was joined to nothing and passed straight on.
+func TestIntegrationARenameCannotWalkOutOfTheShare(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	fid := createdFileID(created)
+
+	for _, name := range []string{`..\stolen`, `dir\..\..\stolen`, `\absolute`, ``} {
+		buf, err := cl.rename(fid, name)
+		if err != nil {
+			t.Fatalf("rename to %q: %v", name, err)
+		}
+		if status := smb2.Header(buf).Status(); status != smb2.STATUS_INVALID_PARAMETER {
+			t.Errorf("a rename to %q was answered %#x, want STATUS_INVALID_PARAMETER", name, status)
+		}
+	}
+}
+
+// TestIntegrationAnAnonymousSessionOpensNoPipe is the session with nobody behind it reaching for
+// the IPC$ share. [MS-SMB2] 3.3.5.9 lets an anonymous caller open only those pipes that allow one,
+// and this server offers none; the check was missing altogether, and what stood in for it was the
+// account lookup failing, which answers that the session is gone rather than that the caller may
+// not have the pipe.
+func TestIntegrationAnAnonymousSessionOpensNoPipe(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	// One of the two dialects whose tree connect asks for no signature of its own.
+	cl.conn.negotiateDialect = smb2.SMB_DIALECT_302
+	cl.conn.dialect = dialectName(cl.conn.negotiateDialect)
+
+	resp, _, err := cl.conn.processRequest(request(t,
+		treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\IPC$`)))
+	if err != nil {
+		t.Fatalf("the tree connect to IPC$ failed: %v", err)
+	}
+	if status := resp.Header().Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the tree connect to IPC$ was answered %#x", status)
+	}
+	tid := resp.Header().TreeID()
+
+	// The flag alone, which is the condition the rule is written against. An anonymous session
+	// authenticated for real also carries an empty user name, and the account lookup further down
+	// the create path happens to refuse that - but it refuses it as a session that is gone rather
+	// than as a caller without the right, and it counts nothing. The flag is what decides here.
+	cl.ss.isAnonymous = true
+
+	before := h.srv.Stats().PermErrors
+
+	for _, pipe := range []string{"srvsvc", "lsarpc", "mdssvc"} {
+		created, _, err := cl.conn.processRequest(request(t, createRequest(1, cl.ss.sessionID, tid,
+			pipe, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, nil)))
+		if err != nil {
+			t.Fatalf("opening %s: %v", pipe, err)
+		}
+		if status := created.Header().Status(); status != smb2.STATUS_ACCESS_DENIED {
+			t.Errorf("an anonymous session opening %s was answered %#x, want STATUS_ACCESS_DENIED",
+				pipe, status)
+		}
+	}
+
+	// A refusal on grounds of permission is counted as one.
+	if got := h.srv.Stats().PermErrors - before; got != 3 {
+		t.Errorf("the refusals raised the permission error count by %d, want 3", got)
+	}
 }

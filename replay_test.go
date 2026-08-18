@@ -282,7 +282,11 @@ func TestAReplayOverAnotherShareIsRefused(t *testing.T) {
 
 	// A second share, connected on the same session as the first: everything the replay is
 	// checked against holds except the share it arrives over.
-	other := &share{name: "other"}
+	other := &share{
+		name:            "other",
+		connectSecurity: h.share.connectSecurity,
+		fileSecurity:    h.share.fileSecurity,
+	}
 	h.srv.shareList[other.name] = other
 	tc := newTreeConnectState(2, alice.ss, other, shareAccess)
 	alice.ss.mu.Lock()

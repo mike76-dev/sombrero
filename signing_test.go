@@ -682,3 +682,135 @@ func TestIntegrationAnEncryptedMessageNeedsACipher(t *testing.T) {
 		t.Fatalf("the server refused a sealed message it had the cipher for: %v", err)
 	}
 }
+
+// A session is in the connection's table from the moment the setup begins, and its ID goes to the
+// client in the very first response - the one that says the setup is not finished. Being in the
+// table is therefore not the same as having authenticated, and [MS-SMB2] 3.3.5.2.9 says so: a
+// session that is InProgress serves LOGOFF, CLOSE and LOCK, and nothing else.
+
+// TestAnUnauthenticatedSessionServesAlmostNothing is what a client could do between being handed a
+// session ID and proving who it is. The IPC$ share grants access to whoever asks for it, so a tree
+// connect went through under a session with no user behind it, and from there the ioctls that need
+// no handle answered too - the network interfaces of the server among them.
+func TestAnUnauthenticatedSessionServesAlmostNothing(t *testing.T) {
+	h := newSMBTest(t)
+	h.srv.applyCapabilities()
+
+	c := h.newTestConnection("half-way")
+
+	// Not 3.1.1, which turns a tree connect away for want of a signature before anything else.
+	c.negotiateDialect = smb2.SMB_DIALECT_30
+	c.dialect = dialectName(c.negotiateDialect)
+
+	// What the first half of a session setup leaves behind.
+	ss := newSessionState(4242, c)
+	c.mu.Lock()
+	c.sessionTable[ss.sessionID] = ss
+	c.mu.Unlock()
+
+	if ss.stateNow() != sessionInProgress || ss.userName != "" {
+		t.Fatalf("the session is in state %d for user %q, want one nobody has authenticated over",
+			ss.stateNow(), ss.userName)
+	}
+
+	// The share that lets anybody in, which is what made this reachable.
+	resp, _, err := c.processRequest(request(t, treeConnectRequest(0, ss.sessionID, `\\SERVER\IPC$`)))
+	if err != nil {
+		t.Fatalf("the server gave up on the tree connect: %v", err)
+	}
+	if status := resp.Header().Status(); status == smb2.STATUS_OK {
+		t.Error("a session nobody has authenticated over connected to IPC$")
+	}
+
+	// And the commands that need neither a handle nor an account are refused with it.
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2IoctlRequestMinSize)
+	ih := smb2.NewHeader(msg)
+	ih.SetCommand(smb2.SMB2_IOCTL)
+	ih.SetMessageID(1)
+	ih.SetSessionID(ss.sessionID)
+	ih.SetCreditCharge(1)
+	body := msg[smb2.SMB2HeaderSize:]
+	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2IoctlRequestStructureSize)
+	binary.LittleEndian.PutUint32(body[4:8], smb2.FSCTL_QUERY_NETWORK_INTERFACE_INFO)
+	copy(body[8:24], smb2.DummyFileID)
+	binary.LittleEndian.PutUint32(body[44:48], 65536)
+	binary.LittleEndian.PutUint32(body[48:52], smb2.IOCTL_IS_FSCTL)
+
+	resp, _, err = c.processRequest(request(t, msg))
+	if err != nil {
+		t.Fatalf("the server gave up on the ioctl: %v", err)
+	}
+	if status := resp.Header().Status(); status == smb2.STATUS_OK {
+		t.Error("a session nobody has authenticated over was told the network interfaces of the server")
+	}
+
+	// A logoff is one of the three it must still serve, or a client that gives up half way through
+	// a setup has no way to say so.
+	msg = make([]byte, smb2.SMB2HeaderSize+smb2.SMB2LogoffRequestMinSize)
+	lh := smb2.NewHeader(msg)
+	lh.SetCommand(smb2.SMB2_LOGOFF)
+	lh.SetMessageID(2)
+	lh.SetSessionID(ss.sessionID)
+	lh.SetCreditCharge(1)
+	binary.LittleEndian.PutUint16(msg[smb2.SMB2HeaderSize:smb2.SMB2HeaderSize+2], smb2.SMB2LogoffRequestStructureSize)
+
+	resp, _, err = c.processRequest(request(t, msg))
+	if err != nil {
+		t.Fatalf("the server gave up on the logoff: %v", err)
+	}
+	if status := resp.Header().Status(); status != smb2.STATUS_OK {
+		t.Errorf("the logoff of a half-finished session was answered %#x, want it served", status)
+	}
+}
+
+// TestTreeConnectSigningExemptsSessionsWithoutAKey is the signature 3.1.1 asks a tree connect for.
+// [MS-SMB2] 3.3.5.7 exempts the anonymous and the guest session from it, and the reason is plain:
+// neither holds a signing key, so a server that demands one of them drops the connection of every
+// client it ever admits that way.
+func TestTreeConnectSigningExemptsSessionsWithoutAKey(t *testing.T) {
+	for _, tt := range []struct {
+		what      string
+		anonymous bool
+		guest     bool
+		wantDrop  bool
+	}{
+		{"a session with a user behind it", false, false, true},
+		{"an anonymous session", true, false, false},
+		{"a guest session", false, true, false},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+
+			// A real tree connect resolves the access of the session against the share, which the
+			// harness leaves empty because dial builds its tree connect directly.
+			h.restrictTo("alice")
+
+			cl := h.dial("alice")
+
+			// The flags alone, so that the exemption is what decides. The user behind the session
+			// is left in place, or the tree connect would be refused for want of access before the
+			// signature is ever weighed.
+			cl.ss.isAnonymous = tt.anonymous
+			cl.ss.isGuest = tt.guest
+
+			// Unsigned and unencrypted, which is all such a session can send.
+			resp, _, err := cl.conn.processRequest(request(t,
+				treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\files`)))
+
+			if tt.wantDrop {
+				if err == nil {
+					t.Fatalf("an unsigned tree connect was answered %#x, want the connection dropped",
+						resp.Header().Status())
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("the connection was dropped over a signature the session cannot make: %v", err)
+			}
+			if status := resp.Header().Status(); status != smb2.STATUS_OK {
+				t.Errorf("the tree connect was answered %#x, want it served", status)
+			}
+		})
+	}
+}

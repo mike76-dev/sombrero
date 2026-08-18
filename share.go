@@ -43,6 +43,28 @@ func (sh *share) ensurePersisted() {
 	}
 }
 
+// mayConnect reports whether the user is allowed on the share at all.
+func (sh *share) mayConnect(workgroup, user string) bool {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	_, ok := sh.connectSecurity[workgroup+"/"+user]
+
+	return ok
+}
+
+// fileAccess returns the rights the user holds on the files of the share, and whether they hold
+// any. Both tables are rewritten whenever the access rights of an account change, so they are only
+// ever read behind the lock those writes take.
+func (sh *share) fileAccess(workgroup, user string) (uint32, bool) {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	access, ok := sh.fileSecurity[workgroup+"/"+user]
+
+	return access, ok
+}
+
 // indexdConn holds the per-workgroup state for an indexd share connection.
 type indexdConn struct {
 	client        client.Client

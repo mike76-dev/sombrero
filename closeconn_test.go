@@ -214,3 +214,34 @@ func TestAPeerThatHasGoneEndsTheConnection(t *testing.T) {
 		t.Error("the connection was left in the connection list after the peer had gone")
 	}
 }
+
+// TestWritingToAClosedConnectionGivesUp is the response nobody is left to send. The sender stops
+// when the connection is torn down and the sending queue has no room, so a response handed over
+// afterwards was waited on for as long as the process lived - stranding the dispatcher, the reading
+// loop or a directory watch, and with them the connection, its sessions and everything they hold.
+func TestWritingToAClosedConnectionGivesUp(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	h.srv.closeConnection(cl.conn)
+
+	// A full sending queue with nothing draining it, which is where the teardown leaves one.
+	for range cap(cl.sent) {
+		cl.sent <- nil
+	}
+
+	resp := smb2.NewErrorResponse(request(t, echoRequest(0, cl.ss.sessionID, cl.tc.treeID)),
+		smb2.STATUS_CANCELLED, 0, nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.srv.writeResponse(cl.conn, cl.ss, resp)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("writing to a closed connection is still waiting for a sender that has stopped")
+	}
+}

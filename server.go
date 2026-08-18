@@ -181,6 +181,7 @@ func (s *server) newConnectionState(clientName string) *connection {
 		server:                s,
 		writeChan:             make(chan []byte),
 		closeChan:             make(chan struct{}),
+		wakeChan:              make(chan struct{}, 1),
 		stopChans:             make(map[uint64]chan struct{}),
 	}
 
@@ -344,7 +345,13 @@ func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResp
 		c.updatePreauthHash(resp.Header().SessionID(), buf)
 	}
 
-	c.writeChan <- buf
+	// Nothing drains the queue of a connection whose sender has stopped, so a message handed over
+	// after that would be waited on for as long as the process lives.
+	select {
+	case c.writeChan <- buf:
+	case <-c.closeChan:
+		return
+	}
 
 	s.mu.Lock()
 	s.stats.BytesSent += uint64(len(buf))
@@ -388,6 +395,7 @@ func (s *server) trySendResponse(c *connection, ss *session, resp smb2.GenericRe
 // enumShares generates a NetShareInfo Type 1 structure for each available share.
 func (s *server) enumShares() []rpc.NetShareInfo1 {
 	var shares []rpc.NetShareInfo1
+	s.mu.Lock()
 	for _, sh := range s.shareList {
 		share := rpc.NetShareInfo1{
 			Share:   sh.name,
@@ -397,6 +405,7 @@ func (s *server) enumShares() []rpc.NetShareInfo1 {
 
 		shares = append(shares, share)
 	}
+	s.mu.Unlock()
 
 	// Add the "imaginary" IPC (Inter-Protocol Communication) share.
 	shares = append(shares, rpc.NetShareInfo1{

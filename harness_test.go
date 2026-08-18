@@ -588,11 +588,15 @@ func newSMBTest(t *testing.T) *smbTest {
 	h.srv = newServerState(ctx, store, false, stores.IndexdConfig{})
 	h.srv.shareList[h.share.name] = h.share
 
+	// A share holds security for whoever may use it, and grants nothing to anybody else, so the
+	// accounts the tests dial with are on it from the start.
+	h.restrictTo("alice", "bob")
+
 	return h
 }
 
 // restrictTo limits the share to the named users, so that everybody else is turned away by the
-// access check. A share with no security set at all lets everybody in.
+// access check.
 func (h *smbTest) restrictTo(users ...string) {
 	h.share.connectSecurity = make(map[string]struct{})
 	h.share.fileSecurity = make(map[string]uint32)
@@ -671,13 +675,25 @@ const (
 	// writeAccess is what a client asks for when it means to change the file, and readAccess
 	// when it only means to look at it. Which of the two a create asks for is what decides
 	// whether the read caches of the other clients survive it.
-	writeAccess = smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA
-	readAccess  = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES
+	//
+	// A handle is granted what its create asked for, so what is asked for here has to cover
+	// everything the tests then do through the handle - writing it, setting information on it,
+	// renaming it and marking it for deletion - the way the ask of a client that means to
+	// change a file does.
+	writeAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES | smb2.FILE_WRITE_DATA |
+		smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
+	readAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES
 
 	// shareAccess is what the share grants over a file: everything a test may want to do with
 	// one. It is what a tree connect on the test share carries as its maximal access.
-	shareAccess = smb2.FILE_READ_DATA | smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA |
-		smb2.FILE_WRITE_EA | smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
+	//
+	// FILE_READ_ATTRIBUTES and FILE_READ_EA come with reading on a real share - the stored
+	// rights hand out 0x80120089 for read access, which carries both - so a fixture that grants
+	// FILE_READ_DATA without them is a handle no share ever issues, and refuses the client that
+	// asks for its reading in generic terms.
+	shareAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_ATTRIBUTES | smb2.FILE_READ_EA |
+		smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA |
+		smb2.FILE_WRITE_ATTRIBUTES | smb2.DELETE
 )
 
 // smbTestClients counts the clients built across a test binary, so that each gets a name and a
@@ -1200,6 +1216,23 @@ func leaseContext(key [16]byte, state uint32, version int) []byte {
 	return createContext(smb2.CREATE_REQUEST_LEASE, data)
 }
 
+// maximalAccessContext formats an SMB2_CREATE_QUERY_MAXIMAL_ACCESS_REQUEST create context, in the
+// form that carries no timestamp and so is always answered.
+func maximalAccessContext() []byte {
+	return createContext(smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST, nil)
+}
+
+// createdMaximalAccess returns the access the create response reports over the file, and whether
+// it carried the context at all.
+func createdMaximalAccess(buf []byte) (uint32, bool) {
+	data, found := createdContext(buf, smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST)
+	if !found || len(data) < 8 {
+		return 0, false
+	}
+
+	return binary.LittleEndian.Uint32(data[4:8]), true
+}
+
 // durableContext formats an SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2 create context, ready to be
 // handed to createRequest.
 func durableContext(createGuid [16]byte, timeout uint32) []byte {
@@ -1461,6 +1494,41 @@ func (cl *testClient) flushHandle(fid []byte) ([]byte, error) {
 	return resp.Encode(), nil
 }
 
+// lockRequest builds the bytes of an SMB2_LOCK request carrying a single lock element.
+func lockRequest(mid, sid uint64, tid uint32, fid []byte, offset, length uint64, flags uint32) []byte {
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2LockRequestMinSize+24)
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_LOCK)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetTreeID(tid)
+	h.SetCreditCharge(1)
+
+	body := msg[smb2.SMB2HeaderSize:]
+	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2LockRequestStructureSize)
+	binary.LittleEndian.PutUint16(body[2:4], 1)
+	copy(body[8:24], fid)
+
+	lock := body[smb2.SMB2LockRequestMinSize:]
+	binary.LittleEndian.PutUint64(lock[0:8], offset)
+	binary.LittleEndian.PutUint64(lock[8:16], length)
+	binary.LittleEndian.PutUint32(lock[16:20], flags)
+
+	return msg
+}
+
+// lockRange asks for a byte range of the file behind the handle to be locked.
+func (cl *testClient) lockRange(fid []byte, offset, length uint64) ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(lockRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, offset, length,
+		smb2.LOCKFLAG_EXCLUSIVE_LOCK|smb2.LOCKFLAG_FAIL_IMMEDIATELY))
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Encode(), nil
+}
+
 // openIDOf returns the key under which the global open table holds the open a create response
 // names: the durable half of the file ID.
 func openIDOf(fid []byte) uint64 {
@@ -1542,4 +1610,47 @@ func createdLeaseState(buf []byte) (uint32, bool) {
 	}
 
 	return binary.LittleEndian.Uint32(data[16:20]), true
+}
+
+// logoffRequest builds the bytes of an SMB2_LOGOFF request.
+func logoffRequest(mid, sid uint64) []byte {
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2LogoffRequestMinSize)
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_LOGOFF)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetCreditCharge(1)
+	binary.LittleEndian.PutUint16(msg[smb2.SMB2HeaderSize:smb2.SMB2HeaderSize+2], smb2.SMB2LogoffRequestStructureSize)
+
+	return msg
+}
+
+// logoff ends the session of the client the way a client that is done with it does.
+func (cl *testClient) logoff() ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(logoffRequest(cl.mid, cl.ss.sessionID))
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Encode(), nil
+}
+
+// treeConnectRequest builds the bytes of an SMB2_TREE_CONNECT request for the given share path.
+func treeConnectRequest(mid, sid uint64, path string) []byte {
+	enc := utils.EncodeStringToBytes(path)
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2TreeConnectRequestMinSize+len(enc))
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_TREE_CONNECT)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetCreditCharge(1)
+
+	body := msg[smb2.SMB2HeaderSize:]
+	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2TreeConnectRequestStructureSize)
+	binary.LittleEndian.PutUint16(body[4:6], uint16(smb2.SMB2HeaderSize+smb2.SMB2TreeConnectRequestMinSize))
+	binary.LittleEndian.PutUint16(body[6:8], uint16(len(enc)))
+	copy(msg[smb2.SMB2HeaderSize+smb2.SMB2TreeConnectRequestMinSize:], enc)
+
+	return msg
 }
