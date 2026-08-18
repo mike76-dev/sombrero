@@ -32,9 +32,21 @@ func TestTreeConnectAnswersWithTheStatusTheSpecNames(t *testing.T) {
 			what: "a share already at its limit of uses",
 			path: `\\SERVER\files`,
 			setUp: func(h *smbTest) {
+				h.restrictTo("alice")
 				h.share.currentUses = maxShareUses
 			},
 			want: smb2.STATUS_REQUEST_NOT_ACCEPTED,
+		},
+		{
+			// The order the two checks are weighed in, which 3.3.5.7 puts the access check first
+			// in: a user with no business on the share is told so whether it is busy or not.
+			what: "a share at its limit that the user has no access to anyway",
+			path: `\\SERVER\files`,
+			setUp: func(h *smbTest) {
+				h.restrictTo("bob")
+				h.share.currentUses = maxShareUses
+			},
+			want: smb2.STATUS_ACCESS_DENIED,
 		},
 	} {
 		t.Run(tt.what, func(t *testing.T) {

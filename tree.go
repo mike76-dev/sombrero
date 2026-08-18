@@ -226,13 +226,6 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			return nil, errAccessDenied
 		}
 
-		sh.mu.Lock()
-		if sh.currentUses >= maxShareUses {
-			sh.mu.Unlock()
-			return nil, errTooManyUses
-		}
-		sh.mu.Unlock()
-
 		// For indexd, lazily restore a connection from the DB if not yet initialized.
 		if sh.backend == "indexd" {
 			sh.mu.Lock()
@@ -257,7 +250,15 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 		if !exists {
 			return nil, errAccessDenied
 		}
+
+		// The use limit is weighed after the access check, in the order [MS-SMB2] 3.3.5.7 gives
+		// them, and under the lock that claims the use, so that two connects racing for the last
+		// one cannot both take it.
 		sh.mu.Lock()
+		if sh.currentUses >= maxShareUses {
+			sh.mu.Unlock()
+			return nil, errTooManyUses
+		}
 		sh.currentUses++
 		sh.mu.Unlock()
 	}
