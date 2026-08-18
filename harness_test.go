@@ -1465,6 +1465,41 @@ func (cl *testClient) flushHandle(fid []byte) ([]byte, error) {
 	return resp.Encode(), nil
 }
 
+// lockRequest builds the bytes of an SMB2_LOCK request carrying a single lock element.
+func lockRequest(mid, sid uint64, tid uint32, fid []byte, offset, length uint64, flags uint32) []byte {
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2LockRequestMinSize+24)
+	h := smb2.NewHeader(msg)
+	h.SetCommand(smb2.SMB2_LOCK)
+	h.SetMessageID(mid)
+	h.SetSessionID(sid)
+	h.SetTreeID(tid)
+	h.SetCreditCharge(1)
+
+	body := msg[smb2.SMB2HeaderSize:]
+	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2LockRequestStructureSize)
+	binary.LittleEndian.PutUint16(body[2:4], 1)
+	copy(body[8:24], fid)
+
+	lock := body[smb2.SMB2LockRequestMinSize:]
+	binary.LittleEndian.PutUint64(lock[0:8], offset)
+	binary.LittleEndian.PutUint64(lock[8:16], length)
+	binary.LittleEndian.PutUint32(lock[16:20], flags)
+
+	return msg
+}
+
+// lockRange asks for a byte range of the file behind the handle to be locked.
+func (cl *testClient) lockRange(fid []byte, offset, length uint64) ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(lockRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, offset, length,
+		smb2.LOCKFLAG_EXCLUSIVE_LOCK|smb2.LOCKFLAG_FAIL_IMMEDIATELY))
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Encode(), nil
+}
+
 // openIDOf returns the key under which the global open table holds the open a create response
 // names: the durable half of the file ID.
 func openIDOf(fid []byte) uint64 {

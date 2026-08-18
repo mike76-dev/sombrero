@@ -1462,9 +1462,24 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
-		if op, status := c.findOpen(ss, fr.FileID(), req); status == smb2.STATUS_OK {
-			op.file.waitForWrites()
+		op, status := c.findOpen(ss, fr.FileID(), req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(fr, status, 0, nil)
+			return resp, ss, nil
 		}
+
+		// [MS-SMB2] 3.3.5.11 asks for the write access that the data being made safe was written
+		// with. The rights a directory is named with, FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY,
+		// are the same two bits, so one test covers both.
+		op.mu.Lock()
+		ga := op.grantedAccess
+		op.mu.Unlock()
+		if ga&(smb2.FILE_WRITE_DATA|smb2.FILE_APPEND_DATA|smb2.GENERIC_WRITE) == 0 {
+			resp := smb2.NewErrorResponse(fr, smb2.STATUS_ACCESS_DENIED, 0, nil)
+			return resp, ss, nil
+		}
+
+		op.file.waitForWrites()
 
 		resp := &smb2.FlushResponse{}
 		resp.FromRequest(fr)
@@ -1892,6 +1907,14 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		ss, status := c.sessionFor(req)
 		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(lr, status, 0, nil)
+			return resp, ss, nil
+		}
+
+		// The handle is looked up even though nothing is locked with it, because [MS-SMB2]
+		// 3.3.5.14 answers one that names no open with STATUS_FILE_CLOSED, and a client that is
+		// told its lock was taken on a handle it has already closed has been told a lie.
+		if _, status := c.findOpen(ss, lr.FileID(), req); status != smb2.STATUS_OK {
 			resp := smb2.NewErrorResponse(lr, status, 0, nil)
 			return resp, ss, nil
 		}
