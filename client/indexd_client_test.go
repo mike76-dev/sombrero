@@ -251,7 +251,7 @@ func TestIndexdClient_FileLifecycle(t *testing.T) {
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := []byte("hello world")
@@ -550,7 +550,7 @@ func TestIndexdClient_RenameDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := makeLargeMixedContent()
@@ -605,7 +605,7 @@ func TestIndexdClient_RangedReads(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := makeLargeMixedContent()
@@ -679,7 +679,7 @@ func TestIndexdClient_DeleteDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := makeLargeMixedContent()
@@ -734,7 +734,7 @@ func TestIndexdClient_RenameDirectoryDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	dir := "docs"
@@ -800,7 +800,7 @@ func TestIndexdClient_OverwriteFileDuringMixedUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newGatedFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	origContent := []byte("old content")
@@ -979,7 +979,7 @@ func TestIndexdClient_CrossWorkgroupIsolation(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := []byte("alice's secret data")
@@ -1018,7 +1018,7 @@ func TestIndexdClient_WithinWorkgroupPrivacy(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	content := []byte("alice's private content")
@@ -1078,7 +1078,7 @@ func TestIndexdClient_WithinWorkgroupPublicDirectory(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// Create a public directory directly via the store. This workgroup has no PublicDirs
@@ -1145,7 +1145,7 @@ func TestIndexdClient_MakeDirectoryAutoPublic(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// "shared" is in PublicDirs so MakeDirectory must create a non-private directory.
@@ -1209,7 +1209,7 @@ func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
 		grantFullAccess(t, db, share, alice)
 		grantFullAccess(t, db, share, bob)
 
-		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 		t.Cleanup(func() { _ = c.Close() })
 
 		// "SHARED" should match "shared" in PublicDirs when case-insensitive.
@@ -1240,7 +1240,7 @@ func TestIndexdClient_PublicDirCaseSensitivity(t *testing.T) {
 		grantFullAccess(t, db, share, alice)
 		grantFullAccess(t, db, share, bob)
 
-		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+		c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 		t.Cleanup(func() { _ = c.Close() })
 
 		// "SHARED" must not match "shared" in PublicDirs when case-sensitive.
@@ -1282,7 +1282,7 @@ func TestIndexdClient_PublicDirCrossWorkgroupIsolation(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg1.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
@@ -1342,7 +1342,7 @@ func TestIndexdClient_ReadOnlyPublicDir(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "readonly"); err != nil {
@@ -1408,7 +1408,7 @@ func TestIndexdClient_RewritablePublicDir(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "shared"); err != nil {
@@ -1456,7 +1456,7 @@ func TestIndexdClient_OverwriteOwnFile(t *testing.T) {
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	path := "file.txt"
@@ -1497,7 +1497,7 @@ func TestIndexdClient_UpdateWorkgroupRestampsDirectories(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// The workgroup has no public folders yet, so the directory starts private.
@@ -1565,7 +1565,7 @@ func TestIndexdClient_RenamePublicDirMovesAllContents(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// Alice sets up a public folder holding one of her files and a read-only
@@ -1612,7 +1612,7 @@ func TestIndexdClient_DuplicatePublicDirEntries(t *testing.T) {
 	grantFullAccess(t, db, share, alice)
 	grantFullAccess(t, db, share, bob)
 
-	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, newFakeBackend(), share.Name, wg.ID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.MakeDirectory(ctx, alice, "dup"); err != nil {
@@ -1702,7 +1702,7 @@ func TestIndexdClient_PackedSlab(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	fb := newFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// With a single data shard, three files of this size stay buffered on
@@ -1777,7 +1777,7 @@ func TestIndexdClient_PackedSlabRangedReads(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	fb := newFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// The same layout as TestIndexdClient_PackedSlab: three equal files, of
@@ -1891,7 +1891,7 @@ func TestIndexdClient_PackedSlabUploadFailure(t *testing.T) {
 	fb := newFakeBackend()
 	fb.failUploads(errors.New("backend is down"))
 
-	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	slabSize := uint64(proto.SectorSize)
@@ -1937,7 +1937,7 @@ func startStuckUpload(t *testing.T, ctx context.Context, db *stores.Database, ac
 	t.Helper()
 
 	fb := newGatedFakeBackend()
-	c := newIndexdClient(db, fb, share, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, fb, share, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 
 	// A full slab is uploaded as it is, without waiting to be packed.
 	content := make([]byte, proto.SectorSize)
@@ -2064,7 +2064,7 @@ func TestIndexdClient_PackedSlabFilesDeletedDuringUpload(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	fb := newGatedFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	slabSize := uint64(proto.SectorSize)
@@ -2159,7 +2159,7 @@ func TestIndexdClient_PackingOptionsWarning(t *testing.T) {
 			log.SetOutput(&out)
 			t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-			c := newIndexdClient(db, newFakeBackend(), "testshare", 1, 1, 0, tc.packing, false)
+			c := newIndexdClient(db, newFakeBackend(), "testshare", 1, 1, 0, tc.packing, FragmentationOptions{}, false)
 			_ = c.Close()
 
 			if got := strings.Contains(out.String(), "will never upload anything"); got != tc.warn {
@@ -2235,7 +2235,7 @@ func TestIndexdClient_LateCompletionSharedSlab(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	fb := newFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 	ic := c.(*IndexdClient)
 
@@ -2298,7 +2298,7 @@ func TestIndexdClient_UnpinRetry(t *testing.T) {
 
 	wgID := workgroupID(t, db, acc)
 	fb := newFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 	ic := c.(*IndexdClient)
 
@@ -2378,7 +2378,7 @@ func TestIndexdClient_StrandedPieceRecovery(t *testing.T) {
 	}
 
 	fb := newFakeBackend()
-	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 	ic := c.(*IndexdClient)
 
@@ -2420,7 +2420,7 @@ func TestIndexdClient_OrphanedSlabs(t *testing.T) {
 
 	backend := newFakeBackend()
 	wg := workgroupID(t, db, acc)
-	c := newIndexdClient(db, backend, share.Name, wg, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, backend, share.Name, wg, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// A file uploaded the normal way references its slab, so it is no orphan.
@@ -2481,7 +2481,7 @@ func TestIndexdClient_UnpinOrphanedSlabs(t *testing.T) {
 
 	backend := newFakeBackend()
 	wg := workgroupID(t, db, acc)
-	c := newIndexdClient(db, backend, share.Name, wg, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, backend, share.Name, wg, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	first := pinUnrecorded(t, ctx, backend, 1024)
@@ -2534,7 +2534,7 @@ func TestIndexdClient_UnpinOrphanedSlabsKeepsFailuresStaged(t *testing.T) {
 
 	backend := newFakeBackend()
 	wg := workgroupID(t, db, acc)
-	c := newIndexdClient(db, backend, share.Name, wg, 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, backend, share.Name, wg, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	leaked := pinUnrecorded(t, ctx, backend, 512)
@@ -2569,7 +2569,7 @@ func TestIndexdClient_OrphanScanPaginates(t *testing.T) {
 	grantFullAccess(t, db, share, acc)
 
 	backend := newFakeBackend()
-	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, false)
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
 	t.Cleanup(func() { _ = c.Close() })
 
 	// More objects than fit in one page of the event log, plus a deletion,
@@ -2595,4 +2595,134 @@ func TestIndexdClient_OrphanScanPaginates(t *testing.T) {
 			t.Fatal("orphans: the slab that was already dropped is reported as still pinned")
 		}
 	}
+}
+
+// packOneSlab uploads a small file and waits for the packer to put it into a
+// slab of its own, which leaves the rest of that slab dead space.
+func packOneSlab(t *testing.T, ctx context.Context, c Client, db *stores.Database, acc stores.Account, share, path string) {
+	t.Helper()
+
+	content := []byte("a small file that will never fill a slab")
+
+	uploadID, err := c.StartUpload(ctx, acc, path)
+	if err != nil {
+		t.Fatalf("StartUpload(%s): %v", path, err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), path, uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write(%s): %v", path, err)
+	}
+	if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload(%s): %v", path, err)
+	}
+
+	waitForMixedState(t, db, acc, share, path, 1, 0)
+}
+
+// TestIndexdClient_FragmentationCheck verifies that the check measures the dead
+// space in the share's slabs and reports it only when the debug flag is set.
+func TestIndexdClient_FragmentationCheck(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	// An age of a nanosecond has the packer take the file as soon as it
+	// looks, which puts it into a slab that is dead space but for those bytes.
+	packing := PackingOptions{MaxAge: time.Nanosecond}
+
+	var out syncBuffer
+	log.SetOutput(&out)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, packing, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	ic, ok := c.(*IndexdClient)
+	if !ok {
+		t.Fatalf("want an *IndexdClient, got %T", c)
+	}
+
+	// Nothing is uploaded yet, so there is nothing to be fragmented.
+	stats, err := ic.checkFragmentation()
+	if err != nil {
+		t.Fatalf("checkFragmentation: %v", err)
+	}
+	if stats != (stores.FragmentationStats{}) {
+		t.Fatalf("want an empty share to have no slabs, got %+v", stats)
+	}
+
+	packOneSlab(t, ctx, c, db, acc, share.Name, "small.txt")
+
+	stats, err = ic.checkFragmentation()
+	if err != nil {
+		t.Fatalf("checkFragmentation: %v", err)
+	}
+	if stats.Slabs != 1 || stats.Fragmented != 1 {
+		t.Fatalf("want the one slab reported as fragmented, got %+v", stats)
+	}
+	if stats.Wasted != stats.FragmentedWasted || stats.Wasted == 0 {
+		t.Fatalf("want all of the dead space charged to the fragmented slab, got %+v", stats)
+	}
+
+	// The check is quiet unless the debug flag is set.
+	if strings.Contains(out.String(), "dead space") {
+		t.Fatalf("want no fragmentation logged without the debug flag, got %q", out.String())
+	}
+
+	ic.debug = true
+	if _, err := ic.checkFragmentation(); err != nil {
+		t.Fatalf("checkFragmentation: %v", err)
+	}
+	if !strings.Contains(out.String(), "1 of 1 slab(s) are at least 25% dead space") {
+		t.Fatalf("want the fragmented slab reported, got %q", out.String())
+	}
+}
+
+// TestIndexdClient_FragmentationMonitor verifies that the monitor only runs
+// when it is given an interval, and that it reports without waiting out the
+// first one.
+func TestIndexdClient_FragmentationMonitor(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	run := func(t *testing.T, frag FragmentationOptions) string {
+		t.Helper()
+
+		var out syncBuffer
+		log.SetOutput(&out)
+		t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+		c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, frag, true)
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && !strings.Contains(out.String(), "fragmentation") {
+			time.Sleep(10 * time.Millisecond)
+		}
+		_ = c.Close()
+
+		return out.String()
+	}
+
+	t.Run("off", func(t *testing.T) {
+		if got := run(t, FragmentationOptions{}); strings.Contains(got, "fragmentation") {
+			t.Fatalf("want no check without an interval, got %q", got)
+		}
+	})
+
+	t.Run("on", func(t *testing.T) {
+		got := run(t, FragmentationOptions{Interval: time.Hour})
+		if !strings.Contains(got, "no slabs to check for fragmentation") {
+			t.Fatalf("want a reading right away, got %q", got)
+		}
+	})
 }

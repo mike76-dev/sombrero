@@ -359,9 +359,13 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 		if err != nil {
 			return err
 		}
+		fragLevel, fragInterval := s.cfg.Fragmentation()
 		c := client.NewIndexdClient(db, sdkClient, share.Name, wg.ID, share.DataShards, share.ParityShards, client.PackingOptions{
 			MinSize: s.cfg.MinPackedSlabSize,
 			MaxAge:  s.cfg.MaxBufferAge.Duration(),
+		}, client.FragmentationOptions{
+			Threshold: fragLevel,
+			Interval:  fragInterval,
 		}, s.debug)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
