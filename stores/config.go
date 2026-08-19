@@ -133,6 +133,80 @@ func (a *BufferAge) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// The defaults of the fragmentation monitor.
+const (
+	DefaultFragmentationCheck     = time.Hour
+	DefaultFragmentationThreshold = 0.25
+)
+
+// CheckInterval is how often a periodic background check runs. Zero means the
+// check's own default, and a negative value, which is what "never" reads as,
+// turns it off.
+type CheckInterval time.Duration
+
+// String implements fmt.Stringer.
+func (i CheckInterval) String() string {
+	switch {
+	case i < 0:
+		return "never"
+	case i == 0:
+		return "default"
+	default:
+		return time.Duration(i).String()
+	}
+}
+
+// Interval returns how often the check runs, falling back to def. A zero
+// duration means it does not run at all.
+func (i CheckInterval) Interval(def time.Duration) time.Duration {
+	switch {
+	case i < 0:
+		return 0
+	case i == 0:
+		return def
+	default:
+		return time.Duration(i)
+	}
+}
+
+// MarshalYAML implements yaml.Marshaler.
+func (i CheckInterval) MarshalYAML() (any, error) {
+	return i.String(), nil
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (i *CheckInterval) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+
+	s = strings.TrimSpace(s)
+	switch strings.ToLower(s) {
+	case "", "default":
+		*i = 0
+		return nil
+	case "never", "off":
+		*i = -1
+		return nil
+	}
+
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("unknown check interval: %q", s)
+	}
+	if d < 0 {
+		return fmt.Errorf("check interval must not be negative: %q", s)
+	}
+	// Zero would read as the default rather than as what it says.
+	if d == 0 {
+		return fmt.Errorf("a check interval of %q does not turn the check off, use \"never\" for that", s)
+	}
+
+	*i = CheckInterval(d)
+	return nil
+}
+
 // IndexdConfig lists all parameters required to connect to an `indexd` node.
 type IndexdConfig struct {
 	Name        string `yaml:"appName"`
@@ -152,6 +226,25 @@ type IndexdConfig struct {
 	// no lower bound on what an aged upload may carry.
 	MinPackedSlabSize uint64    `yaml:"minPackedSlabSize,omitempty"`
 	MaxBufferAge      BufferAge `yaml:"maxBufferAge,omitempty"`
+
+	// Editing and deleting files leaves dead space behind in the slabs they
+	// were packed into, which keeps being paid for. These govern the check
+	// that watches for it: how much of a slab may be dead space before it is
+	// reported, as a fraction between 0 and 1, and how often to look. Unset,
+	// both fall back to their defaults; a FragmentationCheck of "never" turns
+	// the check off and leaves the API to report on demand.
+	FragmentationThreshold float64       `yaml:"fragmentationThreshold,omitempty"`
+	FragmentationCheck     CheckInterval `yaml:"fragmentationCheck,omitempty"`
+}
+
+// Fragmentation returns the monitor's settings with the defaults filled in. A
+// zero interval means the monitor does not run.
+func (c IndexdConfig) Fragmentation() (threshold float64, interval time.Duration) {
+	threshold = c.FragmentationThreshold
+	if threshold <= 0 {
+		threshold = DefaultFragmentationThreshold
+	}
+	return threshold, c.FragmentationCheck.Interval(DefaultFragmentationCheck)
 }
 
 // Config lists the config fields.
@@ -183,6 +276,12 @@ func ReadConfig(dir string) (cfg Config, err error) {
 	// An unset address must not fall back to binding every interface.
 	if cfg.API.Address == "" {
 		cfg.API.Address = defaultAPIAddress
+	}
+
+	// Below zero reports every slab there is, above one reports none.
+	if t := cfg.Indexd.FragmentationThreshold; t < 0 || t > 1 {
+		err = fmt.Errorf("fragmentationThreshold must be a fraction between 0 and 1, got %v", t)
+		return
 	}
 
 	return
