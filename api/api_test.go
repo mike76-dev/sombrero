@@ -1694,8 +1694,8 @@ func TestFragmentation(t *testing.T) {
 			FragmentedWasted: 1000,
 		},
 		Slabs: []stores.PackedSlab{
-			{Key: slabKey(1), Size: 1000, Used: 250, Pieces: 1},
-			{Key: slabKey(2), Size: 1000, Used: 750, Pieces: 3},
+			{Key: slabKey(1), Size: 1000, Filled: 1000, Used: 250, Pieces: 1},
+			{Key: slabKey(2), Size: 1000, Filled: 1000, Used: 750, Pieces: 3},
 		},
 	}
 
@@ -1735,7 +1735,7 @@ func TestFragmentation(t *testing.T) {
 			other: &mockClient{fragmentation: client.FragmentationReport{
 				Threshold: 0.25,
 				Stats:     stores.FragmentationStats{Slabs: 1, Wasted: 500, Fragmented: 1, FragmentedWasted: 500},
-				Slabs:     []stores.PackedSlab{{Key: slabKey(3), Size: 1000, Used: 500, Pieces: 2}},
+				Slabs:     []stores.PackedSlab{{Key: slabKey(3), Size: 1000, Filled: 1000, Used: 500, Pieces: 2}},
 			}},
 		})
 

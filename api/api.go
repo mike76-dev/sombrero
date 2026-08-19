@@ -107,6 +107,7 @@ type FragmentedSlab struct {
 	Workgroup     string        `json:"workgroup"`
 	Key           types.Hash256 `json:"key"`
 	Size          uint64        `json:"size"`
+	Filled        uint64        `json:"filled"`
 	Used          uint64        `json:"used"`
 	Wasted        uint64        `json:"wasted"`
 	Pieces        int           `json:"pieces"`
@@ -909,6 +910,7 @@ func (api *API) fragmentationHandlerGET(w http.ResponseWriter, req *http.Request
 				Workgroup:     wg,
 				Key:           slab.Key,
 				Size:          slab.Size,
+				Filled:        slab.Filled,
 				Used:          slab.Used,
 				Wasted:        slab.Wasted(),
 				Pieces:        slab.Pieces,
@@ -931,8 +933,8 @@ func (api *API) fragmentationHandlerGET(w http.ResponseWriter, req *http.Request
 	// Most fragmented first across all the workgroups, so that the listing
 	// reads the same way it does per connection.
 	sort.Slice(res.Slabs, func(i, j int) bool {
-		if res.Slabs[i].Used != res.Slabs[j].Used {
-			return res.Slabs[i].Used < res.Slabs[j].Used
+		if res.Slabs[i].Wasted != res.Slabs[j].Wasted {
+			return res.Slabs[i].Wasted > res.Slabs[j].Wasted
 		}
 		return bytes.Compare(res.Slabs[i].Key[:], res.Slabs[j].Key[:]) < 0
 	})

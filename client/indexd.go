@@ -398,6 +398,14 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		ic.fragLevel = stores.DefaultFragmentationThreshold
 	}
 
+	// A slab can never hold more dead space than it was filled with, so one
+	// uploaded at the minimum size never reaches a threshold above what that
+	// minimum is of a slab. Only an age uploads a slab short of full, and an
+	// unset minimum puts no floor on how short.
+	if ic.maxBufferAge > 0 && ic.minPackSize > 0 && ic.fragLevel*float64(ic.slabSize) > float64(ic.minPackSize) {
+		log.Printf("share %s: fragmentationThreshold of %.0f%% of a slab of %d is above the minPackedSlabSize of %d, so the holes in slabs uploaded at that minimum will never be reported", share, ic.fragLevel*100, ic.slabSize, ic.minPackSize)
+	}
+
 	// Start background upload threads.
 	for range uploadWorkers {
 		ic.wg.Add(1)

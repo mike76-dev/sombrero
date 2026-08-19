@@ -2597,27 +2597,6 @@ func TestIndexdClient_OrphanScanPaginates(t *testing.T) {
 	}
 }
 
-// packOneSlab uploads a small file and waits for the packer to put it into a
-// slab of its own, which leaves the rest of that slab dead space.
-func packOneSlab(t *testing.T, ctx context.Context, c Client, db *stores.Database, acc stores.Account, share, path string) {
-	t.Helper()
-
-	content := []byte("a small file that will never fill a slab")
-
-	uploadID, err := c.StartUpload(ctx, acc, path)
-	if err != nil {
-		t.Fatalf("StartUpload(%s): %v", path, err)
-	}
-	if _, err := c.Write(ctx, bytes.NewReader(content), path, uploadID, 1, 0, uint64(len(content))); err != nil {
-		t.Fatalf("Write(%s): %v", path, err)
-	}
-	if err := c.FinishUpload(ctx, path, uploadID, nil); err != nil {
-		t.Fatalf("FinishUpload(%s): %v", path, err)
-	}
-
-	waitForMixedState(t, db, acc, share, path, 1, 0)
-}
-
 // TestIndexdClient_FragmentationCheck verifies that the check measures the dead
 // space in the share's slabs and reports it only when the debug flag is set.
 func TestIndexdClient_FragmentationCheck(t *testing.T) {
@@ -2630,9 +2609,12 @@ func TestIndexdClient_FragmentationCheck(t *testing.T) {
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
-	// An age of a nanosecond has the packer take the file as soon as it
-	// looks, which puts it into a slab that is dead space but for those bytes.
-	packing := PackingOptions{MaxAge: time.Nanosecond}
+	// The two files are packed into one slab together: neither reaches the
+	// minimum on its own, and the age has the packer take them both as soon
+	// as the second one is finalized.
+	slab := int(proto.SectorSize)
+	first, second := slab*3/8, slab/8
+	packing := PackingOptions{MinSize: uint64(first + second), MaxAge: time.Nanosecond}
 
 	var out syncBuffer
 	log.SetOutput(&out)
@@ -2655,7 +2637,24 @@ func TestIndexdClient_FragmentationCheck(t *testing.T) {
 		t.Fatalf("want an empty share to have no slabs, got %+v", stats)
 	}
 
-	packOneSlab(t, ctx, c, db, acc, share.Name, "small.txt")
+	uploadFile(t, ctx, c, acc, "first.bin", frand.Bytes(first))
+	uploadFile(t, ctx, c, acc, "second.bin", frand.Bytes(second))
+	waitForMixedState(t, db, acc, share.Name, "first.bin", 1, 0)
+	waitForMixedState(t, db, acc, share.Name, "second.bin", 1, 0)
+
+	// The slab is only part full, but nobody has taken anything out of it.
+	stats, err = ic.checkFragmentation()
+	if err != nil {
+		t.Fatalf("checkFragmentation: %v", err)
+	}
+	if stats.Slabs != 1 || stats.Fragmented != 0 || stats.Wasted != 0 {
+		t.Fatalf("want an untouched slab to hold no dead space, got %+v", stats)
+	}
+
+	// Deleting the first file punches a hole the second one does not fill.
+	if err := c.Delete(ctx, acc, "first.bin", false); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
 
 	stats, err = ic.checkFragmentation()
 	if err != nil {
@@ -2664,8 +2663,8 @@ func TestIndexdClient_FragmentationCheck(t *testing.T) {
 	if stats.Slabs != 1 || stats.Fragmented != 1 {
 		t.Fatalf("want the one slab reported as fragmented, got %+v", stats)
 	}
-	if stats.Wasted != stats.FragmentedWasted || stats.Wasted == 0 {
-		t.Fatalf("want all of the dead space charged to the fragmented slab, got %+v", stats)
+	if stats.Wasted != uint64(first) || stats.FragmentedWasted != uint64(first) {
+		t.Fatalf("want the deleted file's %d bytes wasted, got %+v", first, stats)
 	}
 
 	// The check is quiet unless the debug flag is set.
@@ -2749,4 +2748,66 @@ func TestIndexdClient_FragmentationMonitor(t *testing.T) {
 			t.Fatalf("want a reading right away, got %q", got)
 		}
 	})
+}
+
+// TestIndexdClient_FragmentationThresholdWarning verifies that a threshold no
+// slab uploaded at the minimum size can ever reach is reported, since it leaves
+// the holes in those slabs invisible however many they collect.
+func TestIndexdClient_FragmentationThresholdWarning(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	newTestShare(t, db, "testshare")
+	slab := uint64(proto.SectorSize)
+
+	tests := []struct {
+		name    string
+		packing PackingOptions
+		frag    FragmentationOptions
+		warn    bool
+	}{
+		{
+			name:    "nothing is uploaded short of full",
+			packing: PackingOptions{MinSize: slab / 10},
+			frag:    FragmentationOptions{Threshold: 0.25},
+		},
+		{
+			name:    "no minimum to compare against",
+			packing: PackingOptions{MaxAge: time.Hour},
+			frag:    FragmentationOptions{Threshold: 0.25},
+		},
+		{
+			name:    "threshold below the minimum",
+			packing: PackingOptions{MinSize: slab / 2, MaxAge: time.Hour},
+			frag:    FragmentationOptions{Threshold: 0.25},
+		},
+		{
+			name:    "threshold above the minimum",
+			packing: PackingOptions{MinSize: slab / 10, MaxAge: time.Hour},
+			frag:    FragmentationOptions{Threshold: 0.25},
+			warn:    true,
+		},
+		{
+			name:    "default threshold above the minimum",
+			packing: PackingOptions{MinSize: slab / 10, MaxAge: time.Hour},
+			warn:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out syncBuffer
+			log.SetOutput(&out)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+			c := newIndexdClient(db, newFakeBackend(), "testshare", 1, 1, 0, tc.packing, tc.frag, false)
+			_ = c.Close()
+
+			if got := strings.Contains(out.String(), "will never be reported"); got != tc.warn {
+				t.Fatalf("want warning %v, got %q", tc.warn, out.String())
+			}
+		})
+	}
 }
