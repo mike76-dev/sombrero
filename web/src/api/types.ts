@@ -89,6 +89,34 @@ export interface OrphansResponse {
   errors?: Record<string, string>
 }
 
+export interface FragmentedSlab {
+  workgroup: string
+  key: string
+  size: number
+  // How far into the slab the pieces reached when it was uploaded. What is
+  // left between it and `used` is what deleting and editing punched out.
+  filled: number
+  used: number
+  wasted: number
+  pieces: number
+  // The dead space as a fraction of the slab size, between 0 and 1.
+  fragmentation: number
+}
+
+export interface FragmentationResponse {
+  slabs: FragmentedSlab[]
+  // Every slab of the share, and the dead space in all of them.
+  total: number
+  wasted: number
+  // The listed slabs alone, i.e. those reaching the threshold.
+  fragmented: number
+  fragmentedWasted: number
+  // The dead space a slab had to hold to be listed, as a fraction.
+  threshold: number
+  // Keyed by the workgroup whose connection could not be checked.
+  errors?: Record<string, string>
+}
+
 export interface UnpinOrphansResponse {
   unpinned: number
   freed: number

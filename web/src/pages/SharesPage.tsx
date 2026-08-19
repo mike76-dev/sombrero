@@ -1,6 +1,13 @@
 import { Fragment, useEffect, useState } from 'react'
-import { AccessRights, Account, OrphansResponse, Share } from '../api/types'
 import {
+  AccessRights,
+  Account,
+  FragmentationResponse,
+  OrphansResponse,
+  Share,
+} from '../api/types'
+import {
+  checkFragmentation,
   getAccountById,
   getPolicy,
   getShareAccounts,
@@ -251,6 +258,108 @@ function OrphanedSlabsCard({ share }: { share: Share }) {
   )
 }
 
+// formatPercent renders a fraction as a percentage. A slab that still holds
+// something never rounds up to a full 100%, which would read as an orphan.
+function formatPercent(fraction: number): string {
+  const pct = fraction * 100
+  if (pct >= 100) return '100%'
+  return `${Math.min(Math.round(pct), 99)}%`
+}
+
+// FragmentationCard reports the dead space that editing and deleting files
+// leaves behind in the slabs they were packed into. indexd shares only, and
+// read-only for now: repacking is not implemented yet.
+function FragmentationCard({ share }: { share: Share }) {
+  const { run, busy, error } = useApiAction()
+  const [check, setCheck] = useState<FragmentationResponse | null>(null)
+
+  const failures = check?.errors ? Object.entries(check.errors) : []
+
+  return (
+    <div className="stack">
+      <p className="muted">
+        Editing or deleting a file leaves a hole in the slab it was packed into, and the share
+        keeps paying for the whole slab. Space a slab was never filled with does not count — only
+        what was taken back out of it. Nothing is repacked yet; this only reports what is there.
+      </p>
+      <div className="row">
+        <button
+          className="btn"
+          disabled={busy}
+          onClick={() =>
+            run(async () => {
+              setCheck(await checkFragmentation(share.name))
+            })
+          }
+        >
+          {check ? 'Recheck' : 'Check fragmentation'}
+        </button>
+      </div>
+      <ErrorBanner error={error} />
+      {check &&
+        (check.total === 0 ? (
+          <p className="muted">This share has no uploaded slabs yet.</p>
+        ) : (
+          <>
+            {check.fragmented === 0 ? (
+              <p className="muted">
+                None of the {check.total} slab{check.total === 1 ? '' : 's'} reach{' '}
+                {formatPercent(check.threshold)} dead space, {formatBytes(check.wasted)} wasted in
+                total.
+              </p>
+            ) : (
+              <div className="banner banner-error">
+                <strong>{check.fragmented}</strong> of {check.total} slab
+                {check.total === 1 ? '' : 's'} {check.fragmented === 1 ? 'is' : 'are'} at least{' '}
+                {formatPercent(check.threshold)} dead space, wasting{' '}
+                {formatBytes(check.fragmentedWasted)} of {formatBytes(check.wasted)} in total.
+              </div>
+            )}
+            {check.fragmented > 0 && (
+              <>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Slab</th>
+                      <th>Dead space</th>
+                      <th>Wasted</th>
+                      <th>In use</th>
+                      <th>Pieces</th>
+                      <th>Workgroup</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {check.slabs.slice(0, maxListedSlabs).map((slab) => (
+                      <tr key={`${slab.workgroup}/${slab.key}`}>
+                        <td className="mono">{slab.key.slice(0, 16)}…</td>
+                        <td>{formatPercent(slab.fragmentation)}</td>
+                        <td>{formatBytes(slab.wasted)}</td>
+                        <td>
+                          {formatBytes(slab.used)} of {formatBytes(slab.filled)} written
+                        </td>
+                        <td>{slab.pieces}</td>
+                        <td className="mono muted">{slab.workgroup}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {check.slabs.length > maxListedSlabs && (
+                  <p className="muted">…and {check.slabs.length - maxListedSlabs} more.</p>
+                )}
+              </>
+            )}
+          </>
+        ))}
+      {failures.map(([workgroup, reason]) => (
+        <div className="banner banner-error" key={workgroup}>
+          Workgroup <span className="mono">{workgroup}</span> could not be reached, so its slabs
+          are not counted here: {reason}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function ShareDetails({ share, onChanged }: { share: Share; onChanged: () => void }) {
   const { run, busy, error } = useApiAction()
   const [accounts, setAccounts] = useState<NamedRights[] | null>(null)
@@ -327,6 +436,7 @@ function ShareDetails({ share, onChanged }: { share: Share; onChanged: () => voi
       </div>
       <ErrorBanner error={error} />
       {share.type === 'indexd' && <OrphanedSlabsCard share={share} />}
+      {share.type === 'indexd' && <FragmentationCard share={share} />}
       {accounts &&
         (accounts.length === 0 ? (
           <p className="muted">No accounts have access to this share.</p>

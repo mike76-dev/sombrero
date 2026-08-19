@@ -4,6 +4,7 @@ import type {
   AccessRights,
   ConnectRequestResponse,
   ConnectResponse,
+  FragmentationResponse,
   IsBannedResponse,
   OrphansResponse,
   PublicDir,
@@ -75,6 +76,11 @@ export const unpinOrphans = (share: string) =>
   request<UnpinOrphansResponse>(`/share/${encodeURIComponent(share)}/orphans`, {
     method: 'DELETE',
   })
+
+// Fragmentation (indexd shares only)
+
+export const checkFragmentation = (share: string) =>
+  request<FragmentationResponse>(`/share/${encodeURIComponent(share)}/fragmentation`)
 
 // Access policies
 
