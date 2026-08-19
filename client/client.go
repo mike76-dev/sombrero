@@ -31,6 +31,15 @@ type OrphanedSlab struct {
 	PinnedAt time.Time     `json:"pinnedAt"`
 }
 
+// FragmentationReport is what a connection reports about the dead space in its
+// slabs: the totals over all of them, and the slabs that reach Threshold, most
+// fragmented first.
+type FragmentationReport struct {
+	Threshold float64                   `json:"threshold"`
+	Stats     stores.FragmentationStats `json:"stats"`
+	Slabs     []stores.PackedSlab       `json:"slabs"`
+}
+
 // UnpinResult reports what unpinning a share's orphaned slabs achieved.
 type UnpinResult struct {
 	// Unpinned counts the slabs that were dropped from the backend, and Freed
@@ -99,6 +108,12 @@ type Client interface {
 	// Both return ErrNoSlabScan on the backends that manage their own objects.
 	OrphanedSlabs(ctx context.Context, minAge time.Duration) ([]OrphanedSlab, error)
 	UnpinOrphanedSlabs(ctx context.Context, minAge time.Duration) (UnpinResult, error)
+
+	// Fragmentation reports the dead space in this connection's slabs, listing
+	// those that are dead space by at least threshold. A threshold outside of
+	// (0, 1] reports at the level the connection is configured with. It
+	// returns ErrNoSlabScan on the backends that manage their own objects.
+	Fragmentation(ctx context.Context, threshold float64) (FragmentationReport, error)
 
 	Close() error
 }

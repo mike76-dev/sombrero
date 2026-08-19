@@ -51,10 +51,10 @@ type FragmentationStats struct {
 }
 
 // packedSlabsCTE gathers the slabs of the share ($1) and workgroup ($2), with
-// what is still referenced in each. A slab is pinned under one workgroup's app
-// account, so the scope is the same one the claims are made under. Slabs that
-// are still filled to the brim are kept, so that the counts have a denominator;
-// they hold no dead space and are filtered out where that is what matters.
+// what is still referenced in each. A slab belongs to one share and workgroup,
+// the same scope the claims are made under, so this sees all of its pieces.
+// Slabs that are still filled to the brim are kept, so that the counts have a
+// denominator; they hold no dead space and are filtered out where that matters.
 const packedSlabsCTE = `
 	WITH slabs AS (
 		SELECT

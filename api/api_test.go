@@ -257,6 +257,15 @@ type mockClient struct {
 	unpinned  client.UnpinResult
 	unpinErr  error
 	minAgeGot time.Duration
+
+	fragmentation client.FragmentationReport
+	fragErr       error
+	thresholdGot  float64
+}
+
+func (m *mockClient) Fragmentation(ctx context.Context, threshold float64) (client.FragmentationReport, error) {
+	m.thresholdGot = threshold
+	return m.fragmentation, m.fragErr
 }
 
 func (m *mockClient) OrphanedSlabs(ctx context.Context, minAge time.Duration) ([]client.OrphanedSlab, error) {
@@ -1666,5 +1675,142 @@ func TestOrphans(t *testing.T) {
 		})
 		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodDelete, "/share/myshare/orphans", nil)
 		checkStatus(t, w, http.StatusInternalServerError)
+	})
+}
+
+func TestFragmentation(t *testing.T) {
+	indexdStore := func() *mockStore {
+		return &mockStore{getShare: foundShare("myshare", "indexd")}
+	}
+
+	// A report of one connection: two slabs of 1000 bytes, one of them a
+	// quarter used and the other three quarters.
+	report := client.FragmentationReport{
+		Threshold: 0.25,
+		Stats: stores.FragmentationStats{
+			Slabs:            4,
+			Wasted:           1500,
+			Fragmented:       2,
+			FragmentedWasted: 1000,
+		},
+		Slabs: []stores.PackedSlab{
+			{Key: slabKey(1), Size: 1000, Used: 250, Pieces: 1},
+			{Key: slabKey(2), Size: 1000, Used: 750, Pieces: 3},
+		},
+	}
+
+	t.Run("GET reports the slabs and the totals", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{fragmentation: report},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[FragmentationResponse](t, w)
+		if res.Total != 4 || res.Wasted != 1500 {
+			t.Errorf("totals: want 4 slabs wasting 1500 bytes, got %d of %d", res.Total, res.Wasted)
+		}
+		if res.Fragmented != 2 || res.FragmentedWasted != 1000 {
+			t.Errorf("fragmented: want 2 slabs wasting 1000 bytes, got %d of %d", res.Fragmented, res.FragmentedWasted)
+		}
+		if len(res.Slabs) != 2 || res.Slabs[0].Key != slabKey(1) {
+			t.Fatalf("slabs: want the most fragmented first, got %+v", res.Slabs)
+		}
+		if res.Slabs[0].Wasted != 750 || res.Slabs[0].Fragmentation != 0.75 {
+			t.Errorf("slab: want 750 bytes of dead space at 75%%, got %d at %v", res.Slabs[0].Wasted, res.Slabs[0].Fragmentation)
+		}
+		if res.Slabs[0].Workgroup != testUUID.String() {
+			t.Errorf("workgroup: want %s, got %s", testUUID, res.Slabs[0].Workgroup)
+		}
+		if res.Threshold != 0.25 {
+			t.Errorf("threshold: want the level the connection reported, got %v", res.Threshold)
+		}
+	})
+
+	t.Run("GET aggregates over the workgroup connections", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321").String()
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{fragmentation: report},
+			other: &mockClient{fragmentation: client.FragmentationReport{
+				Threshold: 0.25,
+				Stats:     stores.FragmentationStats{Slabs: 1, Wasted: 500, Fragmented: 1, FragmentedWasted: 500},
+				Slabs:     []stores.PackedSlab{{Key: slabKey(3), Size: 1000, Used: 500, Pieces: 2}},
+			}},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[FragmentationResponse](t, w)
+		if res.Total != 5 || res.Wasted != 2000 || res.Fragmented != 3 || res.FragmentedWasted != 1500 {
+			t.Errorf("totals: want 3 of 5 slabs wasting 1500 of 2000 bytes, got %+v", res)
+		}
+		if len(res.Slabs) != 3 || res.Slabs[0].Key != slabKey(1) || res.Slabs[1].Key != slabKey(3) {
+			t.Fatalf("slabs: want them ordered across the connections, got %+v", res.Slabs)
+		}
+	})
+
+	t.Run("GET passes the threshold on", func(t *testing.T) {
+		mc := &mockClient{}
+		srv := orphanServer(map[string]client.Client{testUUID.String(): mc})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/fragmentation?threshold=0.5", nil)
+		checkStatus(t, w, http.StatusOK)
+		if mc.thresholdGot != 0.5 {
+			t.Errorf("threshold: want 0.5, got %v", mc.thresholdGot)
+		}
+	})
+
+	t.Run("GET leaves the threshold to the connection", func(t *testing.T) {
+		mc := &mockClient{}
+		srv := orphanServer(map[string]client.Client{testUUID.String(): mc})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusOK)
+		if mc.thresholdGot != 0 {
+			t.Errorf("threshold: want the connection's own level, got %v", mc.thresholdGot)
+		}
+	})
+
+	t.Run("GET rejects a threshold that is not a fraction", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{testUUID.String(): &mockClient{}})
+		for _, q := range []string{"?threshold=0", "?threshold=-0.5", "?threshold=1.5", "?threshold=half"} {
+			w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/fragmentation"+q, nil)
+			checkStatus(t, w, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("GET reports a failed connection but keeps the rest", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321").String()
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{fragmentation: report},
+			other:             &mockClient{fragErr: errors.New("database down")},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[FragmentationResponse](t, w)
+		if res.Total != 4 || len(res.Errors) != 1 || res.Errors[other] == "" {
+			t.Fatalf("want the reachable connection reported alongside the failure, got %+v", res)
+		}
+	})
+
+	t.Run("GET fails when no connection could be checked", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{fragErr: errors.New("database down")},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodGet, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("GET refuses a share that packs nothing", func(t *testing.T) {
+		ms := &mockStore{getShare: foundShare("myshare", "renterd")}
+		srv := orphanServer(map[string]client.Client{testUUID.String(): &mockClient{}})
+
+		w := doRequest(newTestAPIWithServer(ms, srv), http.MethodGet, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusBadRequest)
 	})
 }

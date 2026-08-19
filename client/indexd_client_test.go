@@ -2680,6 +2680,30 @@ func TestIndexdClient_FragmentationCheck(t *testing.T) {
 	if !strings.Contains(out.String(), "1 of 1 slab(s) are at least 25% dead space") {
 		t.Fatalf("want the fragmented slab reported, got %q", out.String())
 	}
+
+	// The report the API serves lists the slab at the connection's own level.
+	report, err := c.Fragmentation(ctx, 0)
+	if err != nil {
+		t.Fatalf("Fragmentation: %v", err)
+	}
+	if report.Threshold != stores.DefaultFragmentationThreshold {
+		t.Fatalf("want the configured threshold, got %v", report.Threshold)
+	}
+	if len(report.Slabs) != 1 || report.Slabs[0].Used == 0 || report.Slabs[0].Pieces != 1 {
+		t.Fatalf("want the one slab listed, got %+v", report.Slabs)
+	}
+	if report.Stats != stats {
+		t.Fatalf("want the report to agree with the check, got %+v and %+v", report.Stats, stats)
+	}
+
+	// Nothing is dead space in full, so the slab is counted but not listed.
+	report, err = c.Fragmentation(ctx, 1)
+	if err != nil {
+		t.Fatalf("Fragmentation(1): %v", err)
+	}
+	if len(report.Slabs) != 0 || report.Stats.Slabs != 1 {
+		t.Fatalf("want the slab counted but not listed, got %+v", report)
+	}
 }
 
 // TestIndexdClient_FragmentationMonitor verifies that the monitor only runs

@@ -535,6 +535,11 @@ func (fc *fakeClient) UnpinOrphanedSlabs(context.Context, time.Duration) (client
 	return client.UnpinResult{}, nil
 }
 
+// Nor does it pack anything, so no slab of its can be fragmented.
+func (fc *fakeClient) Fragmentation(context.Context, float64) (client.FragmentationReport, error) {
+	return client.FragmentationReport{}, nil
+}
+
 func (fc *fakeClient) Close() error { return nil }
 
 // smbTest is a server with a single share behind a fake object store, driven by hand-built

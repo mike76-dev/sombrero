@@ -1346,6 +1346,31 @@ func (ic *IndexdClient) checkFragmentation() (stores.FragmentationStats, error) 
 	return stats, nil
 }
 
+// Fragmentation reports the dead space in this connection's slabs, listing
+// those that reach threshold. A threshold outside of (0, 1] reports at the
+// level the connection is configured with.
+func (ic *IndexdClient) Fragmentation(ctx context.Context, threshold float64) (FragmentationReport, error) {
+	if threshold <= 0 || threshold > 1 {
+		threshold = ic.fragLevel
+	}
+
+	stats, err := ic.db.Fragmentation(ic.share, ic.workgroup, ic.slabSize, threshold)
+	if err != nil {
+		return FragmentationReport{}, fmt.Errorf("couldn't summarize the slabs: %v", err)
+	}
+
+	slabs, err := ic.db.PackedSlabs(ic.share, ic.workgroup, ic.slabSize, threshold)
+	if err != nil {
+		return FragmentationReport{}, fmt.Errorf("couldn't list the fragmented slabs: %v", err)
+	}
+
+	return FragmentationReport{
+		Threshold: threshold,
+		Stats:     stats,
+		Slabs:     slabs,
+	}, nil
+}
+
 // monitorFragmentation runs the fragmentation check in the background. Running
 // once right away gives a reading without waiting out the first interval.
 func (ic *IndexdClient) monitorFragmentation(ctx context.Context) {

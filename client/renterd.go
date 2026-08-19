@@ -595,6 +595,12 @@ func (rc *RenterdClient) UnpinOrphanedSlabs(ctx context.Context, minAge time.Dur
 	return UnpinResult{}, ErrNoSlabScan
 }
 
+// Fragmentation is not supported by renterd shares: renterd packs and repacks
+// the objects itself, so this server never sees the slabs they sit in.
+func (rc *RenterdClient) Fragmentation(ctx context.Context, threshold float64) (FragmentationReport, error) {
+	return FragmentationReport{}, ErrNoSlabScan
+}
+
 // Close closes the client and releases all resources.
 func (rc *RenterdClient) Close() error {
 	return nil
