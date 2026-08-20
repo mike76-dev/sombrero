@@ -280,98 +280,86 @@ func (rc *RenterdClient) Object(ctx context.Context, _ stores.Account, path stri
 	return ObjectInfo{}, api.ErrObjectNotFound
 }
 
-// Parents retrieves the information about the current and the parent directories where the file is located.
+// Parents retrieves the information about the directory at path and the one above it.
 func (rc *RenterdClient) Parents(ctx context.Context, _ stores.Account, path string) (currentDir, parentDir FileInfo, err error) {
-	var parent, grandParent, name, parentName string
-	if path != "" {
-		name = path + "/"
-	}
-
+	// A bucket holds no object for a directory that a listing of it would return, so each of the
+	// two is described by the entry that the listing one level above it carries.
+	var parent, grandParent string
 	if i := strings.LastIndex(path, "/"); i >= 0 {
 		parent = path[:i]
-		if parent != "" {
-			parentName = parent + "/"
-		}
-
 		if j := strings.LastIndex(parent, "/"); j >= 0 {
 			grandParent = parent[:j]
 		}
 	}
 
-	if parent != "" {
-		parent += "/"
-	}
-
-	if grandParent != "" {
-		grandParent += "/"
-	}
-
 	var info GeneralInfo
-	if parent == "" || grandParent == "" {
+	if path == "" || parent == "" {
 		info, err = rc.Info(ctx)
 		if err != nil {
 			return
 		}
 	}
 
-	var ois []ObjectInfo
-	if parent != "" {
-		ois, err = rc.List(ctx, stores.Account{}, parent)
-		if err != nil {
-			return
-		}
-
-		for _, oi := range ois {
-			if oi.Key == name {
-				etag, _ := hex.DecodeString(oi.ETag)
-				if len(etag) >= 8 {
-					currentDir.ID64 = binary.LittleEndian.Uint64(etag[:8])
-				}
-
-				currentDir.CreatedAt = oi.CreatedAt
-				currentDir.ModifiedAt = oi.ModifiedAt
-				currentDir.ID = make([]byte, 16)
-				break
-			}
-		}
-	} else {
-		hash := blake2b.Sum256([]byte("/"))
-		currentDir.ID64 = binary.LittleEndian.Uint64(hash[:8])
-		currentDir.CreatedAt = info.CreatedAt
-		currentDir.ModifiedAt = info.CreatedAt
-		currentDir.ID = make([]byte, 16)
+	if path == "" {
+		currentDir = rootFileInfo(info)
+	} else if currentDir, err = rc.dirEntry(ctx, parent, path); err != nil {
+		return
 	}
 
-	if grandParent != "" {
-		ois, err = rc.List(ctx, stores.Account{}, grandParent)
-		if err != nil {
-			return
-		}
-
-		for _, oi := range ois {
-			if oi.Key == parentName {
-				etag, _ := hex.DecodeString(oi.ETag)
-				if len(etag) >= 8 {
-					parentDir.ID64 = binary.LittleEndian.Uint64(etag[:8])
-				}
-
-				parentDir.CreatedAt = oi.CreatedAt
-				parentDir.ModifiedAt = oi.ModifiedAt
-				parentDir.ID = make([]byte, 16)
-				break
-			}
-		}
-	} else {
-		hash := blake2b.Sum256([]byte("/"))
-		parentDir.ID64 = binary.LittleEndian.Uint64(hash[:8])
-		parentDir.CreatedAt = info.CreatedAt
-		parentDir.ModifiedAt = info.CreatedAt
-		parentDir.ID = make([]byte, 16)
+	if parent == "" {
+		parentDir = rootFileInfo(info)
+	} else if parentDir, err = rc.dirEntry(ctx, grandParent, parent); err != nil {
+		return
 	}
 
 	if parentDir.ID64 == currentDir.ID64 {
 		parentDir.ID64 = 0
 	}
+
+	return
+}
+
+// dirEntry describes the directory at path out of the listing of the directory above it, which is
+// where the entry for it lives. A directory the listing does not name is left empty.
+func (rc *RenterdClient) dirEntry(ctx context.Context, above, path string) (fi FileInfo, err error) {
+	if above != "" {
+		above += "/"
+	}
+
+	ois, err := rc.List(ctx, stores.Account{}, above)
+	if err != nil {
+		return
+	}
+
+	// The keys of a listing carry the leading separator, and a directory is named with a
+	// trailing one.
+	key := "/" + path + "/"
+	for _, oi := range ois {
+		if oi.Key != key {
+			continue
+		}
+
+		etag, _ := hex.DecodeString(oi.ETag)
+		if len(etag) >= 8 {
+			fi.ID64 = binary.LittleEndian.Uint64(etag[:8])
+		}
+
+		fi.CreatedAt = oi.CreatedAt
+		fi.ModifiedAt = oi.ModifiedAt
+		fi.ID = make([]byte, 16)
+		break
+	}
+
+	return
+}
+
+// rootFileInfo describes the share root, which no listing holds an entry for.
+func rootFileInfo(info GeneralInfo) (fi FileInfo) {
+	hash := blake2b.Sum256([]byte("/"))
+	fi.ID64 = binary.LittleEndian.Uint64(hash[:8])
+	fi.CreatedAt = info.CreatedAt
+	fi.ModifiedAt = info.CreatedAt
+	fi.ID = make([]byte, 16)
 
 	return
 }

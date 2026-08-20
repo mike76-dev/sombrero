@@ -55,6 +55,13 @@ type fakeClient struct {
 	dirErr    error
 	finishErr error
 
+	// listErr is what listing a directory fails with, when a test asks it to. It stands for a
+	// store that cannot be reached at all, which a search must not read as an empty directory.
+	listErr error
+
+	// parentsPath is the path the "." and ".." entries of a listing were last asked about.
+	parentsPath string
+
 	// readGate holds up every read until a test lets it go, so that a test can arrange for
 	// something to happen to the handle while a read on it is still being worked on.
 	readGate chan struct{}
@@ -235,6 +242,14 @@ func (fc *fakeClient) failFinishingUploads(err error) {
 	fc.finishErr = err
 }
 
+// failListing makes every directory listing fail from here on.
+func (fc *fakeClient) failListing(err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.listErr = err
+}
+
 // failEmptiness makes the emptiness check fail from here on.
 func (fc *fakeClient) failEmptiness(err error) {
 	fc.mu.Lock()
@@ -258,6 +273,10 @@ func (fc *fakeClient) Object(_ context.Context, _ stores.Account, path string) (
 func (fc *fakeClient) List(_ context.Context, _ stores.Account, path string) ([]client.ObjectInfo, error) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
+
+	if fc.listErr != nil {
+		return nil, fc.listErr
+	}
 
 	var ois []client.ObjectInfo
 	for _, oi := range fc.objects {
@@ -309,8 +328,21 @@ func (fc *fakeClient) IsEmpty(_ context.Context, _ stores.Account, path string) 
 	return true, nil
 }
 
-func (fc *fakeClient) Parents(context.Context, stores.Account, string) (client.FileInfo, client.FileInfo, error) {
+func (fc *fakeClient) Parents(_ context.Context, _ stores.Account, path string) (client.FileInfo, client.FileInfo, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.parentsPath = path
+
 	return client.FileInfo{}, client.FileInfo{}, nil
+}
+
+// parentsAsked is the path the "." and ".." of a listing were last asked about.
+func (fc *fakeClient) parentsAsked() string {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	return fc.parentsPath
 }
 
 // Read serves the range out of the contents the test gave the file, which is what lets a test tell

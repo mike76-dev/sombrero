@@ -11,6 +11,10 @@ const (
 	wildDOSStr = '<' // Zero or more characters, stopping at the last period of what is left.
 )
 
+// MaxPatternLength is the longest search pattern worth matching: a pattern stands for one path
+// component, and no name is longer than that.
+const MaxPatternLength = 255
+
 // MatchPattern reports whether name matches the search pattern of a directory query. The
 // pattern is matched as SMB defines it rather than as a shell glob: the DOS wildcards a client
 // may still send are honoured, and anything that is not one of the five wildcard characters is
@@ -18,8 +22,8 @@ const (
 //
 // The comparison runs as a table over the two strings rather than by backtracking, so a pattern
 // that is nothing but wildcards costs the length of the pattern times the length of the name
-// instead of blowing up exponentially. The pattern comes off the wire, so its cost is the
-// client's to choose and must stay bounded.
+// instead of blowing up exponentially. Only one row of the table is held at a time, so a long
+// pattern costs no memory beyond the name.
 func MatchPattern(pattern, name string) bool {
 	p, n := []rune(pattern), []rune(name)
 	np, nn := len(p), len(n)
@@ -42,53 +46,56 @@ func MatchPattern(pattern, name string) bool {
 		}
 	}
 
-	// dp[i][j] says whether p[i:] matches n[j:]. Both ends of both strings are included, so the
-	// empty pattern against the empty remainder is the one case that starts out true.
-	dp := make([][]bool, np+1)
-	for i := range dp {
-		dp[i] = make([]bool, nn+1)
-	}
-	dp[np][nn] = true
+	// cur[j] says whether p[i:] matches n[j:], and next[j] the same for p[i+1:]. Both ends of both
+	// strings are included, so the empty pattern against the empty remainder is the one case that
+	// starts out true. Every rule reads the row behind it and, for the wildcards that stand for
+	// more than one character, the same row further along the name, which the descending j has
+	// already filled in.
+	cur, next := make([]bool, nn+1), make([]bool, nn+1)
+	next[nn] = true
 
 	for i := np - 1; i >= 0; i-- {
 		for j := nn; j >= 0; j-- {
 			switch p[i] {
 			case wildStar:
 				// Nothing, or one more character and the same wildcard again.
-				dp[i][j] = dp[i+1][j] || (j < nn && dp[i][j+1])
+				cur[j] = next[j] || (j < nn && cur[j+1])
 
 			case wildDOSStr:
 				// As above, except that it may not pass the final period of what is left: that
 				// period is where it gives up and hands the rest of the name to the rest of the
 				// pattern. A name with no period left in it is consumed to the end.
-				dp[i][j] = dp[i+1][j] || (j < nn && (lastDot[j] < 0 || j < lastDot[j]) && dp[i][j+1])
+				cur[j] = next[j] || (j < nn && (lastDot[j] < 0 || j < lastDot[j]) && cur[j+1])
 
 			case wildQM:
-				dp[i][j] = j < nn && dp[i+1][j+1]
+				cur[j] = j < nn && next[j+1]
 
 			case wildDOSQM:
 				// One character, unless the name is out or a period has been reached, in which
 				// case this wildcard and every one behind it match nothing at all.
 				if j < nn && n[j] != '.' {
-					dp[i][j] = dp[i+1][j+1]
+					cur[j] = next[j+1]
 				} else {
-					dp[i][j] = dp[i+1][j]
+					cur[j] = next[j]
 				}
 
 			case wildDOSDot:
 				// A period, or nothing once the name has run out. This is how a pattern ending
 				// in a period asks for the names that have no extension.
 				if j < nn {
-					dp[i][j] = n[j] == '.' && dp[i+1][j+1]
+					cur[j] = n[j] == '.' && next[j+1]
 				} else {
-					dp[i][j] = dp[i+1][j]
+					cur[j] = next[j]
 				}
 
 			default:
-				dp[i][j] = j < nn && p[i] == n[j] && dp[i+1][j+1]
+				cur[j] = j < nn && p[i] == n[j] && next[j+1]
 			}
 		}
+
+		cur, next = next, cur
 	}
 
-	return dp[0][0]
+	// The rows were swapped after the last pattern character was done, so the answer is in next.
+	return next[0]
 }

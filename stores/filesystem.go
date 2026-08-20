@@ -322,20 +322,20 @@ func (db *Database) Object(acc Account, shareName, path string) (object ObjectMe
 	return
 }
 
-// CurrentAndParent retrieves the information about the current and the parent directories where the file is located.
+// CurrentAndParent retrieves the information about the given directory and the one above it. The
+// root is left empty in both, since it is not a directory of the share but the share itself.
 func (db *Database) CurrentAndParent(acc Account, shareName, path string) (currentDir, parentDir ObjectMeta, err error) {
 	path = normalizePath(path)
-	dir, _ := splitPath(path)
-	if dir == "/" { // Root directory
+	if path == "/" { // Root directory
 		return
 	}
 
-	currentDir, err = db.Object(acc, shareName, dir)
+	currentDir, err = db.Object(acc, shareName, path)
 	if err != nil {
 		return
 	}
 
-	dir, _ = splitPath(dir)
+	dir, _ := splitPath(path)
 	if dir == "/" {
 		return
 	}
@@ -711,6 +711,8 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 			}
 		}
 
+		// The subtree is matched with starts_with, not LIKE: a directory named
+		// with a _ or a % would make LIKE reach into its siblings.
 		const query = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -761,7 +763,7 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 				FROM src s
 				JOIN dst_parent p ON TRUE
 				WHERE $5 <> s.full_path
-					AND $5 NOT LIKE s.full_path || '/%%'
+					AND NOT starts_with($5::text, s.full_path || '/')
 			),
 			delete_existing AS (
 				DELETE FROM directories d
@@ -783,7 +785,7 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 				FROM target t
 				WHERE d.share_name = $1
 					AND d.id <> t.src_id
-					AND d.full_path LIKE t.old_path || '/%%'
+					AND starts_with(d.full_path, t.old_path || '/')
 			),
 			update_files AS (
 				UPDATE objects o
@@ -792,7 +794,7 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 					modified_at = NOW()
 				FROM target t
 				WHERE o.share_name = $1
-					AND o.full_path LIKE t.old_path || '/%%'
+					AND starts_with(o.full_path, t.old_path || '/')
 			)
 			UPDATE directories d
 			SET
@@ -945,6 +947,8 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 func (db *Database) DeleteDirectory(acc Account, share string, path string) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		// The subtree is matched with starts_with, not LIKE: a directory named
+		// with a _ or a % would make LIKE reach into its siblings.
 		const collectQuery = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -972,7 +976,7 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 				FROM objects o
 				JOIN src s ON TRUE
 				WHERE o.share_name = $1
-					AND o.full_path LIKE s.full_path || '/%%'
+					AND starts_with(o.full_path, s.full_path || '/')
 					And o.temporary = FALSE
 			)
 			SELECT DISTINCT m.buffer_id, m.slab_key
@@ -1016,7 +1020,7 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 				DELETE FROM objects o
 				USING src s
 				WHERE o.share_name = $1
-					AND o.full_path LIKE s.full_path || '/%%'
+					AND starts_with(o.full_path, s.full_path || '/')
 					AND o.temporary = FALSE
 				RETURNING o.id
 			),
@@ -1024,7 +1028,7 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 				DELETE FROM directories d
 				USING src s
 				WHERE d.share_name = $1
-					AND d.full_path LIKE s.full_path || '/%%'
+					AND starts_with(d.full_path, s.full_path || '/')
 				RETURNING d.id
 			),
 			delete_root AS (

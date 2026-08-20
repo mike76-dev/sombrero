@@ -91,6 +91,10 @@ type Client interface {
 	IsEmpty(ctx context.Context, acc stores.Account, path string) (bool, error)
 	List(ctx context.Context, acc stores.Account, path string) ([]ObjectInfo, error)
 	Object(ctx context.Context, acc stores.Account, path string) (ObjectInfo, error)
+
+	// Parents describes the directory at path and the one above it, which is what a listing
+	// carries as its "." and ".." entries. The share root stands in for either of them where
+	// there is none.
 	Parents(ctx context.Context, acc stores.Account, path string) (currentDir, parentDir FileInfo, err error)
 	Read(ctx context.Context, acc stores.Account, path string, offset, length uint64, buf io.Writer) error
 	StartUpload(ctx context.Context, acc stores.Account, path string) (uploadID string, err error)

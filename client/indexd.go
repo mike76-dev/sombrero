@@ -541,7 +541,7 @@ func hashPath(acc stores.Account, path string) [32]byte {
 	return blake2b.Sum256(append([]byte(acc.Username), []byte(acc.Workgroup+path)...))
 }
 
-// Parents retrieves the information about the current and the parent directories where the file is located.
+// Parents retrieves the information about the directory at path and the one above it.
 func (ic *IndexdClient) Parents(ctx context.Context, acc stores.Account, path string) (currentDir, parentDir FileInfo, err error) {
 	current, parent, err := ic.db.CurrentAndParent(acc, ic.share, path)
 	if err != nil {

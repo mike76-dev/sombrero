@@ -651,3 +651,63 @@ func TestSizeFromSeeker(t *testing.T) {
 		}
 	})
 }
+
+// TestRenterdParentsDescribesTheDirectoryAndItsParent is what a listing carries as its "." and
+// ".." entries. A bucket holds nothing a directory can be read out of directly, so each one is
+// looked for in the listing above it - and the keys of a listing carry the leading separator,
+// which the names being looked for did not, so the entries were never found and every directory
+// came back as the share root.
+func TestRenterdParentsDescribesTheDirectoryAndItsParent(t *testing.T) {
+	f := newFakeRenterd(t)
+
+	// The listing of the root names "dir", and the listing of "dir" names "dir/sub".
+	f.answerWith(func(w http.ResponseWriter, r *http.Request) {
+		res := api.ObjectsResponse{}
+		switch r.URL.Path {
+		case "/api/bus/objects/":
+			res.Objects = []api.ObjectMetadata{{Key: "/dir/", ETag: "1111111111111111"}}
+		case "/api/bus/objects/dir/":
+			res.Objects = []api.ObjectMetadata{{Key: "/dir/sub/", ETag: "2222222222222222"}}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	c := f.client("default")
+
+	current, parent, err := c.Parents(context.Background(), stores.Account{}, "dir/sub")
+	if err != nil {
+		t.Fatalf("Parents: %v", err)
+	}
+
+	// The IDs come out of the ETags of the two entries, so finding neither leaves both at zero.
+	if current.ID64 == 0 || parent.ID64 == 0 {
+		t.Fatalf("the directory came back as %d and its parent as %d, want both named", current.ID64, parent.ID64)
+	}
+	if current.ID64 == parent.ID64 {
+		t.Fatalf("the directory and its parent share the ID %d", current.ID64)
+	}
+}
+
+// TestRenterdParentsOfTheRoot is the share root, which no listing holds an entry for: it stands in
+// for itself and for the parent it does not have.
+func TestRenterdParentsOfTheRoot(t *testing.T) {
+	f := newFakeRenterd(t)
+	c := f.client("default")
+
+	current, parent, err := c.Parents(context.Background(), stores.Account{}, "")
+	if err != nil {
+		t.Fatalf("Parents: %v", err)
+	}
+
+	if current.ID64 == 0 {
+		t.Fatal("the root came back without an ID")
+	}
+
+	// The two are the same directory, and a listing says so by leaving the parent without an ID
+	// of its own.
+	if parent.ID64 != 0 {
+		t.Fatalf("the parent of the root came back as %d, want it left unnamed", parent.ID64)
+	}
+}
