@@ -1391,14 +1391,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 			case deleteOnClose:
 				// Somebody else is still on the file, and the upload is the file's: what is in it
-				// may be their writing, and their close is what stores it. Storing it here would
-				// leave the deletion below to take their file away again, and calling it off would
-				// throw their save out. The deletion is what happens now; if their save comes after
-				// it, the file comes back as they wrote it.
+				// may be their writing. It goes all the same, because the deletion below is what
+				// this close is for, and an upload left running puts the deleted file back the
+				// moment whoever holds it closes their handle. The file is marked as gone with it,
+				// so that a write arriving on one of those handles fails rather than starting an
+				// upload of its own and storing the file a piece at a time.
+				op.file.markDeleted()
+				op.cancelUpload()
 
 			default:
 				if err := op.flush(); err != nil {
-					op.cancelUpload()
+					op.abandonUpload()
 					log.Println("Error completing write:", err)
 					unsaved = true
 				}
@@ -1869,9 +1872,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			var resp smb2.GenericResponse
 
 			if err := op.write(wr.Offset(), wr.Buffer()); err != nil {
-				op.cancelUpload()
+				// A write to a file somebody has deleted is answered as what it is, rather than
+				// as a store that would not take the data.
+				status := uint32(smb2.STATUS_DATA_ERROR)
+				if errors.Is(err, errFileDeleted) {
+					status = smb2.STATUS_DELETE_PENDING
+				} else {
+					op.cancelUpload()
+				}
+
 				log.Println("Error writing data:", err)
-				resp = smb2.NewErrorResponse(wr, smb2.STATUS_DATA_ERROR, 0, nil)
+				resp = smb2.NewErrorResponse(wr, status, 0, nil)
 			} else {
 				resp = &smb2.WriteResponse{}
 				resp.FromRequest(wr)

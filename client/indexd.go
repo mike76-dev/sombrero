@@ -40,6 +40,24 @@ const slabDownloadThreads = 4
 // signals the packer directly.
 const packInterval = time.Minute
 
+// retryDelay is how long a worker waits after a failed job, and retryMax how far
+// that wait is allowed to grow while the failures keep coming. A storage backend
+// with no hosts to write to fails every job it is given, and at the shortest
+// wait each worker asks it again once a second, for as long as the outage lasts.
+const (
+	retryDelay = time.Second
+	retryMax   = time.Minute
+)
+
+// nextRetry doubles the wait after another failure, up to retryMax.
+func nextRetry(d time.Duration) time.Duration {
+	if d < retryDelay {
+		return retryDelay
+	}
+
+	return min(d*2, retryMax)
+}
+
 // shutdownDrainTimeout is how long Close lets the background workers finish
 // what they already have in flight before cutting them off. A backend call that
 // is cut short after it has done its work leaves a slab behind — uploaded but
@@ -1255,6 +1273,7 @@ func (ic *IndexdClient) packSlabs(ctx context.Context) {
 	ticker := time.NewTicker(packInterval)
 	defer ticker.Stop()
 
+	delay := retryDelay
 	for {
 		select {
 		case <-ic.drainChan:
@@ -1267,6 +1286,7 @@ func (ic *IndexdClient) packSlabs(ctx context.Context) {
 		// there is nothing left to pack.
 		err := ic.processPackedSlab(ctx)
 		if err == nil {
+			delay = retryDelay
 			continue
 		}
 
@@ -1277,17 +1297,21 @@ func (ic *IndexdClient) packSlabs(ctx context.Context) {
 				return
 			}
 
-			log.Printf("failed to pack a slab: %v", err)
+			log.Printf("failed to pack a slab, retrying in %s: %v", delay, err)
 
-			// The pieces are back in the queue and the failure is
-			// likely transient, so retry shortly.
+			// The pieces are back in the queue, so the wait is what
+			// keeps a backend that fails every slab from being asked
+			// again every second for as long as it is down.
 			select {
 			case <-ic.drainChan:
 				return
-			case <-time.After(time.Second):
+			case <-time.After(delay):
 			}
+			delay = nextRetry(delay)
 			continue
 		}
+
+		delay = retryDelay
 
 		// Nothing to pack: wait until another upload has left a piece
 		// behind, with a periodic fallback in case the signal was missed.
@@ -1401,6 +1425,7 @@ func (ic *IndexdClient) monitorFragmentation(ctx context.Context) {
 
 // processUploads runs the upload jobs in the background.
 func (ic *IndexdClient) processUploads(ctx context.Context) {
+	delay := retryDelay
 	for {
 		select {
 		case <-ic.drainChan:
@@ -1410,10 +1435,12 @@ func (ic *IndexdClient) processUploads(ctx context.Context) {
 
 		err := ic.processUpload(ctx)
 		if err == nil {
+			delay = retryDelay
 			continue
 		}
 
 		if errors.Is(err, stores.ErrNoUploadJobs) {
+			delay = retryDelay
 			// Wait until a new job is signaled, with a periodic fallback
 			// poll in case the signal was missed.
 			select {
@@ -1430,12 +1457,13 @@ func (ic *IndexdClient) processUploads(ctx context.Context) {
 			return
 		}
 
-		log.Printf("failed to run upload job: %v", err)
+		log.Printf("failed to run upload job, retrying in %s: %v", delay, err)
 
 		select {
 		case <-ic.drainChan:
 			return
-		case <-time.After(time.Second):
+		case <-time.After(delay):
 		}
+		delay = nextRetry(delay)
 	}
 }

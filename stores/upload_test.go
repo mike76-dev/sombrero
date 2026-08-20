@@ -1096,3 +1096,115 @@ func TestClaimPackedSlabAgePrefersFullSlab(t *testing.T) {
 		t.Fatalf("want 1 job left in the queue, got %d", n)
 	}
 }
+
+// TestDeleteFileTakesTheUploadInFlight is the file a client gave up on halfway
+// through writing it. The upload holds the only object there is for the path,
+// and it used to be invisible to the deletion: nothing was deleted, and the
+// close that followed made the half-written file appear.
+func TestDeleteFileTakesTheUploadInFlight(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, _ := newSlabTestFixture(t, db)
+
+	uploadID, err := db.CreateUpload(acc, share, "half.bin")
+	if err != nil {
+		t.Fatalf("CreateUpload: %v", err)
+	}
+	if err := db.AddBufferedSlab(uploadID, 0, frand.Bytes(slabSize)); err != nil {
+		t.Fatalf("AddBufferedSlab: %v", err)
+	}
+
+	if _, err := db.DeleteFile(acc, share, "half.bin"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	// The buffer and the queue entry go with the object, so nothing is left for
+	// a worker to keep pushing at the storage backend.
+	if n := storedBuffers(t, db); n != 0 {
+		t.Errorf("%d buffer(s) left behind", n)
+	}
+	if n := pendingJobs(t, db); n != 0 {
+		t.Errorf("%d queued job(s) left behind", n)
+	}
+
+	// The upload is gone with it, so the close that comes after the deletion
+	// has nothing to finalize and the file cannot come back.
+	if err := db.FinalizeUpload(uploadID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("FinalizeUpload after the delete: %v, want the upload gone", err)
+	}
+	if _, err := db.Object(acc, share, "half.bin"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the deleted file is there: %v", err)
+	}
+}
+
+// TestDeleteFileKeepsAnOverwritingUpload is the other side of it: an upload
+// writing over a file that is already on the share belongs to whoever is
+// writing it. The deletion takes the file that is there, and their close still
+// puts theirs in its place.
+func TestDeleteFileKeepsAnOverwritingUpload(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, _ := newSlabTestFixture(t, db)
+
+	stored := types.Hash256{1}
+	plantObject(t, db, share, acc, "notes.txt", stored)
+
+	uploadID, err := db.CreateUpload(acc, share, "notes.txt")
+	if err != nil {
+		t.Fatalf("CreateUpload: %v", err)
+	}
+	data := frand.Bytes(slabSize)
+	if err := db.AddBufferedSlab(uploadID, 0, data); err != nil {
+		t.Fatalf("AddBufferedSlab: %v", err)
+	}
+
+	// The slab of the file that was there is unreferenced by the deletion; the
+	// buffer of the upload in flight is not touched.
+	slabs, err := db.DeleteFile(acc, share, "notes.txt")
+	if err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	assertSlabs(t, "DeleteFile(notes.txt)", slabs, []types.Hash256{stored})
+	if n := bufferedBytes(t, db); n != len(data) {
+		t.Errorf("the upload holds %d bytes, want its %d", n, len(data))
+	}
+
+	if err := db.FinalizeUpload(uploadID); err != nil {
+		t.Fatalf("FinalizeUpload: %v", err)
+	}
+	if _, err := db.Object(acc, share, "notes.txt"); err != nil {
+		t.Fatalf("the file the upload wrote is not there: %v", err)
+	}
+}
+
+// TestDeleteDirectoryTakesTheUploadsInFlight is the same file one directory
+// down. The object went with the directory either way, but its buffer and its
+// slabs were never collected: they stayed paid for, referenced by nobody.
+func TestDeleteDirectoryTakesTheUploadsInFlight(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, _ := newSlabTestFixture(t, db)
+
+	if err := db.CreateDirectory(acc, share, "docs", true, false); err != nil {
+		t.Fatalf("CreateDirectory: %v", err)
+	}
+
+	plantBufferedFile(t, db, share, acc, "docs/half.bin", slabSize, true)
+
+	if _, err := db.DeleteDirectory(acc, share, "docs"); err != nil {
+		t.Fatalf("DeleteDirectory: %v", err)
+	}
+
+	if n := storedBuffers(t, db); n != 0 {
+		t.Errorf("%d buffer(s) left behind", n)
+	}
+	if n := pendingJobs(t, db); n != 0 {
+		t.Errorf("%d queued job(s) left behind", n)
+	}
+}

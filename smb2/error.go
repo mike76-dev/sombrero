@@ -32,6 +32,7 @@ const (
 	STATUS_OBJECT_NAME_COLLISION                 = 0xc0000035
 	STATUS_DATA_ERROR                            = 0xc000003e
 	STATUS_EAS_NOT_SUPPORTED                     = 0xc000004f
+	STATUS_DELETE_PENDING                        = 0xc0000056
 	STATUS_NO_SUCH_USER                          = 0xc0000064
 	STATUS_NONE_MAPPED                           = 0xc0000073
 	STATUS_INSUFFICIENT_RESOURCES                = 0xc000009a

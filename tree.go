@@ -352,7 +352,7 @@ func (ss *session) closeTreeConnect(tid uint32) error {
 		op.releaseCaching()
 		ss.connection.server.clearReplayEligible(op)
 		ss.connection.server.unindexOpen(op)
-		op.cancelUpload()
+		op.abandonUpload()
 		op.releaseFile()
 
 		// The directory watches on the open are answered here rather than left outstanding. A
