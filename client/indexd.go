@@ -1331,13 +1331,13 @@ func (ic *IndexdClient) logFragmentation(stats stores.FragmentationStats) {
 	}
 
 	if stats.Fragmented > 0 {
-		log.Printf("share %s, workgroup %d: %d of %d slab(s) are at least %.0f%% dead space, wasting %d of %d bytes",
+		log.Printf("share %s, workgroup %d: %d of %d slab(s) have %.0f%% or more dead space, which is %d bytes of the total %d wasted",
 			ic.share, ic.workgroup, stats.Fragmented, stats.Slabs, ic.fragLevel*100, stats.FragmentedWasted, stats.Wasted)
 		return
 	}
 
-	log.Printf("share %s, workgroup %d: none of %d slab(s) reach %.0f%% dead space, %d bytes wasted in total",
-		ic.share, ic.workgroup, stats.Slabs, ic.fragLevel*100, stats.Wasted)
+	log.Printf("share %s, workgroup %d: no slab has %.0f%% or more dead space, with %d bytes wasted across %d slab(s)",
+		ic.share, ic.workgroup, ic.fragLevel*100, stats.Wasted, stats.Slabs)
 }
 
 // checkFragmentation measures the dead space in the share's slabs. Nothing is

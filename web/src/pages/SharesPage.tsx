@@ -303,16 +303,17 @@ function FragmentationCard({ share }: { share: Share }) {
           <>
             {check.fragmented === 0 ? (
               <p className="muted">
-                None of the {check.total} slab{check.total === 1 ? '' : 's'} reach{' '}
-                {formatPercent(check.threshold)} dead space, {formatBytes(check.wasted)} wasted in
-                total.
+                No slab has {formatPercent(check.threshold)} or more dead space, with{' '}
+                {formatBytes(check.wasted)} wasted across {check.total} slab
+                {check.total === 1 ? '' : 's'}.
               </p>
             ) : (
               <div className="banner banner-error">
                 <strong>{check.fragmented}</strong> of {check.total} slab
-                {check.total === 1 ? '' : 's'} {check.fragmented === 1 ? 'is' : 'are'} at least{' '}
-                {formatPercent(check.threshold)} dead space, wasting{' '}
-                {formatBytes(check.fragmentedWasted)} of {formatBytes(check.wasted)} in total.
+                {check.total === 1 ? '' : 's'} {check.fragmented === 1 ? 'has' : 'have'}{' '}
+                {formatPercent(check.threshold)} or more dead space, which is{' '}
+                {formatBytes(check.fragmentedWasted)} of the total {formatBytes(check.wasted)}{' '}
+                wasted.
               </div>
             )}
             {check.fragmented > 0 && (

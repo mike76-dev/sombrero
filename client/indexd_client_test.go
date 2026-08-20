@@ -2676,7 +2676,7 @@ func TestIndexdClient_FragmentationCheck(t *testing.T) {
 	if _, err := ic.checkFragmentation(); err != nil {
 		t.Fatalf("checkFragmentation: %v", err)
 	}
-	if !strings.Contains(out.String(), "1 of 1 slab(s) are at least 25% dead space") {
+	if !strings.Contains(out.String(), "1 of 1 slab(s) have 25% or more dead space") {
 		t.Fatalf("want the fragmented slab reported, got %q", out.String())
 	}
 
