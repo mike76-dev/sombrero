@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -174,6 +175,31 @@ func TestIntegrationQueryDirectoryMissesWhatIsNotThere(t *testing.T) {
 	buf := cl.queryDirectory(fid, "M.pdf")
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_NO_SUCH_FILE {
 		t.Errorf("the search for a name the directory does not hold was answered with %#x, want no such file", status)
+	}
+}
+
+// TestIntegrationQueryDirectoryRefusesAnOversizedPattern is the pattern that costs the server more
+// the more the directory holds. A search is the pattern against every name in the directory, and
+// the length of the pattern is the client's to choose, so one longer than any name it could match
+// is turned away before the walk.
+func TestIntegrationQueryDirectoryRefusesAnOversizedPattern(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	h.files.putDir("docs")
+	h.files.put("docs/notes.txt", 12)
+	fid := createdFileID(cl.openDir("docs"))
+
+	buf := cl.queryDirectory(fid, strings.Repeat("*", utils.MaxPatternLength+1))
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OBJECT_NAME_INVALID {
+		t.Errorf("the oversized pattern was answered with %#x, want an invalid name", status)
+	}
+
+	// The longest pattern that is still a name searches as any other does.
+	pattern := "*" + strings.Repeat("x", utils.MaxPatternLength-1)
+	buf = cl.queryDirectory(fid, pattern)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_NO_SUCH_FILE {
+		t.Errorf("the longest allowed pattern was answered with %#x, want no such file", status)
 	}
 }
 

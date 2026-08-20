@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/ntlm"
@@ -2339,6 +2340,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		searchPath := qdr.FileName()
+
+		// A search costs the length of the pattern times the length of every name in the
+		// directory, and the pattern comes off the wire. One longer than any name it could
+		// match is turned away rather than walked.
+		if utf8.RuneCountInString(searchPath) > utils.MaxPatternLength {
+			resp := smb2.NewErrorResponse(qdr, smb2.STATUS_OBJECT_NAME_INVALID, 0, nil)
+			return resp, ss, nil
+		}
+
 		single := qdr.Flags()&smb2.RETURN_SINGLE_ENTRY > 0
 		var buf []byte
 

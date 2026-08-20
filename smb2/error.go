@@ -27,6 +27,7 @@ const (
 	STATUS_MORE_PROCESSING_REQUIRED              = 0xc0000016
 	STATUS_ACCESS_DENIED                         = 0xc0000022
 	STATUS_BUFFER_TOO_SMALL                      = 0xc0000023
+	STATUS_OBJECT_NAME_INVALID                   = 0xc0000033
 	STATUS_OBJECT_NAME_NOT_FOUND                 = 0xc0000034
 	STATUS_OBJECT_NAME_COLLISION                 = 0xc0000035
 	STATUS_DATA_ERROR                            = 0xc000003e

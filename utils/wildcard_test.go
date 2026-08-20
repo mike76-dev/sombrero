@@ -1,6 +1,9 @@
 package utils
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestMatchPatternTakesNamesLiterally is the reason this matcher exists at all: a name is
 // compared character by character, and the punctuation a shell glob would read as syntax means
@@ -130,5 +133,22 @@ func TestMatchPatternDoesNotBacktrack(t *testing.T) {
 
 	if MatchPattern(pattern, name) {
 		t.Error("a name with no b in it matched a pattern that ends in one")
+	}
+}
+
+// TestMatchPatternHoldsOneRow keeps the memory of a match to the length of the name. A caller that
+// has not capped the pattern hands over whatever the client sent, and a table over both strings
+// would allocate megabytes for every name in the directory.
+func TestMatchPatternHoldsOneRow(t *testing.T) {
+	pattern := strings.Repeat("*", 32767) // The longest a pattern can be on the wire.
+	name := strings.Repeat("a", MaxPatternLength)
+
+	rows := testing.AllocsPerRun(10, func() {
+		MatchPattern(pattern, name)
+	})
+
+	// The runes of both strings, the periods of the name, and the two rows.
+	if rows > 5 {
+		t.Errorf("a match allocated %v times, want the rows and the runes alone", rows)
 	}
 }
