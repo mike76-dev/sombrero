@@ -240,6 +240,24 @@ func TestIntegrationQueryDirectoryAnswersAnEmptyDirectory(t *testing.T) {
 	}
 }
 
+// TestIntegrationQueryDirectoryDescribesTheDirectoryItSearched is the "." and ".." of a listing.
+// The store was asked about them by the search pattern rather than by the directory the handle is
+// on, and a pattern is no path: every listing of every directory described the share root.
+func TestIntegrationQueryDirectoryDescribesTheDirectoryItSearched(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	h.files.putDir("docs")
+	h.files.put("docs/notes.txt", 12)
+	fid := createdFileID(cl.openDir("docs"))
+
+	listedNames(t, cl.queryDirectory(fid, "*"))
+
+	if asked := h.files.parentsAsked(); asked != "docs" {
+		t.Fatalf("the listing described %q, want the directory it searched", asked)
+	}
+}
+
 // TestIntegrationQueryDirectoryFullDirectoryInformation is the information class a client may ask a
 // listing in that the server used to turn away. The encoder for it was written and complete, and
 // nothing was wired to it: the class was refused with STATUS_NOT_SUPPORTED before it ever reached

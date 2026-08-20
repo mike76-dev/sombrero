@@ -2390,9 +2390,15 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				}
 			}
 
-			dir, parentDir, err := tc.client.Parents(op.ctx, acc, searchPath)
+			// The "." and ".." of the listing are the directory being searched and the one above
+			// it, which is the path of the handle rather than the pattern it is searched with.
+			op.mu.Lock()
+			dirPath := op.pathName
+			op.mu.Unlock()
+
+			dir, parentDir, err := tc.client.Parents(op.ctx, acc, dirPath)
 			if err != nil {
-				log.Printf("Error getting parent directories of path %s: %v", searchPath, err)
+				log.Printf("Error getting parent directories of path %s: %v", dirPath, err)
 				resp := smb2.NewErrorResponse(qdr, smb2.STATUS_BAD_NETWORK_NAME, 0, nil)
 				return resp, ss, nil
 			}

@@ -121,3 +121,49 @@ func TestRenameDirectoryIntoWildcardSibling(t *testing.T) {
 		t.Fatalf("want a move into its own subtree refused, got %v", err)
 	}
 }
+
+// TestCurrentAndParent verifies that a directory is described along with the one
+// above it, rather than with the one it is itself inside.
+func TestCurrentAndParent(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, _ := newSlabTestFixture(t, db)
+
+	for _, dir := range []string{"/a", "/a/b", "/a/b/c"} {
+		if err := db.CreateDirectory(acc, share, dir, false, false); err != nil {
+			t.Fatalf("CreateDirectory(%s): %v", dir, err)
+		}
+	}
+
+	current, parent, err := db.CurrentAndParent(acc, share, "/a/b/c")
+	if err != nil {
+		t.Fatalf("CurrentAndParent: %v", err)
+	}
+	if current.Path != "/a/b/c" || parent.Path != "/a/b" {
+		t.Fatalf("want /a/b/c and /a/b, got %q and %q", current.Path, parent.Path)
+	}
+
+	// A directory of the root has no parent to name: the share stands in for it.
+	current, parent, err = db.CurrentAndParent(acc, share, "/a")
+	if err != nil {
+		t.Fatalf("CurrentAndParent(/a): %v", err)
+	}
+	if current.Path != "/a" || parent.Path != "" {
+		t.Fatalf("want /a and the root, got %q and %q", current.Path, parent.Path)
+	}
+
+	// The root is neither of them.
+	current, parent, err = db.CurrentAndParent(acc, share, "/")
+	if err != nil {
+		t.Fatalf("CurrentAndParent(/): %v", err)
+	}
+	if current.Path != "" || parent.Path != "" {
+		t.Fatalf("want the root twice, got %q and %q", current.Path, parent.Path)
+	}
+
+	if _, _, err := db.CurrentAndParent(acc, share, "/a/nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want a directory that is not there reported, got %v", err)
+	}
+}

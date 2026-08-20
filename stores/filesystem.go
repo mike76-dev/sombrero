@@ -322,20 +322,20 @@ func (db *Database) Object(acc Account, shareName, path string) (object ObjectMe
 	return
 }
 
-// CurrentAndParent retrieves the information about the current and the parent directories where the file is located.
+// CurrentAndParent retrieves the information about the given directory and the one above it. The
+// root is left empty in both, since it is not a directory of the share but the share itself.
 func (db *Database) CurrentAndParent(acc Account, shareName, path string) (currentDir, parentDir ObjectMeta, err error) {
 	path = normalizePath(path)
-	dir, _ := splitPath(path)
-	if dir == "/" { // Root directory
+	if path == "/" { // Root directory
 		return
 	}
 
-	currentDir, err = db.Object(acc, shareName, dir)
+	currentDir, err = db.Object(acc, shareName, path)
 	if err != nil {
 		return
 	}
 
-	dir, _ = splitPath(dir)
+	dir, _ := splitPath(path)
 	if dir == "/" {
 		return
 	}

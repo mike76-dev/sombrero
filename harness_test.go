@@ -59,6 +59,9 @@ type fakeClient struct {
 	// store that cannot be reached at all, which a search must not read as an empty directory.
 	listErr error
 
+	// parentsPath is the path the "." and ".." entries of a listing were last asked about.
+	parentsPath string
+
 	// readGate holds up every read until a test lets it go, so that a test can arrange for
 	// something to happen to the handle while a read on it is still being worked on.
 	readGate chan struct{}
@@ -325,8 +328,21 @@ func (fc *fakeClient) IsEmpty(_ context.Context, _ stores.Account, path string) 
 	return true, nil
 }
 
-func (fc *fakeClient) Parents(context.Context, stores.Account, string) (client.FileInfo, client.FileInfo, error) {
+func (fc *fakeClient) Parents(_ context.Context, _ stores.Account, path string) (client.FileInfo, client.FileInfo, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.parentsPath = path
+
 	return client.FileInfo{}, client.FileInfo{}, nil
+}
+
+// parentsAsked is the path the "." and ".." of a listing were last asked about.
+func (fc *fakeClient) parentsAsked() string {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	return fc.parentsPath
 }
 
 // Read serves the range out of the contents the test gave the file, which is what lets a test tell
