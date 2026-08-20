@@ -446,6 +446,34 @@ func (s *server) ShareConnections(name string) (map[string]client.Client, map[st
 		return nil, nil, errShareNotFound
 	}
 
+	sh, failed, err := s.startShareConnections(share)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Somebody asked for these, so a failure is worth saying once here rather
+	// than being left to whoever reads what came back.
+	for u, reason := range failed {
+		log.Printf("failed to restore the connection of workgroup %s to share %s: %s", u, name, reason)
+	}
+
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	conns := make(map[string]client.Client, len(sh.indexdConns))
+	for wg, conn := range sh.indexdConns {
+		conns[wg] = conn.client
+		delete(failed, wg)
+	}
+
+	return conns, failed, nil
+}
+
+// startShareConnections starts a client for every workgroup connected to the
+// share that has none running, and returns the workgroups it could not start
+// with the reason why. Nothing is logged: how much a failure is worth saying
+// depends on who is asking, and the restore that keeps retrying would say the
+// same thing every time it does.
+func (s *server) startShareConnections(share stores.Share) (*share, map[string]string, error) {
 	// A share is registered with the server when something first uses it, so
 	// on a server nobody has connected to yet there is nothing to look up.
 	sh, err := s.ensureShare(share)
@@ -463,7 +491,7 @@ func (s *server) ShareConnections(name string) (map[string]client.Client, map[st
 	if !ok {
 		return nil, nil, errors.New("indexd shares require a database-backed store")
 	}
-	stored, err := db.ShareConnections(name)
+	stored, err := db.ShareConnections(share.Name)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -481,25 +509,112 @@ func (s *server) ShareConnections(name string) (map[string]client.Client, map[st
 
 		wg, err := s.store.FindWorkgroup(conn.Workgroup)
 		if err != nil || wg.ID == 0 {
-			log.Printf("failed to resolve workgroup %s of share %s: %v", u, name, err)
 			failed[u] = "workgroup not found"
 			continue
 		}
 		if err := s.AddConnection(wg, share, conn.AppKey); err != nil {
-			log.Printf("failed to restore the connection of workgroup %s to share %s: %v", u, name, err)
 			failed[u] = err.Error()
 		}
 	}
 
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
-	conns := make(map[string]client.Client, len(sh.indexdConns))
-	for wg, conn := range sh.indexdConns {
-		conns[wg] = conn.client
-		delete(failed, wg)
+	return sh, failed, nil
+}
+
+// connectionRestoreInterval is how often the startup restore tries again for the
+// connections it could not bring up.
+const connectionRestoreInterval = time.Minute
+
+// connKey names one workgroup's connection to one share.
+type connKey struct {
+	share     string
+	workgroup string
+}
+
+// restoreConnections brings up the indexd connections the database holds. Each
+// of them carries work that no tree connect triggers: uploading what is still
+// buffered, packing the leftovers, retrying the unpins, and watching for
+// fragmentation. Started only when a client connects, none of that runs on a
+// server nobody has logged on to since it came up, and data written before a
+// restart sits in the database until somebody happens to open the share.
+//
+// A connection that cannot be made is tried again, since a storage backend that
+// is unreachable is exactly when the buffered data most needs the worker that
+// will drain it.
+func (s *server) restoreConnections() {
+	// Lite mode keeps no connections: a renterd share is served by one client
+	// that the share itself holds.
+	if _, ok := s.store.(*stores.Database); !ok {
+		return
 	}
 
-	return conns, failed, nil
+	reported := make(map[connKey]struct{})
+	for {
+		if s.restoreConnectionsOnce(reported) {
+			return
+		}
+
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-time.After(connectionRestoreInterval):
+		}
+	}
+}
+
+// restoreConnectionsOnce starts what it can and reports whether everything the
+// database holds is now running. A failure is logged the first time it is seen
+// and then left alone, so that an outage lasting all afternoon costs one line
+// per connection rather than one a minute.
+func (s *server) restoreConnectionsOnce(reported map[connKey]struct{}) bool {
+	shares, err := s.store.GetAllShares()
+	if err != nil {
+		log.Printf("failed to list the shares to restore their connections: %v", err)
+		return false
+	}
+
+	done := true
+	for _, share := range shares {
+		if share.Type != "indexd" {
+			continue
+		}
+
+		_, failed, err := s.startShareConnections(share)
+		if err != nil {
+			// The share itself could not be reached for, which is one failure
+			// and not one per workgroup: it is keyed under no workgroup at all.
+			key := connKey{share: share.Name}
+			if _, said := reported[key]; !said {
+				log.Printf("failed to restore the connections of share %s, still trying: %v", share.Name, err)
+				reported[key] = struct{}{}
+			}
+			done = false
+			continue
+		}
+
+		for u, reason := range failed {
+			key := connKey{share.Name, u}
+			if _, said := reported[key]; !said {
+				log.Printf("failed to restore the connection of workgroup %s to share %s, still trying: %s", u, share.Name, reason)
+				reported[key] = struct{}{}
+			}
+			done = false
+		}
+
+		for key := range reported {
+			if key.share != share.Name {
+				continue
+			}
+			if _, still := failed[key.workgroup]; still {
+				continue
+			}
+			if key.workgroup != "" {
+				log.Printf("restored the connection of workgroup %s to share %s", key.workgroup, share.Name)
+			}
+			delete(reported, key)
+		}
+	}
+
+	return done
 }
 
 // RemoveConnection closes the workgroup's indexd client and removes their

@@ -2718,6 +2718,16 @@ func TestIndexdClient_FragmentationMonitor(t *testing.T) {
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
+	// One slab of the share's own, so that a check that runs has something to
+	// report: a connection holding none says nothing either way.
+	fb := newFakeBackend()
+	first := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	uploadBuffered(t, ctx, first, acc, "whole.bin", frand.Bytes(int(proto.SectorSize)))
+	waitForObjects(t, fb, 1)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
 	run := func(t *testing.T, frag FragmentationOptions) string {
 		t.Helper()
 
@@ -2725,10 +2735,10 @@ func TestIndexdClient_FragmentationMonitor(t *testing.T) {
 		log.SetOutput(&out)
 		t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-		c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, frag, true)
+		c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, frag, true)
 
 		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) && !strings.Contains(out.String(), "fragmentation") {
+		for time.Now().Before(deadline) && !strings.Contains(out.String(), "dead space") {
 			time.Sleep(10 * time.Millisecond)
 		}
 		_ = c.Close()
@@ -2737,14 +2747,14 @@ func TestIndexdClient_FragmentationMonitor(t *testing.T) {
 	}
 
 	t.Run("off", func(t *testing.T) {
-		if got := run(t, FragmentationOptions{}); strings.Contains(got, "fragmentation") {
+		if got := run(t, FragmentationOptions{}); strings.Contains(got, "dead space") {
 			t.Fatalf("want no check without an interval, got %q", got)
 		}
 	})
 
 	t.Run("on", func(t *testing.T) {
 		got := run(t, FragmentationOptions{Interval: time.Hour})
-		if !strings.Contains(got, "no slabs to check for fragmentation") {
+		if !strings.Contains(got, "no slab has 25% or more dead space") {
 			t.Fatalf("want a reading right away, got %q", got)
 		}
 	})

@@ -1347,10 +1347,11 @@ func (ic *IndexdClient) cleanupUploadJobs(ctx context.Context) {
 	}
 }
 
-// logFragmentation reports what the check found.
+// logFragmentation reports what the check found. A connection holding no slabs
+// has nothing to report: that is what every check of a share nobody has
+// uploaded to finds, from the first one the connection runs onwards.
 func (ic *IndexdClient) logFragmentation(stats stores.FragmentationStats) {
 	if stats.Slabs == 0 {
-		log.Printf("share %s, workgroup %d: no slabs to check for fragmentation", ic.share, ic.workgroup)
 		return
 	}
 

@@ -139,6 +139,7 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool,
 
 	go s.reapDurableOpens()
 	go s.reapConnections()
+	go s.restoreConnections()
 
 	return s
 }
