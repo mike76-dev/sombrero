@@ -35,6 +35,9 @@ var (
 	// multipart upload, which is not an object until it is completed.
 	errNotUploaded = errors.New("file is still being uploaded")
 
+	// errFileDeleted is the write to a handle whose file somebody has deleted in the meantime.
+	errFileDeleted = errors.New("file has been deleted")
+
 	// errTruncateSent is a file cut short at a point that has already gone to the store. The parts
 	// of a multipart upload cannot be taken back, so the file cannot be made to end there.
 	errTruncateSent = errors.New("truncate: what is beyond the new end of the file has already been stored")
@@ -694,6 +697,11 @@ type fileState struct {
 	// nobody holds it open: the store, or this state alone.
 	stored bool
 
+	// deleted says the file has been deleted while opens were still on it. Nothing more is written
+	// through them: a write that started an upload of its own would put the deleted file back, a
+	// piece of it at a time, under a handle nobody asked to keep.
+	deleted bool
+
 	// handles is how many opens share the state. The state of a file the store answers for is
 	// worth keeping for exactly as long as one of them is alive: kept longer, it would go on
 	// answering with the size the last writer left behind, which is the size of a file the store
@@ -817,6 +825,22 @@ func (fs *fileState) isStored() bool {
 	defer fs.mu.Unlock()
 
 	return fs.stored
+}
+
+// markDeleted records that the file has been deleted out from under the opens that are still on it.
+func (fs *fileState) markDeleted() {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.deleted = true
+}
+
+// isDeleted reports whether the file has been deleted while this state was open.
+func (fs *fileState) isDeleted() bool {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.deleted
 }
 
 // generationNow is which writing of the file the state is on.
@@ -1853,6 +1877,11 @@ func (op *open) startUpload() error {
 		return nil
 	}
 
+	// The file is gone, and starting an upload here is what would bring it back.
+	if op.file.isDeleted() {
+		return errFileDeleted
+	}
+
 	acc, err := op.session.connection.server.store.FindAccount(op.session.userName, op.session.workgroup)
 	if err != nil {
 		return err
@@ -2317,11 +2346,11 @@ func (op *open) flush() error {
 	return nil
 }
 
-// cancelUpload aborts the running upload.
-func (op *open) cancelUpload() {
+// cancelUpload aborts the running upload, and reports whether there was one to abort.
+func (op *open) cancelUpload() bool {
 	u := op.file.uploadNow()
 	if u == nil {
-		return
+		return false
 	}
 
 	op.file.dropUpload(u)
@@ -2331,4 +2360,27 @@ func (op *open) cancelUpload() {
 	u.mu.Unlock()
 
 	_ = op.treeConnect.client.AbortUpload(op.ctx, u.path, uploadID)
+
+	return true
+}
+
+// abandonUpload calls the upload off and takes the file off the share with it, for the file that
+// nothing is ever going to store. A file the store has an object for is answered for by the store;
+// one it has nothing for is known by its state alone, and the state of a file whose writing was
+// called off stands for bytes that are no longer anywhere. Left on the share, it is listed to every
+// client as a file that cannot be read.
+//
+// A file that was created and never written to is not this: there is no upload to call off, so
+// nothing is taken away and the file a client made over a connection it has lost is still there
+// when it comes back.
+func (op *open) abandonUpload() {
+	if !op.cancelUpload() || op.file.isStored() {
+		return
+	}
+
+	op.mu.Lock()
+	path := op.pathName
+	op.mu.Unlock()
+
+	op.treeConnect.forgetPersistedFile(path)
 }

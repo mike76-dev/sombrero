@@ -2811,3 +2811,80 @@ func TestIndexdClient_FragmentationThresholdWarning(t *testing.T) {
 		})
 	}
 }
+
+// TestIndexdClient_DeleteCancelsTheUploadInFlight is the copy a client gives up
+// on while the storage backend is unreachable. The delete used to find nothing,
+// because the object of an upload in flight is not on the share yet, and the
+// close that came after it put the half-written file there - with its pieces
+// still queued, which the workers then retried for as long as the backend was
+// down.
+func TestIndexdClient_DeleteCancelsTheUploadInFlight(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	fb.failUploads(errors.New("no more hosts available"))
+
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	data := frand.Bytes(int(proto.SectorSize) / 2)
+
+	uploadID, err := c.StartUpload(ctx, acc, "half.bin")
+	if err != nil {
+		t.Fatalf("StartUpload: %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(data), "half.bin", uploadID, 1, 0, uint64(len(data))); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if err := c.Delete(ctx, acc, "half.bin", false); err != nil {
+		t.Fatalf("the delete of the half-written file: %v", err)
+	}
+
+	// Whatever the handle does on its way out, the file the client asked to go
+	// stays gone.
+	if err := c.FinishUpload(ctx, "half.bin", uploadID, nil); err == nil {
+		t.Fatal("the close finalized an upload the client had deleted")
+	}
+
+	ois, err := c.List(ctx, acc, "/")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(ois) != 0 {
+		t.Fatalf("the share holds %+v, want the cancelled file gone", ois)
+	}
+}
+
+// TestNextRetry covers the wait between failed jobs: it starts at the shortest
+// one and doubles up to the cap, so a storage backend that is down is asked
+// again at a rate that does not grow with how long the outage lasts.
+func TestNextRetry(t *testing.T) {
+	if got := nextRetry(0); got != retryDelay {
+		t.Errorf("the first wait is %s, want %s", got, retryDelay)
+	}
+
+	d := retryDelay
+	for range 3 {
+		next := nextRetry(d)
+		if next != d*2 {
+			t.Fatalf("the wait after %s is %s, want it doubled", d, next)
+		}
+		d = next
+	}
+
+	// However long the failures go on, the wait stops at the cap.
+	for range 20 {
+		d = nextRetry(d)
+	}
+	if d != retryMax {
+		t.Errorf("the wait grew to %s, want it capped at %s", d, retryMax)
+	}
+}

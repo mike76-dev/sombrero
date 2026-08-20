@@ -305,7 +305,7 @@ func (s *server) sweepDurableOpens() {
 		// or the multipart upload it started is left hanging there. Calling it off puts the
 		// file back to the size the store holds it at, and the handle that was keeping the
 		// state on the share is gone with the open.
-		op.cancelUpload()
+		op.abandonUpload()
 		op.releaseFile()
 		op.cancel()
 	}

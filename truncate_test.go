@@ -301,11 +301,11 @@ func TestIntegrationDeletingOnCloseStoresNothingFirst(t *testing.T) {
 	}
 }
 
-// TestIntegrationASaveAfterADeletionPutsTheFileBack is the rule the two of them settle by: whoever
-// saves last is what the file is. A client deleting a file another client has open takes the file
-// away, and the save that comes after it puts the file back exactly as that client wrote it - the
-// upload is the file's, and it is the other client's close that stores it.
-func TestIntegrationASaveAfterADeletionPutsTheFileBack(t *testing.T) {
+// TestIntegrationADeletionTakesTheFileFromTheWriterToo is the rule the two of them settle by: the
+// deletion is the last word. A client deleting a file another client has open takes the file away
+// and the upload with it, so the save that would have come after it stores nothing - the file the
+// client asked to delete stays deleted, whoever else is holding it open.
+func TestIntegrationADeletionTakesTheFileFromTheWriterToo(t *testing.T) {
 	h := newSMBTest(t)
 	h.files.putData("notes.txt", []byte("what was there before"))
 
@@ -341,20 +341,27 @@ func TestIntegrationASaveAfterADeletionPutsTheFileBack(t *testing.T) {
 		t.Error("the store still holds the file that was deleted")
 	}
 
-	// And then the save lands, which is the last word on the file.
+	// The writer is writing to a file that is no longer there, and is told so rather than being
+	// allowed to store it again a piece at a time.
+	refused, err := writer.write(createdFileID(writing), 12, []byte("and some more"))
+	if err != nil {
+		t.Fatalf("the write failed outright: %v", err)
+	}
+	if status := smb2.Header(refused).Status(); status != smb2.STATUS_DELETE_PENDING {
+		t.Errorf("the write to the deleted file was answered with %#x, want the deletion reported", status)
+	}
+
+	// Its close lets the handle go, as a close does, and stores nothing.
 	saved, err := writer.closeHandle(createdFileID(writing))
 	if err != nil {
 		t.Fatalf("the writer's close failed outright: %v", err)
 	}
 	if status := smb2.Header(saved).Status(); status != smb2.STATUS_OK {
-		t.Fatalf("the writer's close was answered with %#x, want the file stored", status)
+		t.Fatalf("the writer's close was answered with %#x, want the handle let go of", status)
 	}
 
-	if !h.files.has("notes.txt") {
-		t.Fatal("the file the writer saved is not in the store")
-	}
-	if got := string(h.files.dataOf("notes.txt")); got != "another test" {
-		t.Errorf("the store holds %q, want the file exactly as it was saved", got)
+	if h.files.has("notes.txt") {
+		t.Errorf("the close of the writer put the deleted file back as %q", string(h.files.dataOf("notes.txt")))
 	}
 }
 

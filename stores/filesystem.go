@@ -819,6 +819,12 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 
 // DeleteFile deletes a file. It returns the keys of the slabs that no other
 // file references any more, so that the caller can unpin them.
+//
+// A file that exists only as an upload in flight is deleted along with the
+// upload, which is what a client asking for a half-written file to go means. An
+// upload overwriting a file that is already there is left alone: the file being
+// deleted is the one that is on the share, and the writer's own close decides
+// what happens to theirs.
 func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
@@ -838,7 +844,16 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 				CROSS JOIN caller c
 				WHERE o.share_name = $1
 					AND o.full_path = $2
-					AND o.temporary = FALSE
+					AND (
+						o.temporary = FALSE
+						OR NOT EXISTS (
+							SELECT 1
+							FROM objects v
+							WHERE v.share_name = $1
+								AND v.full_path = $2
+								AND v.temporary = FALSE
+						)
+					)
 					AND (
 						o.account = c.id
 						OR (
@@ -879,7 +894,16 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 				CROSS JOIN caller c
 				WHERE o.share_name = $1
 					AND o.full_path = $2
-					AND o.temporary = FALSE
+					AND (
+						o.temporary = FALSE
+						OR NOT EXISTS (
+							SELECT 1
+							FROM objects v
+							WHERE v.share_name = $1
+								AND v.full_path = $2
+								AND v.temporary = FALSE
+						)
+					)
 					AND (
 						o.account = c.id
 						OR (
@@ -971,13 +995,16 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 						)
 					)
 			),
+			-- A file still being uploaded into the directory goes with it, and its
+			-- storage is collected here: the object would be taken by the cascade
+			-- of the directory alone, leaving its buffer and its slabs paid for
+			-- and referenced by nobody.
 			target_objects AS (
 				SELECT o.id
 				FROM objects o
 				JOIN src s ON TRUE
 				WHERE o.share_name = $1
 					AND starts_with(o.full_path, s.full_path || '/')
-					And o.temporary = FALSE
 			)
 			SELECT DISTINCT m.buffer_id, m.slab_key
 			FROM metadata m
@@ -1021,7 +1048,6 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 				USING src s
 				WHERE o.share_name = $1
 					AND starts_with(o.full_path, s.full_path || '/')
-					AND o.temporary = FALSE
 				RETURNING o.id
 			),
 			delete_dirs AS (
