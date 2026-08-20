@@ -274,6 +274,8 @@ type IndexdClient struct {
 	slabSize     uint64
 	minPackSize  uint64
 	maxBufferAge time.Duration
+	fragLevel    float64
+	fragInterval time.Duration
 	debug        bool
 
 	// Shutdown happens in two stages. Close closes drainChan, on which the
@@ -337,18 +339,29 @@ type PackingOptions struct {
 	MaxAge time.Duration
 }
 
+// FragmentationOptions describes how the slabs are watched for the dead space
+// that editing and deleting files leaves behind in them.
+type FragmentationOptions struct {
+	// Threshold is the fraction of a slab that may be dead space before the
+	// slab is reported. Anything outside of (0, 1] falls back to the default.
+	Threshold float64
+
+	// Interval is how often to look. Zero turns the check off.
+	Interval time.Duration
+}
+
 // NewIndexdClient returns an initialized IndexdClient serving the given
 // workgroup's connection to the share.
-func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, debug bool) Client {
+func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, fragmentation FragmentationOptions, debug bool) Client {
 	backend := &sdkBackend{
 		sdk:      sdkClient,
 		objCache: make(map[types.Hash256]sdk.Object),
 	}
-	return newIndexdClient(db, backend, share, workgroup, dataShards, parityShards, packing, debug)
+	return newIndexdClient(db, backend, share, workgroup, dataShards, parityShards, packing, fragmentation, debug)
 }
 
 // newIndexdClient allows using a mock SDK for testing.
-func newIndexdClient(db *stores.Database, backend storageBackend, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, debug bool) Client {
+func newIndexdClient(db *stores.Database, backend storageBackend, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, fragmentation FragmentationOptions, debug bool) Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	ic := &IndexdClient{
 		share:        share,
@@ -360,6 +373,8 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		slabSize:     uint64(dataShards) * proto.SectorSize,
 		minPackSize:  packing.MinSize,
 		maxBufferAge: packing.MaxAge,
+		fragLevel:    fragmentation.Threshold,
+		fragInterval: fragmentation.Interval,
 		debug:        debug,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -375,6 +390,20 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 	// age with nothing left to trigger on.
 	if ic.maxBufferAge > 0 && ic.minPackSize >= ic.slabSize {
 		log.Printf("share %s: minPackedSlabSize of %d is not below the slab size of %d, so maxBufferAge of %s will never upload anything", share, ic.minPackSize, ic.slabSize, ic.maxBufferAge)
+	}
+
+	// A threshold of zero would report every slab that holds any dead space
+	// at all, which is not what leaving the setting out asks for.
+	if ic.fragLevel <= 0 || ic.fragLevel > 1 {
+		ic.fragLevel = stores.DefaultFragmentationThreshold
+	}
+
+	// A slab can never hold more dead space than it was filled with, so one
+	// uploaded at the minimum size never reaches a threshold above what that
+	// minimum is of a slab. Only an age uploads a slab short of full, and an
+	// unset minimum puts no floor on how short.
+	if ic.maxBufferAge > 0 && ic.minPackSize > 0 && ic.fragLevel*float64(ic.slabSize) > float64(ic.minPackSize) {
+		log.Printf("share %s: fragmentationThreshold of %.0f%% of a slab of %d is above the minPackedSlabSize of %d, so the holes in slabs uploaded at that minimum will never be reported", share, ic.fragLevel*100, ic.slabSize, ic.minPackSize)
 	}
 
 	// Start background upload threads.
@@ -402,6 +431,15 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		defer ic.wg.Done()
 		ic.cleanupUploadJobs(ic.ctx)
 	}()
+
+	// Start the fragmentation monitor, unless it is turned off.
+	if ic.fragInterval > 0 {
+		ic.wg.Add(1)
+		go func() {
+			defer ic.wg.Done()
+			ic.monitorFragmentation(ic.ctx)
+		}()
+	}
 
 	return ic
 }
@@ -1276,6 +1314,82 @@ func (ic *IndexdClient) cleanupUploadJobs(ctx context.Context) {
 		}
 		ic.retryPendingUnpins(ctx)
 		suspects = ic.requeueStrandedPieces(suspects)
+
+		select {
+		case <-ic.drainChan:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// logFragmentation reports what the check found.
+func (ic *IndexdClient) logFragmentation(stats stores.FragmentationStats) {
+	if stats.Slabs == 0 {
+		log.Printf("share %s, workgroup %d: no slabs to check for fragmentation", ic.share, ic.workgroup)
+		return
+	}
+
+	if stats.Fragmented > 0 {
+		log.Printf("share %s, workgroup %d: %d of %d slab(s) have %.0f%% or more dead space, which is %d bytes of the total %d wasted",
+			ic.share, ic.workgroup, stats.Fragmented, stats.Slabs, ic.fragLevel*100, stats.FragmentedWasted, stats.Wasted)
+		return
+	}
+
+	log.Printf("share %s, workgroup %d: no slab has %.0f%% or more dead space, with %d bytes wasted across %d slab(s)",
+		ic.share, ic.workgroup, ic.fragLevel*100, stats.Wasted, stats.Slabs)
+}
+
+// checkFragmentation measures the dead space in the share's slabs. Nothing is
+// repacked yet: the level is only reported.
+func (ic *IndexdClient) checkFragmentation() (stores.FragmentationStats, error) {
+	stats, err := ic.db.Fragmentation(ic.share, ic.workgroup, ic.slabSize, ic.fragLevel)
+	if err != nil {
+		return stores.FragmentationStats{}, err
+	}
+
+	if ic.debug {
+		ic.logFragmentation(stats)
+	}
+	return stats, nil
+}
+
+// Fragmentation reports the dead space in this connection's slabs, listing
+// those that reach threshold. A threshold outside of (0, 1] reports at the
+// level the connection is configured with.
+func (ic *IndexdClient) Fragmentation(ctx context.Context, threshold float64) (FragmentationReport, error) {
+	if threshold <= 0 || threshold > 1 {
+		threshold = ic.fragLevel
+	}
+
+	stats, err := ic.db.Fragmentation(ic.share, ic.workgroup, ic.slabSize, threshold)
+	if err != nil {
+		return FragmentationReport{}, fmt.Errorf("couldn't summarize the slabs: %v", err)
+	}
+
+	slabs, err := ic.db.PackedSlabs(ic.share, ic.workgroup, ic.slabSize, threshold)
+	if err != nil {
+		return FragmentationReport{}, fmt.Errorf("couldn't list the fragmented slabs: %v", err)
+	}
+
+	return FragmentationReport{
+		Threshold: threshold,
+		Stats:     stats,
+		Slabs:     slabs,
+	}, nil
+}
+
+// monitorFragmentation runs the fragmentation check in the background. Running
+// once right away gives a reading without waiting out the first interval.
+func (ic *IndexdClient) monitorFragmentation(ctx context.Context) {
+	ticker := time.NewTicker(ic.fragInterval)
+	defer ticker.Stop()
+
+	for {
+		// A check cut short by Close is not worth reporting.
+		if _, err := ic.checkFragmentation(); err != nil && ctx.Err() == nil {
+			log.Printf("failed to check the fragmentation of share %s, workgroup %d: %v", ic.share, ic.workgroup, err)
+		}
 
 		select {
 		case <-ic.drainChan:

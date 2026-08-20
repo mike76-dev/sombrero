@@ -53,13 +53,120 @@ func TestBufferAgeYAML(t *testing.T) {
 	}
 }
 
+// TestCheckIntervalYAML verifies how the interval of a periodic check is read
+// from the config file, in particular that leaving it out means the default
+// while turning the check off has to be said out loud.
+func TestCheckIntervalYAML(t *testing.T) {
+	tests := []struct {
+		yaml string
+		want CheckInterval
+		fail bool
+	}{
+		{yaml: "fragmentationCheck: 6h", want: CheckInterval(6 * time.Hour)},
+		{yaml: "fragmentationCheck: 30m", want: CheckInterval(30 * time.Minute)},
+		{yaml: "fragmentationCheck: never", want: -1},
+		{yaml: "fragmentationCheck: Never", want: -1},
+		{yaml: "fragmentationCheck: off", want: -1},
+		{yaml: "fragmentationCheck: default", want: 0},
+		{yaml: "fragmentationCheck: ''", want: 0},
+		{yaml: "fragmentationCheck: '  6h  '", want: CheckInterval(6 * time.Hour)},
+		{yaml: "appName: Sombrero", want: 0},
+		{yaml: "fragmentationCheck: 0", fail: true},
+		{yaml: "fragmentationCheck: 0s", fail: true},
+		{yaml: "fragmentationCheck: 3600", fail: true},
+		{yaml: "fragmentationCheck: -1h", fail: true},
+		{yaml: "fragmentationCheck: sometimes", fail: true},
+	}
+
+	for _, tc := range tests {
+		var cfg IndexdConfig
+		err := yaml.Unmarshal([]byte(tc.yaml), &cfg)
+
+		if tc.fail {
+			if err == nil {
+				t.Fatalf("%q: want an error, got %v", tc.yaml, cfg.FragmentationCheck)
+			}
+			continue
+		}
+
+		if err != nil {
+			t.Fatalf("%q: %v", tc.yaml, err)
+		}
+		if cfg.FragmentationCheck != tc.want {
+			t.Fatalf("%q: want %v, got %v", tc.yaml, tc.want, cfg.FragmentationCheck)
+		}
+	}
+}
+
+// TestFragmentationDefaults verifies that the monitor's settings fall back to
+// the defaults when the config leaves them out, and that turning the check off
+// is reported as an interval of zero.
+func TestFragmentationDefaults(t *testing.T) {
+	tests := []struct {
+		cfg           IndexdConfig
+		wantThreshold float64
+		wantInterval  time.Duration
+	}{
+		{
+			cfg:           IndexdConfig{},
+			wantThreshold: DefaultFragmentationThreshold,
+			wantInterval:  DefaultFragmentationCheck,
+		},
+		{
+			cfg:           IndexdConfig{FragmentationThreshold: 0.5, FragmentationCheck: CheckInterval(6 * time.Hour)},
+			wantThreshold: 0.5,
+			wantInterval:  6 * time.Hour,
+		},
+		{
+			// Off leaves the threshold alone: it still applies to the
+			// listing the API serves on demand.
+			cfg:           IndexdConfig{FragmentationThreshold: 0.5, FragmentationCheck: -1},
+			wantThreshold: 0.5,
+			wantInterval:  0,
+		},
+	}
+
+	for _, tc := range tests {
+		threshold, interval := tc.cfg.Fragmentation()
+		if threshold != tc.wantThreshold || interval != tc.wantInterval {
+			t.Fatalf("%+v: want %v every %v, got %v every %v", tc.cfg, tc.wantThreshold, tc.wantInterval, threshold, interval)
+		}
+	}
+}
+
+// TestReadConfigRejectsBadThreshold verifies that a threshold that would report
+// either every slab or none of them is refused rather than quietly applied.
+func TestReadConfigRejectsBadThreshold(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "sombrero.yml"), []byte(body), 0600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	for _, body := range []string{"indexd:\n  fragmentationThreshold: -0.1\n", "indexd:\n  fragmentationThreshold: 1.5\n"} {
+		write(body)
+		if _, err := ReadConfig(dir); err == nil {
+			t.Fatalf("ReadConfig(%q): want an error, got none", body)
+		}
+	}
+
+	write("indexd:\n  fragmentationThreshold: 0.25\n")
+	if _, err := ReadConfig(dir); err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+}
+
 // TestIndexdConfigRoundTrip verifies that the packing settings survive being
 // written out and read back, and that the defaults stay out of the file.
 func TestIndexdConfigRoundTrip(t *testing.T) {
 	cfg := IndexdConfig{
-		Name:              "Sombrero",
-		MinPackedSlabSize: 1 << 20,
-		MaxBufferAge:      BufferAge(24 * time.Hour),
+		Name:                   "Sombrero",
+		MinPackedSlabSize:      1 << 20,
+		MaxBufferAge:           BufferAge(24 * time.Hour),
+		FragmentationThreshold: 0.4,
+		FragmentationCheck:     CheckInterval(6 * time.Hour),
 	}
 
 	out, err := yaml.Marshal(cfg)
@@ -80,7 +187,7 @@ func TestIndexdConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal defaults: %v", err)
 	}
-	for _, key := range []string{"minPackedSlabSize", "maxBufferAge"} {
+	for _, key := range []string{"minPackedSlabSize", "maxBufferAge", "fragmentationThreshold", "fragmentationCheck"} {
 		if strings.Contains(string(out), key) {
 			t.Fatalf("want %q left out of a default config, got %q", key, out)
 		}
@@ -158,10 +265,12 @@ func TestSaveConfigRoundTrip(t *testing.T) {
 		API:            APIConfig{Address: "127.0.0.1:9999", Password: "hunter2"},
 		Database:       DatabaseConfig{Host: "127.0.0.1", Port: 5432, User: "postgres", Database: "sombrero", SSLMode: "disable"},
 		Indexd: IndexdConfig{
-			Name:              "Sombrero",
-			SeedPhrase:        "seed",
-			MinPackedSlabSize: 1 << 20,
-			MaxBufferAge:      BufferAge(24 * time.Hour),
+			Name:                   "Sombrero",
+			SeedPhrase:             "seed",
+			MinPackedSlabSize:      1 << 20,
+			MaxBufferAge:           BufferAge(24 * time.Hour),
+			FragmentationThreshold: 0.4,
+			FragmentationCheck:     CheckInterval(6 * time.Hour),
 		},
 	}
 

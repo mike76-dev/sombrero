@@ -101,6 +101,40 @@ type OrphansResponse struct {
 	Errors map[string]string `json:"errors,omitempty"`
 }
 
+// FragmentedSlab is one entry of a fragmentation report: a slab holding dead
+// space that editing or deleting files left behind.
+type FragmentedSlab struct {
+	Workgroup     string        `json:"workgroup"`
+	Key           types.Hash256 `json:"key"`
+	Size          uint64        `json:"size"`
+	Filled        uint64        `json:"filled"`
+	Used          uint64        `json:"used"`
+	Wasted        uint64        `json:"wasted"`
+	Pieces        int           `json:"pieces"`
+	Fragmentation float64       `json:"fragmentation"`
+}
+
+// FragmentationResponse is the response type for GET /share/:name/fragmentation.
+type FragmentationResponse struct {
+	// Slabs is what the check found, most fragmented first.
+	Slabs []FragmentedSlab `json:"slabs"`
+
+	// Total counts every slab of the share and Wasted is the dead space in all
+	// of them, which is what Fragmented and FragmentedWasted are a part of.
+	Total            int    `json:"total"`
+	Wasted           uint64 `json:"wasted"`
+	Fragmented       int    `json:"fragmented"`
+	FragmentedWasted uint64 `json:"fragmentedWasted"`
+
+	// Threshold is the dead space a slab had to hold to be listed, as a
+	// fraction of its size.
+	Threshold float64 `json:"threshold"`
+
+	// Errors names the workgroup connections that could not be checked, if
+	// any. The check of the others still counts.
+	Errors map[string]string `json:"errors,omitempty"`
+}
+
 // UnpinOrphansResponse is the response type for DELETE /share/:name/orphans.
 type UnpinOrphansResponse struct {
 	Unpinned int               `json:"unpinned"`
@@ -261,6 +295,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.DELETE("/share/:name/orphans", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.orphansHandlerDELETE(w, req, ps)
+	})
+
+	router.GET("/share/:name/fragmentation", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.fragmentationHandlerGET(w, req, ps)
 	})
 
 	router.GET("/share/:name/policy", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -649,6 +687,24 @@ func scanMinAge(w http.ResponseWriter, req *http.Request) (time.Duration, bool) 
 	return time.Duration(secs * float64(time.Second)), true
 }
 
+// fragmentationThreshold reads the dead space a slab has to hold to be
+// reported from the request, as a fraction of its size. Left out, the
+// connections report at the level they are configured with.
+func fragmentationThreshold(w http.ResponseWriter, req *http.Request) (float64, bool) {
+	raw := req.FormValue("threshold")
+	if raw == "" {
+		return 0, true
+	}
+
+	t, err := strconv.ParseFloat(raw, 64)
+	if err != nil || t <= 0 || t > 1 {
+		writeError(w, "threshold must be a fraction between 0 and 1", http.StatusBadRequest)
+		return 0, false
+	}
+
+	return t, true
+}
+
 // scannableShare resolves the workgroup connections of the named share, and
 // writes the error response itself when the share cannot be scanned. The
 // connections it could not reach are returned alongside, to be reported with
@@ -809,6 +865,79 @@ func (api *API) orphansHandlerDELETE(w http.ResponseWriter, req *http.Request, p
 	if len(failed) > 0 {
 		res.Errors = failed
 	}
+
+	writeJSON(w, res)
+}
+
+// fragmentationHandlerGET handles the GET /share/:name/fragmentation calls. It
+// reports the dead space that editing and deleting files has left behind in the
+// share's slabs, without changing anything.
+func (api *API) fragmentationHandlerGET(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	conns, failed, ok := api.scannableShare(w, ps.ByName("name"))
+	if !ok {
+		return
+	}
+	threshold, ok := fragmentationThreshold(w, req)
+	if !ok {
+		return
+	}
+
+	res := FragmentationResponse{
+		Slabs:     []FragmentedSlab{},
+		Threshold: threshold,
+	}
+
+	var checked int
+	for wg, c := range conns {
+		report, err := c.Fragmentation(req.Context(), threshold)
+		if err != nil {
+			log.Printf("failed to check share %s of workgroup %s for fragmentation: %v", ps.ByName("name"), wg, err)
+			failed[wg] = err.Error()
+			continue
+		}
+		checked++
+
+		// Left out of the request, the threshold is whatever the connections
+		// are configured with, which is the same for all of them.
+		res.Threshold = report.Threshold
+		res.Total += report.Stats.Slabs
+		res.Wasted += report.Stats.Wasted
+		res.Fragmented += report.Stats.Fragmented
+		res.FragmentedWasted += report.Stats.FragmentedWasted
+
+		for _, slab := range report.Slabs {
+			res.Slabs = append(res.Slabs, FragmentedSlab{
+				Workgroup:     wg,
+				Key:           slab.Key,
+				Size:          slab.Size,
+				Filled:        slab.Filled,
+				Used:          slab.Used,
+				Wasted:        slab.Wasted(),
+				Pieces:        slab.Pieces,
+				Fragmentation: slab.Fragmentation(),
+			})
+		}
+	}
+
+	// A connection that could not be checked is reported alongside what the
+	// others found, so that the counts are never mistaken for the whole share.
+	// Only a check that saw nothing at all fails.
+	if checked == 0 {
+		writeError(w, "failed to check the share for fragmentation", http.StatusInternalServerError)
+		return
+	}
+	if len(failed) > 0 {
+		res.Errors = failed
+	}
+
+	// Most fragmented first across all the workgroups, so that the listing
+	// reads the same way it does per connection.
+	sort.Slice(res.Slabs, func(i, j int) bool {
+		if res.Slabs[i].Wasted != res.Slabs[j].Wasted {
+			return res.Slabs[i].Wasted > res.Slabs[j].Wasted
+		}
+		return bytes.Compare(res.Slabs[i].Key[:], res.Slabs[j].Key[:]) < 0
+	})
 
 	writeJSON(w, res)
 }
