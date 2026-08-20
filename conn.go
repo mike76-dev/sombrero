@@ -2374,16 +2374,20 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			// Send as many search results as the buffer length allows.
 			buf = op.takeSearchResults(qdr.FileInformationClass(), qdr.OutputBufferLength(), single, false, client.FileInfo{}, client.FileInfo{})
 		} else {
-			// Run a new search.
-			if err := op.queryDirectory(acc, searchPath); err != nil && searchPath != "*" {
-				if errors.Is(err, errNoFiles) { // No such file exists
-					resp := smb2.NewErrorResponse(qdr, smb2.STATUS_NO_SUCH_FILE, 0, nil)
+			// Run a new search. A directory that holds nothing is still an answer to the search
+			// for everything - the "." and ".." entries alone - but a store that could not be
+			// reached is reported rather than passed off as an empty directory.
+			if err := op.queryDirectory(acc, searchPath); err != nil {
+				if !errors.Is(err, errNoFiles) {
+					log.Printf("Error running query directory on path %s: %v", searchPath, err)
+					resp := smb2.NewErrorResponse(qdr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 					return resp, ss, nil
 				}
 
-				log.Printf("Error running query directory on path %s: %v", searchPath, err)
-				resp := smb2.NewErrorResponse(qdr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
-				return resp, ss, nil
+				if searchPath != "*" { // No such file exists
+					resp := smb2.NewErrorResponse(qdr, smb2.STATUS_NO_SUCH_FILE, 0, nil)
+					return resp, ss, nil
+				}
 			}
 
 			dir, parentDir, err := tc.client.Parents(op.ctx, acc, searchPath)

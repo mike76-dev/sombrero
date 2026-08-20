@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -200,6 +201,42 @@ func TestIntegrationQueryDirectoryRefusesAnOversizedPattern(t *testing.T) {
 	buf = cl.queryDirectory(fid, pattern)
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_NO_SUCH_FILE {
 		t.Errorf("the longest allowed pattern was answered with %#x, want no such file", status)
+	}
+}
+
+// TestIntegrationQueryDirectorySaysWhenTheStoreCannotBeReached is the backend failure that used to
+// come back as an empty directory. The search for everything is allowed to find nothing, and the
+// error of a store that could not be listed was taken for that: the client was answered with the
+// "." and ".." entries under a success status, and told the directory it holds files in is empty.
+func TestIntegrationQueryDirectorySaysWhenTheStoreCannotBeReached(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	h.files.putDir("docs")
+	h.files.put("docs/notes.txt", 12)
+	fid := createdFileID(cl.openDir("docs"))
+
+	h.files.failListing(errors.New("the store cannot be reached"))
+
+	buf := cl.queryDirectory(fid, "*")
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_INVALID_PARAMETER {
+		t.Fatalf("the search of a store that could not be listed was answered with %#x, want the failure reported", status)
+	}
+}
+
+// TestIntegrationQueryDirectoryAnswersAnEmptyDirectory is the other side of that: finding nothing
+// is not a failure, and the search for everything still carries the directory and its parent.
+func TestIntegrationQueryDirectoryAnswersAnEmptyDirectory(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	h.files.putDir("empty")
+	fid := createdFileID(cl.openDir("empty"))
+
+	names := listedNames(t, cl.queryDirectory(fid, "*"))
+
+	if !slices.Contains(names, ".") || !slices.Contains(names, "..") {
+		t.Fatalf("the search of an empty directory found %v, want it and its parent", names)
 	}
 }
 
