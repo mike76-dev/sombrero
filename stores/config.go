@@ -235,16 +235,21 @@ type IndexdConfig struct {
 	// the check off and leaves the API to report on demand.
 	FragmentationThreshold float64       `yaml:"fragmentationThreshold,omitempty"`
 	FragmentationCheck     CheckInterval `yaml:"fragmentationCheck,omitempty"`
+
+	// Defragment has the check repack the slabs it reports, which frees the
+	// dead space in them at the cost of uploading what is left in them again.
+	// Unset, the check only reports.
+	Defragment bool `yaml:"defragment,omitempty"`
 }
 
 // Fragmentation returns the monitor's settings with the defaults filled in. A
 // zero interval means the monitor does not run.
-func (c IndexdConfig) Fragmentation() (threshold float64, interval time.Duration) {
+func (c IndexdConfig) Fragmentation() (threshold float64, interval time.Duration, defragment bool) {
 	threshold = c.FragmentationThreshold
 	if threshold <= 0 {
 		threshold = DefaultFragmentationThreshold
 	}
-	return threshold, c.FragmentationCheck.Interval(DefaultFragmentationCheck)
+	return threshold, c.FragmentationCheck.Interval(DefaultFragmentationCheck), c.Defragment
 }
 
 // Config lists the config fields.

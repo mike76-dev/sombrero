@@ -808,6 +808,29 @@ func (db *Database) CleanupUploadJobs() error {
 	})
 }
 
+// BufferedBytes returns how much data of the given share and workgroup is
+// waiting in the database to be uploaded, whether it is queued or claimed.
+func (db *Database) BufferedBytes(share string, workgroup int) (bytes uint64, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT COALESCE(SUM(m.data_length), 0)
+			FROM metadata m
+			JOIN objects o ON o.id = m.object_id
+			WHERE o.share_name = $1
+				AND o.workgroup = $2
+				AND m.buffer_id IS NOT NULL
+		`
+
+		var total int64
+		if err := tx.QueryRow(ctx, query, share, workgroup).Scan(&total); err != nil {
+			return fmt.Errorf("failed to measure the buffered data: %w", err)
+		}
+		bytes = uint64(total)
+		return nil
+	})
+	return
+}
+
 // StrandedPieces returns the metadata entries of the given share and
 // workgroup that reference a buffer but have no entry in the upload queue.
 // This is what a claim leaves behind when the process stops between claiming

@@ -1303,3 +1303,45 @@ func TestDeleteDirectoryTakesTheUploadsInFlight(t *testing.T) {
 		t.Errorf("%d queued job(s) left behind", n)
 	}
 }
+
+// TestBufferedBytes verifies that what is counted as waiting to go up is the
+// data of this share and workgroup that still sits in a buffer, whether or not
+// it has been claimed.
+func TestBufferedBytes(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+	bob, bobWG := newForeignAccount(t, db, "bob")
+
+	if n, err := db.BufferedBytes(share, wg); err != nil || n != 0 {
+		t.Fatalf("BufferedBytes on an empty share: want 0, got %d (%v)", n, err)
+	}
+
+	plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
+	plantBufferedFile(t, db, share, acc, "b.txt", 200, true)
+	plantBufferedFile(t, db, share, bob, "theirs.txt", 700, false)
+
+	// An upload in flight is data waiting just as much as a finalized one.
+	if n, err := db.BufferedBytes(share, wg); err != nil || n != 500 {
+		t.Fatalf("BufferedBytes: want 500, got %d (%v)", n, err)
+	}
+	if n, err := db.BufferedBytes(share, bobWG); err != nil || n != 700 {
+		t.Fatalf("BufferedBytes(bob): want 700, got %d (%v)", n, err)
+	}
+
+	// A claim takes the queue entry, not the buffer, so what is claimed is
+	// still waiting.
+	backdateUploads(t, db, 48*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("want the finalized piece claimed, got %d", len(jobs))
+	}
+	if n, err := db.BufferedBytes(share, wg); err != nil || n != 500 {
+		t.Fatalf("BufferedBytes after a claim: want 500, got %d (%v)", n, err)
+	}
+}

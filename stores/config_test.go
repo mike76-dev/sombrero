@@ -103,9 +103,10 @@ func TestCheckIntervalYAML(t *testing.T) {
 // is reported as an interval of zero.
 func TestFragmentationDefaults(t *testing.T) {
 	tests := []struct {
-		cfg           IndexdConfig
-		wantThreshold float64
-		wantInterval  time.Duration
+		cfg            IndexdConfig
+		wantThreshold  float64
+		wantInterval   time.Duration
+		wantDefragment bool
 	}{
 		{
 			cfg:           IndexdConfig{},
@@ -124,12 +125,21 @@ func TestFragmentationDefaults(t *testing.T) {
 			wantThreshold: 0.5,
 			wantInterval:  0,
 		},
+		{
+			// Repacking is opt-in, and does not come with a default of
+			// its own: it runs at whatever the check is set to.
+			cfg:            IndexdConfig{Defragment: true},
+			wantThreshold:  DefaultFragmentationThreshold,
+			wantInterval:   DefaultFragmentationCheck,
+			wantDefragment: true,
+		},
 	}
 
 	for _, tc := range tests {
-		threshold, interval := tc.cfg.Fragmentation()
-		if threshold != tc.wantThreshold || interval != tc.wantInterval {
-			t.Fatalf("%+v: want %v every %v, got %v every %v", tc.cfg, tc.wantThreshold, tc.wantInterval, threshold, interval)
+		threshold, interval, defragment := tc.cfg.Fragmentation()
+		if threshold != tc.wantThreshold || interval != tc.wantInterval || defragment != tc.wantDefragment {
+			t.Fatalf("%+v: want %v every %v (defragment %v), got %v every %v (defragment %v)",
+				tc.cfg, tc.wantThreshold, tc.wantInterval, tc.wantDefragment, threshold, interval, defragment)
 		}
 	}
 }

@@ -589,6 +589,12 @@ func (rc *RenterdClient) Fragmentation(ctx context.Context, threshold float64) (
 	return FragmentationReport{}, ErrNoSlabScan
 }
 
+// Defragment is not supported by renterd shares, for the reason given on
+// Fragmentation.
+func (rc *RenterdClient) Defragment(ctx context.Context) (DefragmentReport, error) {
+	return DefragmentReport{}, ErrNoSlabScan
+}
+
 // Close closes the client and releases all resources.
 func (rc *RenterdClient) Close() error {
 	return nil
