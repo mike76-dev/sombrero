@@ -154,7 +154,7 @@ CREATE UNIQUE INDEX idx_metadata_object_offset ON metadata (object_id, obj_offse
 
 CREATE TABLE upload_jobs (
     id BIGSERIAL PRIMARY KEY,
-    upload_id BIGINT NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+    upload_id BIGINT REFERENCES uploads(id) ON DELETE CASCADE,
     metadata_id BIGINT NOT NULL UNIQUE REFERENCES metadata(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

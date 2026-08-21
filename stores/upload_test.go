@@ -1004,6 +1004,85 @@ func TestClaimPackedSlabAgeTrigger(t *testing.T) {
 	}
 }
 
+// backdateJobs makes every queue entry look as if it had been added the given
+// duration ago, which is what the age of a piece that belongs to no upload
+// counts from.
+func backdateJobs(t *testing.T, db *Database, age time.Duration) {
+	t.Helper()
+
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE upload_jobs
+			SET created_at = NOW() - MAKE_INTERVAL(secs => $1::DOUBLE PRECISION)
+		`, age.Seconds())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("backdate upload jobs: %v", err)
+	}
+}
+
+// dropJobUploads detaches every queue entry from its upload, which is the state
+// of a piece that was queued again after it had already been stored.
+func dropJobUploads(t *testing.T, db *Database) {
+	t.Helper()
+
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE upload_jobs SET upload_id = NULL`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("drop job uploads: %v", err)
+	}
+}
+
+// TestClaimPackedSlabAgeWithoutAnUpload verifies that a piece belonging to no
+// upload ages from its queue entry. The upload it originally came from is long
+// past, and taking the age from there would make such a piece look aged out the
+// moment it is queued, packing it into a slab short of full straight away.
+func TestClaimPackedSlabAgeWithoutAnUpload(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+
+	plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
+	plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
+	backdateUploads(t, db, 48*time.Hour)
+	dropJobUploads(t, db)
+
+	// The uploads are ancient, but the entries that carry the age are not.
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("ClaimPackedSlab with fresh entries: want %v, got %v", ErrNoUploadJobs, err)
+	}
+
+	backdateJobs(t, db, 48*time.Hour)
+
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab past the age: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("want both buffers claimed, got %d", len(jobs))
+	}
+	for _, job := range jobs {
+		if job.UploadID != 0 {
+			t.Fatalf("want no upload on the claimed job, got %d", job.UploadID)
+		}
+	}
+
+	// Requeueing what was claimed without an upload keeps it queued.
+	for _, job := range jobs {
+		if err := db.RequeueUploadJob(job.UploadID, job.MetadataID); err != nil {
+			t.Fatalf("RequeueUploadJob: %v", err)
+		}
+	}
+	if n := pendingJobs(t, db); n != 2 {
+		t.Fatalf("want both pieces queued again, got %d jobs", n)
+	}
+}
+
 // TestClaimPackedSlabAgeSurvivesRequeue verifies that requeueing a claimed
 // batch, which is what a failed upload does, leaves the buffer age untouched.
 // The age counts from the upload's creation; when it counted from the queue
