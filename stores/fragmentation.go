@@ -45,6 +45,191 @@ func (s PackedSlab) Fragmentation() float64 {
 	return float64(s.Wasted()) / float64(s.Size)
 }
 
+// SlabPiece is one live slice of a stored slab: DataLength bytes at DataOffset
+// in the slab, which the object references at ObjOffset. Data is what the slab
+// holds there, for the caller to download before rebuffering the piece.
+type SlabPiece struct {
+	MetadataID uint64
+	ObjectID   uint64
+	ObjOffset  uint64
+	DataOffset uint64
+	DataLength uint64
+	Data       []byte
+}
+
+// ErrSlabInUse is returned for a slab that a file still being written
+// references, which may yet be discarded or replaced.
+var ErrSlabInUse = errors.New("slab belongs to an upload in flight")
+
+// ErrSlabChanged is returned when a slab no longer holds the pieces it was
+// listed with, as deleting or overwriting a file leaves it.
+var ErrSlabChanged = errors.New("slab pieces have changed")
+
+// slabPiecesQuery gathers the live pieces of one slab, in the order in which
+// they sit in it. A full slab uploaded mid-write clears the upload from the
+// metadata, so the temporary object is what marks a piece as in flight.
+const slabPiecesQuery = `
+	SELECT
+		m.id,
+		m.object_id,
+		m.obj_offset,
+		m.data_offset,
+		m.data_length,
+		o.temporary OR m.upload_id IS NOT NULL
+	FROM metadata m
+	JOIN objects o ON o.id = m.object_id
+	WHERE m.slab_key = $1
+		AND o.share_name = $2
+		AND o.workgroup = $3
+	ORDER BY m.data_offset, m.id
+`
+
+// slabPieces runs the listing, locking the pieces when the caller is about to
+// rewrite them.
+func slabPieces(ctx context.Context, tx pgx.Tx, share string, workgroup int, key types.Hash256, lock bool) (pieces []SlabPiece, err error) {
+	query := slabPiecesQuery
+	if lock {
+		query += " FOR UPDATE OF m"
+	}
+
+	rows, err := tx.Query(ctx, query, key[:], share, workgroup)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list slab pieces: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			piece    SlabPiece
+			inFlight bool
+		)
+		if err := rows.Scan(
+			&piece.MetadataID,
+			&piece.ObjectID,
+			&piece.ObjOffset,
+			&piece.DataOffset,
+			&piece.DataLength,
+			&inFlight,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan slab piece: %w", err)
+		}
+		if inFlight {
+			return nil, ErrSlabInUse
+		}
+		pieces = append(pieces, piece)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate slab pieces: %w", err)
+	}
+	return pieces, nil
+}
+
+// SlabPieces lists what is still referenced in the given slab of the share and
+// workgroup, in the order in which the pieces sit in it. ErrSlabInUse says the
+// slab must be left alone for now.
+func (db *Database) SlabPieces(share string, workgroup int, key types.Hash256) (pieces []SlabPiece, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		pieces, err = slabPieces(ctx, tx, share, workgroup, key, false)
+		return err
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
+// samePieces reports whether the slab still holds what was listed, by where
+// the pieces sit rather than by the data downloaded into them since.
+func samePieces(current, listed []SlabPiece) bool {
+	if len(current) != len(listed) {
+		return false
+	}
+	for i := range current {
+		if current[i].MetadataID != listed[i].MetadataID ||
+			current[i].ObjectID != listed[i].ObjectID ||
+			current[i].ObjOffset != listed[i].ObjOffset ||
+			current[i].DataOffset != listed[i].DataOffset ||
+			current[i].DataLength != listed[i].DataLength {
+			return false
+		}
+	}
+	return true
+}
+
+// RebufferSlab moves the given pieces of a stored slab back into buffers of
+// their own and queues them to be packed again, which is what closes the dead
+// space between them. Each piece has to carry the bytes downloaded from the
+// slab, and nothing is done unless the slab still holds exactly what was
+// listed, since a file deleted in between makes that data stale.
+//
+// The slab is staged for unpinning if this leaves nothing referencing it, and
+// its key is then returned for the caller to drop from the storage backend.
+func (db *Database) RebufferSlab(share string, workgroup int, key types.Hash256, pieces []SlabPiece) (slabs []types.Hash256, err error) {
+	if len(pieces) == 0 {
+		return nil, errors.New("cannot rebuffer a slab without pieces")
+	}
+	for i, piece := range pieces {
+		if uint64(len(piece.Data)) != piece.DataLength {
+			return nil, fmt.Errorf("piece %d carries %d of its %d bytes", i, len(piece.Data), piece.DataLength)
+		}
+	}
+
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		current, err := slabPieces(ctx, tx, share, workgroup, key, true)
+		if err != nil {
+			return err
+		}
+		if !samePieces(current, pieces) {
+			return ErrSlabChanged
+		}
+
+		for _, piece := range pieces {
+			// Each piece becomes a buffer holding nothing but itself, so the
+			// dead space around it is not carried along.
+			const query = `
+				WITH new_buffer AS (
+					INSERT INTO buffers (share_name, data)
+					VALUES ($1, $2)
+					RETURNING id
+				),
+				moved AS (
+					UPDATE metadata m
+					SET
+						buffer_id = nb.id,
+						slab_key = NULL,
+						data_offset = 0
+					FROM new_buffer nb
+					WHERE m.id = $3
+						AND m.slab_key = $4
+					RETURNING m.id
+				)
+				INSERT INTO upload_jobs (upload_id, metadata_id)
+				SELECT NULL::BIGINT, m.id
+				FROM moved m
+			`
+
+			tag, err := tx.Exec(ctx, query, share, piece.Data, int64(piece.MetadataID), key[:])
+			if err != nil {
+				return fmt.Errorf("failed to rebuffer piece %d: %w", piece.MetadataID, err)
+			}
+			if tag.RowsAffected() == 0 {
+				// The rollback takes the buffer this inserted with it.
+				return ErrSlabChanged
+			}
+		}
+
+		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, [][]byte{key[:]})
+		return err
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
 // FragmentationStats summarizes a share's slabs.
 type FragmentationStats struct {
 	// Slabs counts every slab the connection has pieces in, and Wasted is the

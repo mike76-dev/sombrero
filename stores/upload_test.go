@@ -186,6 +186,22 @@ func pendingJobs(t *testing.T, db *Database) int {
 	return n
 }
 
+// queuedWithUpload returns the number of queue entries that belong to an
+// upload, as everything a client writes does.
+func queuedWithUpload(t *testing.T, db *Database) int {
+	t.Helper()
+
+	var n int
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COUNT(*) FROM upload_jobs WHERE upload_id IS NOT NULL`).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("count attached upload jobs: %v", err)
+	}
+
+	return n
+}
+
 // storedBuffers returns the number of buffers held in the database.
 func storedBuffers(t *testing.T, db *Database) int {
 	t.Helper()
