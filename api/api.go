@@ -135,6 +135,16 @@ type FragmentationResponse struct {
 	Errors map[string]string `json:"errors,omitempty"`
 }
 
+// DefragmentResponse is the response type for POST /share/:name/fragmentation.
+// It reports one round: the slabs whose contents were moved back into the
+// upload queue, how much that was, and the dead space those slabs held.
+type DefragmentResponse struct {
+	Slabs     int               `json:"slabs"`
+	Moved     uint64            `json:"moved"`
+	Reclaimed uint64            `json:"reclaimed"`
+	Errors    map[string]string `json:"errors,omitempty"`
+}
+
 // UnpinOrphansResponse is the response type for DELETE /share/:name/orphans.
 type UnpinOrphansResponse struct {
 	Unpinned int               `json:"unpinned"`
@@ -299,6 +309,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.GET("/share/:name/fragmentation", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.fragmentationHandlerGET(w, req, ps)
+	})
+
+	router.POST("/share/:name/fragmentation", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.fragmentationHandlerPOST(w, req, ps)
 	})
 
 	router.GET("/share/:name/policy", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -938,6 +952,49 @@ func (api *API) fragmentationHandlerGET(w http.ResponseWriter, req *http.Request
 		}
 		return bytes.Compare(res.Slabs[i].Key[:], res.Slabs[j].Key[:]) < 0
 	})
+
+	writeJSON(w, res)
+}
+
+// fragmentationHandlerPOST handles the POST /share/:name/fragmentation calls.
+// Each connection repacks the slabs it finds fragmented at that moment, rather
+// than what a previous check reported, and does one round of it: as many slabs
+// as it takes to free one, or none where that cannot be reached.
+func (api *API) fragmentationHandlerPOST(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	conns, failed, ok := api.scannableShare(w, ps.ByName("name"))
+	if !ok {
+		return
+	}
+
+	var res DefragmentResponse
+
+	var ran int
+	for wg, c := range conns {
+		report, err := c.Defragment(req.Context())
+		if err != nil {
+			log.Printf("failed to defragment share %s of workgroup %s: %v", ps.ByName("name"), wg, err)
+			failed[wg] = err.Error()
+		} else {
+			ran++
+		}
+
+		// A round that failed part of the way through still moved what it got
+		// to, so its counts are reported either way.
+		res.Slabs += report.Slabs
+		res.Moved += report.Moved
+		res.Reclaimed += report.Reclaimed
+	}
+
+	// Repacking is a change, so a round that got part of the way through is
+	// reported rather than hidden behind an error. Only one that moved nothing
+	// at all fails.
+	if ran == 0 && res.Slabs == 0 {
+		writeError(w, "failed to defragment the share", http.StatusInternalServerError)
+		return
+	}
+	if len(failed) > 0 {
+		res.Errors = failed
+	}
 
 	writeJSON(w, res)
 }
