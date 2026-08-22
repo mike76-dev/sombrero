@@ -788,6 +788,7 @@ func TestTreeConnectSigningExemptsSessionsWithoutAKey(t *testing.T) {
 			h.restrictTo("alice")
 			h.share.allowGuest = true
 			h.share.allowAnonymous = true
+			h.share.publicDir = "Drop"
 
 			cl := h.dial("alice")
 

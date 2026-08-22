@@ -23,6 +23,7 @@ import (
 // told to fail, so that rollbacks can be tested.
 type recordingShares struct {
 	registered   []string
+	settings     []Share
 	removed      []string
 	updated      []AccessRights
 	accessGone   []string // workgroup UUID + "/" + username, as keyed by the SMB server
@@ -36,6 +37,14 @@ func (r *recordingShares) RegisterShare(sh Share) error {
 		return r.fail
 	}
 	r.registered = append(r.registered, sh.Name)
+	return nil
+}
+
+func (r *recordingShares) UpdateShare(sh Share) error {
+	if r.fail != nil {
+		return r.fail
+	}
+	r.settings = append(r.settings, sh)
 	return nil
 }
 
@@ -1191,6 +1200,49 @@ func TestStoreAnonymousIdentity(t *testing.T) {
 		err = st.AddAccount(Account{Username: "mallory", Password: "secret123", Workgroup: AnonymousWorkgroup.String()})
 		if !errors.Is(err, ErrReservedWorkgroup) {
 			t.Fatalf("AddAccount: want %v, got %v", ErrReservedWorkgroup, err)
+		}
+	})
+}
+
+// TestStoreUpdateShare verifies that what a share admits can be changed after
+// it is registered, that what it is backed by cannot, and that the running
+// server is told.
+func TestStoreUpdateShare(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store, rs *recordingShares) {
+		sh := addShare(t, st, "myshare")
+
+		sh.AllowGuest = true
+		sh.AllowAnonymous = true
+		sh.PublicDir = "Drop"
+		sh.Remark = "drop box"
+		sh.ServerName = "elsewhere"
+		if err := st.UpdateShare(sh); err != nil {
+			t.Fatalf("UpdateShare: %v", err)
+		}
+
+		got, err := st.GetShare("myshare")
+		if err != nil {
+			t.Fatalf("GetShare: %v", err)
+		}
+		if !got.AllowGuest || !got.AllowAnonymous || got.PublicDir != "Drop" || got.Remark != "drop box" {
+			t.Fatalf("want the settings stored, got %+v", got)
+		}
+		if got.ServerName != "srv" {
+			t.Fatalf("want the backend left alone, got %q", got.ServerName)
+		}
+
+		// The server is running with a copy of what was registered, so it has
+		// to hear about the change.
+		if len(rs.settings) != 1 || !rs.settings[0].AllowAnonymous {
+			t.Fatalf("share manager not notified: %+v", rs.settings)
+		}
+
+		// A share that is not there is not an update.
+		if err := st.UpdateShare(Share{Name: "nosuch"}); err == nil {
+			t.Fatal("UpdateShare of a missing share: want an error, got none")
+		}
+		if err := st.UpdateShare(Share{}); err != nil {
+			t.Fatalf("UpdateShare of nothing: %v", err)
 		}
 	})
 }

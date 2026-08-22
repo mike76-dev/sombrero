@@ -879,6 +879,16 @@ func (cl *testClient) speaking(dialect uint16) *testClient {
 	return cl
 }
 
+// anonymously turns the session into what an anonymous login leaves behind: the flag, and the
+// reserved identity the server binds such a session to. Setting the flag alone would leave the
+// session carrying the user it was dialled as, which the share's security tables know.
+func (cl *testClient) anonymously() *testClient {
+	cl.ss.isAnonymous = true
+	cl.ss.userName = stores.AnonymousAccount
+	cl.ss.workgroup = stores.AnonymousWorkgroup.String()
+	return cl
+}
+
 // send hands a message to the dispatcher the way the reading loop would. It reports an error
 // rather than failing the test, so that it may be called from a goroutine of its own.
 func (cl *testClient) send(msg []byte) (smb2.GenericResponse, error) {

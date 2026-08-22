@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/binary"
 	"testing"
 
+	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 )
 
 // TestTreeConnectAnswersWithTheStatusTheSpecNames checks what a refused tree connect is told.
@@ -111,8 +114,8 @@ func TestTreeConnectGuestNeedsAGuestShare(t *testing.T) {
 
 // TestTreeConnectAnonymousNeedsAnAnonymousShare verifies that a session that
 // presented no credentials reaches only the shares that offer anonymous
-// access, and that it is let on holding no rights over what is on them: what
-// it may do is the public folder's business, not the policies'.
+// access, and that what it is granted there is the same everywhere: the
+// policies of the share have nothing to say about it.
 func TestTreeConnectAnonymousNeedsAnAnonymousShare(t *testing.T) {
 	for _, tt := range []struct {
 		what  string
@@ -131,8 +134,10 @@ func TestTreeConnectAnonymousNeedsAnAnonymousShare(t *testing.T) {
 			h.share.allowAnonymous = tt.allow
 			h.share.publicDir = "Drop"
 
-			cl := h.dial("alice").speaking(smb2.SMB_DIALECT_302)
-			cl.ss.isAnonymous = true
+			// As a share of a server that encrypts what it can.
+			h.share.encryptData = true
+
+			cl := h.dial("alice").speaking(smb2.SMB_DIALECT_302).anonymously()
 
 			resp, _, err := cl.conn.processRequest(request(t,
 				treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\files`)))
@@ -147,16 +152,223 @@ func TestTreeConnectAnonymousNeedsAnAnonymousShare(t *testing.T) {
 				return
 			}
 
-			// Nothing is granted over the share's files yet.
-			cl.ss.mu.Lock()
-			var access uint32
-			for _, tc := range cl.ss.treeConnectTable {
-				access = tc.maximalAccess
+			// The tree must not come back demanding encryption: this session
+			// holds no key, so a share that insists on it leaves the client
+			// nothing it may send, and it gives up without asking anything.
+			flags := binary.LittleEndian.Uint32(resp.Encode()[smb2.SMB2HeaderSize+4 : smb2.SMB2HeaderSize+8])
+			if flags&smb2.SHAREFLAG_ENCRYPT_DATA != 0 {
+				t.Errorf("the tree was reported as encrypted to a session with no key, flags %#x", flags)
 			}
-			cl.ss.mu.Unlock()
-			if access != 0 {
-				t.Errorf("want an anonymous session to hold no rights on the share, got %#x", access)
+
+			// What the client is told it holds over the public folder, which is
+			// everything: clients ask for DELETE on opens they may never delete
+			// anything through, and one identity owns every file in there
+			// anyway.
+			access := binary.LittleEndian.Uint32(resp.Encode()[smb2.SMB2HeaderSize+12 : smb2.SMB2HeaderSize+16])
+			for _, want := range []struct {
+				bit  uint32
+				what string
+			}{
+				{smb2.FILE_READ_DATA, "read"},
+				{smb2.FILE_WRITE_DATA, "write"},
+				{smb2.DELETE, "delete"},
+			} {
+				if access&want.bit == 0 {
+					t.Errorf("want the public folder open to %s, got %#x", want.what, access)
+				}
 			}
 		})
+	}
+}
+
+// TestAnonymousIsRootedAtThePublicFolder verifies the confinement: what an
+// anonymous client calls the root of the share is the public folder, so every
+// name it can utter lands inside that folder and nothing it can say leads out
+// of it. The files of the share proper are not merely hidden from it — they
+// have no name it can reach them by.
+func TestAnonymousIsRootedAtThePublicFolder(t *testing.T) {
+	h := newSMBTest(t)
+	h.restrictTo("alice")
+	h.share.allowAnonymous = true
+	h.share.publicDir = "Drop"
+
+	// The identity such a session is bound to, which the server puts in place
+	// at startup when it is configured to admit them.
+	if _, err := h.srv.store.EnsureAnonymous(); err != nil {
+		t.Fatalf("EnsureAnonymous: %v", err)
+	}
+
+	// A file of the share proper, and one already in the public folder.
+	h.files.put("secret.txt", 100)
+	h.files.putDir("Drop")
+	h.files.putData("Drop/left.txt", []byte("dropped earlier"))
+
+	cl := h.dial("alice").anonymously()
+
+	// The name the client uses is the name inside the folder.
+	if path := cl.tc.confine("hello.txt"); path != "Drop/hello.txt" {
+		t.Errorf("want the create rooted at the folder, got %q", path)
+	}
+	if path := cl.tc.confine(""); path != "Drop" {
+		t.Errorf("want the root of the share to be the folder, got %q", path)
+	}
+
+	// The share's own files are out of reach: the name that would find one
+	// resolves inside the folder instead.
+	if path := cl.tc.confine("secret.txt"); path != "Drop/secret.txt" {
+		t.Errorf("want the name confined, got %q", path)
+	}
+
+	// And a session with a user behind it is left alone.
+	other := h.dial("alice")
+	if path := other.tc.confine("secret.txt"); path != "secret.txt" {
+		t.Errorf("want an ordinary session unconfined, got %q", path)
+	}
+
+	// The create path is where that reaches the client: opening "left.txt"
+	// finds the file that only exists inside the folder, and opening
+	// "secret.txt" finds nothing, because the share's own file is not what
+	// that name resolves to any more.
+	resp, _ := cl.create("left.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(resp).Status(); status != smb2.STATUS_OK {
+		t.Errorf("opening a file of the public folder was answered %#x", status)
+	}
+	resp, _ = cl.create("secret.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(resp).Status(); status != smb2.STATUS_OBJECT_NAME_NOT_FOUND {
+		t.Errorf("opening a file outside the folder was answered %#x, want it not found", status)
+	}
+}
+
+// TestConfinementSurvivesTheNamesAClientCanSend verifies that nothing a client
+// may put in a path escapes the public folder. The traversal it would take is
+// refused before this by validPath, which is what the confinement leans on.
+func TestConfinementSurvivesTheNamesAClientCanSend(t *testing.T) {
+	h := newSMBTest(t)
+	h.share.allowAnonymous = true
+	h.share.publicDir = "Drop"
+
+	cl := h.dial("alice").anonymously()
+
+	for _, name := range []string{"../secret.txt", "a/../../secret.txt", "/secret.txt", "./secret.txt"} {
+		if validPath(name) {
+			t.Errorf("%q was let through as a path, which the confinement relies on refusing", name)
+		}
+	}
+
+	// What is left after that check cannot lead out of the folder.
+	for _, name := range []string{"a/b/c.txt", "sub/file"} {
+		if path := cl.tc.confine(name); path != "Drop/"+name {
+			t.Errorf("want %q under the folder, got %q", name, path)
+		}
+	}
+}
+
+// anonymousLogin is the client half of a login with no credentials at all: the
+// AUTHENTICATE message carries no user, no domain and no response.
+type anonymousLogin struct{}
+
+func (anonymousLogin) negotiate() []byte {
+	return ntlmClient{}.negotiate()
+}
+
+func (anonymousLogin) authenticate(t *testing.T, _ []byte) []byte {
+	t.Helper()
+
+	msg := ntlmMessage(3, 64)
+	binary.LittleEndian.PutUint32(msg[60:64], ntlm.NTLMSSP_NEGOTIATE_UNICODE|ntlm.NTLMSSP_NEGOTIATE_SIGN)
+	return msg
+}
+
+// TestASessionWithoutAKeyIsNotHeldToOne verifies that neither an anonymous nor
+// a guest session is put into signing or encryption. Neither holds a key the
+// client and the server can agree on, so a server that turns either on hands
+// out a session that cannot carry a single request: with encryption on, every
+// message it then sends is refused for being encrypted, which is how this was
+// found.
+func TestASessionWithoutAKeyIsNotHeldToOne(t *testing.T) {
+	for _, tt := range []struct {
+		what  string
+		login func(h *smbTest) ntlmLogin
+	}{
+		{"an anonymous session", func(*smbTest) ntlmLogin { return anonymousLogin{} }},
+		{"a guest session", func(h *smbTest) ntlmLogin { return h.withPassword("guest", "") }},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+
+			// A server that encrypts what it can, which is what put the
+			// session into encryption whatever it was.
+			h.srv.encryptData = true
+
+			c := h.negotiated("anon", [16]byte{9}, smb2.SMB_DIALECT_311)
+			c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, true)
+			c.cipherID = smb2.AES_128_GCM
+			c.clientCapabilities |= smb2.GLOBAL_CAP_ENCRYPTION
+
+			resp := h.authenticateOver(c, tt.login(h))
+			if status := resp.Header().Status(); status != smb2.STATUS_OK {
+				t.Fatalf("the session setup was answered %#x, want it established", status)
+			}
+
+			c.mu.Lock()
+			ss := c.sessionTable[resp.Header().SessionID()]
+			c.mu.Unlock()
+			if ss == nil {
+				t.Fatal("the session was not registered on the connection")
+			}
+
+			if ss.signingRequired {
+				t.Error("a session with no key of its own was required to sign")
+			}
+			if ss.encryptData {
+				t.Error("a session with no key of its own was put into encryption")
+			}
+
+			// And the client is not told to encrypt either.
+			flags := binary.LittleEndian.Uint16(resp.Encode()[smb2.SMB2HeaderSize+2 : smb2.SMB2HeaderSize+4])
+			if flags&smb2.SESSION_FLAG_ENCRYPT_DATA != 0 {
+				t.Errorf("the client was told to encrypt, flags %#x", flags)
+			}
+		})
+	}
+}
+
+// TestUpdateShareTakesEffectOnTheRunningServer verifies that turning anonymous
+// access on reaches the share the server is serving with. It holds a copy of
+// what it was registered with, so without this a change would wait for the next
+// restart, which is how a share that looks enabled is still refusing clients.
+func TestUpdateShareTakesEffectOnTheRunningServer(t *testing.T) {
+	h := newSMBTest(t)
+	h.restrictTo("alice")
+	if _, err := h.srv.store.EnsureAnonymous(); err != nil {
+		t.Fatalf("EnsureAnonymous: %v", err)
+	}
+
+	connect := func() uint32 {
+		t.Helper()
+
+		cl := h.dial("alice").speaking(smb2.SMB_DIALECT_302).anonymously()
+		resp, _, err := cl.conn.processRequest(request(t,
+			treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\files`)))
+		if err != nil {
+			t.Fatalf("the tree connect was not answered: %v", err)
+		}
+		return resp.Header().Status()
+	}
+
+	if status := connect(); status != smb2.STATUS_ACCESS_DENIED {
+		t.Fatalf("before the change the tree connect was answered %#x, want it refused", status)
+	}
+
+	if err := h.srv.UpdateShare(stores.Share{
+		Name:           h.share.name,
+		AllowAnonymous: true,
+		PublicDir:      "Drop",
+	}); err != nil {
+		t.Fatalf("UpdateShare: %v", err)
+	}
+
+	if status := connect(); status != smb2.STATUS_OK {
+		t.Fatalf("after the change the tree connect was answered %#x, want it served", status)
 	}
 }

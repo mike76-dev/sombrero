@@ -43,6 +43,18 @@ func (sh *share) ensurePersisted() {
 	}
 }
 
+// anonymousAccess is what an anonymous session holds over the public folder it
+// is confined to. The folder is public in both directions: everything dropped
+// into it belongs to one identity, so there is no telling one anonymous user's
+// files from another's, and withholding DELETE would not keep them apart — it
+// would only refuse the opens that clients routinely ask for it in.
+var anonymousAccess = stores.FlagsFromAccessRights(stores.AccessRights{
+	ReadAccess:    true,
+	WriteAccess:   true,
+	DeleteAccess:  true,
+	ExecuteAccess: true,
+})
+
 // mayConnect reports whether the user is allowed on the share at all.
 func (sh *share) mayConnect(workgroup, user string) bool {
 	sh.mu.Lock()
@@ -87,9 +99,8 @@ type share struct {
 
 	// allowGuest lets the passwordless accounts of a workgroup connect, and
 	// allowAnonymous lets a client that presented no credentials connect, with
-	// publicDir naming the one folder such a session may use. All three are
-	// read from the share as it was registered, so a change to them takes
-	// effect when the share is registered again.
+	// publicDir naming the one folder such a session may use. All three follow
+	// the stored share, through UpdateShare.
 	allowGuest     bool
 	allowAnonymous bool
 	publicDir      string
@@ -214,6 +225,27 @@ func (s *server) loadAccessRights(sh *share, ars []stores.AccessRights) error {
 		sh.connectSecurity[acc.Workgroup+"/"+acc.Username] = struct{}{}
 		sh.fileSecurity[acc.Workgroup+"/"+acc.Username] = stores.FlagsFromAccessRights(ar)
 	}
+
+	return nil
+}
+
+// UpdateShare applies the settings of a share that has changed to the copy the server is running
+// with. Only what a client is admitted by can change: what the share is backed by is fixed when it
+// is registered, and the clients and the security tables hang off that.
+func (s *server) UpdateShare(ss stores.Share) error {
+	s.mu.Lock()
+	sh, found := s.shareList[ss.Name]
+	s.mu.Unlock()
+	if !found { // Share not loaded yet, so it will be registered with the new settings.
+		return nil
+	}
+
+	sh.mu.Lock()
+	sh.remark = ss.Remark
+	sh.allowGuest = ss.AllowGuest
+	sh.allowAnonymous = ss.AllowAnonymous
+	sh.publicDir = ss.PublicDir
+	sh.mu.Unlock()
 
 	return nil
 }

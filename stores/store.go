@@ -39,6 +39,7 @@ type Store interface {
 	ClearAccessRights(acc Account) error
 
 	RegisterShare(s Share) error
+	UpdateShare(s Share) error
 	UnregisterShare(name string) error
 	GetShare(name string) (s Share, err error)
 	GetShares(acc Account) (shares []Share, err error)

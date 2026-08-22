@@ -32,10 +32,18 @@ func (h *smbTest) negotiated(name string, guid [16]byte, dialect uint16) *connec
 	return c
 }
 
+// ntlmLogin is the client half of a session setup: whatever a test sends as the two legs of the
+// exchange. A login with a user behind it and one with no credentials at all differ only in what
+// they put in those two messages.
+type ntlmLogin interface {
+	negotiate() []byte
+	authenticate(t *testing.T, cmsg []byte) []byte
+}
+
 // authenticateOver runs a whole session setup over the connection: the client says who it is, the
 // server challenges, and the client answers. What comes back is the answer to the second leg, which
 // is where the client is told it has a session - or that it is not getting one.
-func (h *smbTest) authenticateOver(c *connection, nc ntlmClient) smb2.GenericResponse {
+func (h *smbTest) authenticateOver(c *connection, nc ntlmLogin) smb2.GenericResponse {
 	h.t.Helper()
 
 	send := func(mid, sid uint64, token []byte) smb2.GenericResponse {

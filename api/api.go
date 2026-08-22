@@ -52,6 +52,7 @@ type Store interface {
 	ClearAccessRights(acc stores.Account) error
 
 	RegisterShare(s stores.Share) error
+	UpdateShare(s stores.Share) error
 	UnregisterShare(name string) error
 	GetShare(name string) (s stores.Share, err error)
 	GetShares(acc stores.Account) (shares []stores.Share, err error)
@@ -305,6 +306,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.DELETE("/share/:name/orphans", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.orphansHandlerDELETE(w, req, ps)
+	})
+
+	router.PUT("/share/:name", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.shareHandlerPUT(w, req, ps)
 	})
 
 	router.GET("/share/:name/fragmentation", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -643,6 +648,53 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 
 	if err := api.store.RegisterShare(share); err != nil {
 		log.Printf("failed to register share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeSuccess(w)
+}
+
+// shareHandlerPUT handles the PUT /share/:name calls. It changes what a share
+// offers its clients — guest and anonymous access, the public folder, and the
+// remark — and leaves what it is backed by alone: a share that changed its
+// server or its redundancy would be a different share holding the same files.
+func (api *API) shareHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	shareName := strings.ToLower(ps.ByName("name"))
+	if shareName == "" {
+		writeError(w, "share name cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	var settings stores.Share
+	if err := json.NewDecoder(req.Body).Decode(&settings); err != nil {
+		writeError(w, "invalid share structure", http.StatusBadRequest)
+		return
+	}
+
+	share, err := api.store.GetShare(shareName)
+	if err != nil {
+		log.Printf("failed to find share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if share.Name == "" {
+		writeError(w, "share not found", http.StatusNotFound)
+		return
+	}
+
+	share.Remark = settings.Remark
+	share.AllowGuest = settings.AllowGuest
+	share.AllowAnonymous = settings.AllowAnonymous
+	share.PublicDir = settings.PublicDir
+
+	if status, msg := checkShareAccess(share, api.cfg.Anonymous); msg != "" {
+		writeError(w, msg, status)
+		return
+	}
+
+	if err := api.store.UpdateShare(share); err != nil {
+		log.Printf("failed to update share: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
 	}

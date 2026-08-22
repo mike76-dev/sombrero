@@ -626,14 +626,20 @@ func satisfies(held, desired uint32) bool {
 
 // grantAccess returns true if the user's access rights are sufficient for performing the requested operation(s) on the file.
 func grantAccess(cr smb2.CreateRequest, tc *treeConnect, ss *session) bool {
-	// A share holding no security for the user grants nothing, which is what the tree connect
-	// makes of one and so what a file on it has to make of one as well. Read the other way
-	// round, an empty table would be a share every user has every right over.
-	if !tc.share.mayConnect(ss.workgroup, ss.userName) {
-		return false
-	}
+	// An anonymous session is in neither of the share's security tables: it holds no policies of
+	// its own, and what the tree connect granted it over the public folder is the whole of what
+	// it may do.
+	fs, held := tc.maximalAccess, tc.maximalAccess != 0
+	if !ss.isAnonymous {
+		// A share holding no security for the user grants nothing, which is what the tree connect
+		// makes of one and so what a file on it has to make of one as well. Read the other way
+		// round, an empty table would be a share every user has every right over.
+		if !tc.share.mayConnect(ss.workgroup, ss.userName) {
+			return false
+		}
 
-	fs, held := tc.share.fileAccess(ss.workgroup, ss.userName)
+		fs, held = tc.share.fileAccess(ss.workgroup, ss.userName)
+	}
 	if !held {
 		return false
 	}

@@ -236,7 +236,11 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 	}
 
 	ss.sessionKey = ss.connection.ntlmServer.Session().SessionKey()
-	ss.encryptData = ss.connection.server.encryptData
+
+	// A session with no key behind it neither signs nor encrypts. An anonymous
+	// one holds no key at all, and a guest holds one derived from a password
+	// that is public, so [MS-SMB2] 3.3.5.5.3 keeps both out of either.
+	ss.encryptData = ss.connection.server.encryptData && !ss.isAnonymous && !ss.isGuest
 
 	if ss.connection.server.debug {
 		buf := make([]byte, 8)

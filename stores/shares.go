@@ -273,3 +273,39 @@ func (db *Database) GetAccounts(sh Share) (ars []AccessRights, err error) {
 	})
 	return
 }
+
+// UpdateShare changes what a share offers its clients: who it admits and the
+// folder an anonymous session is confined to, along with its remark. What the
+// share is backed by is not part of it — a share that changed its server,
+// bucket or redundancy would be a different share holding the same files.
+func (db *Database) UpdateShare(s Share) error {
+	if s.Name == "" {
+		return nil
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			UPDATE shares
+			SET
+				remark = $2,
+				allow_guest = $3,
+				allow_anonymous = $4,
+				public_dir = $5
+			WHERE share_name = $1
+		`
+
+		tag, err := tx.Exec(ctx, query, s.Name, s.Remark, s.AllowGuest, s.AllowAnonymous, s.PublicDir)
+		if err != nil {
+			return fmt.Errorf("failed to update share: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+
+		// The running server holds a copy of what it was registered with.
+		if err := db.shares.UpdateShare(s); err != nil {
+			return fmt.Errorf("failed to apply the share settings: %w", err)
+		}
+		return nil
+	})
+}

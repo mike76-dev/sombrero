@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 	"lukechampine.com/frand"
 )
 
@@ -138,6 +139,21 @@ func (tc *treeConnect) persistedObjects(want func(path string) bool) []client.Ob
 	return ois
 }
 
+// confine roots the path at the share's public folder, which is the whole of
+// what an anonymous session may reach: what such a client calls the root of the
+// share is that folder, and it has no way of naming anything outside it. The
+// path has already been validated, so it carries no ".." to lead back out.
+func (tc *treeConnect) confine(path string) string {
+	if !tc.session.isAnonymous || tc.share.publicDir == "" {
+		return path
+	}
+	if path == "" {
+		return tc.share.publicDir
+	}
+
+	return tc.share.publicDir + "/" + path
+}
+
 // extractShareName extracts the share name from the provided string of the format \\SERVER\SHARE.
 func extractShareName(path string) string {
 	var ok bool
@@ -222,7 +238,12 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			}
 		}
 
-		if smb2.Is3X(c.negotiateDialect) && sh.encryptData && c.clientCapabilities&smb2.GLOBAL_CAP_ENCRYPTION == 0 {
+		// A share that encrypts is only held against a session that could encrypt: one with no key
+		// of its own is served in the clear whatever the share asks for, so refusing it here for
+		// want of a capability it would never use only makes anonymous access impossible on a
+		// server that encrypts at all.
+		if smb2.Is3X(c.negotiateDialect) && sh.encryptData && !ss.isAnonymous && !ss.isGuest &&
+			c.clientCapabilities&smb2.GLOBAL_CAP_ENCRYPTION == 0 {
 			return nil, errAccessDenied
 		}
 
@@ -254,12 +275,26 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 
 		if ss.isAnonymous {
 			// An anonymous session has no policies of its own: the share says
-			// whether it is admitted at all, and what it may then do is what
-			// the public folder allows. Until that is in place it is let on to
-			// the share holding no rights over anything in it.
-			if !sh.allowAnonymous {
+			// whether it is admitted at all, and what it holds is the same on
+			// every share that takes it, over the public folder it is confined
+			// to and nothing else.
+			if !sh.allowAnonymous || sh.publicDir == "" {
 				return nil, errAccessDenied
 			}
+
+			// On indexd the folder is served by the connection of the reserved
+			// workgroup, which owns what is dropped into it. Without it there
+			// is nothing to read from or write to.
+			if sh.backend == "indexd" {
+				sh.mu.Lock()
+				_, connected := sh.indexdConns[stores.AnonymousWorkgroup.String()]
+				sh.mu.Unlock()
+				if !connected {
+					return nil, errShareUnavailable
+				}
+			}
+
+			access = anonymousAccess
 		} else {
 			access, exists = sh.fileAccess(ss.workgroup, ss.userName)
 			if !exists {

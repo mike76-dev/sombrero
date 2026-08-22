@@ -840,3 +840,37 @@ func accessRightsFromPolicy(p jsonPolicy) AccessRights {
 		ExecuteAccess: p.ExecuteAccess,
 	}
 }
+
+// UpdateShare changes what a share offers its clients, leaving what it is
+// backed by as it was registered.
+func (js *JSONStore) UpdateShare(s Share) error {
+	if s.Name == "" {
+		return nil
+	}
+
+	var updated Share
+	err := js.update(func(d *jsonData) error {
+		for i, sh := range d.Shares {
+			if sh.Name != s.Name {
+				continue
+			}
+			sh.Remark = s.Remark
+			sh.AllowGuest = s.AllowGuest
+			sh.AllowAnonymous = s.AllowAnonymous
+			sh.PublicDir = s.PublicDir
+			d.Shares[i] = sh
+			updated = sh
+			return nil
+		}
+		return ErrNotFound
+	}, nil)
+	if err != nil {
+		return err
+	}
+
+	// The running server holds a copy of what it was registered with.
+	if err := js.shares.UpdateShare(updated); err != nil {
+		return fmt.Errorf("failed to apply the share settings: %w", err)
+	}
+	return nil
+}
