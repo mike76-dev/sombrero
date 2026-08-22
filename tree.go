@@ -246,6 +246,12 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			}
 		}
 
+		// A passwordless account reaches only the shares that offer guest
+		// access, whatever the policies grant it.
+		if ss.isGuest && !sh.allowGuest {
+			return nil, errAccessDenied
+		}
+
 		access, exists = sh.fileAccess(ss.workgroup, ss.userName)
 		if !exists {
 			return nil, errAccessDenied

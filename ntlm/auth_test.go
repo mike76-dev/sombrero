@@ -287,3 +287,43 @@ func TestAuthenticateRejectsAnUnknownUser(t *testing.T) {
 		}
 	}
 }
+
+// TestAuthenticateMarksAPasswordlessAccountAsAGuest verifies that an account
+// with no password authenticates like any other, and that the session says so.
+// What such an account may reach is decided above this layer; what matters here
+// is that the response is still verified against the empty password, so both
+// sides derive the same keys.
+func TestAuthenticateMarksAPasswordlessAccountAsAGuest(t *testing.T) {
+	store := knownAccount()
+	store.acc.NTHash = ntHashOf("")
+	srv := NewServer("SOMBRERO", "WORKGROUP", store)
+
+	if err := authenticateAs(t, srv, testUser, testWorkgroup, ntHashOf("")); err != nil {
+		t.Fatalf("the passwordless account was turned away: %v", err)
+	}
+	if !srv.Session().IsGuest() {
+		t.Error("want the session marked as a guest one")
+	}
+
+	// A response over any other password is still refused: passwordless means
+	// the password is empty, not that anything goes.
+	srv = NewServer("SOMBRERO", "WORKGROUP", store)
+	if err := authenticateAs(t, srv, testUser, testWorkgroup, ntHashOf(testPassword)); err == nil {
+		t.Error("a response over the wrong password was accepted")
+	}
+}
+
+// TestAuthenticateLeavesAnAccountWithAPasswordAlone is the control: the guest
+// mark follows the account, not the user name a client happens to log in with.
+func TestAuthenticateLeavesAnAccountWithAPasswordAlone(t *testing.T) {
+	store := knownAccount()
+	store.acc.Username = "guest"
+	srv := NewServer("SOMBRERO", "WORKGROUP", store)
+
+	if err := authenticateAs(t, srv, "guest", testWorkgroup, ntHashOf(testPassword)); err != nil {
+		t.Fatalf("the account was turned away: %v", err)
+	}
+	if srv.Session().IsGuest() {
+		t.Error("an account with a password was marked as a guest for being called guest")
+	}
+}

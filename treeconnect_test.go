@@ -70,3 +70,41 @@ func TestTreeConnectAnswersWithTheStatusTheSpecNames(t *testing.T) {
 		})
 	}
 }
+
+// TestTreeConnectGuestNeedsAGuestShare verifies that a session that logged in
+// without a password reaches only the shares that offer guest access, whatever
+// the policies of its workgroup grant it, and that IPC$ is not one of them:
+// [MS-SMB2] 3.3.5.9 restricts the anonymous session on a pipe, not the guest.
+func TestTreeConnectGuestNeedsAGuestShare(t *testing.T) {
+	for _, tt := range []struct {
+		what  string
+		path  string
+		allow bool
+		want  uint32
+	}{
+		{"a share that does not take guests", `\\SERVER\files`, false, smb2.STATUS_ACCESS_DENIED},
+		{"a share that takes guests", `\\SERVER\files`, true, smb2.STATUS_OK},
+		{"IPC$, which every session reaches", `\\SERVER\ipc$`, false, smb2.STATUS_OK},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+
+			// The policies grant the user the share, so the guest flag is the
+			// only thing left to decide it.
+			h.restrictTo("alice")
+			h.share.allowGuest = tt.allow
+
+			cl := h.dial("alice").speaking(smb2.SMB_DIALECT_302)
+			cl.ss.isGuest = true
+
+			resp, _, err := cl.conn.processRequest(request(t,
+				treeConnectRequest(0, cl.ss.sessionID, tt.path)))
+			if err != nil {
+				t.Fatalf("the tree connect was not answered: %v", err)
+			}
+			if status := resp.Header().Status(); status != tt.want {
+				t.Errorf("the tree connect was answered %#x, want %#x", status, tt.want)
+			}
+		})
+	}
+}

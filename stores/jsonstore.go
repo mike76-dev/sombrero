@@ -12,9 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mike76-dev/sombrero/utils"
 	"go.sia.tech/core/types"
-	"golang.org/x/crypto/md4"
 )
 
 // jsonStoreFilename is the name of the persistence file of a JSONStore.
@@ -285,12 +283,10 @@ func (js *JSONStore) AddAccount(acc Account) error {
 			}
 		}
 
-		h := md4.New()
-		h.Write(utils.EncodeStringToBytes(acc.Password))
 		d.Accounts = append(d.Accounts, jsonAccount{
 			ID:        d.NextAccountID,
 			Username:  acc.Username,
-			NTHash:    h.Sum(nil),
+			NTHash:    ntHash(acc.Password),
 			Workgroup: acc.Workgroup,
 		})
 		d.NextAccountID++

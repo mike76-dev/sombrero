@@ -212,9 +212,11 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 	if ss.userName == "" {
 		ss.isAnonymous = true
 	}
-	if ss.userName == "guest" {
-		ss.isGuest = true
-	}
+
+	// A guest is whoever logged in without a password, whatever the account is
+	// called: the name "guest" is a convention of the clients, not something
+	// the rights hang off.
+	ss.isGuest = ss.connection.ntlmServer.Session().IsGuest()
 	ss.signingRequired = (req.SecurityMode()&smb2.NEGOTIATE_SIGNING_REQUIRED > 0) && !ss.isAnonymous && !ss.isGuest && ss.connection.shouldSign
 
 	if ss.connection.negotiateDialect == smb2.SMB_DIALECT_311 {

@@ -85,6 +85,11 @@ type share struct {
 	encryptData     bool
 	compressData    bool
 
+	// allowGuest lets the passwordless accounts of a workgroup connect. It is
+	// read from the share as it was registered, so a change to it takes effect
+	// when the share is registered again.
+	allowGuest bool
+
 	// For renterd shares (single client shared by all workgroups).
 	client        client.Client
 	maxUploadSize uint64
@@ -120,6 +125,7 @@ func (s *server) RegisterShare(ss stores.Share) error {
 		shareType:       smb2.SHARE_TYPE_DISK,
 		bucket:          ss.Bucket,
 		remark:          ss.Remark,
+		allowGuest:      ss.AllowGuest,
 		connectSecurity: make(map[string]struct{}),
 		fileSecurity:    make(map[string]uint32),
 		persisted:       make(map[persistedKey]*fileState),

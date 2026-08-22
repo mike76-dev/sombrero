@@ -509,6 +509,30 @@ func (api *API) accountHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 	}
 	acc.Workgroup = wg.UUID.String()
 
+	// An account with no password is one anybody can log in as, so it is only
+	// worth having where a share takes guests. Without one it could connect
+	// nowhere, and the refusal says so rather than leaving an open account
+	// behind that never works.
+	if acc.Password == "" {
+		shares, err := api.store.GetAllShares()
+		if err != nil {
+			log.Printf("failed to retrieve shares: %v", err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		var guests bool
+		for _, share := range shares {
+			if share.AllowGuest {
+				guests = true
+				break
+			}
+		}
+		if !guests {
+			writeError(w, "no share offers guest access, so a passwordless account has nowhere to connect", http.StatusBadRequest)
+			return
+		}
+	}
+
 	if err := api.store.AddAccount(acc); err != nil {
 		log.Printf("failed to add account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)

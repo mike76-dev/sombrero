@@ -559,12 +559,50 @@ func TestAccount(t *testing.T) {
 		checkStatus(t, w, http.StatusBadRequest)
 	})
 
+	t.Run("POST a passwordless account with no guest share returns 400", func(t *testing.T) {
+		added := false
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			addAccount:    func(stores.Account) error { added = true; return nil },
+			getAllShares: func() ([]stores.Share, error) {
+				return []stores.Share{{Name: "s", Type: "indexd"}}, nil
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/account", stores.Account{
+			Username: "guest", Workgroup: testUUID.String(),
+		})
+		checkStatus(t, w, http.StatusBadRequest)
+		if added {
+			t.Error("an account nothing would let in was created anyway")
+		}
+	})
+
+	t.Run("POST a passwordless account with a guest share succeeds", func(t *testing.T) {
+		var got stores.Account
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			addAccount:    func(a stores.Account) error { got = a; return nil },
+			getAllShares: func() ([]stores.Share, error) {
+				return []stores.Share{{Name: "s", Type: "indexd", AllowGuest: true}}, nil
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/account", stores.Account{
+			Username: "guest", Workgroup: testUUID.String(),
+		})
+		checkStatus(t, w, http.StatusNoContent)
+		if got.Username != "guest" || got.Password != "" {
+			t.Errorf("want the passwordless account created, got %+v", got)
+		}
+	})
+
 	t.Run("POST store error", func(t *testing.T) {
 		ms := &mockStore{
 			findWorkgroup: foundWorkgroup(),
 			addAccount:    func(stores.Account) error { return errStore },
 		}
-		w := doRequest(newTestAPI(ms), http.MethodPost, "/account", stores.Account{Username: "alice", Workgroup: testUUID.String()})
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/account", stores.Account{
+			Username: "alice", Password: "secret123", Workgroup: testUUID.String(),
+		})
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 

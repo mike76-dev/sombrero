@@ -355,6 +355,7 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 
 		session.user = user
 		session.domain = workgroup
+		session.guest = acc.Passwordless()
 		session.negotiateFlags = flags
 
 		h.Reset()

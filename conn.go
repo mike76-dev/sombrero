@@ -837,12 +837,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		var flags uint16
 		if ss.stateNow() == sessionValid {
-			switch strings.ToLower(ss.userName) {
-			case "":
+			switch {
+			case ss.isAnonymous:
 				flags = smb2.SESSION_FLAG_IS_NULL
-			case "guest":
+			case ss.isGuest:
 				flags = smb2.SESSION_FLAG_IS_GUEST
-			default:
 			}
 		}
 		if smb2.Is3X(c.negotiateDialect) && ss.encryptData && c.clientCapabilities&smb2.GLOBAL_CAP_ENCRYPTION != 0 {
