@@ -572,6 +572,10 @@ func (fc *fakeClient) Fragmentation(context.Context, float64) (client.Fragmentat
 	return client.FragmentationReport{}, nil
 }
 
+func (fc *fakeClient) Defragment(context.Context) (client.DefragmentReport, error) {
+	return client.DefragmentReport{}, nil
+}
+
 func (fc *fakeClient) Close() error { return nil }
 
 // smbTest is a server with a single share behind a fake object store, driven by hand-built

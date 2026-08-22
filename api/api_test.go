@@ -261,6 +261,15 @@ type mockClient struct {
 	fragmentation client.FragmentationReport
 	fragErr       error
 	thresholdGot  float64
+
+	defragmented client.DefragmentReport
+	defragErr    error
+	defragRuns   int
+}
+
+func (m *mockClient) Defragment(ctx context.Context) (client.DefragmentReport, error) {
+	m.defragRuns++
+	return m.defragmented, m.defragErr
 }
 
 func (m *mockClient) Fragmentation(ctx context.Context, threshold float64) (client.FragmentationReport, error) {
@@ -1811,6 +1820,104 @@ func TestFragmentation(t *testing.T) {
 		srv := orphanServer(map[string]client.Client{testUUID.String(): &mockClient{}})
 
 		w := doRequest(newTestAPIWithServer(ms, srv), http.MethodGet, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	round := client.DefragmentReport{Slabs: 2, Moved: 500, Reclaimed: 1500}
+
+	t.Run("POST repacks and reports what it moved", func(t *testing.T) {
+		mc := &mockClient{defragmented: round}
+		srv := orphanServer(map[string]client.Client{testUUID.String(): mc})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodPost, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[DefragmentResponse](t, w)
+		if res.Slabs != 2 || res.Moved != 500 || res.Reclaimed != 1500 {
+			t.Errorf("want 2 slabs emptied of 500 bytes freeing 1500, got %+v", res)
+		}
+		if mc.defragRuns != 1 {
+			t.Errorf("want one round per call, got %d", mc.defragRuns)
+		}
+	})
+
+	t.Run("POST aggregates over the workgroup connections", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321").String()
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{defragmented: round},
+			other:             &mockClient{defragmented: client.DefragmentReport{Slabs: 1, Moved: 100, Reclaimed: 900}},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodPost, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[DefragmentResponse](t, w)
+		if res.Slabs != 3 || res.Moved != 600 || res.Reclaimed != 2400 {
+			t.Errorf("want the rounds added up, got %+v", res)
+		}
+	})
+
+	t.Run("POST reports a failed connection but keeps what moved", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321").String()
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{defragmented: round},
+			other:             &mockClient{defragErr: errors.New("no more hosts available")},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodPost, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[DefragmentResponse](t, w)
+		if res.Slabs != 2 || len(res.Errors) != 1 || res.Errors[other] == "" {
+			t.Fatalf("want the round that ran reported alongside the failure, got %+v", res)
+		}
+	})
+
+	t.Run("POST reports what a failed round got to", func(t *testing.T) {
+		// The slabs it emptied before it failed are already repacked, which
+		// the caller has to be told even though the round failed.
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{
+				defragmented: client.DefragmentReport{Slabs: 1, Moved: 100, Reclaimed: 900},
+				defragErr:    errors.New("no more hosts available"),
+			},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodPost, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[DefragmentResponse](t, w)
+		if res.Slabs != 1 || len(res.Errors) != 1 {
+			t.Fatalf("want the partial round reported with its failure, got %+v", res)
+		}
+	})
+
+	t.Run("POST fails when no connection moved anything", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{
+			testUUID.String(): &mockClient{defragErr: errors.New("database down")},
+		})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodPost, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("POST reports a round that found nothing to do", func(t *testing.T) {
+		srv := orphanServer(map[string]client.Client{testUUID.String(): &mockClient{}})
+
+		w := doRequest(newTestAPIWithServer(indexdStore(), srv), http.MethodPost, "/share/myshare/fragmentation", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[DefragmentResponse](t, w)
+		if res.Slabs != 0 || len(res.Errors) != 0 {
+			t.Fatalf("want an empty round rather than a failure, got %+v", res)
+		}
+	})
+
+	t.Run("POST refuses a share that packs nothing", func(t *testing.T) {
+		ms := &mockStore{getShare: foundShare("myshare", "renterd")}
+		srv := orphanServer(map[string]client.Client{testUUID.String(): &mockClient{}})
+
+		w := doRequest(newTestAPIWithServer(ms, srv), http.MethodPost, "/share/myshare/fragmentation", nil)
 		checkStatus(t, w, http.StatusBadRequest)
 	})
 }

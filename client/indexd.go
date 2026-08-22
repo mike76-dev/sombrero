@@ -35,6 +35,15 @@ const uploadWorkers = 3
 // the slab size is smaller than the read chunk size (low dataShards).
 const slabDownloadThreads = 4
 
+// defragWait is how long a defragmentation round waits for the packer to take
+// up what the previous one queued, and defragPoll how often it looks. A share
+// whose queue stays full is one the packer or the writers have enough to do
+// with, and repacking its slabs can wait for the next check.
+const (
+	defragWait = 2 * time.Minute
+	defragPoll = 5 * time.Second
+)
+
 // packInterval is how often the packer looks for buffered pieces to combine on
 // its own. It only serves as a fallback: an upload that leaves a piece behind
 // signals the packer directly.
@@ -294,6 +303,7 @@ type IndexdClient struct {
 	maxBufferAge time.Duration
 	fragLevel    float64
 	fragInterval time.Duration
+	defrag       bool
 	debug        bool
 
 	// Shutdown happens in two stages. Close closes drainChan, on which the
@@ -366,6 +376,10 @@ type FragmentationOptions struct {
 
 	// Interval is how often to look. Zero turns the check off.
 	Interval time.Duration
+
+	// Defragment has the check repack what it reports, instead of only
+	// reporting it.
+	Defragment bool
 }
 
 // NewIndexdClient returns an initialized IndexdClient serving the given
@@ -393,6 +407,7 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		maxBufferAge: packing.MaxAge,
 		fragLevel:    fragmentation.Threshold,
 		fragInterval: fragmentation.Interval,
+		defrag:       fragmentation.Defragment,
 		debug:        debug,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -449,6 +464,12 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		defer ic.wg.Done()
 		ic.cleanupUploadJobs(ic.ctx)
 	}()
+
+	// Repacking is driven by the check, so turning the check off leaves it to
+	// the API to ask for.
+	if ic.defrag && ic.fragInterval == 0 {
+		log.Printf("share %s: defragment is set while the fragmentation check is off, so the slabs are only repacked when the API asks", share)
+	}
 
 	// Start the fragmentation monitor, unless it is turned off.
 	if ic.fragInterval > 0 {
@@ -1404,6 +1425,174 @@ func (ic *IndexdClient) Fragmentation(ctx context.Context, threshold float64) (F
 	}, nil
 }
 
+// slabsFor is how many slabs the given amount of data is paid for by, once it
+// has been packed.
+func slabsFor(data, slabSize uint64) uint64 {
+	return (data + slabSize - 1) / slabSize
+}
+
+// defragBatch picks the slabs one round empties: enough of the most fragmented
+// ones that emptying them leaves the share paying for fewer slabs than it does
+// now. Anything less frees nothing, since a slab short of full is paid for like
+// a full one, so a listing that holds no such prefix is left alone.
+//
+// What is already buffered counts towards that, because the pieces are packed
+// together with it: a slab whose remains fit in the room left in the slab those
+// buffers will fill rides along at no cost of its own. Without that, a share
+// would have to hold 1/threshold fragmented slabs before a round could act.
+func defragBatch(slabs []stores.PackedSlab, slabSize, buffered uint64) []stores.PackedSlab {
+	if slabSize == 0 {
+		return nil
+	}
+
+	waiting := slabsFor(buffered, slabSize)
+
+	var used uint64
+	for i, slab := range slabs {
+		used += slab.Used
+		if uint64(i+1)+waiting >= slabsFor(buffered+used, slabSize)+1 {
+			return slabs[:i+1]
+		}
+	}
+
+	return nil
+}
+
+// defragmentSlab downloads what is still referenced in one slab and hands it to
+// the database to be queued again. The slab is left pinned: the unpin it is
+// staged for is confirmed by the periodic retry, which gives a read that
+// started before the rewrite time to finish against the slab it was told to
+// read from.
+func (ic *IndexdClient) defragmentSlab(ctx context.Context, key types.Hash256) (uint64, error) {
+	pieces, err := ic.db.SlabPieces(ic.share, ic.workgroup, key)
+	if err != nil {
+		return 0, err
+	}
+	if len(pieces) == 0 {
+		return 0, nil
+	}
+
+	// Only what is live is downloaded, one piece at a time: the dead space
+	// between them is what this is here to stop paying for, and the pieces of
+	// a slab are few enough not to be worth running in parallel.
+	var moved uint64
+	for i := range pieces {
+		var piece bytes.Buffer
+		piece.Grow(int(pieces[i].DataLength))
+		if err := ic.backend.Download(ctx, key, pieces[i].DataOffset, pieces[i].DataLength, &piece); err != nil {
+			return 0, fmt.Errorf("couldn't download piece %d: %v", pieces[i].MetadataID, err)
+		}
+		if uint64(piece.Len()) != pieces[i].DataLength {
+			return 0, fmt.Errorf("piece %d came back as %d of its %d bytes", pieces[i].MetadataID, piece.Len(), pieces[i].DataLength)
+		}
+
+		pieces[i].Data = piece.Bytes()
+		moved += pieces[i].DataLength
+	}
+
+	if _, err := ic.db.RebufferSlab(ic.share, ic.workgroup, key, pieces); err != nil {
+		return 0, err
+	}
+
+	return moved, nil
+}
+
+// Defragment moves what is left in the most fragmented slabs back into the
+// upload queue, for the packer to combine into fewer slabs than they take up
+// now.
+func (ic *IndexdClient) Defragment(ctx context.Context) (DefragmentReport, error) {
+	slabs, err := ic.db.PackedSlabs(ic.share, ic.workgroup, ic.slabSize, ic.fragLevel)
+	if err != nil {
+		return DefragmentReport{}, fmt.Errorf("couldn't list the fragmented slabs: %v", err)
+	}
+
+	buffered, err := ic.db.BufferedBytes(ic.share, ic.workgroup)
+	if err != nil {
+		return DefragmentReport{}, fmt.Errorf("couldn't measure the buffered data: %v", err)
+	}
+
+	var report DefragmentReport
+	for _, slab := range defragBatch(slabs, ic.slabSize, buffered) {
+		moved, err := ic.defragmentSlab(ctx, slab.Key)
+		if errors.Is(err, stores.ErrSlabInUse) || errors.Is(err, stores.ErrSlabChanged) {
+			// The files moved on since they were listed. What the round did
+			// move stays queued, and the next one sees them as they are now.
+			continue
+		}
+		if err != nil {
+			return report, fmt.Errorf("couldn't defragment slab %s: %v", slab.Key, err)
+		}
+		if moved == 0 {
+			continue
+		}
+
+		report.Slabs++
+		report.Moved += moved
+		report.Reclaimed += slab.Wasted()
+	}
+
+	if report.Slabs > 0 {
+		select {
+		case ic.packChan <- struct{}{}:
+		default:
+		}
+	}
+
+	return report, nil
+}
+
+// awaitPacker waits until the data waiting in the database falls short of a
+// slab, so that a round only adds to a queue the packer has caught up with. It
+// reports whether it is worth going on.
+func (ic *IndexdClient) awaitPacker(ctx context.Context) bool {
+	deadline := time.Now().Add(defragWait)
+	for {
+		buffered, err := ic.db.BufferedBytes(ic.share, ic.workgroup)
+		if err != nil {
+			log.Printf("failed to measure the buffered data of share %s, workgroup %d: %v", ic.share, ic.workgroup, err)
+			return false
+		}
+		if buffered < ic.slabSize {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ic.drainChan:
+			return false
+		case <-time.After(defragPoll):
+		}
+	}
+}
+
+// defragment repacks the fragmented slabs of the connection until nothing is
+// left worth moving, one round at a time.
+func (ic *IndexdClient) defragment(ctx context.Context) {
+	for {
+		if !ic.awaitPacker(ctx) {
+			return
+		}
+
+		report, err := ic.Defragment(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("failed to defragment share %s, workgroup %d: %v", ic.share, ic.workgroup, err)
+			}
+			return
+		}
+		if report.Slabs == 0 {
+			return
+		}
+
+		log.Printf("share %s, workgroup %d: moved %d bytes out of %d slab(s) to be packed again, freeing %d bytes of dead space",
+			ic.share, ic.workgroup, report.Moved, report.Slabs, report.Reclaimed)
+	}
+}
+
 // monitorFragmentation runs the fragmentation check in the background. Running
 // once right away gives a reading without waiting out the first interval.
 func (ic *IndexdClient) monitorFragmentation(ctx context.Context) {
@@ -1412,8 +1601,12 @@ func (ic *IndexdClient) monitorFragmentation(ctx context.Context) {
 
 	for {
 		// A check cut short by Close is not worth reporting.
-		if _, err := ic.checkFragmentation(); err != nil && ctx.Err() == nil {
+		stats, err := ic.checkFragmentation()
+		if err != nil && ctx.Err() == nil {
 			log.Printf("failed to check the fragmentation of share %s, workgroup %d: %v", ic.share, ic.workgroup, err)
+		}
+		if err == nil && ic.defrag && stats.Fragmented > 0 {
+			ic.defragment(ctx)
 		}
 
 		select {

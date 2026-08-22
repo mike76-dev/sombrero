@@ -8,6 +8,7 @@ import {
 } from '../api/types'
 import {
   checkFragmentation,
+  defragment,
   getAccountById,
   getPolicy,
   getShareAccounts,
@@ -267,10 +268,10 @@ function formatPercent(fraction: number): string {
 }
 
 // FragmentationCard reports the dead space that editing and deleting files
-// leaves behind in the slabs they were packed into. indexd shares only, and
-// read-only for now: repacking is not implemented yet.
+// leaves behind in the slabs they were packed into, and offers to repack them.
+// indexd shares only: renterd packs its objects itself.
 function FragmentationCard({ share }: { share: Share }) {
-  const { run, busy, error } = useApiAction()
+  const { run, busy, error, message, setMessage } = useApiAction()
   const [check, setCheck] = useState<FragmentationResponse | null>(null)
 
   const failures = check?.errors ? Object.entries(check.errors) : []
@@ -280,7 +281,8 @@ function FragmentationCard({ share }: { share: Share }) {
       <p className="muted">
         Editing or deleting a file leaves a hole in the slab it was packed into, and the share
         keeps paying for the whole slab. Space a slab was never filled with does not count — only
-        what was taken back out of it. Nothing is repacked yet; this only reports what is there.
+        what was taken back out of it. Repacking moves what is left in those slabs back into the
+        upload queue, to be packed into fewer slabs than they take up now.
       </p>
       <div className="row">
         <button
@@ -294,8 +296,42 @@ function FragmentationCard({ share }: { share: Share }) {
         >
           {check ? 'Recheck' : 'Check fragmentation'}
         </button>
+        {!!check?.fragmented && (
+          <button
+            className="btn"
+            disabled={busy}
+            onClick={() => {
+              if (
+                !window.confirm(
+                  `Repack the fragmented slabs of ${share.name}? What is left in them is ` +
+                    `downloaded and uploaded again, which is paid for like any other upload, ` +
+                    `and the slabs they came out of are unpinned once nothing reads from them.`,
+                )
+              )
+                return
+              run(async () => {
+                const res = await defragment(share.name)
+                // Show what is left rather than what was found before.
+                setCheck(await checkFragmentation(share.name))
+                setMessage(
+                  res.slabs
+                    ? `Moved ${formatBytes(res.moved)} out of ${res.slabs} slab` +
+                        `${res.slabs === 1 ? '' : 's'} to be packed again, freeing ` +
+                        `${formatBytes(res.reclaimed)}. The new slab goes up in the background.`
+                    : 'Nothing was repacked: what is left in these slabs would fill as many ' +
+                        'slabs again, and a slab short of full is paid for like a full one. ' +
+                        'Try again once more slabs are fragmented, or once there is data ' +
+                        'waiting to be uploaded that fits in the dead space.',
+                )
+              })
+            }}
+          >
+            Repack
+          </button>
+        )}
       </div>
       <ErrorBanner error={error} />
+      <SuccessBanner message={message} />
       {check &&
         (check.total === 0 ? (
           <p className="muted">This share has no uploaded slabs yet.</p>

@@ -38,6 +38,7 @@ CREATE TABLE accounts (
     CONSTRAINT accounts_password_hash_length CHECK (octet_length(password_hash) = 16),
     CONSTRAINT accounts_unique UNIQUE (account_name, workgroup)
 );
+CREATE INDEX idx_accounts_workgroup ON accounts (workgroup);
 
 CREATE TABLE connections (
     workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
@@ -62,6 +63,7 @@ CREATE TABLE policies (
     CONSTRAINT share_account UNIQUE (share_name, account)
 );
 CREATE INDEX idx_policies_account ON policies (account);
+CREATE INDEX idx_policies_connection ON policies (workgroup, share_name);
 
 CREATE TABLE bans (
     host TEXT UNIQUE NOT NULL,
@@ -107,8 +109,12 @@ CREATE TABLE objects (
 CREATE INDEX idx_directories_lookup_path ON directories (share_name, full_path);
 CREATE INDEX idx_directories_lookup_parent ON directories (parent_id);
 CREATE INDEX idx_directories_list ON directories (share_name, parent_id, name);
+CREATE INDEX idx_directories_account ON directories (account);
+CREATE INDEX idx_directories_workgroup ON directories (workgroup);
 CREATE INDEX idx_objects_list ON objects (share_name, directory_id, name);
 CREATE INDEX idx_objects_lookup_directory ON objects (directory_id);
+CREATE INDEX idx_objects_account ON objects (account);
+CREATE INDEX idx_objects_workgroup ON objects (workgroup);
 CREATE UNIQUE INDEX idx_objects_lookup_path ON objects (share_name, full_path) WHERE temporary = FALSE;
 CREATE UNIQUE INDEX idx_objects_lookup_entry ON objects (share_name, directory_id, name) WHERE temporary = FALSE;
 
@@ -118,6 +124,7 @@ CREATE TABLE buffers (
     data BYTEA STORAGE EXTERNAL NOT NULL,
     CONSTRAINT buffers_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE
 );
+CREATE INDEX idx_buffers_share ON buffers (share_name);
 
 CREATE TABLE uploads (
     id BIGSERIAL PRIMARY KEY,
@@ -126,6 +133,7 @@ CREATE TABLE uploads (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uploads_id_length CHECK (octet_length(upload_id) = 32)
 );
+CREATE INDEX idx_uploads_object ON uploads (object_id);
 
 CREATE TABLE metadata (
     id BIGSERIAL PRIMARY KEY,
@@ -149,15 +157,17 @@ CREATE INDEX idx_metadata_object ON metadata (object_id);
 CREATE INDEX idx_metadata_offset ON metadata (object_id, obj_offset);
 CREATE INDEX idx_metadata_slab_key ON metadata (slab_key);
 CREATE INDEX idx_metadata_slab_key_offset ON metadata (slab_key, data_offset);
+CREATE INDEX idx_metadata_buffer_id ON metadata (buffer_id) WHERE buffer_id IS NOT NULL;
 CREATE INDEX idx_metadata_upload_id ON metadata (upload_id);
 CREATE UNIQUE INDEX idx_metadata_object_offset ON metadata (object_id, obj_offset);
 
 CREATE TABLE upload_jobs (
     id BIGSERIAL PRIMARY KEY,
-    upload_id BIGINT NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+    upload_id BIGINT REFERENCES uploads(id) ON DELETE CASCADE,
     metadata_id BIGINT NOT NULL UNIQUE REFERENCES metadata(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX idx_upload_jobs_upload_id ON upload_jobs (upload_id) WHERE upload_id IS NOT NULL;
 
 CREATE TABLE pending_unpins (
     share_name TEXT NOT NULL,
@@ -167,3 +177,4 @@ CREATE TABLE pending_unpins (
     CONSTRAINT pending_unpins_unique UNIQUE (share_name, workgroup, slab_key),
     CONSTRAINT pending_unpins_key_length CHECK (octet_length(slab_key) = 32)
 );
+CREATE INDEX idx_pending_unpins_workgroup ON pending_unpins (workgroup);

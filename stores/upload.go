@@ -21,7 +21,9 @@ type SlabSlice struct {
 	Data   []byte
 }
 
-// uploadJob represents a pending upload job that is being processed asynchronously.
+// UploadJob represents a pending upload job that is being processed
+// asynchronously. UploadID is zero for a job that belongs to no upload, which
+// is what a piece queued again after it was already stored gets.
 type UploadJob struct {
 	ID         uint64
 	UploadID   uint64
@@ -567,7 +569,7 @@ func (db *Database) ClaimUploadJob(share string, workgroup int, minSize uint64) 
 			)
 			SELECT
 				d.id,
-				d.upload_id,
+				COALESCE(d.upload_id, 0),
 				m.id,
 				m.object_id,
 				m.buffer_id,
@@ -628,7 +630,8 @@ func (db *Database) ClaimUploadJob(share string, workgroup int, minSize uint64) 
 // one, so with maxAge left at zero the buffers wait for as long as it takes.
 // The age is measured from the creation of a buffer's upload, so it is not
 // reset when a failed claim requeues the buffer, and the remainder that a
-// split leaves behind keeps the age of the upload it came from.
+// split leaves behind keeps the age of the upload it came from. A piece that
+// belongs to no upload ages from its queue entry instead.
 //
 // ErrNoUploadJobs is returned when neither applies, in which case nothing is
 // claimed.
@@ -675,7 +678,7 @@ func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSi
 					uj.id,
 					uj.upload_id,
 					uj.metadata_id,
-					u.created_at,
+					COALESCE(u.created_at, uj.created_at) AS created_at,
 					m.object_id,
 					m.buffer_id,
 					m.obj_offset,
@@ -683,7 +686,7 @@ func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSi
 					m.data_length
 				FROM upload_jobs uj
 				JOIN cutoff c ON c.id = uj.id
-				JOIN uploads u ON u.id = uj.upload_id
+				LEFT JOIN uploads u ON u.id = uj.upload_id
 				JOIN metadata m ON m.id = uj.metadata_id
 				WHERE m.buffer_id IS NOT NULL
 					AND m.upload_id IS NULL
@@ -728,7 +731,7 @@ func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSi
 			)
 			SELECT
 				p.id,
-				p.upload_id,
+				COALESCE(p.upload_id, 0),
 				p.metadata_id,
 				p.object_id,
 				p.buffer_id,
@@ -805,6 +808,29 @@ func (db *Database) CleanupUploadJobs() error {
 	})
 }
 
+// BufferedBytes returns how much data of the given share and workgroup is
+// waiting in the database to be uploaded, whether it is queued or claimed.
+func (db *Database) BufferedBytes(share string, workgroup int) (bytes uint64, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT COALESCE(SUM(m.data_length), 0)
+			FROM metadata m
+			JOIN objects o ON o.id = m.object_id
+			WHERE o.share_name = $1
+				AND o.workgroup = $2
+				AND m.buffer_id IS NOT NULL
+		`
+
+		var total int64
+		if err := tx.QueryRow(ctx, query, share, workgroup).Scan(&total); err != nil {
+			return fmt.Errorf("failed to measure the buffered data: %w", err)
+		}
+		bytes = uint64(total)
+		return nil
+	})
+	return
+}
+
 // StrandedPieces returns the metadata entries of the given share and
 // workgroup that reference a buffer but have no entry in the upload queue.
 // This is what a claim leaves behind when the process stops between claiming
@@ -855,8 +881,7 @@ func (db *Database) StrandedPieces(share string, workgroup int) (ids []uint64, e
 
 // RequeueStrandedPieces puts the given metadata entries back in the upload
 // queue, so that their pieces are claimed again. An entry that no longer
-// references a buffer, is back in the queue already, or whose upload row
-// cannot be resolved any more is skipped.
+// references a buffer, or that is back in the queue already, is skipped.
 func (db *Database) RequeueStrandedPieces(ids []uint64) error {
 	if len(ids) == 0 {
 		return nil
@@ -869,27 +894,14 @@ func (db *Database) RequeueStrandedPieces(ids []uint64) error {
 
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		// A finalized piece has had its upload ID cleared from the metadata,
-		// but the uploads row itself lives on attached to the object, so it
-		// is resolved from there.
+		// and is requeued without one: what it was uploaded under is no longer
+		// recorded anywhere, so the entry carries its own age from here on.
 		const query = `
-			WITH resolved AS (
-				SELECT
-					m.id AS metadata_id,
-					COALESCE(m.upload_id, (
-						SELECT u.id
-						FROM uploads u
-						WHERE u.object_id = m.object_id
-						ORDER BY u.id
-						LIMIT 1
-					)) AS upload_id
-				FROM metadata m
-				WHERE m.id = ANY($1::BIGINT[])
-					AND m.buffer_id IS NOT NULL
-			)
 			INSERT INTO upload_jobs (upload_id, metadata_id)
-			SELECT r.upload_id, r.metadata_id
-			FROM resolved r
-			WHERE r.upload_id IS NOT NULL
+			SELECT m.upload_id, m.id
+			FROM metadata m
+			WHERE m.id = ANY($1::BIGINT[])
+				AND m.buffer_id IS NOT NULL
 			ON CONFLICT (metadata_id) DO NOTHING
 		`
 
@@ -1037,7 +1049,7 @@ func splitPackedItem(ctx context.Context, tx pgx.Tx, job UploadJob, taken uint64
 			RETURNING id
 		)
 		INSERT INTO upload_jobs (upload_id, metadata_id)
-		SELECT $6, e.id
+		SELECT NULLIF($6, 0::BIGINT), e.id
 		FROM entry e
 	`
 
@@ -1158,12 +1170,13 @@ func (db *Database) CompletePackedSlab(jobs []UploadJob, slabKey types.Hash256) 
 	})
 }
 
-// RequeueUploadJob re-adds the given upload job to the queue for retrying.
+// RequeueUploadJob re-adds the given upload job to the queue for retrying. An
+// upload ID of zero requeues the piece without one, as it was claimed.
 func (db *Database) RequeueUploadJob(uploadID, metadataID uint64) error {
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
 			INSERT INTO upload_jobs (upload_id, metadata_id)
-			VALUES ($1, $2)
+			VALUES (NULLIF($1, 0::BIGINT), $2)
 			ON CONFLICT (metadata_id) DO NOTHING
 		`
 

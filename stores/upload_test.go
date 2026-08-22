@@ -186,6 +186,22 @@ func pendingJobs(t *testing.T, db *Database) int {
 	return n
 }
 
+// queuedWithUpload returns the number of queue entries that belong to an
+// upload, as everything a client writes does.
+func queuedWithUpload(t *testing.T, db *Database) int {
+	t.Helper()
+
+	var n int
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COUNT(*) FROM upload_jobs WHERE upload_id IS NOT NULL`).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("count attached upload jobs: %v", err)
+	}
+
+	return n
+}
+
 // storedBuffers returns the number of buffers held in the database.
 func storedBuffers(t *testing.T, db *Database) int {
 	t.Helper()
@@ -1004,6 +1020,85 @@ func TestClaimPackedSlabAgeTrigger(t *testing.T) {
 	}
 }
 
+// backdateJobs makes every queue entry look as if it had been added the given
+// duration ago, which is what the age of a piece that belongs to no upload
+// counts from.
+func backdateJobs(t *testing.T, db *Database, age time.Duration) {
+	t.Helper()
+
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE upload_jobs
+			SET created_at = NOW() - MAKE_INTERVAL(secs => $1::DOUBLE PRECISION)
+		`, age.Seconds())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("backdate upload jobs: %v", err)
+	}
+}
+
+// dropJobUploads detaches every queue entry from its upload, which is the state
+// of a piece that was queued again after it had already been stored.
+func dropJobUploads(t *testing.T, db *Database) {
+	t.Helper()
+
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE upload_jobs SET upload_id = NULL`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("drop job uploads: %v", err)
+	}
+}
+
+// TestClaimPackedSlabAgeWithoutAnUpload verifies that a piece belonging to no
+// upload ages from its queue entry. The upload it originally came from is long
+// past, and taking the age from there would make such a piece look aged out the
+// moment it is queued, packing it into a slab short of full straight away.
+func TestClaimPackedSlabAgeWithoutAnUpload(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+
+	plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
+	plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
+	backdateUploads(t, db, 48*time.Hour)
+	dropJobUploads(t, db)
+
+	// The uploads are ancient, but the entries that carry the age are not.
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("ClaimPackedSlab with fresh entries: want %v, got %v", ErrNoUploadJobs, err)
+	}
+
+	backdateJobs(t, db, 48*time.Hour)
+
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab past the age: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("want both buffers claimed, got %d", len(jobs))
+	}
+	for _, job := range jobs {
+		if job.UploadID != 0 {
+			t.Fatalf("want no upload on the claimed job, got %d", job.UploadID)
+		}
+	}
+
+	// Requeueing what was claimed without an upload keeps it queued.
+	for _, job := range jobs {
+		if err := db.RequeueUploadJob(job.UploadID, job.MetadataID); err != nil {
+			t.Fatalf("RequeueUploadJob: %v", err)
+		}
+	}
+	if n := pendingJobs(t, db); n != 2 {
+		t.Fatalf("want both pieces queued again, got %d jobs", n)
+	}
+}
+
 // TestClaimPackedSlabAgeSurvivesRequeue verifies that requeueing a claimed
 // batch, which is what a failed upload does, leaves the buffer age untouched.
 // The age counts from the upload's creation; when it counted from the queue
@@ -1206,5 +1301,47 @@ func TestDeleteDirectoryTakesTheUploadsInFlight(t *testing.T) {
 	}
 	if n := pendingJobs(t, db); n != 0 {
 		t.Errorf("%d queued job(s) left behind", n)
+	}
+}
+
+// TestBufferedBytes verifies that what is counted as waiting to go up is the
+// data of this share and workgroup that still sits in a buffer, whether or not
+// it has been claimed.
+func TestBufferedBytes(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+	bob, bobWG := newForeignAccount(t, db, "bob")
+
+	if n, err := db.BufferedBytes(share, wg); err != nil || n != 0 {
+		t.Fatalf("BufferedBytes on an empty share: want 0, got %d (%v)", n, err)
+	}
+
+	plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
+	plantBufferedFile(t, db, share, acc, "b.txt", 200, true)
+	plantBufferedFile(t, db, share, bob, "theirs.txt", 700, false)
+
+	// An upload in flight is data waiting just as much as a finalized one.
+	if n, err := db.BufferedBytes(share, wg); err != nil || n != 500 {
+		t.Fatalf("BufferedBytes: want 500, got %d (%v)", n, err)
+	}
+	if n, err := db.BufferedBytes(share, bobWG); err != nil || n != 700 {
+		t.Fatalf("BufferedBytes(bob): want 700, got %d (%v)", n, err)
+	}
+
+	// A claim takes the queue entry, not the buffer, so what is claimed is
+	// still waiting.
+	backdateUploads(t, db, 48*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("want the finalized piece claimed, got %d", len(jobs))
+	}
+	if n, err := db.BufferedBytes(share, wg); err != nil || n != 500 {
+		t.Fatalf("BufferedBytes after a claim: want 500, got %d (%v)", n, err)
 	}
 }

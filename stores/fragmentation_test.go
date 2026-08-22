@@ -1,11 +1,15 @@
 package stores
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"go.sia.tech/core/types"
+	"lukechampine.com/frand"
 )
 
 // plantPiece inserts a visible file whose single metadata entry occupies the
@@ -454,5 +458,266 @@ func TestFragmentationBadArgs(t *testing.T) {
 		if _, err := db.Fragmentation(tc.share, wg, tc.slabSize, tc.threshold); err == nil {
 			t.Fatalf("Fragmentation(%q, %d, %v): want an error, got none", tc.share, tc.slabSize, tc.threshold)
 		}
+	}
+}
+
+// fillPieces hands each piece the bytes the slab holds at its slice, which is
+// what the caller downloads before rebuffering them.
+func fillPieces(t *testing.T, pieces []SlabPiece, slab []byte) []SlabPiece {
+	t.Helper()
+
+	for i := range pieces {
+		end := pieces[i].DataOffset + pieces[i].DataLength
+		if end > uint64(len(slab)) {
+			t.Fatalf("piece %d reaches past the %d byte slab", i, len(slab))
+		}
+		pieces[i].Data = slab[pieces[i].DataOffset:end]
+	}
+
+	return pieces
+}
+
+// markTemporary hides the file again, which is the state of one whose upload
+// has not been finalized.
+func markTemporary(t *testing.T, db *Database, share, path string) {
+	t.Helper()
+
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE objects
+			SET temporary = TRUE
+			WHERE share_name = $1
+				AND full_path = $2
+		`, share, normalizePath(path))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("mark %s temporary: %v", path, err)
+	}
+}
+
+// TestRebufferSlab verifies that the live pieces of a fragmented slab go back
+// into the upload queue holding their own data, that the files still read the
+// same, and that the emptied slab is staged for unpinning.
+func TestRebufferSlab(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+
+	slab := make([]byte, slabSize)
+	frand.Read(slab)
+
+	key := types.Hash256{1}
+	plantPiece(t, db, share, acc, "a.txt", key, 0, 400)
+	plantPiece(t, db, share, acc, "b.txt", key, 400, 300)
+	plantPiece(t, db, share, acc, "c.txt", key, 700, 300)
+
+	// The hole b.txt leaves behind is what the rebuffering closes.
+	if _, err := db.DeleteFile(acc, share, "b.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	pieces, err := db.SlabPieces(share, wg, key)
+	if err != nil {
+		t.Fatalf("SlabPieces: %v", err)
+	}
+	if len(pieces) != 2 {
+		t.Fatalf("want the 2 surviving pieces, got %d", len(pieces))
+	}
+
+	staged, err := db.RebufferSlab(share, wg, key, fillPieces(t, pieces, slab))
+	if err != nil {
+		t.Fatalf("RebufferSlab: %v", err)
+	}
+	if len(staged) != 1 || staged[0] != key {
+		t.Fatalf("want the emptied slab staged for unpinning, got %v", staged)
+	}
+
+	// Both files read back the same, now out of the database.
+	if got := readPacked(t, db, acc, share, "a.txt", 400, nil); !bytes.Equal(got, slab[:400]) {
+		t.Fatalf("a.txt reads back wrong after rebuffering")
+	}
+	if got := readPacked(t, db, acc, share, "c.txt", 300, nil); !bytes.Equal(got, slab[700:1000]) {
+		t.Fatalf("c.txt reads back wrong after rebuffering")
+	}
+
+	// The queue holds them without an upload, so they age from now on.
+	if n := pendingJobs(t, db); n != 2 {
+		t.Fatalf("want both pieces queued, got %d jobs", n)
+	}
+	if n := queuedWithUpload(t, db); n != 0 {
+		t.Fatalf("want no queued piece attached to an upload, got %d", n)
+	}
+
+	// Nothing references the slab any more, and the packer sees the pieces.
+	slabs, err := db.PackedSlabs(share, wg, slabSize, 0)
+	if err != nil {
+		t.Fatalf("PackedSlabs: %v", err)
+	}
+	if len(slabs) != 0 {
+		t.Fatalf("want the slab gone from the listing, got %+v", slabs)
+	}
+
+	// They fall short of a slab between them, so it takes the age they now
+	// carry themselves to have them packed.
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, time.Hour); !errors.Is(err, ErrNoUploadJobs) {
+		t.Fatalf("ClaimPackedSlab straight away: want %v, got %v", ErrNoUploadJobs, err)
+	}
+	backdateJobs(t, db, 2*time.Hour)
+
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("want both pieces claimable as one slab, got %d", len(jobs))
+	}
+	packed := append(append([]byte{}, jobs[0].Data...), jobs[1].Data...)
+	if want := append(append([]byte{}, slab[:400]...), slab[700:1000]...); !bytes.Equal(packed, want) {
+		t.Fatalf("the repacked slab does not hold what the pieces did")
+	}
+}
+
+// TestSlabPiecesInFlight verifies that a slab a file that is still being
+// written references is left alone: that upload may yet be abandoned.
+func TestSlabPiecesInFlight(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+
+	key := types.Hash256{1}
+	plantPiece(t, db, share, acc, "a.txt", key, 0, 400)
+	plantPiece(t, db, share, acc, "b.txt", key, 400, 600)
+	markTemporary(t, db, share, "b.txt")
+
+	if _, err := db.SlabPieces(share, wg, key); !errors.Is(err, ErrSlabInUse) {
+		t.Fatalf("SlabPieces: want %v, got %v", ErrSlabInUse, err)
+	}
+
+	// The check is made again where it counts, so a write that starts after
+	// the listing does not slip through.
+	pieces := []SlabPiece{{MetadataID: 1, DataLength: 1, Data: []byte{0}}}
+	if _, err := db.RebufferSlab(share, wg, key, pieces); !errors.Is(err, ErrSlabInUse) {
+		t.Fatalf("RebufferSlab: want %v, got %v", ErrSlabInUse, err)
+	}
+}
+
+// TestRebufferSlabChanged verifies that a slab whose pieces moved on since they
+// were listed is left untouched, since the data downloaded for it is no longer
+// what the files reference.
+func TestRebufferSlabChanged(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+
+	slab := make([]byte, slabSize)
+	frand.Read(slab)
+
+	key := types.Hash256{1}
+	plantPiece(t, db, share, acc, "a.txt", key, 0, 400)
+	plantPiece(t, db, share, acc, "b.txt", key, 400, 300)
+	plantPiece(t, db, share, acc, "c.txt", key, 700, 300)
+
+	if _, err := db.DeleteFile(acc, share, "b.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	pieces, err := db.SlabPieces(share, wg, key)
+	if err != nil {
+		t.Fatalf("SlabPieces: %v", err)
+	}
+	fillPieces(t, pieces, slab)
+
+	// A.txt goes between the listing and the rewrite.
+	if _, err := db.DeleteFile(acc, share, "a.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	if _, err := db.RebufferSlab(share, wg, key, pieces); !errors.Is(err, ErrSlabChanged) {
+		t.Fatalf("RebufferSlab: want %v, got %v", ErrSlabChanged, err)
+	}
+
+	// What is left is still where it was, and nothing was queued.
+	if n := pendingJobs(t, db); n != 0 {
+		t.Fatalf("want an empty queue, got %d jobs", n)
+	}
+	if n := storedBuffers(t, db); n != 0 {
+		t.Fatalf("want no buffers, got %d", n)
+	}
+	slabs, err := db.PackedSlabs(share, wg, slabSize, 0)
+	if err != nil {
+		t.Fatalf("PackedSlabs: %v", err)
+	}
+	assertPacked(t, slabs, []PackedSlab{
+		{Key: key, Used: 300, Filled: 1000, Pieces: 1},
+	})
+
+	// A piece that appeared since the listing is one nothing was downloaded
+	// for, and moving the rest would leave the slab pinned for it anyway.
+	pieces, err = db.SlabPieces(share, wg, key)
+	if err != nil {
+		t.Fatalf("SlabPieces: %v", err)
+	}
+	fillPieces(t, pieces, slab)
+	plantPiece(t, db, share, acc, "d.txt", key, 0, 400)
+
+	if _, err := db.RebufferSlab(share, wg, key, pieces); !errors.Is(err, ErrSlabChanged) {
+		t.Fatalf("RebufferSlab with a new piece: want %v, got %v", ErrSlabChanged, err)
+	}
+	if n := storedBuffers(t, db); n != 0 {
+		t.Fatalf("want no buffers, got %d", n)
+	}
+}
+
+// TestRebufferSlabSharedKey verifies that a slab whose key is referenced from
+// outside this workgroup stays pinned. Slabs are content-addressed, so a file
+// of the same content that another workgroup uploaded carries the same key,
+// and unpinning the slab would take that file's data with it.
+func TestRebufferSlabSharedKey(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+	bob, _ := newForeignAccount(t, db, "bob")
+
+	slab := make([]byte, slabSize)
+	frand.Read(slab)
+
+	// The packed slab of this workgroup, and the file of another workgroup
+	// whose content came out identical to it.
+	key := types.Hash256{1}
+	plantPiece(t, db, share, acc, "mine.txt", key, 0, 400)
+	plantPiece(t, db, share, acc, "gone.txt", key, 400, 300)
+	plantPiece(t, db, share, acc, "kept.txt", key, 700, 300)
+	plantPiece(t, db, share, bob, "theirs.txt", key, 0, slabSize)
+
+	if _, err := db.DeleteFile(acc, share, "gone.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	pieces, err := db.SlabPieces(share, wg, key)
+	if err != nil {
+		t.Fatalf("SlabPieces: %v", err)
+	}
+	if len(pieces) != 2 {
+		t.Fatalf("want only this workgroup's pieces, got %d", len(pieces))
+	}
+
+	staged, err := db.RebufferSlab(share, wg, key, fillPieces(t, pieces, slab))
+	if err != nil {
+		t.Fatalf("RebufferSlab: %v", err)
+	}
+	if len(staged) != 0 {
+		t.Fatalf("want the shared slab left pinned, got %v", staged)
+	}
+	if got := readPacked(t, db, bob, share, "theirs.txt", slabSize, slab); !bytes.Equal(got, slab) {
+		t.Fatalf("theirs.txt no longer reads out of the slab")
 	}
 }

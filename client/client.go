@@ -40,6 +40,15 @@ type FragmentationReport struct {
 	Slabs     []stores.PackedSlab       `json:"slabs"`
 }
 
+// DefragmentReport is what one round of defragmenting achieved: the slabs it
+// emptied, the bytes it moved back into the upload queue to be packed again,
+// and the dead space those slabs held.
+type DefragmentReport struct {
+	Slabs     int    `json:"slabs"`
+	Moved     uint64 `json:"moved"`
+	Reclaimed uint64 `json:"reclaimed"`
+}
+
 // UnpinResult reports what unpinning a share's orphaned slabs achieved.
 type UnpinResult struct {
 	// Unpinned counts the slabs that were dropped from the backend, and Freed
@@ -118,6 +127,13 @@ type Client interface {
 	// (0, 1] reports at the level the connection is configured with. It
 	// returns ErrNoSlabScan on the backends that manage their own objects.
 	Fragmentation(ctx context.Context, threshold float64) (FragmentationReport, error)
+
+	// Defragment moves what is left in the fragmented slabs back into the
+	// upload queue, to be packed into fewer slabs. One call does at most one
+	// round, which is as many slabs as it takes to leave the share paying for
+	// one less; a round that reports no slabs found nothing worth moving. It
+	// returns ErrNoSlabScan on the backends that manage their own objects.
+	Defragment(ctx context.Context) (DefragmentReport, error)
 
 	Close() error
 }

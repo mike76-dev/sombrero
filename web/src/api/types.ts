@@ -117,6 +117,16 @@ export interface FragmentationResponse {
   errors?: Record<string, string>
 }
 
+export interface DefragmentResponse {
+  // What one round emptied: the slabs whose contents went back into the upload
+  // queue, how much that was, and the dead space those slabs held.
+  slabs: number
+  moved: number
+  reclaimed: number
+  // Keyed by the workgroup whose connection could not be repacked.
+  errors?: Record<string, string>
+}
+
 export interface UnpinOrphansResponse {
   unpinned: number
   freed: number
