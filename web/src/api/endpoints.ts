@@ -4,6 +4,7 @@ import type {
   AccessRights,
   ConnectRequestResponse,
   ConnectResponse,
+  DefragmentResponse,
   FragmentationResponse,
   IsBannedResponse,
   OrphansResponse,
@@ -81,6 +82,11 @@ export const unpinOrphans = (share: string) =>
 
 export const checkFragmentation = (share: string) =>
   request<FragmentationResponse>(`/share/${encodeURIComponent(share)}/fragmentation`)
+
+export const defragment = (share: string) =>
+  request<DefragmentResponse>(`/share/${encodeURIComponent(share)}/fragmentation`, {
+    method: 'POST',
+  })
 
 // Access policies
 
