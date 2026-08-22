@@ -319,7 +319,9 @@ function FragmentationCard({ share }: { share: Share }) {
                         `${res.slabs === 1 ? '' : 's'} to be packed again, freeing ` +
                         `${formatBytes(res.reclaimed)}. The new slab goes up in the background.`
                     : 'Nothing was repacked: what is left in these slabs would fill as many ' +
-                        'slabs again, and a slab short of full is paid for like a full one.',
+                        'slabs again, and a slab short of full is paid for like a full one. ' +
+                        'Try again once more slabs are fragmented, or once there is data ' +
+                        'waiting to be uploaded that fits in the dead space.',
                 )
               })
             }}

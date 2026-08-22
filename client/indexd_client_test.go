@@ -2901,16 +2901,17 @@ func TestNextRetry(t *testing.T) {
 }
 
 // TestDefragBatch verifies which slabs a round takes on: enough of them that
-// what is left in them fits into fewer slabs than they occupy now, and none at
-// all when no prefix of the listing does, since repacking a slab into a slab
-// frees nothing.
+// emptying them leaves fewer slabs paid for, counting the room left in the slab
+// the buffered data will fill, and none at all when no prefix of the listing
+// gets there, since repacking a slab into a slab frees nothing.
 func TestDefragBatch(t *testing.T) {
 	const size = 1000
 
 	tests := []struct {
-		name string
-		used []uint64
-		want int
+		name     string
+		used     []uint64
+		buffered uint64
+		want     int
 	}{
 		{name: "nothing listed"},
 		{name: "one slab cannot free itself", used: []uint64{500}},
@@ -2918,6 +2919,29 @@ func TestDefragBatch(t *testing.T) {
 		{name: "two nearly full ones make two", used: []uint64{900, 900}},
 		{name: "four at three quarters make three", used: []uint64{750, 750, 750, 750}, want: 4},
 		{name: "the shortest prefix wins", used: []uint64{500, 300, 200}, want: 2},
+		{
+			// The 600 rides along in the slab the 300 already waiting will
+			// be packed into, so the slab it came out of is freed for good.
+			name:     "a lone slab fits in what is already waiting",
+			used:     []uint64{600},
+			buffered: 300,
+			want:     1,
+		},
+		{
+			// Together they overflow that slab, which would need a second
+			// one to hold what the first slab freed.
+			name:     "a lone slab that overflows it is left alone",
+			used:     []uint64{800},
+			buffered: 300,
+		},
+		{
+			// Two of them fit into the two slabs that the buffered data and
+			// the first of them are worth.
+			name:     "the buffered data shortens the batch",
+			used:     []uint64{900, 800},
+			buffered: 300,
+			want:     2,
+		},
 	}
 
 	for _, tc := range tests {
@@ -2927,7 +2951,7 @@ func TestDefragBatch(t *testing.T) {
 				slabs[i] = stores.PackedSlab{Size: size, Filled: size, Used: used}
 			}
 
-			if got := defragBatch(slabs, size); len(got) != tc.want {
+			if got := defragBatch(slabs, size, tc.buffered); len(got) != tc.want {
 				t.Fatalf("want %d slab(s) in the batch, got %d", tc.want, len(got))
 			}
 		})
@@ -3193,4 +3217,72 @@ func TestIndexdClient_DefragmentWaitsForThePacker(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the round kept waiting after the connection was closed")
 	}
+}
+
+// TestIndexdClient_DefragmentRidesAlongWithTheQueue verifies that a share with
+// a single fragmented slab repacks it once enough data is waiting to take its
+// remains along: the slab is freed, and what came out of it is packed into one
+// that was going to be paid for anyway.
+func TestIndexdClient_DefragmentRidesAlongWithTheQueue(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+	wg := workgroupID(t, db, acc)
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, wg, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	kept := plantFragmentedSlabs(t, ctx, c, fb, acc, 1)
+
+	// On its own it is left alone: its half slab would be paid for by a slab
+	// of its own.
+	report, err := c.Defragment(ctx)
+	if err != nil {
+		t.Fatalf("Defragment: %v", err)
+	}
+	if report.Slabs != 0 {
+		t.Fatalf("want the lone slab left alone, got %+v", report)
+	}
+
+	// A file waiting to go up, with room to spare in the slab it will fill.
+	waiting := frand.Bytes(int(proto.SectorSize / 4))
+	uploadBuffered(t, ctx, c, acc, "waiting.bin", waiting)
+
+	report, err = c.Defragment(ctx)
+	if err != nil {
+		t.Fatalf("Defragment with data waiting: %v", err)
+	}
+	if report.Slabs != 1 {
+		t.Fatalf("want the slab emptied now that its remains fit, got %+v", report)
+	}
+	if want := uint64(proto.SectorSize / 2); report.Moved != want {
+		t.Fatalf("want %d bytes moved, got %d", want, report.Moved)
+	}
+
+	// The slab is gone from the listing and staged for the unpin, while what
+	// came out of it is still readable from the database.
+	slabs, err := db.PackedSlabs(share.Name, wg, uint64(proto.SectorSize), stores.DefaultFragmentationThreshold)
+	if err != nil {
+		t.Fatalf("PackedSlabs: %v", err)
+	}
+	if len(slabs) != 0 {
+		t.Fatalf("want nothing fragmented left, got %+v", slabs)
+	}
+	staged, err := db.PendingUnpins(share.Name, wg)
+	if err != nil {
+		t.Fatalf("PendingUnpins: %v", err)
+	}
+	if len(staged) != 1 {
+		t.Fatalf("want the emptied slab staged, got %v", staged)
+	}
+	for path, data := range kept {
+		mustReadEquals(t, ctx, c, acc, path, data)
+	}
+	mustReadEquals(t, ctx, c, acc, "waiting.bin", waiting)
 }

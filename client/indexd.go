@@ -1425,15 +1425,32 @@ func (ic *IndexdClient) Fragmentation(ctx context.Context, threshold float64) (F
 	}, nil
 }
 
+// slabsFor is how many slabs the given amount of data is paid for by, once it
+// has been packed.
+func slabsFor(data, slabSize uint64) uint64 {
+	return (data + slabSize - 1) / slabSize
+}
+
 // defragBatch picks the slabs one round empties: enough of the most fragmented
-// ones that what is left in them fits into fewer slabs than they occupy now.
-// Fewer than that frees nothing, since a slab short of full is paid for like a
-// full one, so a listing that holds no such prefix is left alone.
-func defragBatch(slabs []stores.PackedSlab, slabSize uint64) []stores.PackedSlab {
+// ones that emptying them leaves the share paying for fewer slabs than it does
+// now. Anything less frees nothing, since a slab short of full is paid for like
+// a full one, so a listing that holds no such prefix is left alone.
+//
+// What is already buffered counts towards that, because the pieces are packed
+// together with it: a slab whose remains fit in the room left in the slab those
+// buffers will fill rides along at no cost of its own. Without that, a share
+// would have to hold 1/threshold fragmented slabs before a round could act.
+func defragBatch(slabs []stores.PackedSlab, slabSize, buffered uint64) []stores.PackedSlab {
+	if slabSize == 0 {
+		return nil
+	}
+
+	waiting := slabsFor(buffered, slabSize)
+
 	var used uint64
 	for i, slab := range slabs {
 		used += slab.Used
-		if used <= uint64(i)*slabSize {
+		if uint64(i+1)+waiting >= slabsFor(buffered+used, slabSize)+1 {
 			return slabs[:i+1]
 		}
 	}
@@ -1489,8 +1506,13 @@ func (ic *IndexdClient) Defragment(ctx context.Context) (DefragmentReport, error
 		return DefragmentReport{}, fmt.Errorf("couldn't list the fragmented slabs: %v", err)
 	}
 
+	buffered, err := ic.db.BufferedBytes(ic.share, ic.workgroup)
+	if err != nil {
+		return DefragmentReport{}, fmt.Errorf("couldn't measure the buffered data: %v", err)
+	}
+
 	var report DefragmentReport
-	for _, slab := range defragBatch(slabs, ic.slabSize) {
+	for _, slab := range defragBatch(slabs, ic.slabSize, buffered) {
 		moved, err := ic.defragmentSlab(ctx, slab.Key)
 		if errors.Is(err, stores.ErrSlabInUse) || errors.Is(err, stores.ErrSlabChanged) {
 			// The files moved on since they were listed. What the round did

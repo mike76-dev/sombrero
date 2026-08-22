@@ -130,9 +130,9 @@ type Client interface {
 
 	// Defragment moves what is left in the fragmented slabs back into the
 	// upload queue, to be packed into fewer slabs. One call does at most one
-	// round, which is as many slabs as it takes to free one; a round that
-	// reports no slabs found nothing worth moving. It returns ErrNoSlabScan on
-	// the backends that manage their own objects.
+	// round, which is as many slabs as it takes to leave the share paying for
+	// one less; a round that reports no slabs found nothing worth moving. It
+	// returns ErrNoSlabScan on the backends that manage their own objects.
 	Defragment(ctx context.Context) (DefragmentReport, error)
 
 	Close() error
