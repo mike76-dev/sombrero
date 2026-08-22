@@ -107,6 +107,12 @@ indexd:
                                                                                  # with the data of other files; if omitted, it waits indefinitely
   minPackedSlabSize: 0                                                           # optional: the least amount of leftover data, in bytes, that an incomplete slab
                                                                                  # is uploaded with once it has reached maxBufferAge; if omitted, any amount is uploaded
+  fragmentationThreshold: 0.25                                                   # optional: how much of a slab may be dead space before it is reported, as a fraction
+                                                                                 # between 0 and 1; if omitted, defaults to 0.25
+  fragmentationCheck: 1h                                                         # optional: how often to look for the dead space; 'never' turns the check off and leaves
+                                                                                 # it to the web UI and the API to report on demand
+  defragment: false                                                              # optional: whether the check also repacks the slabs it reports, instead of only reporting
+                                                                                 # them; if omitted, nothing is repacked on its own
 ```
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash
@@ -189,6 +195,12 @@ A server built without this step runs normally and serves the API as usual; only
 
 ## Upload Packing
 A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Both config fields are optional: setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, while `minPackedSlabSize` (for example, `1048576`) holds that upload back until the leftover data of a share is worth a slab. On its own, `minPackedSlabSize` has no effect.
+## Slab Fragmentation
+Deleting or overwriting a file punches a hole in the slab it was packed into, and the share keeps paying for the whole slab. A slab belongs to the workgroup that uploaded it, so each workgroup's connection to the share looks for it in its own slabs every `fragmentationCheck` (`1h` by default, `never` to turn the check off) and reports the slabs that are at least `fragmentationThreshold` dead space (`0.25` by default).
+
+Setting `defragment: true` has the check repack what it reports instead of only reporting it: what is still referenced in those slabs is downloaded, put back into the upload queue to be packed together with the data of other files, and the slabs it came out of are unpinned once nothing reads from them any more.
+
+Repacking costs what any other upload of the same data costs, and between a round and the packed slab that follows it the moved data sits in the database rather than on the network. Rounds give way to what clients are writing: one only starts while less than a slab's worth of data is waiting to be uploaded, and `maxBufferAge` is what bounds how long the moved data waits there.
 ## Shared Folders
 It is possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup. Only working on `indexd` shares.
 
