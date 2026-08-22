@@ -252,9 +252,19 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			return nil, errAccessDenied
 		}
 
-		access, exists = sh.fileAccess(ss.workgroup, ss.userName)
-		if !exists {
-			return nil, errAccessDenied
+		if ss.isAnonymous {
+			// An anonymous session has no policies of its own: the share says
+			// whether it is admitted at all, and what it may then do is what
+			// the public folder allows. Until that is in place it is let on to
+			// the share holding no rights over anything in it.
+			if !sh.allowAnonymous {
+				return nil, errAccessDenied
+			}
+		} else {
+			access, exists = sh.fileAccess(ss.workgroup, ss.userName)
+			if !exists {
+				return nil, errAccessDenied
+			}
 		}
 
 		// The use limit is weighed after the access check, in the order [MS-SMB2] 3.3.5.7 gives

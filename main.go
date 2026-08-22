@@ -100,8 +100,16 @@ func main() {
 	log.Printf("SMB: listening at %s ...\n", l.Addr())
 	defer l.Close()
 
+	// The identity that anonymous sessions act as has to exist before one can
+	// be established, and nothing else creates it.
+	if cfg.Anonymous {
+		if _, err := db.EnsureAnonymous(); err != nil {
+			log.Fatalf("failed to prepare anonymous access: %v", err)
+		}
+	}
+
 	// Start the SMB server.
-	server := newServer(ctx, l, db, cfg.Debug, cfg.Indexd)
+	server := newServer(ctx, l, db, cfg)
 	server.applyCapabilities()
 	db.WithShares(server)
 
@@ -232,7 +240,7 @@ func main() {
 
 				log.Println("Incoming connection from", conn.RemoteAddr())
 				c := server.newConnection(conn)
-				c.ntlmServer = ntlm.NewServer("SERVER", "", db)
+				c.ntlmServer = ntlm.NewServer("SERVER", "", db, cfg.Anonymous)
 				c.readLoop(host)
 			}()
 		}

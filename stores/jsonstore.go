@@ -270,6 +270,9 @@ func (js *JSONStore) FindAccount(username, workgroup string) (acc Account, err e
 
 // AddAccount adds a new account to the store.
 func (js *JSONStore) AddAccount(acc Account) error {
+	if IsAnonymousWorkgroup(acc.Workgroup) {
+		return ErrReservedWorkgroup
+	}
 	if _, err := uuid.Parse(acc.Workgroup); err != nil {
 		return fmt.Errorf("invalid workgroup UUID: %w", err)
 	}
@@ -423,6 +426,9 @@ func (js *JSONStore) GetWorkgroups() (wgs []Workgroup, err error) {
 
 // AddWorkgroup adds a new workgroup to the store.
 func (js *JSONStore) AddWorkgroup(wg Workgroup) error {
+	if wg.UUID == AnonymousWorkgroup {
+		return ErrReservedWorkgroup
+	}
 	wg.Name = NormalizeWorkgroupName(wg.Name)
 	return js.update(func(d *jsonData) error {
 		for _, w := range d.Workgroups {

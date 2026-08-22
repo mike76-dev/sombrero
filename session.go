@@ -20,6 +20,7 @@ import (
 	"github.com/mike76-dev/sombrero/kdf"
 	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 	"lukechampine.com/frand"
 )
 
@@ -209,14 +210,19 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 	ss.securityContext = ss.connection.ntlmServer.Session().GetSecurityContext()
 	ss.userName = ss.connection.ntlmServer.Session().User()
 	ss.workgroup = ss.connection.ntlmServer.Session().Domain()
-	if ss.userName == "" {
-		ss.isAnonymous = true
-	}
-
 	// A guest is whoever logged in without a password, whatever the account is
 	// called: the name "guest" is a convention of the clients, not something
 	// the rights hang off.
 	ss.isGuest = ss.connection.ntlmServer.Session().IsGuest()
+
+	// An anonymous session presented no credentials, so it carries no identity
+	// of its own. It acts as the server's reserved account, which is what owns
+	// what it uploads and what nobody can log in as.
+	ss.isAnonymous = ss.connection.ntlmServer.Session().IsAnonymous()
+	if ss.isAnonymous {
+		ss.userName = stores.AnonymousAccount
+		ss.workgroup = stores.AnonymousWorkgroup.String()
+	}
 	ss.signingRequired = (req.SecurityMode()&smb2.NEGOTIATE_SIGNING_REQUIRED > 0) && !ss.isAnonymous && !ss.isGuest && ss.connection.shouldSign
 
 	if ss.connection.negotiateDialect == smb2.SMB_DIALECT_311 {

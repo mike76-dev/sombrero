@@ -101,6 +101,9 @@ func (db *Database) FindAccount(username, workgroup string) (acc Account, err er
 
 // AddAccount adds a new account to the database.
 func (db *Database) AddAccount(acc Account) error {
+	if IsAnonymousWorkgroup(acc.Workgroup) {
+		return ErrReservedWorkgroup
+	}
 	u, err := uuid.Parse(acc.Workgroup)
 	if err != nil {
 		return fmt.Errorf("invalid workgroup UUID: %w", err)

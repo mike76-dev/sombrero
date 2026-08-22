@@ -246,7 +246,7 @@ func (h *smbTest) negotiatedCapabilities(t *testing.T, asks uint32, dialects ...
 	h.srv.applyCapabilities()
 
 	c := h.newTestConnection("negotiating")
-	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 	resp, _, err := c.processRequest(request(t, negotiateRequest(asks, dialects...)))
 	if err != nil {
@@ -348,7 +348,7 @@ func TestIntegrationTheCapabilitiesOfAConnectionAreWhatWentOut(t *testing.T) {
 			h.srv.applyCapabilities()
 
 			c := h.newTestConnection("negotiating")
-			c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+			c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 			// The client offers a cipher, which is what a 3.1.1 negotiate settles one from.
 			msg := negotiateRequest(0, tt.dialect)
@@ -395,7 +395,7 @@ func TestIntegrationNegotiateSettlesACipher(t *testing.T) {
 			h.srv.applyCapabilities()
 
 			c := h.newTestConnection("negotiating")
-			c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+			c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 			if _, _, err := c.processRequest(request(t, negotiateRequest(0, tt.dialect))); err != nil {
 				t.Fatalf("the server gave up on the negotiate: %v", err)

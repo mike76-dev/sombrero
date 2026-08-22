@@ -23,7 +23,7 @@ func (h *smbTest) negotiated(name string, guid [16]byte, dialect uint16) *connec
 	c.clientGuid = guid[:]
 	c.negotiateDialect = dialect
 	c.dialect = dialectName(dialect)
-	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 	h.srv.mu.Lock()
 	h.srv.connectionList[c.clientName] = c

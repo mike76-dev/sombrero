@@ -10,7 +10,7 @@ import (
 func authenticated(t *testing.T, user, workgroup string) *Session {
 	t.Helper()
 
-	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 	if err := authenticateAs(t, srv, user, workgroup, ntHashOf(testPassword)); err != nil {
 		t.Fatalf("the exchange did not complete: %v", err)
 	}

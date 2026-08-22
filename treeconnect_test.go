@@ -108,3 +108,55 @@ func TestTreeConnectGuestNeedsAGuestShare(t *testing.T) {
 		})
 	}
 }
+
+// TestTreeConnectAnonymousNeedsAnAnonymousShare verifies that a session that
+// presented no credentials reaches only the shares that offer anonymous
+// access, and that it is let on holding no rights over what is on them: what
+// it may do is the public folder's business, not the policies'.
+func TestTreeConnectAnonymousNeedsAnAnonymousShare(t *testing.T) {
+	for _, tt := range []struct {
+		what  string
+		allow bool
+		want  uint32
+	}{
+		{"a share that does not take anonymous sessions", false, smb2.STATUS_ACCESS_DENIED},
+		{"a share that does", true, smb2.STATUS_OK},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+
+			// The policies of the session's own user grant it the share, so
+			// the anonymous flag is the only thing left to decide it.
+			h.restrictTo("alice")
+			h.share.allowAnonymous = tt.allow
+			h.share.publicDir = "Drop"
+
+			cl := h.dial("alice").speaking(smb2.SMB_DIALECT_302)
+			cl.ss.isAnonymous = true
+
+			resp, _, err := cl.conn.processRequest(request(t,
+				treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\files`)))
+			if err != nil {
+				t.Fatalf("the tree connect was not answered: %v", err)
+			}
+			if status := resp.Header().Status(); status != tt.want {
+				t.Fatalf("the tree connect was answered %#x, want %#x", status, tt.want)
+			}
+
+			if tt.want != smb2.STATUS_OK {
+				return
+			}
+
+			// Nothing is granted over the share's files yet.
+			cl.ss.mu.Lock()
+			var access uint32
+			for _, tc := range cl.ss.treeConnectTable {
+				access = tc.maximalAccess
+			}
+			cl.ss.mu.Unlock()
+			if access != 0 {
+				t.Errorf("want an anonymous session to hold no rights on the share, got %#x", access)
+			}
+		})
+	}
+}

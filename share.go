@@ -85,10 +85,14 @@ type share struct {
 	encryptData     bool
 	compressData    bool
 
-	// allowGuest lets the passwordless accounts of a workgroup connect. It is
-	// read from the share as it was registered, so a change to it takes effect
-	// when the share is registered again.
-	allowGuest bool
+	// allowGuest lets the passwordless accounts of a workgroup connect, and
+	// allowAnonymous lets a client that presented no credentials connect, with
+	// publicDir naming the one folder such a session may use. All three are
+	// read from the share as it was registered, so a change to them takes
+	// effect when the share is registered again.
+	allowGuest     bool
+	allowAnonymous bool
+	publicDir      string
 
 	// For renterd shares (single client shared by all workgroups).
 	client        client.Client
@@ -126,6 +130,8 @@ func (s *server) RegisterShare(ss stores.Share) error {
 		bucket:          ss.Bucket,
 		remark:          ss.Remark,
 		allowGuest:      ss.AllowGuest,
+		allowAnonymous:  ss.AllowAnonymous,
+		publicDir:       ss.PublicDir,
 		connectSecurity: make(map[string]struct{}),
 		fileSecurity:    make(map[string]uint32),
 		persisted:       make(map[persistedKey]*fileState),
@@ -355,20 +361,20 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 			return errors.New("indexd shares require a database-backed store")
 		}
 		builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
-			ID:          types.HashBytes(append([]byte(s.cfg.Name), []byte(s.cfg.Description)...)),
-			Name:        s.cfg.Name,
-			Description: s.cfg.Description,
-			LogoURL:     s.cfg.LogoURL,
-			ServiceURL:  s.cfg.ServiceURL,
+			ID:          types.HashBytes(append([]byte(s.cfg.Indexd.Name), []byte(s.cfg.Indexd.Description)...)),
+			Name:        s.cfg.Indexd.Name,
+			Description: s.cfg.Indexd.Description,
+			LogoURL:     s.cfg.Indexd.LogoURL,
+			ServiceURL:  s.cfg.Indexd.ServiceURL,
 		})
 		sdkClient, err := builder.SDK(appKey)
 		if err != nil {
 			return err
 		}
-		fragLevel, fragInterval, defragment := s.cfg.Fragmentation()
+		fragLevel, fragInterval, defragment := s.cfg.Indexd.Fragmentation()
 		c := client.NewIndexdClient(db, sdkClient, share.Name, wg.ID, share.DataShards, share.ParityShards, client.PackingOptions{
-			MinSize: s.cfg.MinPackedSlabSize,
-			MaxAge:  s.cfg.MaxBufferAge.Duration(),
+			MinSize: s.cfg.Indexd.MinPackedSlabSize,
+			MaxAge:  s.cfg.Indexd.MaxBufferAge.Duration(),
 		}, client.FragmentationOptions{
 			Threshold:  fragLevel,
 			Interval:   fragInterval,

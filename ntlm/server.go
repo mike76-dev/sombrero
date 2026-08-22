@@ -40,6 +40,10 @@ type Server struct {
 
 	mechTypes []asn1.ObjectIdentifier
 	accounts  AccountStore
+
+	// anonymous is whether a client that presents no credentials at all is
+	// admitted, which is the server-wide setting the shares' own hang off.
+	anonymous bool
 }
 
 // AccountStore defines the minimal account store.
@@ -57,6 +61,12 @@ func (s *Server) resolveWorkgroup(domain string) (string, error) {
 		return "", nil
 	}
 	if u, err := uuid.Parse(domain); err == nil {
+		// The anonymous identity is the server's own. A client that names it
+		// would be logging in as an account with no password, which is not
+		// what anonymous access is: that is the empty credential below.
+		if u == stores.AnonymousWorkgroup {
+			return "", errors.New("login failure")
+		}
 		return u.String(), nil
 	}
 	wg, err := s.accounts.FindWorkgroupByName(domain)
@@ -74,7 +84,7 @@ func (s *Server) resolveWorkgroup(domain string) (string, error) {
 }
 
 // NewServer returns an initialized NTLMv2 server.
-func NewServer(targetName, targetDomain string, store AccountStore) *Server {
+func NewServer(targetName, targetDomain string, store AccountStore, anonymous bool) *Server {
 	mechTypes := make([]asn1.ObjectIdentifier, 1)
 	mechTypes[0] = spnego.NlmpOid
 	return &Server{
@@ -82,6 +92,7 @@ func NewServer(targetName, targetDomain string, store AccountStore) *Server {
 		targetDomain: targetDomain,
 		mechTypes:    mechTypes,
 		accounts:     store,
+		anonymous:    anonymous,
 	}
 }
 
@@ -433,7 +444,33 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		return nil
 	}
 
-	return errors.New("credential is empty")
+	// A credential with nothing in it is the anonymous login: no user, no
+	// domain, and no response to verify. There is no key material either, so
+	// the session is left with a zero one, which is what keeps it out of
+	// signing and encryption ([MS-SMB2] 3.3.5.5.3).
+	if !s.anonymous {
+		return errors.New("credential is empty")
+	}
+
+	session := new(Session)
+	session.isClientSide = false
+	session.anonymous = true
+	session.negotiateFlags = flags
+	session.exportedSessionKey = make([]byte, 16)
+
+	session.clientSigningKey = signKey(flags, session.exportedSessionKey, true)
+	session.serverSigningKey = signKey(flags, session.exportedSessionKey, false)
+	if session.clientHandle, err = rc4.NewCipher(sealKey(flags, session.exportedSessionKey, true)); err != nil {
+		return err
+	}
+	if session.serverHandle, err = rc4.NewCipher(sealKey(flags, session.exportedSessionKey, false)); err != nil {
+		return err
+	}
+
+	s.session = session
+	s.amsg = amsg
+
+	return nil
 }
 
 // Signature generates a signature of an NTLM AUTHENTICATE message. It returns nothing until an

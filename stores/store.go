@@ -21,6 +21,10 @@ type Store interface {
 	FindAccounts(workgroup string) (accs []Account, err error)
 	RemoveAccounts(workgroup string) error
 
+	// EnsureAnonymous creates the identity that anonymous sessions act as,
+	// unless it is there already, and returns its account.
+	EnsureAnonymous() (Account, error)
+
 	GetWorkgroupByID(id int) (Workgroup, error)
 	FindWorkgroup(u uuid.UUID) (Workgroup, error)
 	FindWorkgroupByName(name string) (Workgroup, error)

@@ -78,7 +78,7 @@ func newOplockOpen(t *testing.T, s *server, sh *share, path string) (*open, *con
 // There is no store behind it. None of these tests reaches one, and a test that starts to will
 // fail loudly rather than quietly work on something half-built.
 func newCachingServer() *server {
-	return newServerState(context.Background(), nil, false, stores.IndexdConfig{})
+	return newServerState(context.Background(), nil, stores.Config{})
 }
 
 // recvBreak takes the break notification the server sent to a client, failing the test if none

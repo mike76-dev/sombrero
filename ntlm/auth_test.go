@@ -66,18 +66,24 @@ func knownAccount() stubStore {
 	}
 }
 
-// authenticateAs drives a whole NTLMv2 exchange against srv on behalf of user, signing the
-// challenge with ntHash. Everything it uses is something a client can see or choose, so a hash
-// that is not the account's is exactly the position an attacker is in.
-func authenticateAs(t *testing.T, srv *Server, user, workgroup string, ntHash []byte) error {
+// negotiate is the NEGOTIATE message a client opens the exchange with.
+func negotiate(t *testing.T) []byte {
 	t.Helper()
 
 	nmsg := make([]byte, 32)
 	copy(nmsg[:8], signature)
 	binary.LittleEndian.PutUint32(nmsg[8:12], NtLmNegotiate)
 	binary.LittleEndian.PutUint32(nmsg[12:16], defaultFlags)
+	return nmsg
+}
 
-	cmsg, err := srv.Challenge(nmsg)
+// authenticateAs drives a whole NTLMv2 exchange against srv on behalf of user, signing the
+// challenge with ntHash. Everything it uses is something a client can see or choose, so a hash
+// that is not the account's is exactly the position an attacker is in.
+func authenticateAs(t *testing.T, srv *Server, user, workgroup string, ntHash []byte) error {
+	t.Helper()
+
+	cmsg, err := srv.Challenge(negotiate(t))
 	if err != nil {
 		t.Fatalf("challenge: %v", err)
 	}
@@ -127,7 +133,7 @@ func ntHashOf(password string) []byte {
 // The positive control. Without it the rejections below would be satisfied by a message this
 // test simply builds wrong, and would go on passing however broken the server became.
 func TestAuthenticateAcceptsTheRightPassword(t *testing.T) {
-	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 
 	if err := authenticateAs(t, srv, testUser, testWorkgroup, ntHashOf(testPassword)); err != nil {
 		t.Fatalf("the account's own password was turned away: %v", err)
@@ -153,7 +159,7 @@ func TestAuthenticateResolvesWorkgroupName(t *testing.T) {
 		var lookedUp string
 		store := knownAccount()
 		store.lookedUp = &lookedUp
-		srv := NewServer("SOMBRERO", "WORKGROUP", store)
+		srv := NewServer("SOMBRERO", "WORKGROUP", store, false)
 
 		if err := authenticateAs(t, srv, testUser, domain, ntHashOf(testPassword)); err != nil {
 			t.Fatalf("login as %q\\%q was turned away: %v", domain, testUser, err)
@@ -180,7 +186,7 @@ func TestAuthenticateCanonicalizesWorkgroupUUID(t *testing.T) {
 		var lookedUp string
 		store := knownAccount()
 		store.lookedUp = &lookedUp
-		srv := NewServer("SOMBRERO", "WORKGROUP", store)
+		srv := NewServer("SOMBRERO", "WORKGROUP", store, false)
 
 		if err := authenticateAs(t, srv, testUser, domain, ntHashOf(testPassword)); err != nil {
 			t.Fatalf("login with workgroup %q was turned away: %v", domain, err)
@@ -202,7 +208,7 @@ func TestAuthenticateRejectsAnUnknownWorkgroupName(t *testing.T) {
 	var lookedUp string
 	store := knownAccount()
 	store.lookedUp = &lookedUp
-	srv := NewServer("SOMBRERO", "WORKGROUP", store)
+	srv := NewServer("SOMBRERO", "WORKGROUP", store, false)
 
 	if err := authenticateAs(t, srv, testUser, "no-such-workgroup", ntHashOf(testPassword)); err == nil {
 		t.Error("a workgroup that does not exist authenticated")
@@ -237,7 +243,7 @@ func TestAuthenticateAgainstTheStore(t *testing.T) {
 	// The name as a client sends it, the name as it was created, and the UUID. Windows uppercases
 	// the workgroup, so the first of these is the one the bug was found with.
 	for _, domain := range []string{strings.ToUpper(testWorkgroupName), testWorkgroupName, u.String()} {
-		srv := NewServer("SOMBRERO", "WORKGROUP", store)
+		srv := NewServer("SOMBRERO", "WORKGROUP", store, false)
 
 		if err := authenticateAs(t, srv, testUser, domain, ntHashOf(testPassword)); err != nil {
 			t.Errorf("login as %q\\%q was turned away: %v", domain, testUser, err)
@@ -249,14 +255,14 @@ func TestAuthenticateAgainstTheStore(t *testing.T) {
 	}
 
 	// A password that is not the account's still fails, whichever way the workgroup was named.
-	srv := NewServer("SOMBRERO", "WORKGROUP", store)
+	srv := NewServer("SOMBRERO", "WORKGROUP", store, false)
 	if err := authenticateAs(t, srv, testUser, testWorkgroupName, ntHashOf("not the password")); err == nil {
 		t.Error("a wrong password authenticated against a named workgroup")
 	}
 }
 
 func TestAuthenticateRejectsTheWrongPassword(t *testing.T) {
-	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 
 	if err := authenticateAs(t, srv, testUser, testWorkgroup, ntHashOf("not the password")); err == nil {
 		t.Fatal("a wrong password authenticated")
@@ -279,7 +285,7 @@ func TestAuthenticateRejectsAnUnknownUser(t *testing.T) {
 		{err: stores.ErrAccountNotFound},
 		{}, // a zero Account and no error
 	} {
-		srv := NewServer("SOMBRERO", "WORKGROUP", store)
+		srv := NewServer("SOMBRERO", "WORKGROUP", store, false)
 
 		if err := authenticateAs(t, srv, "nobody", testWorkgroup, nil); err == nil {
 			t.Errorf("a user that does not exist authenticated as %q in workgroup %q",
@@ -296,7 +302,7 @@ func TestAuthenticateRejectsAnUnknownUser(t *testing.T) {
 func TestAuthenticateMarksAPasswordlessAccountAsAGuest(t *testing.T) {
 	store := knownAccount()
 	store.acc.NTHash = ntHashOf("")
-	srv := NewServer("SOMBRERO", "WORKGROUP", store)
+	srv := NewServer("SOMBRERO", "WORKGROUP", store, false)
 
 	if err := authenticateAs(t, srv, testUser, testWorkgroup, ntHashOf("")); err != nil {
 		t.Fatalf("the passwordless account was turned away: %v", err)
@@ -307,7 +313,7 @@ func TestAuthenticateMarksAPasswordlessAccountAsAGuest(t *testing.T) {
 
 	// A response over any other password is still refused: passwordless means
 	// the password is empty, not that anything goes.
-	srv = NewServer("SOMBRERO", "WORKGROUP", store)
+	srv = NewServer("SOMBRERO", "WORKGROUP", store, false)
 	if err := authenticateAs(t, srv, testUser, testWorkgroup, ntHashOf(testPassword)); err == nil {
 		t.Error("a response over the wrong password was accepted")
 	}
@@ -318,12 +324,74 @@ func TestAuthenticateMarksAPasswordlessAccountAsAGuest(t *testing.T) {
 func TestAuthenticateLeavesAnAccountWithAPasswordAlone(t *testing.T) {
 	store := knownAccount()
 	store.acc.Username = "guest"
-	srv := NewServer("SOMBRERO", "WORKGROUP", store)
+	srv := NewServer("SOMBRERO", "WORKGROUP", store, false)
 
 	if err := authenticateAs(t, srv, "guest", testWorkgroup, ntHashOf(testPassword)); err != nil {
 		t.Fatalf("the account was turned away: %v", err)
 	}
 	if srv.Session().IsGuest() {
 		t.Error("an account with a password was marked as a guest for being called guest")
+	}
+}
+
+// TestAuthenticateAdmitsAnAnonymousLogin verifies that a credential with
+// nothing in it establishes a session only where the server allows anonymous
+// access, and that the session carries no identity and no key.
+func TestAuthenticateAdmitsAnAnonymousLogin(t *testing.T) {
+	// An AUTHENTICATE message with no user, no domain and no response, which
+	// is what a client sends for a null session.
+	empty := func() []byte {
+		amsg := make([]byte, 64)
+		copy(amsg[:8], signature)
+		binary.LittleEndian.PutUint32(amsg[8:12], NtLmAuthenticate)
+		binary.LittleEndian.PutUint32(amsg[60:64], defaultFlags&^NTLMSSP_NEGOTIATE_VERSION&^NTLMSSP_NEGOTIATE_KEY_EXCH)
+		return amsg
+	}
+
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
+	if _, err := srv.Challenge(negotiate(t)); err != nil {
+		t.Fatalf("Challenge: %v", err)
+	}
+	if err := srv.Authenticate(empty()); err == nil {
+		t.Error("an anonymous login was admitted while anonymous access is off")
+	}
+
+	srv = NewServer("SOMBRERO", "WORKGROUP", knownAccount(), true)
+	if _, err := srv.Challenge(negotiate(t)); err != nil {
+		t.Fatalf("Challenge: %v", err)
+	}
+	if err := srv.Authenticate(empty()); err != nil {
+		t.Fatalf("the anonymous login was turned away: %v", err)
+	}
+
+	sess := srv.Session()
+	if !sess.IsAnonymous() {
+		t.Error("want the session marked as an anonymous one")
+	}
+	if sess.IsGuest() {
+		t.Error("an anonymous session must not pass for a guest")
+	}
+	if sess.User() != "" || sess.Domain() != "" {
+		t.Errorf("want no identity, got %q\\%q", sess.Domain(), sess.User())
+	}
+	for _, b := range sess.SessionKey() {
+		if b != 0 {
+			t.Fatal("an anonymous session must hold no key")
+		}
+	}
+}
+
+// TestAuthenticateRefusesTheAnonymousWorkgroup verifies that the identity the
+// server reserves for anonymous sessions cannot be logged into. It holds a
+// passwordless account, so without this anyone naming it would be let in and
+// treated as a guest.
+func TestAuthenticateRefusesTheAnonymousWorkgroup(t *testing.T) {
+	store := knownAccount()
+	store.acc.NTHash = ntHashOf("")
+	srv := NewServer("SOMBRERO", "WORKGROUP", store, true)
+
+	err := authenticateAs(t, srv, stores.AnonymousAccount, stores.AnonymousWorkgroup.String(), ntHashOf(""))
+	if err == nil {
+		t.Fatal("the reserved anonymous identity was logged into")
 	}
 }

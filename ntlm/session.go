@@ -19,8 +19,10 @@ type Session struct {
 	domain string
 
 	// guest records that the account the session authenticated against has no
-	// password, which is what makes the session a guest one.
-	guest bool
+	// password, which is what makes the session a guest one. anonymous records
+	// that there was no account at all: the client presented no credentials.
+	guest     bool
+	anonymous bool
 
 	negotiateFlags     uint32
 	exportedSessionKey []byte
@@ -102,6 +104,11 @@ func (s *Session) Domain() string {
 // account.
 func (s *Session) IsGuest() bool {
 	return s.guest
+}
+
+// IsAnonymous reports whether the session was established without credentials.
+func (s *Session) IsAnonymous() bool {
+	return s.anonymous
 }
 
 // SessionKey returns the session's signing key.

@@ -782,10 +782,12 @@ func TestTreeConnectSigningExemptsSessionsWithoutAKey(t *testing.T) {
 			h := newSMBTest(t)
 
 			// A real tree connect resolves the access of the session against the share, which the
-			// harness leaves empty because dial builds its tree connect directly. A guest is only
-			// let in where the share offers guest access, which is not what this is about.
+			// harness leaves empty because dial builds its tree connect directly. Neither a guest
+			// nor an anonymous session is let in unless the share offers it, which is not what
+			// this is about.
 			h.restrictTo("alice")
 			h.share.allowGuest = true
+			h.share.allowAnonymous = true
 
 			cl := h.dial("alice")
 

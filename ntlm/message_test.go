@@ -27,7 +27,7 @@ func negotiateMessage(flags uint32) []byte {
 func challenged(t *testing.T) *Server {
 	t.Helper()
 
-	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 	if _, err := srv.Challenge(negotiateMessage(defaultFlags)); err != nil {
 		t.Fatalf("the challenge would not go out: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestAuthenticateRefusesAResponseOfTheRightLengthButWrongContents(t *testing
 // — so an authenticate arriving first is a client's to arrange, and session binding is a path
 // that reaches this with a connection that has only ever negotiated.
 func TestAuthenticateRefusesWhatArrivesBeforeAChallenge(t *testing.T) {
-	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 
 	err := srv.Authenticate(authenticateMessage(make([]byte, ntlmv2ResponseMinSize), defaultFlags&^NTLMSSP_NEGOTIATE_KEY_EXCH))
 	if err == nil {
@@ -198,7 +198,7 @@ func TestChallengeRefusesAMalformedNegotiate(t *testing.T) {
 		}()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+			srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 
 			if _, err := srv.Challenge(tt.msg); err == nil {
 				t.Fatal("a message that is not a negotiate was answered with a challenge")
@@ -264,7 +264,7 @@ func authenticateExchangingKey(t *testing.T, srv *Server, keyLen int) error {
 // turned away before it.
 func TestAuthenticateRefusesASessionKeyOfTheWrongLength(t *testing.T) {
 	for _, keyLen := range []int{0, 1, 8, 15, 17, 32, 255} {
-		srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+		srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 
 		if err := authenticateExchangingKey(t, srv, keyLen); err == nil {
 			t.Errorf("a session key of %d bytes was taken", keyLen)
@@ -279,7 +279,7 @@ func TestAuthenticateRefusesASessionKeyOfTheWrongLength(t *testing.T) {
 // control for the case above: without it the refusals there would be satisfied by a message this
 // test simply builds wrong.
 func TestAuthenticateTakesASessionKeyOfTheRightLength(t *testing.T) {
-	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 
 	if err := authenticateExchangingKey(t, srv, 16); err != nil {
 		t.Fatalf("a session key of the right length was turned away: %v", err)
@@ -293,7 +293,7 @@ func TestAuthenticateTakesASessionKeyOfTheRightLength(t *testing.T) {
 // exchange has begun. It is what tells a client which mechanism to authenticate with, so the one
 // mechanism this server has must be named in it.
 func TestNegotiateOffersNTLM(t *testing.T) {
-	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 
 	token, err := srv.Negotiate()
 	if err != nil {
@@ -313,7 +313,7 @@ func TestNegotiateOffersNTLM(t *testing.T) {
 // TestChallengeIsWellFormed reads back the message the server sends, since a client parses it the
 // same way and nothing else in this package checks that it lays out as it says it does.
 func TestChallengeIsWellFormed(t *testing.T) {
-	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 
 	cmsg, err := srv.Challenge(negotiateMessage(defaultFlags))
 	if err != nil {
@@ -367,7 +367,7 @@ func TestChallengeIsDifferentEveryTime(t *testing.T) {
 	seen := make(map[string]struct{})
 
 	for i := 0; i < 64; i++ {
-		srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+		srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 		cmsg, err := srv.Challenge(negotiateMessage(defaultFlags))
 		if err != nil {
 			t.Fatalf("the challenge would not go out: %v", err)
@@ -466,7 +466,7 @@ func FuzzAuthenticate(f *testing.F) {
 	f.Add([]byte{})
 
 	f.Fuzz(func(t *testing.T, msg []byte) {
-		srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+		srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 		if _, err := srv.Challenge(negotiateMessage(defaultFlags)); err != nil {
 			t.Skip()
 		}
@@ -490,7 +490,7 @@ func FuzzChallenge(f *testing.F) {
 	f.Add([]byte{})
 
 	f.Fuzz(func(t *testing.T, msg []byte) {
-		srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+		srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 
 		cmsg, err := srv.Challenge(msg)
 		if err != nil {

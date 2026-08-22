@@ -1151,3 +1151,46 @@ func TestStoreBans(t *testing.T) {
 		}
 	})
 }
+
+// TestStoreAnonymousIdentity verifies that the identity anonymous sessions act
+// as is created on demand and only once, and that nothing else may put a
+// workgroup or an account where it lives.
+func TestStoreAnonymousIdentity(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store, rs *recordingShares) {
+		acc, err := st.EnsureAnonymous()
+		if err != nil {
+			t.Fatalf("EnsureAnonymous: %v", err)
+		}
+		if acc.Username != AnonymousAccount || acc.Workgroup != AnonymousWorkgroup.String() {
+			t.Fatalf("want the reserved identity, got %+v", acc)
+		}
+		if !acc.Passwordless() {
+			t.Fatal("want the anonymous account to have no password")
+		}
+
+		// Running again finds what is there rather than making a second one.
+		again, err := st.EnsureAnonymous()
+		if err != nil {
+			t.Fatalf("EnsureAnonymous again: %v", err)
+		}
+		if again.ID != acc.ID {
+			t.Fatalf("want the same account back, got %d and %d", acc.ID, again.ID)
+		}
+
+		// It is also what a login resolves to, which is what binds an
+		// anonymous session to it.
+		found, err := st.FindAccount(AnonymousAccount, AnonymousWorkgroup.String())
+		if err != nil || found.ID != acc.ID {
+			t.Fatalf("FindAccount: %v %+v", err, found)
+		}
+
+		// Nobody may add to it.
+		if err := st.AddWorkgroup(Workgroup{UUID: AnonymousWorkgroup}); !errors.Is(err, ErrReservedWorkgroup) {
+			t.Fatalf("AddWorkgroup: want %v, got %v", ErrReservedWorkgroup, err)
+		}
+		err = st.AddAccount(Account{Username: "mallory", Password: "secret123", Workgroup: AnonymousWorkgroup.String()})
+		if !errors.Is(err, ErrReservedWorkgroup) {
+			t.Fatalf("AddAccount: want %v, got %v", ErrReservedWorkgroup, err)
+		}
+	})
+}

@@ -74,7 +74,7 @@ type server struct {
 	connectionCount map[string]int
 	store           stores.Store
 	debug           bool
-	cfg             stores.IndexdConfig
+	cfg             stores.Config
 	ctx             context.Context
 }
 
@@ -84,7 +84,7 @@ type server struct {
 // It is the half of newServer that the tests share, and the reason to put a new table here
 // rather than in the caller. A table created only in newServer is nil in every test, and the
 // test that first reaches it fails somewhere far from the omission.
-func newServerState(ctx context.Context, db stores.Store, debug bool, cfg stores.IndexdConfig) *server {
+func newServerState(ctx context.Context, db stores.Store, cfg stores.Config) *server {
 	s := &server{
 		enabled:              true,
 		serverGuid:           uuid.New(),
@@ -101,7 +101,7 @@ func newServerState(ctx context.Context, db stores.Store, debug bool, cfg stores
 		watchInterval:        watchInterval,
 		connectionCount:      make(map[string]int),
 		store:                db,
-		debug:                debug,
+		debug:                cfg.Debug,
 		cfg:                  cfg,
 		ctx:                  ctx,
 	}
@@ -134,8 +134,8 @@ func (s *server) applyCapabilities() {
 }
 
 // newServer returns an initialized SMB server, listening and reaping.
-func newServer(ctx context.Context, l net.Listener, db stores.Store, debug bool, cfg stores.IndexdConfig) *server {
-	s := newServerState(ctx, db, debug, cfg)
+func newServer(ctx context.Context, l net.Listener, db stores.Store, cfg stores.Config) *server {
+	s := newServerState(ctx, db, cfg)
 
 	go s.reapDurableOpens()
 	go s.reapConnections()

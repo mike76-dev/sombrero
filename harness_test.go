@@ -626,7 +626,7 @@ func newSMBTest(t *testing.T) *smbTest {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	h.srv = newServerState(ctx, store, false, stores.IndexdConfig{})
+	h.srv = newServerState(ctx, store, stores.Config{})
 	h.srv.shareList[h.share.name] = h.share
 
 	// A share holds security for whoever may use it, and grants nothing to anybody else, so the
