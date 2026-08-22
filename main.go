@@ -111,7 +111,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer lAPI.Close()
-	a := api.NewAPI(ctx, db, server, cfg.Indexd, cfg.Mode)
+	a := api.NewAPI(ctx, db, server, cfg)
 	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, cfg.API.Password)}
 	go apiSrv.Serve(lAPI)
 	log.Printf("API and web UI: listening at http://%s ...\n", lAPI.Addr())

@@ -207,6 +207,44 @@ func TestIndexdConfigRoundTrip(t *testing.T) {
 // TestReadConfigRejectsUnknownFields verifies that a mistyped setting is
 // reported instead of being silently ignored, which is what keeps a typo in the
 // packing settings from leaving them at their defaults unnoticed.
+// TestAnonymousDefaultsOff verifies that a config that says nothing about
+// anonymous access does not allow it, and that the setting is left out of what
+// is written back rather than saved as a false the reader cannot tell from an
+// omission.
+func TestAnonymousDefaultsOff(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(dir, "sombrero.yml"), []byte("mode: lite\n"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if cfg.Anonymous {
+		t.Fatal("want anonymous access off when the config leaves it out")
+	}
+
+	if err := SaveConfig(cfg, dir); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	saved, err := os.ReadFile(filepath.Join(dir, "sombrero.yml"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(saved), "anonymous") {
+		t.Fatalf("want the setting left out, got:\n%s", saved)
+	}
+
+	// And it is read back when it is there.
+	if err := os.WriteFile(filepath.Join(dir, "sombrero.yml"), []byte("anonymous: true\n"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if cfg, err := ReadConfig(dir); err != nil || !cfg.Anonymous {
+		t.Fatalf("ReadConfig: want anonymous access on, got %v (%v)", cfg.Anonymous, err)
+	}
+}
+
 func TestReadConfigRejectsUnknownFields(t *testing.T) {
 	dir := t.TempDir()
 	write := func(body string) {
@@ -272,6 +310,7 @@ func TestSaveConfigRoundTrip(t *testing.T) {
 		Debug:          true,
 		Mode:           ModeLite,
 		MaxConnections: 30,
+		Anonymous:      true,
 		API:            APIConfig{Address: "127.0.0.1:9999", Password: "hunter2"},
 		Database:       DatabaseConfig{Host: "127.0.0.1", Port: 5432, User: "postgres", Database: "sombrero", SSLMode: "disable"},
 		Indexd: IndexdConfig{

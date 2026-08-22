@@ -649,14 +649,17 @@ func TestStoreAccounts(t *testing.T) {
 func TestStoreShares(t *testing.T) {
 	forEachStore(t, func(t *testing.T, st Store, rs *recordingShares) {
 		share := Share{
-			Name:         "mybucket",
-			Type:         "renterd",
-			ServerName:   "localhost",
-			Password:     "apipass",
-			Bucket:       "files",
-			Remark:       "test share",
-			DataShards:   10,
-			ParityShards: 4,
+			Name:           "mybucket",
+			Type:           "renterd",
+			ServerName:     "localhost",
+			Password:       "apipass",
+			Bucket:         "files",
+			Remark:         "test share",
+			DataShards:     10,
+			ParityShards:   4,
+			AllowGuest:     true,
+			AllowAnonymous: true,
+			PublicDir:      "Drop",
 		}
 		if err := st.RegisterShare(share); err != nil {
 			t.Fatalf("RegisterShare: %v", err)
@@ -684,6 +687,9 @@ func TestStoreShares(t *testing.T) {
 		if got.DataShards != share.DataShards || got.ParityShards != share.ParityShards {
 			t.Fatalf("GetShare: want %d/%d shards, got %d/%d", share.DataShards, share.ParityShards, got.DataShards, got.ParityShards)
 		}
+		if !got.AllowGuest || !got.AllowAnonymous || got.PublicDir != share.PublicDir {
+			t.Fatalf("GetShare: want the access settings back, got %+v", got)
+		}
 		if got.CreatedAt.IsZero() {
 			t.Fatal("GetShare: expected a creation timestamp")
 		}
@@ -704,6 +710,9 @@ func TestStoreShares(t *testing.T) {
 		}
 		if len(shares) != 2 || shares[0].Name != "another" || shares[1].Name != "mybucket" {
 			t.Fatalf("GetAllShares: want [another mybucket], got %v", shareNames(shares))
+		}
+		if !shares[1].AllowGuest || !shares[1].AllowAnonymous || shares[1].PublicDir != share.PublicDir {
+			t.Fatalf("GetAllShares: want the access settings listed too, got %+v", shares[1])
 		}
 
 		// UnregisterShare removes the share and notifies the share manager.

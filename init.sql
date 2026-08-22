@@ -7,7 +7,10 @@ CREATE TABLE shares (
     remark TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     data_shards INT NOT NULL DEFAULT 0,
-    parity_shards INT NOT NULL DEFAULT 0
+    parity_shards INT NOT NULL DEFAULT 0,
+    allow_guest BOOLEAN NOT NULL DEFAULT FALSE,
+    allow_anonymous BOOLEAN NOT NULL DEFAULT FALSE,
+    public_dir TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE workgroups (

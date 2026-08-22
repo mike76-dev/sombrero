@@ -193,7 +193,7 @@ type API struct {
 	router          httprouter.Router
 	store           Store
 	server          Server
-	cfg             stores.IndexdConfig
+	cfg             stores.Config
 	mode            stores.ServerMode
 	ctx             context.Context
 	pendingBuilders sync.Map // key: "workgroupUUID/shareName" → *sdk.Builder
@@ -202,12 +202,12 @@ type API struct {
 // NewAPI returns an initialized API object. srv is the running SMB server and
 // may be nil, in which case the statistics come back empty and the endpoints
 // that need a storage backend report the share as unavailable.
-func NewAPI(ctx context.Context, s Store, srv Server, cfg stores.IndexdConfig, mode stores.ServerMode) *API {
+func NewAPI(ctx context.Context, s Store, srv Server, cfg stores.Config) *API {
 	api := &API{
 		store:  s,
 		server: srv,
 		cfg:    cfg,
-		mode:   mode,
+		mode:   cfg.Mode,
 		ctx:    ctx,
 	}
 	api.buildHTTPRoutes()
@@ -573,6 +573,28 @@ func (api *API) accountsHandlerDELETE(w http.ResponseWriter, req *http.Request, 
 	writeSuccess(w)
 }
 
+// checkShareAccess validates what a share says about guest and anonymous
+// access, and reports the status and message to refuse it with. An anonymous
+// session is confined to the public folder, so a share that offers it has to
+// name one, and the server has to allow anonymous access at all.
+func checkShareAccess(share stores.Share, anonymous bool) (int, string) {
+	if share.PublicDir != "" && strings.ContainsAny(share.PublicDir, `/\`) {
+		return http.StatusBadRequest, "the public folder is a folder name, not a path"
+	}
+
+	if !share.AllowAnonymous {
+		return 0, ""
+	}
+	if !anonymous {
+		return http.StatusBadRequest, "anonymous access is turned off in the server config"
+	}
+	if share.PublicDir == "" {
+		return http.StatusBadRequest, "anonymous access needs a public folder to confine it to"
+	}
+
+	return 0, ""
+}
+
 // shareHandlerPOST handles the POST /share calls.
 func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	var share stores.Share
@@ -588,6 +610,10 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 	}
 	if api.mode == stores.ModeLite && share.Type != "renterd" {
 		writeError(w, "only renterd shares are supported in Lite mode", http.StatusBadRequest)
+		return
+	}
+	if status, msg := checkShareAccess(share, api.cfg.Anonymous); msg != "" {
+		writeError(w, msg, status)
 		return
 	}
 
@@ -1367,11 +1393,11 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 	}
 
 	builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
-		ID:          types.HashBytes(append([]byte(api.cfg.Name), []byte(api.cfg.Description)...)),
-		Name:        api.cfg.Name,
-		Description: api.cfg.Description,
-		LogoURL:     api.cfg.LogoURL,
-		ServiceURL:  api.cfg.ServiceURL,
+		ID:          types.HashBytes(append([]byte(api.cfg.Indexd.Name), []byte(api.cfg.Indexd.Description)...)),
+		Name:        api.cfg.Indexd.Name,
+		Description: api.cfg.Indexd.Description,
+		LogoURL:     api.cfg.Indexd.LogoURL,
+		ServiceURL:  api.cfg.Indexd.ServiceURL,
 	})
 
 	approvalURL, err := builder.RequestConnection(req.Context())
@@ -1462,7 +1488,7 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 			return
 		}
 
-		sdkInst, err := builder.Register(req.Context(), api.cfg.SeedPhrase)
+		sdkInst, err := builder.Register(req.Context(), api.cfg.Indexd.SeedPhrase)
 		if err != nil {
 			api.pendingBuilders.Delete(pendingKey)
 			log.Printf("failed to register app: %v", err)

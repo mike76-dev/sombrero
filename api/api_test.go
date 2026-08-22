@@ -288,15 +288,21 @@ func (m *mockClient) UnpinOrphanedSlabs(ctx context.Context, minAge time.Duratio
 }
 
 func newTestAPI(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, nil, stores.IndexdConfig{}, stores.ModeNormal)
+	return NewAPI(context.Background(), ms, nil, stores.Config{Mode: stores.ModeNormal})
 }
 
 func newTestAPIWithServer(ms *mockStore, srv Server) *API {
-	return NewAPI(context.Background(), ms, srv, stores.IndexdConfig{}, stores.ModeNormal)
+	return NewAPI(context.Background(), ms, srv, stores.Config{Mode: stores.ModeNormal})
 }
 
 func newTestLiteAPI(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, nil, stores.IndexdConfig{}, stores.ModeLite)
+	return NewAPI(context.Background(), ms, nil, stores.Config{Mode: stores.ModeLite})
+}
+
+// newTestAPIWithAnonymous is the server that allows anonymous sessions at all,
+// which is what a share's own flag hangs off.
+func newTestAPIWithAnonymous(ms *mockStore) *API {
+	return NewAPI(context.Background(), ms, nil, stores.Config{Mode: stores.ModeNormal, Anonymous: true})
 }
 
 func doRequest(api *API, method, path string, body any) *httptest.ResponseRecorder {
@@ -687,6 +693,68 @@ func TestShares(t *testing.T) {
 	t.Run("POST wrong type returns 400", func(t *testing.T) {
 		w := doRequest(newTestAPI(&mockStore{}), http.MethodPost, "/share", stores.Share{Name: "s", Type: "unknown"})
 		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("POST keeps the access flags", func(t *testing.T) {
+		var got stores.Share
+		ms := &mockStore{registerShare: func(s stores.Share) error { got = s; return nil }}
+		w := doRequest(newTestAPIWithAnonymous(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s", Type: "indexd", AllowGuest: true, AllowAnonymous: true, PublicDir: "Drop",
+		})
+		checkStatus(t, w, http.StatusNoContent)
+		if !got.AllowGuest || !got.AllowAnonymous || got.PublicDir != "Drop" {
+			t.Errorf("want the access flags kept, got %+v", got)
+		}
+	})
+
+	t.Run("POST guest access needs nothing of the server", func(t *testing.T) {
+		// Only anonymous access hangs off the server-wide switch: a guest is
+		// an account of a workgroup like any other.
+		ms := &mockStore{registerShare: func(stores.Share) error { return nil }}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s", Type: "indexd", AllowGuest: true,
+		})
+		checkStatus(t, w, http.StatusNoContent)
+	})
+
+	t.Run("POST anonymous access with the switch off returns 400", func(t *testing.T) {
+		registered := false
+		ms := &mockStore{registerShare: func(stores.Share) error { registered = true; return nil }}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s", Type: "indexd", AllowAnonymous: true, PublicDir: "Drop",
+		})
+		checkStatus(t, w, http.StatusBadRequest)
+		if registered {
+			t.Error("the share must not be registered while anonymous access is off")
+		}
+	})
+
+	t.Run("POST anonymous access without a public folder returns 400", func(t *testing.T) {
+		ms := &mockStore{registerShare: func(stores.Share) error { return nil }}
+		w := doRequest(newTestAPIWithAnonymous(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s", Type: "indexd", AllowAnonymous: true,
+		})
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("POST anonymous access on a renterd share succeeds", func(t *testing.T) {
+		// The public folder confines an anonymous session by path, which has
+		// nothing to do with what the share is backed by.
+		ms := &mockStore{registerShare: func(stores.Share) error { return nil }}
+		w := doRequest(newTestAPIWithAnonymous(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s", Type: "renterd", ServerName: "srv", AllowAnonymous: true, PublicDir: "Drop",
+		})
+		checkStatus(t, w, http.StatusNoContent)
+	})
+
+	t.Run("POST a public folder that is a path returns 400", func(t *testing.T) {
+		for _, dir := range []string{"a/b", `a\b`, "/Drop"} {
+			ms := &mockStore{registerShare: func(stores.Share) error { return nil }}
+			w := doRequest(newTestAPIWithAnonymous(ms), http.MethodPost, "/share", stores.Share{
+				Name: "s", Type: "indexd", PublicDir: dir,
+			})
+			checkStatus(t, w, http.StatusBadRequest)
+		}
 	})
 
 	t.Run("POST invalid JSON returns 400", func(t *testing.T) {

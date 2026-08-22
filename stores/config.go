@@ -254,12 +254,19 @@ func (c IndexdConfig) Fragmentation() (threshold float64, interval time.Duration
 
 // Config lists the config fields.
 type Config struct {
-	Debug          bool           `yaml:"debug"`
-	Mode           ServerMode     `yaml:"mode"`
-	MaxConnections int            `yaml:"maxConnections"`
-	API            APIConfig      `yaml:"api"`
-	Database       DatabaseConfig `yaml:"database,omitempty"`
-	Indexd         IndexdConfig   `yaml:"indexd,omitempty"`
+	Debug          bool       `yaml:"debug"`
+	Mode           ServerMode `yaml:"mode"`
+	MaxConnections int        `yaml:"maxConnections"`
+
+	// Anonymous lets clients log in with no credentials at all. It is the
+	// switch every share's own AllowAnonymous hangs off: with it unset, no
+	// anonymous session is established in the first place, whatever the
+	// shares are configured with.
+	Anonymous bool `yaml:"anonymous,omitempty"`
+
+	API      APIConfig      `yaml:"api"`
+	Database DatabaseConfig `yaml:"database,omitempty"`
+	Indexd   IndexdConfig   `yaml:"indexd,omitempty"`
 }
 
 // ReadConfig tries to read the config from the specified directory.
