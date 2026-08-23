@@ -44,7 +44,7 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 			WHERE d.share_name = $2
 				AND d.full_path = $3
 				AND (d.account = c.id
-				OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+				OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
 			)
 		`
 		const query = `
@@ -68,7 +68,7 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 						SELECT 1
 						FROM accounts a
 						WHERE a.id = d.account
-							AND a.workgroup = c.workgroup
+							AND (a.workgroup = c.workgroup OR a.workgroup = anonymous_workgroup())
 					))
 				)
 
@@ -93,7 +93,7 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 					o.account = c.id
 					OR (
 						od.private = FALSE
-						AND owner.workgroup = c.workgroup
+						AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 					)
 				)
 
@@ -156,7 +156,7 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 			WHERE d.share_name = $2
 				AND d.full_path = $3
 				AND (d.account = c.id
-				OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+				OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
 			)
 		`
 		const query = `
@@ -175,7 +175,7 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 						AND d.parent_id IS NOT DISTINCT FROM $2
 						AND (
 							d.account = c.id
-							OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+							OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
 						)
 				)
 				OR EXISTS (
@@ -192,7 +192,7 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 							o.account = c.id
 							OR (
 								od.private = FALSE
-								AND owner.workgroup = c.workgroup
+								AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 							)
 						)
 				)
@@ -277,7 +277,7 @@ func (db *Database) Object(acc Account, shareName, path string) (object ObjectMe
 					AND d.full_path = $2
 					AND (
 						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
 					)
 
 				UNION ALL
@@ -301,7 +301,7 @@ func (db *Database) Object(acc Account, shareName, path string) (object ObjectMe
 						o.account = c.id
 						OR (
 							od.private = FALSE
-							AND owner.workgroup = c.workgroup
+							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
 					)
 			) t
@@ -372,7 +372,7 @@ func (db *Database) CreateDirectory(acc Account, share string, path string, priv
 					AND d.full_path = $2
 					AND (
 						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
 					)
 
 				UNION ALL
@@ -478,7 +478,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 					AND d.full_path = $3
 					AND (
 						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
 					)
 
 				UNION ALL
@@ -560,7 +560,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 						AND d.full_path = $2
 						AND (
 							d.account = c.id
-							OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+							OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
 						)
 
 					UNION ALL
@@ -617,7 +617,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 					AND d.full_path = $3
 					AND (
 						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
 					)
 
 				UNION ALL
@@ -731,7 +731,7 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 						OR (
 							d.private = FALSE
 							AND d.read_only = FALSE
-							AND owner.workgroup = c.workgroup
+							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
 					)
 			),
@@ -744,7 +744,7 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 					AND d.full_path = $3
 					AND (
 						d.account = c.id
-						OR (d.private = FALSE AND owner.workgroup = c.workgroup)
+						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
 					)
 
 				UNION ALL
@@ -859,7 +859,7 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 						OR (
 							od.private = FALSE
 							AND od.read_only = FALSE
-							AND owner.workgroup = c.workgroup
+							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
 					)
 			)
@@ -909,7 +909,7 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 						OR (
 							od.private = FALSE
 							AND od.read_only = FALSE
-							AND owner.workgroup = c.workgroup
+							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
 					)
 			),
@@ -991,7 +991,7 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 						OR (
 							d.private = FALSE
 							AND d.read_only = FALSE
-							AND owner.workgroup = c.workgroup
+							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
 					)
 			),
@@ -1039,7 +1039,7 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 						OR (
 							d.private = FALSE
 							AND d.read_only = FALSE
-							AND owner.workgroup = c.workgroup
+							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
 					)
 			),

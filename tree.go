@@ -292,6 +292,14 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 				if !connected {
 					return nil, errShareUnavailable
 				}
+
+				// The folder is made here rather than when the share is set up,
+				// so that it is there whatever order the two were done in, and
+				// follows a share whose folder was renamed since.
+				if err := c.server.store.EnsurePublicDir(sh.name, sh.publicDir); err != nil {
+					log.Printf("share %s: %v", sh.name, err)
+					return nil, errShareUnavailable
+				}
 			}
 
 			access = anonymousAccess

@@ -22,8 +22,11 @@ type Store interface {
 	RemoveAccounts(workgroup string) error
 
 	// EnsureAnonymous creates the identity that anonymous sessions act as,
-	// unless it is there already, and returns its account.
+	// unless it is there already, and returns its account. EnsurePublicDir
+	// makes the folder such a session is confined to on the given share, owned
+	// by that identity.
 	EnsureAnonymous() (Account, error)
+	EnsurePublicDir(share, name string) error
 
 	GetWorkgroupByID(id int) (Workgroup, error)
 	FindWorkgroup(u uuid.UUID) (Workgroup, error)

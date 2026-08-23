@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/mike76-dev/sombrero/ntlm"
@@ -370,6 +371,64 @@ func TestUpdateShareTakesEffectOnTheRunningServer(t *testing.T) {
 
 	if status := connect(); status != smb2.STATUS_OK {
 		t.Fatalf("after the change the tree connect was answered %#x, want it served", status)
+	}
+}
+
+// publicDirStore records what the server asks it to make the public folder of,
+// and can refuse, so that a tree connect can be held to both.
+type publicDirStore struct {
+	stores.Store
+	asked []string
+	err   error
+}
+
+func (p *publicDirStore) EnsurePublicDir(share, name string) error {
+	p.asked = append(p.asked, share+"/"+name)
+	return p.err
+}
+
+// TestAnonymousOnIndexdMakesThePublicFolder verifies that the folder an
+// anonymous session is confined to is made under the reserved identity when
+// such a session arrives, and that a share whose folder cannot be made that way
+// takes no anonymous sessions at all: it would let one in with nothing it could
+// see or write.
+func TestAnonymousOnIndexdMakesThePublicFolder(t *testing.T) {
+	h := newSMBTest(t)
+	h.restrictTo("alice")
+	h.share.allowAnonymous = true
+	h.share.publicDir = "Drop"
+	h.share.backend = "indexd"
+	h.share.indexdConns = map[string]*indexdConn{
+		stores.AnonymousWorkgroup.String(): {client: h.files},
+	}
+
+	store := &publicDirStore{Store: h.srv.store}
+	h.srv.store = store
+
+	connect := func() uint32 {
+		t.Helper()
+
+		cl := h.dial("alice").speaking(smb2.SMB_DIALECT_302).anonymously()
+		resp, _, err := cl.conn.processRequest(request(t,
+			treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\files`)))
+		if err != nil {
+			t.Fatalf("the tree connect was not answered: %v", err)
+		}
+		return resp.Header().Status()
+	}
+
+	if status := connect(); status != smb2.STATUS_OK {
+		t.Fatalf("the tree connect was answered %#x, want it served", status)
+	}
+	if len(store.asked) != 1 || store.asked[0] != "files/Drop" {
+		t.Fatalf("want the public folder of the share made, got %v", store.asked)
+	}
+
+	// A folder that cannot be made — somebody else's, say — keeps the session
+	// out rather than letting it in blind.
+	store.err = errors.New("belongs to another workgroup")
+	if status := connect(); status != smb2.STATUS_SHARE_UNAVAILABLE {
+		t.Fatalf("the tree connect was answered %#x, want the share unavailable", status)
 	}
 }
 

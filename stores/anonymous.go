@@ -1,6 +1,7 @@
 package stores
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -124,4 +125,74 @@ func (js *JSONStore) EnsureAnonymous() (acc Account, err error) {
 		return nil
 	}, nil)
 	return
+}
+
+// EnsurePublicDir makes the folder an anonymous session is confined to on the
+// given share, owned by the reserved identity and open to everyone. It is what
+// makes the folder visible to both sides: the anonymous session owns it, and
+// every member of the share sees it for being owned by that identity.
+//
+// A folder of that name that somebody else already made is left alone and
+// reported: taking it over would hand one workgroup's directory to everyone.
+func (db *Database) EnsurePublicDir(share, name string) error {
+	if share == "" || name == "" {
+		return nil
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const create = `
+			WITH anon AS (
+				SELECT a.id AS account, a.workgroup
+				FROM accounts a
+				JOIN workgroups w ON w.id = a.workgroup
+				WHERE a.account_name = $2
+					AND w.uuid = $3
+			)
+			INSERT INTO directories (
+				share_name,
+				parent_id,
+				name,
+				full_path,
+				account,
+				workgroup,
+				private,
+				read_only
+			)
+			SELECT $1, NULL, $4, '/' || $4, anon.account, anon.workgroup, FALSE, FALSE
+			FROM anon
+			ON CONFLICT (share_name, full_path) DO NOTHING
+		`
+
+		if _, err := tx.Exec(ctx, create, share, AnonymousAccount, AnonymousWorkgroup[:], name); err != nil {
+			return fmt.Errorf("failed to create the public folder: %w", err)
+		}
+
+		// Whether it was made here or was there already, it is only usable if
+		// the reserved identity owns it.
+		const owner = `
+			SELECT w.uuid
+			FROM directories d
+			JOIN accounts a ON a.id = d.account
+			JOIN workgroups w ON w.id = a.workgroup
+			WHERE d.share_name = $1
+				AND d.full_path = '/' || $2
+		`
+
+		var u []byte
+		if err := tx.QueryRow(ctx, owner, share, name).Scan(&u); err != nil {
+			return fmt.Errorf("failed to check the public folder: %w", err)
+		}
+		if !bytes.Equal(u, AnonymousWorkgroup[:]) {
+			return fmt.Errorf("the public folder %q of share %s belongs to another workgroup", name, share)
+		}
+
+		return nil
+	})
+}
+
+// EnsurePublicDir has nothing to do in the Lite mode: a renterd share keeps no
+// folders of its own, and an anonymous session there is confined by its path
+// alone.
+func (js *JSONStore) EnsurePublicDir(share, name string) error {
+	return nil
 }

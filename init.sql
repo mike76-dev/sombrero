@@ -22,6 +22,10 @@ CREATE TABLE workgroups (
     CONSTRAINT workgroups_unique UNIQUE (uuid)
 );
 
+CREATE FUNCTION anonymous_workgroup() RETURNS INT AS $$
+    SELECT id FROM workgroups WHERE uuid = '\x00000000000000000000000000000000'
+$$ LANGUAGE SQL STABLE;
+
 CREATE TABLE public_dirs (
     id SERIAL PRIMARY KEY,
     workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
