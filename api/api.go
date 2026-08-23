@@ -177,7 +177,7 @@ type WorkgroupResponse struct {
 	Name string    `json:"name,omitempty"`
 }
 
-// ConnectRequestResponse is the response type for POST /connect/request/:workgroup/:share.
+// ConnectRequestResponse is the response type for POST /connect/:workgroup/:share.
 type ConnectRequestResponse struct {
 	URL string `json:"url"`
 }
@@ -1499,7 +1499,7 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 // Three paths:
 //  1. Body with appKey (hex) — reconnect using an existing key.
 //  2. No body, indexd share, pending builder present — complete the approval flow
-//     started by POST /connect/request, derive the app key, and return it.
+//     started by POST /connect/:workgroup/:share, derive the app key, and return it.
 //  3. No body, renterd share — no key required.
 //
 // :workgroup may be a UUID or a workgroup name.
@@ -1549,7 +1549,7 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 		pendingKey := wg.UUID.String() + "/" + share.Name
 		v, ok := api.pendingBuilders.Load(pendingKey)
 		if !ok {
-			writeError(w, "no pending connection request found; call POST /connect/request first", http.StatusBadRequest)
+			writeError(w, "no pending connection request found; call POST /connect/:workgroup/:share first", http.StatusBadRequest)
 			return
 		}
 		builder := v.(*sdk.Builder)

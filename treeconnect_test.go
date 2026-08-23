@@ -372,3 +372,43 @@ func TestUpdateShareTakesEffectOnTheRunningServer(t *testing.T) {
 		t.Fatalf("after the change the tree connect was answered %#x, want it served", status)
 	}
 }
+
+// TestAnonymousOnIndexdNeedsTheReservedConnection verifies that an indexd share
+// takes anonymous sessions only once the reserved workgroup has a connection of
+// its own. What such a session drops is pinned under that connection's app key,
+// so without it there is nothing to write to, and a client is told the share is
+// unavailable rather than being let in to fail later.
+func TestAnonymousOnIndexdNeedsTheReservedConnection(t *testing.T) {
+	h := newSMBTest(t)
+	h.restrictTo("alice")
+	h.share.allowAnonymous = true
+	h.share.publicDir = "Drop"
+
+	// A share of the backend that pins per workgroup, with no connections yet.
+	h.share.backend = "indexd"
+	h.share.indexdConns = make(map[string]*indexdConn)
+
+	connect := func() uint32 {
+		t.Helper()
+
+		cl := h.dial("alice").speaking(smb2.SMB_DIALECT_302).anonymously()
+		resp, _, err := cl.conn.processRequest(request(t,
+			treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\files`)))
+		if err != nil {
+			t.Fatalf("the tree connect was not answered: %v", err)
+		}
+		return resp.Header().Status()
+	}
+
+	if status := connect(); status != smb2.STATUS_SHARE_UNAVAILABLE {
+		t.Fatalf("without the connection the tree connect was answered %#x, want the share unavailable", status)
+	}
+
+	// The reserved workgroup connects like any other, through the same flow and
+	// under an app key of its own.
+	h.share.indexdConns[stores.AnonymousWorkgroup.String()] = &indexdConn{client: h.files}
+
+	if status := connect(); status != smb2.STATUS_OK {
+		t.Fatalf("with the connection the tree connect was answered %#x, want it served", status)
+	}
+}
