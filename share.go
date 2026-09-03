@@ -65,6 +65,24 @@ func (sh *share) mayConnect(workgroup, user string) bool {
 	return ok
 }
 
+// clients returns every storage client the share is running: the one a renterd share holds, or
+// one per workgroup connection of an indexd share. They are gathered under the lock and closed
+// outside it, since a client spends its shutdown draining what it has in flight.
+func (sh *share) clients() []client.Client {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	cs := make([]client.Client, 0, len(sh.indexdConns)+1)
+	if sh.client != nil {
+		cs = append(cs, sh.client)
+	}
+	for _, conn := range sh.indexdConns {
+		cs = append(cs, conn.client)
+	}
+
+	return cs
+}
+
 // fileAccess returns the rights the user holds on the files of the share, and whether they hold
 // any. Both tables are rewritten whenever the access rights of an account change, so they are only
 // ever read behind the lock those writes take.
@@ -276,8 +294,8 @@ func (s *server) RemoveShare(ss stores.Share) error {
 			}
 		}
 	case "indexd":
-		for _, conn := range sh.indexdConns {
-			if err := conn.client.Close(); err != nil {
+		for _, c := range sh.clients() {
+			if err := c.Close(); err != nil {
 				log.Printf("close indexd client: %v", err)
 			}
 		}

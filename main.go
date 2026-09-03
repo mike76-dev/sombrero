@@ -183,11 +183,8 @@ func main() {
 			}()
 		}
 		for _, share := range shares {
-			if share.client != nil { // renterd share
-				closeClient(share.client)
-			}
-			for _, conn := range share.indexdConns { // indexd share
-				closeClient(conn.client)
+			for _, c := range share.clients() {
+				closeClient(c)
 			}
 		}
 		wg.Wait()

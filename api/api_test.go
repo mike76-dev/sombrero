@@ -2099,3 +2099,27 @@ func TestFragmentation(t *testing.T) {
 		checkStatus(t, w, http.StatusBadRequest)
 	})
 }
+
+// TestSettings verifies that the web UI is told what the server allows, so that
+// it can offer the per-share settings that depend on it.
+func TestSettings(t *testing.T) {
+	t.Run("GET reports the switches", func(t *testing.T) {
+		w := doRequest(newTestAPIWithAnonymous(&mockStore{}), http.MethodGet, "/settings", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[SettingsResponse](t, w)
+		if !res.Anonymous || res.Mode != "normal" {
+			t.Errorf("want anonymous access on in normal mode, got %+v", res)
+		}
+	})
+
+	t.Run("GET reports them off", func(t *testing.T) {
+		w := doRequest(newTestLiteAPI(&mockStore{}), http.MethodGet, "/settings", nil)
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[SettingsResponse](t, w)
+		if res.Anonymous || res.Mode != "lite" {
+			t.Errorf("want anonymous access off in Lite mode, got %+v", res)
+		}
+	})
+}

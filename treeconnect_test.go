@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/mike76-dev/sombrero/ntlm"
@@ -470,4 +472,44 @@ func TestAnonymousOnIndexdNeedsTheReservedConnection(t *testing.T) {
 	if status := connect(); status != smb2.STATUS_OK {
 		t.Fatalf("with the connection the tree connect was answered %#x, want it served", status)
 	}
+}
+
+// TestGatheringTheClientsOfAShareIsSafe verifies that the clients of a share
+// may be collected while connections are still being made. The shutdown does
+// exactly that — it closes what every share is running while the restore of the
+// connections may still be adding to it — and reading that map without the lock
+// races with the writer, which is what the detector caught on a live server.
+func TestGatheringTheClientsOfAShareIsSafe(t *testing.T) {
+	sh := &share{
+		name:        "files",
+		backend:     "indexd",
+		indexdConns: make(map[string]*indexdConn),
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// The connections being restored, as AddConnection makes them.
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			sh.mu.Lock()
+			sh.indexdConns[fmt.Sprint(i)] = &indexdConn{client: newFakeClient()}
+			sh.mu.Unlock()
+		}
+	}()
+
+	// The shutdown gathering what to close.
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			for _, c := range sh.clients() {
+				if c == nil {
+					t.Error("a share reported a connection with no client")
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
 }

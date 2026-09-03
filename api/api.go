@@ -154,6 +154,17 @@ type UnpinOrphansResponse struct {
 	Errors   map[string]string `json:"errors,omitempty"`
 }
 
+// SettingsResponse is the response type for GET /settings. It carries what the
+// web UI has to know about how the server is configured, rather than anything
+// else the config file holds.
+type SettingsResponse struct {
+	Mode string `json:"mode"`
+
+	// Anonymous is the server-wide switch every share's own setting hangs off:
+	// with it off, no share admits an anonymous session however it is set up.
+	Anonymous bool `json:"anonymous"`
+}
+
 // ServerStats keeps track of the server statistics.
 type ServerStats struct {
 	Start      time.Time `json:"start"`      // The time the server started
@@ -362,6 +373,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.GET("/stats", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.statsHandlerGET(w, req, ps)
+	})
+
+	router.GET("/settings", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.settingsHandlerGET(w, req, ps)
 	})
 
 	router.POST("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -1441,6 +1456,14 @@ func (api *API) statsHandlerGET(w http.ResponseWriter, req *http.Request, _ http
 	}
 
 	writeJSON(w, stats)
+}
+
+// settingsHandlerGET handles the GET /settings calls.
+func (api *API) settingsHandlerGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	writeJSON(w, SettingsResponse{
+		Mode:      api.cfg.Mode.String(),
+		Anonymous: api.cfg.Anonymous,
+	})
 }
 
 // connectHandlerPOST handles the POST /connect/:workgroup/:share calls.
