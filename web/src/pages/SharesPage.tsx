@@ -4,6 +4,7 @@ import {
   Account,
   FragmentationResponse,
   OrphansResponse,
+  ServerSettings,
   Share,
 } from '../api/types'
 import {
@@ -11,6 +12,7 @@ import {
   defragment,
   getAccountById,
   getPolicy,
+  getSettings,
   getShareAccounts,
   listAccounts,
   listShares,
@@ -20,6 +22,7 @@ import {
   scanOrphans,
   setPolicy,
   unpinOrphans,
+  updateShare,
 } from '../api/endpoints'
 import {
   Card,
@@ -397,7 +400,101 @@ function FragmentationCard({ share }: { share: Share }) {
   )
 }
 
-function ShareDetails({ share, onChanged }: { share: Share; onChanged: () => void }) {
+// ShareAccess is who the share admits besides the accounts its policies name.
+// The anonymous box follows the server's own setting: a share cannot offer what
+// the server does not allow, so it is left unusable rather than misleading, and
+// the reason is said out loud.
+function ShareAccess({
+  share,
+  settings,
+  onChanged,
+}: {
+  share: Share
+  settings: ServerSettings | undefined
+  onChanged: () => void
+}) {
+  const { run, busy, error, message, setMessage } = useApiAction()
+  const [guest, setGuest] = useState(!!share.allowGuest)
+  const [anonymous, setAnonymous] = useState(!!share.allowAnonymous)
+  const [publicDir, setPublicDir] = useState(share.publicDir || '')
+
+  const serverAllows = settings?.anonymous !== false
+
+  return (
+    <div className="stack">
+      <p className="muted">
+        A guest is an account of a workgroup that has no password, and reaches whatever the
+        policies of the share grant it. An anonymous client presents no credentials at all, and
+        reaches only the public folder: it sees what was dropped there and nothing else of the
+        share, while everyone else sees the drops.
+      </p>
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={guest}
+          disabled={busy}
+          onChange={(e) => setGuest(e.target.checked)}
+        />
+        Guest access: allow the passwordless accounts of a workgroup
+      </label>
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={anonymous}
+          disabled={busy || !serverAllows}
+          onChange={(e) => setAnonymous(e.target.checked)}
+        />
+        Anonymous access: allow clients that present no credentials at all
+      </label>
+      {!serverAllows && (
+        <p className="muted">
+          Anonymous access is turned off in the server config; set <code>anonymous: true</code> in
+          sombrero.yml and restart to offer it here.
+        </p>
+      )}
+      <Field label="Public folder">
+        <input
+          value={publicDir}
+          disabled={busy || !serverAllows}
+          placeholder="Drop"
+          onChange={(e) => setPublicDir(e.target.value)}
+        />
+      </Field>
+      <div className="row">
+        <button
+          className="btn"
+          disabled={busy}
+          onClick={() =>
+            run(async () => {
+              await updateShare(share.name, {
+                remark: share.remark,
+                allowGuest: guest,
+                allowAnonymous: anonymous,
+                publicDir,
+              })
+              setMessage('Saved. It applies to the connections made from now on.')
+              onChanged()
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      <ErrorBanner error={error} />
+      <SuccessBanner message={message} />
+    </div>
+  )
+}
+
+function ShareDetails({
+  share,
+  settings,
+  onChanged,
+}: {
+  share: Share
+  settings: ServerSettings | undefined
+  onChanged: () => void
+}) {
   const { run, busy, error } = useApiAction()
   const [accounts, setAccounts] = useState<NamedRights[] | null>(null)
 
@@ -453,6 +550,7 @@ function ShareDetails({ share, onChanged }: { share: Share; onChanged: () => voi
           )}
         </tbody>
       </table>
+      <ShareAccess share={share} settings={settings} onChanged={onChanged} />
       <div className="row">
         <button className="btn" disabled={busy} onClick={loadAccounts}>
           {accounts ? 'Reload accounts' : 'Show accounts with access'}
@@ -508,12 +606,14 @@ function ShareDetails({ share, onChanged }: { share: Share; onChanged: () => voi
 
 function SharesListCard({
   shares,
+  settings,
   loaded,
   busy,
   error,
   onChanged,
 }: {
   shares: Share[]
+  settings: ServerSettings | undefined
   loaded: boolean
   busy: boolean
   error: string | null
@@ -565,7 +665,7 @@ function SharesListCard({
                 {expanded === s.name && (
                   <tr>
                     <td colSpan={4}>
-                      <ShareDetails share={s} onChanged={onChanged} />
+                      <ShareDetails share={s} settings={settings} onChanged={onChanged} />
                     </td>
                   </tr>
                 )}
@@ -708,6 +808,7 @@ function PolicyCard({ shares }: { shares: Share[] }) {
 
 export function SharesPage() {
   const { data, error, busy, reload } = useApiData(() => listShares())
+  const { data: settings } = useApiData(() => getSettings())
   const shares = data || []
 
   return (
@@ -715,6 +816,7 @@ export function SharesPage() {
       <RegisterShareCard onRegistered={reload} />
       <SharesListCard
         shares={shares}
+        settings={settings}
         loaded={data !== undefined}
         busy={busy}
         error={error}

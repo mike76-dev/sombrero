@@ -94,6 +94,7 @@ export function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[] | null>(null)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [guest, setGuest] = useState(false)
   const list = useApiAction()
   const add = useApiAction()
 
@@ -131,19 +132,21 @@ export function AccountsPage() {
               <Field label="Password">
                 <input
                   type="password"
-                  value={password}
+                  value={guest ? '' : password}
+                  disabled={guest}
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="new-password"
                 />
               </Field>
               <button
                 className="btn btn-primary"
-                disabled={add.busy || !username.trim() || !password}
+                disabled={add.busy || !username.trim() || (!password && !guest)}
                 onClick={() =>
                   add.run(async () => {
-                    await addAccount(username.trim(), password, workgroup.trim())
+                    await addAccount(username.trim(), guest ? '' : password, workgroup.trim())
                     setUsername('')
                     setPassword('')
+                    setGuest(false)
                     await refresh()
                   }, 'Account added.')
                 }
@@ -151,6 +154,19 @@ export function AccountsPage() {
                 Add
               </button>
             </div>
+            <label className="checkbox checkbox-spaced">
+              <input
+                type="checkbox"
+                checked={guest}
+                onChange={(e) => setGuest(e.target.checked)}
+              />
+              guest account
+            </label>
+            <p className="muted">
+              A guest account reaches only the shares that offer guest access, and there it holds
+              whatever the policies of this workgroup grant it. Asking for one explicitly is what
+              tells an account meant to be open from one whose password was left out by mistake.
+            </p>
             <ErrorBanner error={add.error} />
             <SuccessBanner message={add.message} />
           </Card>
