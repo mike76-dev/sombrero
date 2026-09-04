@@ -455,6 +455,60 @@ func TestIntegrationQueryInfoReportsADeletionCalledOff(t *testing.T) {
 	}
 }
 
+// TestAnAnonymousSessionIsAskedWhoOwnsAFile is the query a Mac makes as soon as it opens a share:
+// the security descriptor of a file, the owner included. A session with no account behind it
+// carries no domain identifier of its own, and building an owner out of one took the connection
+// down with a nil pointer — which the client answered by opening another and asking again, so the
+// share could be reached but never let go of.
+func TestAnAnonymousSessionIsAskedWhoOwnsAFile(t *testing.T) {
+	h := newSMBTest(t)
+	h.share.allowAnonymous = true
+	h.share.publicDir = "Drop"
+
+	// The identity such a session is bound to, which the server puts in place at startup when it
+	// is configured to admit them.
+	if _, err := h.srv.store.EnsureAnonymous(); err != nil {
+		t.Fatalf("EnsureAnonymous: %v", err)
+	}
+
+	h.files.putDir("Drop")
+	h.files.putData("Drop/left.txt", []byte("dropped earlier"))
+
+	cl := h.dial("alice").anonymously()
+
+	created, _ := cl.create("left.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if status := smb2.Header(created).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the file was answered %#x", status)
+	}
+	fid := createdFileID(created)
+
+	// The descriptor a client asks for whole: who owns the file, what group it belongs to, and
+	// what may be done to it. The owner is the part that was reached for through the nil.
+	msg := queryInfoRequest(cl.mid+1, cl.ss.sessionID, cl.tc.treeID, fid, smb2.INFO_SECURITY, 0, 4096)
+	binary.LittleEndian.PutUint32(msg[smb2.SMB2HeaderSize+16:smb2.SMB2HeaderSize+20],
+		smb2.OWNER_SECURITY_INFORMATION|smb2.GROUP_SECURITY_INFORMATION|smb2.DACL_SECURITY_INFORMATION)
+	cl.mid++
+
+	resp, err := cl.send(msg)
+	if err != nil {
+		t.Fatalf("the query failed: %v", err)
+	}
+	if status := resp.Header().Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the query was answered %#x, want the descriptor", status)
+	}
+
+	// And the owner it names is the anonymous logon, S-1-5-7. The owner SID follows the twenty
+	// bytes of the descriptor's own header: a revision, the count of sub-authorities, the six-byte
+	// authority, and then the sub-authorities themselves.
+	sd := queriedInfo(t, resp.Encode())
+	if n := sd[21]; n != 1 {
+		t.Fatalf("the owner carries %d sub-authorities, want the one of a well-known identity", n)
+	}
+	if rid := binary.LittleEndian.Uint32(sd[28:32]); rid != 7 {
+		t.Errorf("the file is owned by S-1-5-%d, want the anonymous logon, S-1-5-7", rid)
+	}
+}
+
 // TestASecurityDescriptorTooBigForTheBufferIsRefused is the query whose buffer will not hold the
 // answer. A security descriptor is never sent in part, so the client is told how much room it needs
 // and asks again — and [MS-SMB2] 3.3.5.20.3 names the one status this must not carry:

@@ -21,6 +21,11 @@ var AnonymousWorkgroup = uuid.UUID{}
 // to it.
 const AnonymousAccount = "anonymous"
 
+// GuestAccount is the name a client sends when its user ticks a guest box. The
+// dialogs that offer one ask for nothing else: macOS has no field for a
+// workgroup there, so a login under this name may match no account at all.
+const GuestAccount = "guest"
+
 // ErrReservedWorkgroup is returned when something tries to create a workgroup
 // or an account where only the server's own anonymous identity belongs.
 var ErrReservedWorkgroup = errors.New("the anonymous workgroup is reserved")

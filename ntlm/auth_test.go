@@ -381,6 +381,79 @@ func TestAuthenticateAdmitsAnAnonymousLogin(t *testing.T) {
 	}
 }
 
+// TestAuthenticateAdmitsAGuestWithNoWorkgroup verifies that a login under the
+// name the guest boxes send, with no workgroup to look it up in, is admitted as
+// anonymous where the server allows anonymous access. The dialog macOS offers
+// has no field for either a user name or a workgroup, so this is the whole of
+// what such a client presents: the name GUEST over the empty password.
+func TestAuthenticateAdmitsAGuestWithNoWorkgroup(t *testing.T) {
+	store := knownAccount()
+	store.err = stores.ErrAccountNotFound
+
+	srv := NewServer("SOMBRERO", "WORKGROUP", store, false)
+	if err := authenticateAs(t, srv, stores.GuestAccount, "", ntHashOf("")); err == nil {
+		t.Error("a guest was admitted while anonymous access is off")
+	}
+
+	srv = NewServer("SOMBRERO", "WORKGROUP", store, true)
+	if err := authenticateAs(t, srv, stores.GuestAccount, "", ntHashOf("")); err != nil {
+		t.Fatalf("the guest login was turned away: %v", err)
+	}
+
+	sess := srv.Session()
+	if !sess.IsAnonymous() {
+		t.Error("want a guest with no workgroup admitted as an anonymous session")
+	}
+	if !sess.IsGuest() {
+		t.Error("want the session marked as a guest one, which is what the client asked to be")
+	}
+	if sess.User() != "" || sess.Domain() != "" {
+		t.Errorf("want no identity, got %q\\%q", sess.Domain(), sess.User())
+	}
+	for _, b := range sess.SessionKey() {
+		if b != 0 {
+			t.Fatal("a session with no account behind it must hold no key")
+		}
+	}
+
+	// The name is what makes the fallback, and nothing else does: any other
+	// user the store does not have is still turned away.
+	srv = NewServer("SOMBRERO", "WORKGROUP", store, true)
+	if err := authenticateAs(t, srv, testUser, "", ntHashOf("")); err == nil {
+		t.Error("an unknown user was admitted for presenting no workgroup")
+	}
+}
+
+// TestAuthenticateLeavesAGuestAccountAlone is the control for the fallback
+// above: a workgroup that holds a guest account of its own authenticates
+// against it, password and all, rather than being let in as anonymous.
+func TestAuthenticateLeavesAGuestAccountAlone(t *testing.T) {
+	store := knownAccount()
+	store.acc.Username = stores.GuestAccount
+	store.acc.NTHash = ntHashOf("")
+
+	srv := NewServer("SOMBRERO", "WORKGROUP", store, true)
+	if err := authenticateAs(t, srv, stores.GuestAccount, testWorkgroup, ntHashOf("")); err != nil {
+		t.Fatalf("the guest account was turned away: %v", err)
+	}
+	if srv.Session().IsAnonymous() {
+		t.Error("the guest account of a workgroup was turned into an anonymous session")
+	}
+	if !srv.Session().IsGuest() {
+		t.Error("want the passwordless account marked as a guest one")
+	}
+	if domain := srv.Session().Domain(); domain != testWorkgroup {
+		t.Errorf("the session carries the workgroup %q, want %q", domain, testWorkgroup)
+	}
+
+	// And the response is still verified against it: a login that reaches an
+	// account is held to it, whatever the account is called.
+	srv = NewServer("SOMBRERO", "WORKGROUP", store, true)
+	if err := authenticateAs(t, srv, stores.GuestAccount, testWorkgroup, ntHashOf(testPassword)); err == nil {
+		t.Error("a response over the wrong password was accepted")
+	}
+}
+
 // TestAuthenticateRefusesTheAnonymousWorkgroup verifies that the identity the
 // server reserves for anonymous sessions cannot be logged into. It holds a
 // passwordless account, so without this anyone naming it would be let in and

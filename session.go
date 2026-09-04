@@ -215,9 +215,11 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 	// the rights hang off.
 	ss.isGuest = ss.connection.ntlmServer.Session().IsGuest()
 
-	// An anonymous session presented no credentials, so it carries no identity
+	// An anonymous session has no account behind it, so it carries no identity
 	// of its own. It acts as the server's reserved account, which is what owns
-	// what it uploads and what nobody can log in as.
+	// what it uploads and what nobody can log in as. A client that asked for
+	// guest access without naming a workgroup lands here too, and is both:
+	// anonymous in what it may reach, a guest in what it is told.
 	ss.isAnonymous = ss.connection.ntlmServer.Session().IsAnonymous()
 	if ss.isAnonymous {
 		ss.userName = stores.AnonymousAccount

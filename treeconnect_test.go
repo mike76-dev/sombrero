@@ -336,6 +336,84 @@ func TestASessionWithoutAKeyIsNotHeldToOne(t *testing.T) {
 	}
 }
 
+// TestAGuestWithNoWorkgroupIsToldItIsAGuest verifies the whole of what a Mac
+// sends when its user ticks the guest box: the name GUEST over the empty
+// password, and no workgroup, there being no field for one. The session it gets
+// is the anonymous one, bound to the reserved identity and holding no key, and
+// the client is told it is a guest, which is the answer it is waiting for.
+func TestAGuestWithNoWorkgroupIsToldItIsAGuest(t *testing.T) {
+	h := newSMBTest(t)
+
+	c := h.negotiated("mac", [16]byte{7}, smb2.SMB_DIALECT_311)
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, true)
+
+	resp := h.authenticateOver(c, ntlmClient{user: "GUEST", ntHash: ntHashOf("")})
+	if status := resp.Header().Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the session setup was answered %#x, want it established", status)
+	}
+
+	flags := binary.LittleEndian.Uint16(resp.Encode()[smb2.SMB2HeaderSize+2 : smb2.SMB2HeaderSize+4])
+	if flags&smb2.SESSION_FLAG_IS_GUEST == 0 {
+		t.Errorf("the client was not told it is a guest, flags %#x", flags)
+	}
+
+	c.mu.Lock()
+	ss := c.sessionTable[resp.Header().SessionID()]
+	c.mu.Unlock()
+	if ss == nil {
+		t.Fatal("the session was not registered on the connection")
+	}
+
+	if !ss.isAnonymous {
+		t.Error("want the session held as an anonymous one")
+	}
+	if ss.userName != stores.AnonymousAccount || ss.workgroup != stores.AnonymousWorkgroup.String() {
+		t.Errorf("the session acts as %s\\%s, want the reserved identity", ss.workgroup, ss.userName)
+	}
+	if ss.signingRequired || ss.encryptData {
+		t.Error("a session with no key of its own was put into signing or encryption")
+	}
+}
+
+// TestTreeConnectWeighsAGuestWithNoWorkgroupAsAnonymous verifies that such a
+// session is judged by what the share allows anonymous sessions, not by what it
+// allows guests. There is no account behind it, so the rights a guest account
+// would be weighed against are not there to weigh.
+func TestTreeConnectWeighsAGuestWithNoWorkgroupAsAnonymous(t *testing.T) {
+	for _, tt := range []struct {
+		what      string
+		anonymous bool
+		guest     bool
+		want      uint32
+	}{
+		{"a share that takes anonymous sessions but not guests", true, false, smb2.STATUS_OK},
+		{"a share that takes guests but not anonymous sessions", false, true, smb2.STATUS_ACCESS_DENIED},
+	} {
+		t.Run(tt.what, func(t *testing.T) {
+			h := newSMBTest(t)
+
+			// The policies of the session's own user grant it the share, so
+			// the two flags are all that is left to decide it.
+			h.restrictTo("alice")
+			h.share.allowAnonymous = tt.anonymous
+			h.share.allowGuest = tt.guest
+			h.share.publicDir = "Drop"
+
+			cl := h.dial("alice").speaking(smb2.SMB_DIALECT_302).anonymously()
+			cl.ss.isGuest = true
+
+			resp, _, err := cl.conn.processRequest(request(t,
+				treeConnectRequest(0, cl.ss.sessionID, `\\SERVER\files`)))
+			if err != nil {
+				t.Fatalf("the tree connect was not answered: %v", err)
+			}
+			if status := resp.Header().Status(); status != tt.want {
+				t.Errorf("the tree connect was answered %#x, want %#x", status, tt.want)
+			}
+		})
+	}
+}
+
 // TestUpdateShareTakesEffectOnTheRunningServer verifies that turning anonymous
 // access on reaches the share the server is serving with. It holds a copy of
 // what it was registered with, so without this a change would wait for the next

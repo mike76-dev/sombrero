@@ -267,12 +267,9 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 			}
 		}
 
-		// A passwordless account reaches only the shares that offer guest
-		// access, whatever the policies grant it.
-		if ss.isGuest && !sh.allowGuest {
-			return nil, errAccessDenied
-		}
-
+		// A session with nothing behind it is weighed as an anonymous one even
+		// where the client calls itself a guest, that being all such a login is:
+		// there is no account for the guest rules to work on.
 		if ss.isAnonymous {
 			// An anonymous session has no policies of its own: the share says
 			// whether it is admitted at all, and what it holds is the same on
@@ -304,6 +301,12 @@ func (c *connection) newTreeConnect(ss *session, path string) (*treeConnect, err
 
 			access = anonymousAccess
 		} else {
+			// A passwordless account reaches only the shares that offer guest
+			// access, whatever the policies grant it.
+			if ss.isGuest && !sh.allowGuest {
+				return nil, errAccessDenied
+			}
+
 			access, exists = sh.fileAccess(ss.workgroup, ss.userName)
 			if !exists {
 				return nil, errAccessDenied

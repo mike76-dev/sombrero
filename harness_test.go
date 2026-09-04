@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/client"
+	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/utils"
@@ -886,6 +887,7 @@ func (cl *testClient) anonymously() *testClient {
 	cl.ss.isAnonymous = true
 	cl.ss.userName = stores.AnonymousAccount
 	cl.ss.workgroup = stores.AnonymousWorkgroup.String()
+	cl.ss.securityContext = ntlm.AnonymousContext()
 	return cl
 }
 

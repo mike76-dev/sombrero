@@ -306,17 +306,31 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 			domain = strings.ToLower(utils.DecodeToString(domainName))
 		}
 
+		// A client whose user ticked a guest box sends the name "guest" and no
+		// workgroup, having no field to put one in, so there is no account for
+		// it to match. Such a login is let in as anonymous, which is the
+		// identity that belongs to no workgroup, if the server admits those at
+		// all. A guest account that a workgroup does hold is unaffected: it
+		// resolves below and authenticates like any other.
+		guestLogin := s.anonymous && user == stores.GuestAccount
+
 		// The account lookup, and every consumer of the session below it, keys the workgroup by
 		// its UUID, while a client logs in with whatever it was handed: the UUID of the
 		// workgroup, or the name of a named one. The name is turned into the UUID here, so that
 		// nothing downstream has to know that a workgroup can be referred to two ways.
 		workgroup, err := s.resolveWorkgroup(domain)
 		if err != nil {
+			if guestLogin {
+				return s.anonymousSession(flags, amsg, true)
+			}
 			return err
 		}
 
 		acc, err := s.accounts.FindAccount(user, workgroup)
 		if err != nil {
+			if guestLogin {
+				return s.anonymousSession(flags, amsg, true)
+			}
 			return err
 		}
 
@@ -445,16 +459,23 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 	}
 
 	// A credential with nothing in it is the anonymous login: no user, no
-	// domain, and no response to verify. There is no key material either, so
-	// the session is left with a zero one, which is what keeps it out of
-	// signing and encryption ([MS-SMB2] 3.3.5.5.3).
+	// domain, and no response to verify.
 	if !s.anonymous {
 		return errors.New("credential is empty")
 	}
 
+	return s.anonymousSession(flags, amsg, false)
+}
+
+// anonymousSession establishes a session with no identity behind it. There is
+// no key material either, so it is left with a zero one, which is what keeps
+// the session out of signing and encryption ([MS-SMB2] 3.3.5.5.3). guest marks
+// a client that asked to be let in as a guest, which is what it is told it is.
+func (s *Server) anonymousSession(flags uint32, amsg []byte, guest bool) (err error) {
 	session := new(Session)
 	session.isClientSide = false
 	session.anonymous = true
+	session.guest = guest
 	session.negotiateFlags = flags
 	session.exportedSessionKey = make([]byte, 16)
 
