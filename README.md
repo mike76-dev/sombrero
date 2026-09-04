@@ -10,10 +10,6 @@ How to set up a `renterd` node is described here: [https://github.com/SiaFoundat
 The setup process of an `indexd` node is described here: [https://github.com/SiaFoundation/indexd](https://github.com/SiaFoundation/indexd). Alternatively, one can connect to the [Sia Foundation indexer](https://sia.storage/).
 * The SMB port 445 needs to be open on the machine where the server is running.
 
-## Limitations
-* Guest and anonymous access are turned off by default and have to be offered per share (see [Guest and Anonymous Access](#guest-and-anonymous-access)).
-* A guest login needs a client that will send a blank password. Ubuntu's file manager is not one of them.
-
 ## Installing PostgreSQL
 This section will assume you are running Ubuntu Server 24.04. On the other systems, the commands may be different.
 
