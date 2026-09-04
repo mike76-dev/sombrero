@@ -11,7 +11,8 @@ The setup process of an `indexd` node is described here: [https://github.com/Sia
 * The SMB port 445 needs to be open on the machine where the server is running.
 
 ## Limitations
-* Guest or anonymous access is not supported.
+* Guest and anonymous access are turned off by default and have to be offered per share (see [Guest and Anonymous Access](#guest-and-anonymous-access)).
+* A guest login needs a client that will send a blank password. Ubuntu's file manager is not one of them.
 
 ## Installing PostgreSQL
 This section will assume you are running Ubuntu Server 24.04. On the other systems, the commands may be different.
@@ -85,6 +86,8 @@ A config file, `sombrero.yml`, needs to be created in the directory where the se
 debug: false               # indicates whether to display the session ID and key for tools like Wireshark to decrypt the encrypted data
 mode: normal               # the server mode: 'normal' or 'lite' (see below)
 maxConnections: 30         # the maximum number of connections accepted from the same IP within 10 minutes
+anonymous: false           # optional: whether clients presenting no credentials at all are admitted; a share
+                           # has to offer it as well (see below). If omitted, they are turned away
 api:
   address: 127.0.0.1:9999  # the address the API is listening on; defaults to localhost, since the API administers
                            # the whole server. Change it only if the API needs to be reached from another machine,
@@ -139,6 +142,7 @@ Example of the output:
 ```Bash
 {"uuid":"8303eeb8-f30e-4607-9eb7-875df2c5bd52"}
 ```
+
 ### 2. Add user account(s) to the workgroup
 ```Bash
 curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/account" -d '{"username":"test","password":"123","workgroup":"8303eeb8-f30e-4607-9eb7-875df2c5bd52"}'
@@ -147,6 +151,7 @@ or
 ```Bash
 curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/account" -d '{"username":"test","password":"123","workgroup":"home"}'
 ```
+
 ### 3. Register a share
 ```Bash
 curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/share" -d '{"name":"shared-renterd","type":"renterd","serverName":"http://127.0.0.1:9980","password":"1234","bucket":"default","remark":"renterd"}'
@@ -155,6 +160,7 @@ or
 ```Bash
 curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/share" -d '{"name":"shared-indexd","type":"indexd","serverName":"https://sia.storage","remark":"Sia Foundation indexer","dataShards":10,"parityShards":20}'
 ```
+
 ### 4. Connect the workgroup to the share
 In case of a `renterd` share, simply call
 ```Bash
@@ -176,11 +182,13 @@ Example of the output:
 ```Bash
 {"appKey":"03a2aab52b79f674354af35b0030cd0cd45b51f53a1a75795a58c85844767b3d3ac38242c05637cac5b8b7fbcea55d29826845fdfc0ef19894d7640438f43a22"}
 ```
+
 ### 5. Grant access to the share
 To grant an account access to the share, run:
 ```Bash
 curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/policy?username=test&workgroup=8303eeb8-f30e-4607-9eb7-875df2c5bd52&read=true&write=true&delete=true&execute=true"
 ```
+
 ## Web UI
 The server ships with a web UI covering the same ground as the API: workgroups, accounts, shares, access policies, bans, and the server statistics. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` on the Settings page.
 
@@ -195,12 +203,14 @@ A server built without this step runs normally and serves the API as usual; only
 
 ## Upload Packing
 A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Both config fields are optional: setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, while `minPackedSlabSize` (for example, `1048576`) holds that upload back until the leftover data of a share is worth a slab. On its own, `minPackedSlabSize` has no effect.
+
 ## Slab Fragmentation
 Deleting or overwriting a file punches a hole in the slab it was packed into, and the share keeps paying for the whole slab. A slab belongs to the workgroup that uploaded it, so each workgroup's connection to the share looks for it in its own slabs every `fragmentationCheck` (`1h` by default, `never` to turn the check off) and reports the slabs that are at least `fragmentationThreshold` dead space (`0.25` by default).
 
 Setting `defragment: true` has the check repack what it reports instead of only reporting it: what is still referenced in those slabs is downloaded, put back into the upload queue to be packed together with the data of other files, and the slabs it came out of are unpinned once nothing reads from them any more.
 
 Repacking costs what any other upload of the same data costs, and between a round and the packed slab that follows it the moved data sits in the database rather than on the network. Rounds give way to what clients are writing: one only starts while less than a slab's worth of data is waiting to be uploaded, and `maxBufferAge` is what bounds how long the moved data waits there.
+
 ## Shared Folders
 It is possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup. Only working on `indexd` shares.
 
@@ -220,11 +230,36 @@ The call replaces the whole list, so passing an empty list removes all shared fo
 
 Changing the list also applies to the folders that already exist: a folder whose name starts matching an entry becomes shared, a folder that no longer matches any entry becomes private again, and a folder that stays matched picks up the new flags.
 
+## Guest and Anonymous Access
+A share is reached only by the accounts its policies name, unless it is told to offer one of the two ways in below. Those are two different concepts, and both are turned off by default.
+
+A **guest** is an account of a workgroup that has no password, so anybody who knows its name may log in as it. In every other way it is an ordinary account: it belongs to a workgroup, the policies of the share decide what it may do, and the files it uploads belong to it. Create one by leaving the password empty:
+```Bash
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/account" -d '{"username":"guest","password":"","workgroup":"8303eeb8-f30e-4607-9eb7-875df2c5bd52"}'
+```
+Such an account is refused while no share offers guest access, since it would have nowhere to connect. A share offers it from its details with:
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/<SHARE_NAME>" -d '{"allowGuest":true}'
+```
+
+An **anonymous** client presents no credentials at all. This is turned off for the whole server unless `anonymous: true` is set in the config file. A share then offers it together with the folder to confine it to:
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/<SHARE_NAME>" -d '{"allowAnonymous":true,"publicDir":"public"}'
+```
+An anonymous session reaches that folder and nothing else: what it calls the root of the share is the folder itself, so the rest of the share has no name it could ask for. What it drops there every member of the share can see, while what they keep elsewhere stays as private from it as it is from each other. Everything in the folder belongs to one identity, so one anonymous client may delete what another dropped; the folder is public in both directions.
+
+On an `indexd` share the folder is served by a connection of its own, made once under the reserved workgroup `00000000-0000-0000-0000-000000000000`:
+```Bash
+curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/connect/00000000-0000-0000-0000-000000000000/<SHARE_NAME>"
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/00000000-0000-0000-0000-000000000000/<SHARE_NAME>"
+```
+The first call returns a URL to approve, exactly as for any other workgroup. What anonymous uploads is then pinned under an app account of its own, with its own quota, so no workgroup pays for it. The server makes the folder itself; if a folder of that name is already there and belongs to somebody else, the share turns anonymous sessions away and says so in the log rather than handing that folder to everyone.
+
 ## Lite Mode
 If you only intend to connect to `renterd` shares, you can run the server in the Lite mode by setting `mode: lite` in the config file. In this mode, no PostgreSQL database is required: the shares, workgroups, accounts, access policies, and the ban list are kept in a JSON file (`store.json`) in the data directory, and the `database` and `indexd` sections of the config file may be omitted. `indexd` shares are not supported in the Lite mode.
 
 ## Security Considerations
-An open TCP port 445 attracts thousands of attackers and those who look for a free storage. For this reason, guest and anonymous accesses are disabled. Even when the server is running on a private LAN, it should not be a problem to create a password-protected account like described above.
+An open TCP port 445 attracts thousands of attackers and those who look for a free storage. For this reason, guest and anonymous accesses are turned off by default. Even when the server is running on a private LAN, it should not be a problem to create a password-protected account like described above; a share that admits anybody is worth a deliberate decision, and [Guest and Anonymous Access](#guest-and-anonymous-access) describes what each of them can reach.
 
 The API administers the whole server, so it listens on `127.0.0.1` unless the config file says otherwise, and the server refuses to start without an API password. Repeated failed logins from the same host are throttled. If you do need to reach the API or the web UI from another machine, prefer an SSH tunnel:
 ```Bash
