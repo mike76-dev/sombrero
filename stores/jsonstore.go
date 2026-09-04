@@ -12,9 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mike76-dev/sombrero/utils"
 	"go.sia.tech/core/types"
-	"golang.org/x/crypto/md4"
 )
 
 // jsonStoreFilename is the name of the persistence file of a JSONStore.
@@ -272,6 +270,9 @@ func (js *JSONStore) FindAccount(username, workgroup string) (acc Account, err e
 
 // AddAccount adds a new account to the store.
 func (js *JSONStore) AddAccount(acc Account) error {
+	if IsAnonymousWorkgroup(acc.Workgroup) {
+		return ErrReservedWorkgroup
+	}
 	if _, err := uuid.Parse(acc.Workgroup); err != nil {
 		return fmt.Errorf("invalid workgroup UUID: %w", err)
 	}
@@ -285,12 +286,10 @@ func (js *JSONStore) AddAccount(acc Account) error {
 			}
 		}
 
-		h := md4.New()
-		h.Write(utils.EncodeStringToBytes(acc.Password))
 		d.Accounts = append(d.Accounts, jsonAccount{
 			ID:        d.NextAccountID,
 			Username:  acc.Username,
-			NTHash:    h.Sum(nil),
+			NTHash:    ntHash(acc.Password),
 			Workgroup: acc.Workgroup,
 		})
 		d.NextAccountID++
@@ -427,6 +426,9 @@ func (js *JSONStore) GetWorkgroups() (wgs []Workgroup, err error) {
 
 // AddWorkgroup adds a new workgroup to the store.
 func (js *JSONStore) AddWorkgroup(wg Workgroup) error {
+	if wg.UUID == AnonymousWorkgroup {
+		return ErrReservedWorkgroup
+	}
 	wg.Name = NormalizeWorkgroupName(wg.Name)
 	return js.update(func(d *jsonData) error {
 		for _, w := range d.Workgroups {
@@ -837,4 +839,38 @@ func accessRightsFromPolicy(p jsonPolicy) AccessRights {
 		DeleteAccess:  p.DeleteAccess,
 		ExecuteAccess: p.ExecuteAccess,
 	}
+}
+
+// UpdateShare changes what a share offers its clients, leaving what it is
+// backed by as it was registered.
+func (js *JSONStore) UpdateShare(s Share) error {
+	if s.Name == "" {
+		return nil
+	}
+
+	var updated Share
+	err := js.update(func(d *jsonData) error {
+		for i, sh := range d.Shares {
+			if sh.Name != s.Name {
+				continue
+			}
+			sh.Remark = s.Remark
+			sh.AllowGuest = s.AllowGuest
+			sh.AllowAnonymous = s.AllowAnonymous
+			sh.PublicDir = s.PublicDir
+			d.Shares[i] = sh
+			updated = sh
+			return nil
+		}
+		return ErrNotFound
+	}, nil)
+	if err != nil {
+		return err
+	}
+
+	// The running server holds a copy of what it was registered with.
+	if err := js.shares.UpdateShare(updated); err != nil {
+		return fmt.Errorf("failed to apply the share settings: %w", err)
+	}
+	return nil
 }

@@ -43,6 +43,18 @@ func (sh *share) ensurePersisted() {
 	}
 }
 
+// anonymousAccess is what an anonymous session holds over the public folder it
+// is confined to. The folder is public in both directions: everything dropped
+// into it belongs to one identity, so there is no telling one anonymous user's
+// files from another's, and withholding DELETE would not keep them apart — it
+// would only refuse the opens that clients routinely ask for it in.
+var anonymousAccess = stores.FlagsFromAccessRights(stores.AccessRights{
+	ReadAccess:    true,
+	WriteAccess:   true,
+	DeleteAccess:  true,
+	ExecuteAccess: true,
+})
+
 // mayConnect reports whether the user is allowed on the share at all.
 func (sh *share) mayConnect(workgroup, user string) bool {
 	sh.mu.Lock()
@@ -51,6 +63,24 @@ func (sh *share) mayConnect(workgroup, user string) bool {
 	_, ok := sh.connectSecurity[workgroup+"/"+user]
 
 	return ok
+}
+
+// clients returns every storage client the share is running: the one a renterd share holds, or
+// one per workgroup connection of an indexd share. They are gathered under the lock and closed
+// outside it, since a client spends its shutdown draining what it has in flight.
+func (sh *share) clients() []client.Client {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	cs := make([]client.Client, 0, len(sh.indexdConns)+1)
+	if sh.client != nil {
+		cs = append(cs, sh.client)
+	}
+	for _, conn := range sh.indexdConns {
+		cs = append(cs, conn.client)
+	}
+
+	return cs
 }
 
 // fileAccess returns the rights the user holds on the files of the share, and whether they hold
@@ -84,6 +114,14 @@ type share struct {
 	currentUses     int
 	encryptData     bool
 	compressData    bool
+
+	// allowGuest lets the passwordless accounts of a workgroup connect, and
+	// allowAnonymous lets a client that presented no credentials connect, with
+	// publicDir naming the one folder such a session may use. All three follow
+	// the stored share, through UpdateShare.
+	allowGuest     bool
+	allowAnonymous bool
+	publicDir      string
 
 	// For renterd shares (single client shared by all workgroups).
 	client        client.Client
@@ -120,6 +158,9 @@ func (s *server) RegisterShare(ss stores.Share) error {
 		shareType:       smb2.SHARE_TYPE_DISK,
 		bucket:          ss.Bucket,
 		remark:          ss.Remark,
+		allowGuest:      ss.AllowGuest,
+		allowAnonymous:  ss.AllowAnonymous,
+		publicDir:       ss.PublicDir,
 		connectSecurity: make(map[string]struct{}),
 		fileSecurity:    make(map[string]uint32),
 		persisted:       make(map[persistedKey]*fileState),
@@ -206,6 +247,27 @@ func (s *server) loadAccessRights(sh *share, ars []stores.AccessRights) error {
 	return nil
 }
 
+// UpdateShare applies the settings of a share that has changed to the copy the server is running
+// with. Only what a client is admitted by can change: what the share is backed by is fixed when it
+// is registered, and the clients and the security tables hang off that.
+func (s *server) UpdateShare(ss stores.Share) error {
+	s.mu.Lock()
+	sh, found := s.shareList[ss.Name]
+	s.mu.Unlock()
+	if !found { // Share not loaded yet, so it will be registered with the new settings.
+		return nil
+	}
+
+	sh.mu.Lock()
+	sh.remark = ss.Remark
+	sh.allowGuest = ss.AllowGuest
+	sh.allowAnonymous = ss.AllowAnonymous
+	sh.publicDir = ss.PublicDir
+	sh.mu.Unlock()
+
+	return nil
+}
+
 // RemoveShare removes a share from the SMB server.
 func (s *server) RemoveShare(ss stores.Share) error {
 	s.mu.Lock()
@@ -232,8 +294,8 @@ func (s *server) RemoveShare(ss stores.Share) error {
 			}
 		}
 	case "indexd":
-		for _, conn := range sh.indexdConns {
-			if err := conn.client.Close(); err != nil {
+		for _, c := range sh.clients() {
+			if err := c.Close(); err != nil {
 				log.Printf("close indexd client: %v", err)
 			}
 		}
@@ -349,20 +411,20 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 			return errors.New("indexd shares require a database-backed store")
 		}
 		builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
-			ID:          types.HashBytes(append([]byte(s.cfg.Name), []byte(s.cfg.Description)...)),
-			Name:        s.cfg.Name,
-			Description: s.cfg.Description,
-			LogoURL:     s.cfg.LogoURL,
-			ServiceURL:  s.cfg.ServiceURL,
+			ID:          types.HashBytes(append([]byte(s.cfg.Indexd.Name), []byte(s.cfg.Indexd.Description)...)),
+			Name:        s.cfg.Indexd.Name,
+			Description: s.cfg.Indexd.Description,
+			LogoURL:     s.cfg.Indexd.LogoURL,
+			ServiceURL:  s.cfg.Indexd.ServiceURL,
 		})
 		sdkClient, err := builder.SDK(appKey)
 		if err != nil {
 			return err
 		}
-		fragLevel, fragInterval, defragment := s.cfg.Fragmentation()
+		fragLevel, fragInterval, defragment := s.cfg.Indexd.Fragmentation()
 		c := client.NewIndexdClient(db, sdkClient, share.Name, wg.ID, share.DataShards, share.ParityShards, client.PackingOptions{
-			MinSize: s.cfg.MinPackedSlabSize,
-			MaxAge:  s.cfg.MaxBufferAge.Duration(),
+			MinSize: s.cfg.Indexd.MinPackedSlabSize,
+			MaxAge:  s.cfg.Indexd.MaxBufferAge.Duration(),
 		}, client.FragmentationOptions{
 			Threshold:  fragLevel,
 			Interval:   fragInterval,

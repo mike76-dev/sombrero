@@ -350,6 +350,9 @@ func (db *Database) GetWorkgroups() (wgs []Workgroup, err error) {
 
 // AddWorkgroup adds a new workgroup to the database.
 func (db *Database) AddWorkgroup(wg Workgroup) error {
+	if wg.UUID == AnonymousWorkgroup {
+		return ErrReservedWorkgroup
+	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
 			INSERT INTO workgroups (uuid, name)

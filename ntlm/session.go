@@ -18,6 +18,13 @@ type Session struct {
 	user   string
 	domain string
 
+	// guest records that the session is a guest one: either the account it
+	// authenticated against has no password, or the client asked to be let in
+	// as a guest and was admitted as anonymous. anonymous records that there is
+	// no account behind it at all.
+	guest     bool
+	anonymous bool
+
 	negotiateFlags     uint32
 	exportedSessionKey []byte
 	clientSigningKey   []byte
@@ -36,9 +43,30 @@ type SecurityContext struct {
 	SessionKey []byte
 }
 
+// AnonymousContext is the security context of a session with no account behind
+// it: the well-known anonymous logon identity S-1-5-7 ([MS-DTYP] 2.4.2.4). Such
+// a session is still asked who owns what it can see, and this is the answer it
+// gives.
+func AnonymousContext() SecurityContext {
+	return SecurityContext{
+		UserRID: 7,
+		DomainSID: &dtyp.SID{
+			Revision:    1,
+			IDAuthority: &dtyp.SIDIDAuthority{Value: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x05}},
+		},
+	}
+}
+
 // GetSecurityContext generates a security context from the session data.
 func (s *Session) GetSecurityContext() (sc SecurityContext) {
 	if s.user == "" {
+		// A session with no name of its own still has an identity to answer
+		// with, and a context with nothing in it carries no SID at all: what
+		// asks for one has nothing to read but a nil pointer.
+		if s.anonymous {
+			sc = AnonymousContext()
+			sc.SessionKey = s.exportedSessionKey
+		}
 		return
 	}
 
@@ -92,6 +120,18 @@ func (s *Session) User() string {
 // Domain returns the session's domain name.
 func (s *Session) Domain() string {
 	return s.domain
+}
+
+// IsGuest reports whether the session is a guest one, whether it authenticated
+// against a passwordless account or was admitted as anonymous under the guest
+// name.
+func (s *Session) IsGuest() bool {
+	return s.guest
+}
+
+// IsAnonymous reports whether the session was established without credentials.
+func (s *Session) IsAnonymous() bool {
+	return s.anonymous
 }
 
 // SessionKey returns the session's signing key.

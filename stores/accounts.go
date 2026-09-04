@@ -1,6 +1,7 @@
 package stores
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -25,6 +26,25 @@ type Account struct {
 	Password  string `json:"password"`
 	NTHash    []byte `json:"-"`
 	Workgroup string `json:"workgroup"`
+}
+
+// emptyNTHash is what an account with no password hashes to.
+var emptyNTHash = ntHash("")
+
+// ntHash returns the NT hash of the password, which is what an account is
+// stored and authenticated with.
+func ntHash(password string) []byte {
+	h := md4.New()
+	h.Write(utils.EncodeStringToBytes(password))
+	return h.Sum(nil)
+}
+
+// Passwordless reports whether the account is one that anybody can log in as,
+// which is what makes it a guest account. Such an account still authenticates
+// like any other: the client has to compute its response over the same empty
+// password, which is what keeps the session keys of both sides in step.
+func (acc Account) Passwordless() bool {
+	return bytes.Equal(acc.NTHash, emptyNTHash)
 }
 
 // GetAccountByID tries to retrieve the account by its ID.
@@ -81,6 +101,9 @@ func (db *Database) FindAccount(username, workgroup string) (acc Account, err er
 
 // AddAccount adds a new account to the database.
 func (db *Database) AddAccount(acc Account) error {
+	if IsAnonymousWorkgroup(acc.Workgroup) {
+		return ErrReservedWorkgroup
+	}
 	u, err := uuid.Parse(acc.Workgroup)
 	if err != nil {
 		return fmt.Errorf("invalid workgroup UUID: %w", err)
@@ -91,9 +114,7 @@ func (db *Database) AddAccount(acc Account) error {
 			VALUES ($1, $2, (SELECT id FROM workgroups WHERE uuid = $3))
 		`
 
-		h := md4.New()
-		h.Write(utils.EncodeStringToBytes(acc.Password))
-		acc.NTHash = h.Sum(nil)
+		acc.NTHash = ntHash(acc.Password)
 
 		_, err := tx.Exec(ctx, query, acc.Username, acc.NTHash, u[:])
 		if err != nil {

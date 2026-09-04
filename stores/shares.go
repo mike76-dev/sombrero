@@ -11,16 +11,25 @@ import (
 )
 
 // Share represents a renterd bucket, which is mounted as a remote share.
+//
+// AllowGuest lets the passwordless accounts of a workgroup connect to the
+// share, and AllowAnonymous lets clients that present no credentials at all
+// connect, which the server-wide Anonymous setting has to permit as well.
+// PublicDir is the one folder an anonymous session may use, and is what its
+// uploads are visible in.
 type Share struct {
-	Name         string    `json:"name"`
-	Type         string    `json:"type"`
-	ServerName   string    `json:"serverName"`
-	Password     string    `json:"password,omitempty"`
-	Bucket       string    `json:"bucket,omitempty"`
-	Remark       string    `json:"remark,omitempty"`
-	CreatedAt    time.Time `json:"createdAt,omitempty"`
-	DataShards   uint8     `json:"dataShards,omitempty"`
-	ParityShards uint8     `json:"parityShards,omitempty"`
+	Name           string    `json:"name"`
+	Type           string    `json:"type"`
+	ServerName     string    `json:"serverName"`
+	Password       string    `json:"password,omitempty"`
+	Bucket         string    `json:"bucket,omitempty"`
+	Remark         string    `json:"remark,omitempty"`
+	CreatedAt      time.Time `json:"createdAt,omitempty"`
+	DataShards     uint8     `json:"dataShards,omitempty"`
+	ParityShards   uint8     `json:"parityShards,omitempty"`
+	AllowGuest     bool      `json:"allowGuest,omitempty"`
+	AllowAnonymous bool      `json:"allowAnonymous,omitempty"`
+	PublicDir      string    `json:"publicDir,omitempty"`
 }
 
 // RegisterShare registers a new share in the database.
@@ -36,11 +45,14 @@ func (db *Database) RegisterShare(s Share) error {
 				remark,
 				created_at,
 				data_shards,
-				parity_shards
+				parity_shards,
+				allow_guest,
+				allow_anonymous,
+				public_dir
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		`
-		_, err := tx.Exec(ctx, query, s.Name, s.Type, s.ServerName, s.Password, s.Bucket, s.Remark, time.Now(), s.DataShards, s.ParityShards)
+		_, err := tx.Exec(ctx, query, s.Name, s.Type, s.ServerName, s.Password, s.Bucket, s.Remark, time.Now(), s.DataShards, s.ParityShards, s.AllowGuest, s.AllowAnonymous, s.PublicDir)
 		if err != nil {
 			return fmt.Errorf("failed to register share: %w", err)
 		} else if err := db.shares.RegisterShare(s); err != nil {
@@ -97,49 +109,98 @@ func (db *Database) GetShare(name string) (s Share, err error) {
 				remark,
 				created_at,
 				data_shards,
-				parity_shards
+				parity_shards,
+				allow_guest,
+				allow_anonymous,
+				public_dir
 			FROM shares
 			WHERE share_name = $1
 		`
-		var backend, server, password, bucket, remark string
+		var backend, server, password, bucket, remark, publicDir string
 		var created time.Time
 		var dataShards, parityShards int
-		err = tx.QueryRow(ctx, query, name).Scan(&backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards)
+		var allowGuest, allowAnonymous bool
+		err = tx.QueryRow(ctx, query, name).Scan(&backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards, &allowGuest, &allowAnonymous, &publicDir)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		} else if err != nil {
 			return fmt.Errorf("failed to retrieve share: %w", err)
 		}
 		s = Share{
-			Name:         name,
-			Type:         backend,
-			ServerName:   server,
-			Password:     password,
-			Bucket:       bucket,
-			Remark:       remark,
-			CreatedAt:    created,
-			DataShards:   uint8(dataShards),
-			ParityShards: uint8(parityShards),
+			Name:           name,
+			Type:           backend,
+			ServerName:     server,
+			Password:       password,
+			Bucket:         bucket,
+			Remark:         remark,
+			CreatedAt:      created,
+			DataShards:     uint8(dataShards),
+			ParityShards:   uint8(parityShards),
+			AllowGuest:     allowGuest,
+			AllowAnonymous: allowAnonymous,
+			PublicDir:      publicDir,
 		}
 		return nil
 	})
 	return
 }
 
+// shareColumns is what a share is read back from, aliased to s, in the order
+// scanShares takes them.
+const shareColumns = `
+	s.share_name,
+	s.share_type,
+	s.server_name,
+	s.api_password,
+	s.bucket,
+	s.remark,
+	s.created_at,
+	s.data_shards,
+	s.parity_shards,
+	s.allow_guest,
+	s.allow_anonymous,
+	s.public_dir
+`
+
+// scanShares reads the rows of a query that selects shareColumns.
+func scanShares(rows pgx.Rows) (shares []Share, err error) {
+	defer rows.Close()
+
+	for rows.Next() {
+		var s Share
+		var dataShards, parityShards int
+		if err := rows.Scan(
+			&s.Name,
+			&s.Type,
+			&s.ServerName,
+			&s.Password,
+			&s.Bucket,
+			&s.Remark,
+			&s.CreatedAt,
+			&dataShards,
+			&parityShards,
+			&s.AllowGuest,
+			&s.AllowAnonymous,
+			&s.PublicDir,
+		); err != nil {
+			return nil, fmt.Errorf("failed to retrieve share: %w", err)
+		}
+		s.DataShards = uint8(dataShards)
+		s.ParityShards = uint8(parityShards)
+		shares = append(shares, s)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate shares: %w", err)
+	}
+	return shares, nil
+}
+
 // GetShares lists all shares the specified account has access to.
 func (db *Database) GetShares(acc Account) (shares []Share, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
-			SELECT DISTINCT
-				s.share_name,
-				s.share_type,
-				s.server_name,
-				s.api_password,
-				s.bucket,
-				s.remark,
-				s.created_at,
-				s.data_shards,
-				s.parity_shards
+			SELECT DISTINCT ` + shareColumns + `
 			FROM shares AS s
 			JOIN policies AS p
 			ON p.share_name = s.share_name
@@ -153,27 +214,8 @@ func (db *Database) GetShares(acc Account) (shares []Share, err error) {
 		if err != nil {
 			return fmt.Errorf("failed to retrieve share: %w", err)
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var name, backend, server, password, bucket, remark string
-			var created time.Time
-			var dataShards, parityShards int
-			if err := rows.Scan(&name, &backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards); err != nil {
-				return fmt.Errorf("failed to retrieve share: %w", err)
-			}
-			shares = append(shares, Share{
-				Name:         name,
-				Type:         backend,
-				ServerName:   server,
-				Password:     password,
-				Bucket:       bucket,
-				Remark:       remark,
-				CreatedAt:    created,
-				DataShards:   uint8(dataShards),
-				ParityShards: uint8(parityShards),
-			})
-		}
-		return nil
+		shares, err = scanShares(rows)
+		return err
 	})
 	return
 }
@@ -182,44 +224,16 @@ func (db *Database) GetShares(acc Account) (shares []Share, err error) {
 func (db *Database) GetAllShares() (shares []Share, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
-			SELECT
-				share_name,
-				share_type,
-				server_name,
-				api_password,
-				bucket,
-				remark,
-				created_at,
-				data_shards,
-				parity_shards
-			FROM shares
-			ORDER BY share_name
+			SELECT ` + shareColumns + `
+			FROM shares AS s
+			ORDER BY s.share_name
 		`
 		rows, err := tx.Query(ctx, query)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve shares: %w", err)
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var name, backend, server, password, bucket, remark string
-			var created time.Time
-			var dataShards, parityShards int
-			if err := rows.Scan(&name, &backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards); err != nil {
-				return fmt.Errorf("failed to retrieve shares: %w", err)
-			}
-			shares = append(shares, Share{
-				Name:         name,
-				Type:         backend,
-				ServerName:   server,
-				Password:     password,
-				Bucket:       bucket,
-				Remark:       remark,
-				CreatedAt:    created,
-				DataShards:   uint8(dataShards),
-				ParityShards: uint8(parityShards),
-			})
-		}
-		return nil
+		shares, err = scanShares(rows)
+		return err
 	})
 	return
 }
@@ -258,4 +272,40 @@ func (db *Database) GetAccounts(sh Share) (ars []AccessRights, err error) {
 		return nil
 	})
 	return
+}
+
+// UpdateShare changes what a share offers its clients: who it admits and the
+// folder an anonymous session is confined to, along with its remark. What the
+// share is backed by is not part of it — a share that changed its server,
+// bucket or redundancy would be a different share holding the same files.
+func (db *Database) UpdateShare(s Share) error {
+	if s.Name == "" {
+		return nil
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			UPDATE shares
+			SET
+				remark = $2,
+				allow_guest = $3,
+				allow_anonymous = $4,
+				public_dir = $5
+			WHERE share_name = $1
+		`
+
+		tag, err := tx.Exec(ctx, query, s.Name, s.Remark, s.AllowGuest, s.AllowAnonymous, s.PublicDir)
+		if err != nil {
+			return fmt.Errorf("failed to update share: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+
+		// The running server holds a copy of what it was registered with.
+		if err := db.shares.UpdateShare(s); err != nil {
+			return fmt.Errorf("failed to apply the share settings: %w", err)
+		}
+		return nil
+	})
 }

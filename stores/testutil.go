@@ -15,6 +15,7 @@ import (
 type noopShares struct{}
 
 func (noopShares) RegisterShare(sh Share) error                                 { return nil }
+func (noopShares) UpdateShare(sh Share) error                                   { return nil }
 func (noopShares) RemoveShare(sh Share) error                                   { return nil }
 func (noopShares) UpdateAccessRights(sh Share, ar AccessRights) error           { return nil }
 func (noopShares) RemoveAccess(acc Account)                                     {}

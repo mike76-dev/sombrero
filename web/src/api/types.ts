@@ -18,6 +18,29 @@ export interface Share {
   createdAt?: string
   dataShards?: number
   parityShards?: number
+  // Who the share admits besides the accounts its policies name: the
+  // passwordless accounts of a workgroup, and clients presenting no
+  // credentials at all. `publicDir` is the one folder the latter may use.
+  allowGuest?: boolean
+  allowAnonymous?: boolean
+  publicDir?: string
+}
+
+// ShareSettings is what PUT /share/:name changes. What a share is backed by is
+// fixed when it is registered.
+export interface ShareSettings {
+  remark?: string
+  allowGuest?: boolean
+  allowAnonymous?: boolean
+  publicDir?: string
+}
+
+// ServerSettings is how the server itself is configured, as far as the UI needs
+// to know. Anonymous access has to be allowed here before any share can offer
+// it.
+export interface ServerSettings {
+  mode: string
+  anonymous: boolean
 }
 
 export interface PublicDir {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/client"
+	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/utils"
@@ -626,7 +627,7 @@ func newSMBTest(t *testing.T) *smbTest {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	h.srv = newServerState(ctx, store, false, stores.IndexdConfig{})
+	h.srv = newServerState(ctx, store, stores.Config{})
 	h.srv.shareList[h.share.name] = h.share
 
 	// A share holds security for whoever may use it, and grants nothing to anybody else, so the
@@ -876,6 +877,17 @@ func (cl *testClient) goesAway() {
 func (cl *testClient) speaking(dialect uint16) *testClient {
 	cl.conn.negotiateDialect = dialect
 	cl.conn.dialect = dialectName(dialect)
+	return cl
+}
+
+// anonymously turns the session into what an anonymous login leaves behind: the flag, and the
+// reserved identity the server binds such a session to. Setting the flag alone would leave the
+// session carrying the user it was dialled as, which the share's security tables know.
+func (cl *testClient) anonymously() *testClient {
+	cl.ss.isAnonymous = true
+	cl.ss.userName = stores.AnonymousAccount
+	cl.ss.workgroup = stores.AnonymousWorkgroup.String()
+	cl.ss.securityContext = ntlm.AnonymousContext()
 	return cl
 }
 

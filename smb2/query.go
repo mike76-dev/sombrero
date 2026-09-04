@@ -1290,11 +1290,15 @@ func NewSecInfo(ctx ntlm.SecurityContext, info uint32, access uint32) []byte {
 	}
 
 	if info&OWNER_SECURITY_INFORMATION > 0 {
+		var domain []uint32
+		if ctx.DomainSID != nil {
+			domain = ctx.DomainSID.SubAuthority
+		}
 		si.Owner = dtyp.SID{
 			Revision:          1,
-			SubAuthorityCount: uint8(len(ctx.DomainSID.SubAuthority)) + 1,
+			SubAuthorityCount: uint8(len(domain)) + 1,
 			IDAuthority:       &dtyp.SIDIDAuthority{Value: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x05}},
-			SubAuthority:      append(ctx.DomainSID.SubAuthority, ctx.UserRID),
+			SubAuthority:      append(domain, ctx.UserRID),
 		}
 	}
 

@@ -250,6 +250,12 @@ textarea {
   user-select: none;
 }
 
+/* A checkbox that stands on its own under a row of fields, rather than beside
+   the other checkboxes of a group. */
+.checkbox-spaced {
+  margin-top: 14px;
+}
+
 .checkbox input {
   accent-color: var(--accent);
   width: 16px;

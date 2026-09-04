@@ -9,7 +9,9 @@ import type {
   IsBannedResponse,
   OrphansResponse,
   PublicDir,
+  ServerSettings,
   ServerStats,
+  ShareSettings,
   Share,
   UnpinOrphansResponse,
   Workgroup,
@@ -61,6 +63,9 @@ export const listShares = () => request<Share[] | null>('/shares')
 
 export const getShare = (name: string) =>
   request<Share>(`/share/${encodeURIComponent(name)}`)
+
+export const updateShare = (name: string, settings: ShareSettings) =>
+  request(`/share/${encodeURIComponent(name)}`, { method: 'PUT', body: settings })
 
 export const removeShare = (name: string) =>
   request(`/share/${encodeURIComponent(name)}`, { method: 'DELETE' })
@@ -137,6 +142,8 @@ export const removeWorkgroup = (id: string) =>
 // Stats
 
 export const getStats = () => request<ServerStats>('/stats')
+
+export const getSettings = () => request<ServerSettings>('/settings')
 
 // Connections
 

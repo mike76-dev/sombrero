@@ -20,6 +20,7 @@ import (
 	"github.com/mike76-dev/sombrero/kdf"
 	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 	"lukechampine.com/frand"
 )
 
@@ -209,11 +210,20 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 	ss.securityContext = ss.connection.ntlmServer.Session().GetSecurityContext()
 	ss.userName = ss.connection.ntlmServer.Session().User()
 	ss.workgroup = ss.connection.ntlmServer.Session().Domain()
-	if ss.userName == "" {
-		ss.isAnonymous = true
-	}
-	if ss.userName == "guest" {
-		ss.isGuest = true
+	// A guest is whoever logged in without a password, whatever the account is
+	// called: the name "guest" is a convention of the clients, not something
+	// the rights hang off.
+	ss.isGuest = ss.connection.ntlmServer.Session().IsGuest()
+
+	// An anonymous session has no account behind it, so it carries no identity
+	// of its own. It acts as the server's reserved account, which is what owns
+	// what it uploads and what nobody can log in as. A client that asked for
+	// guest access without naming a workgroup lands here too, and is both:
+	// anonymous in what it may reach, a guest in what it is told.
+	ss.isAnonymous = ss.connection.ntlmServer.Session().IsAnonymous()
+	if ss.isAnonymous {
+		ss.userName = stores.AnonymousAccount
+		ss.workgroup = stores.AnonymousWorkgroup.String()
 	}
 	ss.signingRequired = (req.SecurityMode()&smb2.NEGOTIATE_SIGNING_REQUIRED > 0) && !ss.isAnonymous && !ss.isGuest && ss.connection.shouldSign
 
@@ -228,7 +238,11 @@ func (ss *session) finalize(req smb2.SessionSetupRequest) {
 	}
 
 	ss.sessionKey = ss.connection.ntlmServer.Session().SessionKey()
-	ss.encryptData = ss.connection.server.encryptData
+
+	// A session with no key behind it neither signs nor encrypts. An anonymous
+	// one holds no key at all, and a guest holds one derived from a password
+	// that is public, so [MS-SMB2] 3.3.5.5.3 keeps both out of either.
+	ss.encryptData = ss.connection.server.encryptData && !ss.isAnonymous && !ss.isGuest
 
 	if ss.connection.server.debug {
 		buf := make([]byte, 8)

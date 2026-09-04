@@ -505,7 +505,7 @@ func TestBindSessionAnswersTheFirstLegWithAChallenge(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice").signing()
 	c := h.joining(cl)
-	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 	sid := cl.ss.sessionID
 	msg := signed(t, bindingRequest(1, sid, ntlmMessage(1, 32)), cl.ss.signingKey, smb2.SMB_DIALECT_311, 0)
@@ -557,7 +557,7 @@ func TestBindSessionRefusesAnAuthenticationThatFails(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice").signing()
 	c := h.joining(cl)
-	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 	sid := cl.ss.sessionID
 
@@ -596,7 +596,7 @@ func TestBindSessionDropsTheHashOfAFailedExchange(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice").signing()
 	c := h.joining(cl)
-	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 	sid := cl.ss.sessionID
 
@@ -777,7 +777,7 @@ func TestBindSessionJoinsTheSession(t *testing.T) {
 
 			cl := h.dial("carol").signing().speaking(tt.dialect)
 			c := h.joining(cl)
-			c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+			c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 			sid := cl.ss.sessionID
 			start := bytes.Clone(c.preauthIntegrityHashValue)
@@ -846,7 +846,7 @@ func TestBindSessionRefusesAnotherUser(t *testing.T) {
 	// The session belongs to dave; carol is the one who turns up on the new connection.
 	cl := h.dial("dave").signing()
 	c := h.joining(cl)
-	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 	sid := cl.ss.sessionID
 	_, resp, bound := h.bindOver(c, cl.ss, nc, smb2.SMB_DIALECT_311)
@@ -879,7 +879,7 @@ func TestBindSessionRefusesTheWrongPassword(t *testing.T) {
 
 	cl := h.dial("carol").signing()
 	c := h.joining(cl)
-	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store)
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
 
 	sid := cl.ss.sessionID
 	_, resp, bound := h.bindOver(c, cl.ss, nc, smb2.SMB_DIALECT_311)

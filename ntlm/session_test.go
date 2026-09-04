@@ -10,7 +10,7 @@ import (
 func authenticated(t *testing.T, user, workgroup string) *Session {
 	t.Helper()
 
-	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount())
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), false)
 	if err := authenticateAs(t, srv, user, workgroup, ntHashOf(testPassword)); err != nil {
 		t.Fatalf("the exchange did not complete: %v", err)
 	}
@@ -126,6 +126,34 @@ func TestSecurityContextOfNobody(t *testing.T) {
 	sc := s.GetSecurityContext()
 	if sc.User != "" || sc.Domain != "" || sc.UserRID != 0 || sc.DomainSID != nil {
 		t.Errorf("a session with nobody in it gave the context %+v", sc)
+	}
+}
+
+// TestSecurityContextOfAnAnonymousSession is the session admitted with no account behind it. It
+// has no name to build an identifier from, but it is still asked who owns what it can see, and a
+// context with no domain in it is one the callers reach into for a nil.
+func TestSecurityContextOfAnAnonymousSession(t *testing.T) {
+	srv := NewServer("SOMBRERO", "WORKGROUP", knownAccount(), true)
+	if _, err := srv.Challenge(negotiate(t)); err != nil {
+		t.Fatalf("Challenge: %v", err)
+	}
+
+	// An AUTHENTICATE message with no user, no domain and no response.
+	amsg := make([]byte, 64)
+	copy(amsg[:8], signature)
+	binary.LittleEndian.PutUint32(amsg[8:12], NtLmAuthenticate)
+	binary.LittleEndian.PutUint32(amsg[60:64], defaultFlags&^NTLMSSP_NEGOTIATE_VERSION&^NTLMSSP_NEGOTIATE_KEY_EXCH)
+	if err := srv.Authenticate(amsg); err != nil {
+		t.Fatalf("the anonymous login was turned away: %v", err)
+	}
+
+	sc := srv.Session().GetSecurityContext()
+	if sc.DomainSID == nil {
+		t.Fatal("an anonymous session carries no identifier at all")
+	}
+	if sc.UserRID != 7 || len(sc.DomainSID.SubAuthority) != 0 {
+		t.Errorf("the session is S-1-5-%v-%d, want the anonymous logon, S-1-5-7",
+			sc.DomainSID.SubAuthority, sc.UserRID)
 	}
 }
 

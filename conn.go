@@ -776,14 +776,19 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				return resp, nil, nil
 			}
 
-			// User successfully authenticated.
+			// User successfully authenticated. What an anonymous or a guest
+			// session may be held to was settled in finalize and is not
+			// revisited here: neither can sign or encrypt, so a server that
+			// asks it to is asking for a session nothing can use.
 			ss.finalize(ssr)
-			if smb2.Is3X(c.negotiateDialect) && c.server.encryptData && c.cipherID != 0 {
-				ss.signingRequired = false
-				ss.encryptData = true
-			} else {
-				ss.signingRequired = true
-				ss.encryptData = false
+			if !ss.isAnonymous && !ss.isGuest {
+				if smb2.Is3X(c.negotiateDialect) && c.server.encryptData && c.cipherID != 0 {
+					ss.signingRequired = false
+					ss.encryptData = true
+				} else {
+					ss.signingRequired = true
+					ss.encryptData = false
+				}
 			}
 			ss.activate()
 
@@ -837,12 +842,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		var flags uint16
 		if ss.stateNow() == sessionValid {
-			switch strings.ToLower(ss.userName) {
-			case "":
-				flags = smb2.SESSION_FLAG_IS_NULL
-			case "guest":
+			switch {
+			case ss.isGuest:
 				flags = smb2.SESSION_FLAG_IS_GUEST
-			default:
+			case ss.isAnonymous:
+				flags = smb2.SESSION_FLAG_IS_NULL
 			}
 		}
 		if smb2.Is3X(c.negotiateDialect) && ss.encryptData && c.clientCapabilities&smb2.GLOBAL_CAP_ENCRYPTION != 0 {
@@ -963,7 +967,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		resp := &smb2.TreeConnectResponse{}
 		resp.FromRequest(tcr)
-		resp.Generate(tc.treeID, uint8(tc.share.shareType), tc.maximalAccess, tc.share.encryptData, tc.share.compressData)
+		// A tree is only reported as encrypted to a session that can encrypt. Telling one that
+		// holds no key that everything on the share has to be encrypted leaves it nothing it may
+		// legally send, and a client handed that contradiction hangs up without a word.
+		resp.Generate(tc.treeID, uint8(tc.share.shareType), tc.maximalAccess,
+			tc.share.encryptData && !ss.isAnonymous && !ss.isGuest, tc.share.compressData)
 
 		return resp, ss, nil
 
@@ -1132,6 +1140,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 			return resp, ss, nil
 		}
+		path = tc.confine(path)
 
 		co := cr.CreateOptions()
 		if co&smb2.FILE_DELETE_ON_CLOSE > 0 && (tc.maximalAccess&(smb2.DELETE|smb2.GENERIC_ALL|smb2.GENERIC_EXECUTE|smb2.GENERIC_READ|smb2.GENERIC_WRITE) == 0) {
@@ -2865,6 +2874,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					resp := smb2.NewErrorResponse(sir, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 					return resp, ss, nil
 				}
+				newName = tc.confine(newName)
 
 				// A rename moves what the store holds, and a file still being written is not held
 				// by it yet: the bytes are in the upload buffer, under a name the rename is about

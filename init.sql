@@ -7,7 +7,10 @@ CREATE TABLE shares (
     remark TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     data_shards INT NOT NULL DEFAULT 0,
-    parity_shards INT NOT NULL DEFAULT 0
+    parity_shards INT NOT NULL DEFAULT 0,
+    allow_guest BOOLEAN NOT NULL DEFAULT FALSE,
+    allow_anonymous BOOLEAN NOT NULL DEFAULT FALSE,
+    public_dir TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE workgroups (
@@ -18,6 +21,10 @@ CREATE TABLE workgroups (
     CONSTRAINT workgroups_uuid_length CHECK (octet_length(uuid) = 16),
     CONSTRAINT workgroups_unique UNIQUE (uuid)
 );
+
+CREATE FUNCTION anonymous_workgroup() RETURNS INT AS $$
+    SELECT id FROM workgroups WHERE uuid = '\x00000000000000000000000000000000'
+$$ LANGUAGE SQL STABLE;
 
 CREATE TABLE public_dirs (
     id SERIAL PRIMARY KEY,

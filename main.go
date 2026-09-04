@@ -100,8 +100,16 @@ func main() {
 	log.Printf("SMB: listening at %s ...\n", l.Addr())
 	defer l.Close()
 
+	// The identity that anonymous sessions act as has to exist before one can
+	// be established, and nothing else creates it.
+	if cfg.Anonymous {
+		if _, err := db.EnsureAnonymous(); err != nil {
+			log.Fatalf("failed to prepare anonymous access: %v", err)
+		}
+	}
+
 	// Start the SMB server.
-	server := newServer(ctx, l, db, cfg.Debug, cfg.Indexd)
+	server := newServer(ctx, l, db, cfg)
 	server.applyCapabilities()
 	db.WithShares(server)
 
@@ -111,7 +119,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer lAPI.Close()
-	a := api.NewAPI(ctx, db, server, cfg.Indexd, cfg.Mode)
+	a := api.NewAPI(ctx, db, server, cfg)
 	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, cfg.API.Password)}
 	go apiSrv.Serve(lAPI)
 	log.Printf("API and web UI: listening at http://%s ...\n", lAPI.Addr())
@@ -175,11 +183,8 @@ func main() {
 			}()
 		}
 		for _, share := range shares {
-			if share.client != nil { // renterd share
-				closeClient(share.client)
-			}
-			for _, conn := range share.indexdConns { // indexd share
-				closeClient(conn.client)
+			for _, c := range share.clients() {
+				closeClient(c)
 			}
 		}
 		wg.Wait()
@@ -232,7 +237,7 @@ func main() {
 
 				log.Println("Incoming connection from", conn.RemoteAddr())
 				c := server.newConnection(conn)
-				c.ntlmServer = ntlm.NewServer("SERVER", "", db)
+				c.ntlmServer = ntlm.NewServer("SERVER", "", db, cfg.Anonymous)
 				c.readLoop(host)
 			}()
 		}

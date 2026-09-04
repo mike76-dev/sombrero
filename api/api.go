@@ -52,6 +52,7 @@ type Store interface {
 	ClearAccessRights(acc stores.Account) error
 
 	RegisterShare(s stores.Share) error
+	UpdateShare(s stores.Share) error
 	UnregisterShare(name string) error
 	GetShare(name string) (s stores.Share, err error)
 	GetShares(acc stores.Account) (shares []stores.Share, err error)
@@ -153,6 +154,17 @@ type UnpinOrphansResponse struct {
 	Errors   map[string]string `json:"errors,omitempty"`
 }
 
+// SettingsResponse is the response type for GET /settings. It carries what the
+// web UI has to know about how the server is configured, rather than anything
+// else the config file holds.
+type SettingsResponse struct {
+	Mode string `json:"mode"`
+
+	// Anonymous is the server-wide switch every share's own setting hangs off:
+	// with it off, no share admits an anonymous session however it is set up.
+	Anonymous bool `json:"anonymous"`
+}
+
 // ServerStats keeps track of the server statistics.
 type ServerStats struct {
 	Start      time.Time `json:"start"`      // The time the server started
@@ -176,7 +188,7 @@ type WorkgroupResponse struct {
 	Name string    `json:"name,omitempty"`
 }
 
-// ConnectRequestResponse is the response type for POST /connect/request/:workgroup/:share.
+// ConnectRequestResponse is the response type for POST /connect/:workgroup/:share.
 type ConnectRequestResponse struct {
 	URL string `json:"url"`
 }
@@ -193,7 +205,7 @@ type API struct {
 	router          httprouter.Router
 	store           Store
 	server          Server
-	cfg             stores.IndexdConfig
+	cfg             stores.Config
 	mode            stores.ServerMode
 	ctx             context.Context
 	pendingBuilders sync.Map // key: "workgroupUUID/shareName" → *sdk.Builder
@@ -202,12 +214,12 @@ type API struct {
 // NewAPI returns an initialized API object. srv is the running SMB server and
 // may be nil, in which case the statistics come back empty and the endpoints
 // that need a storage backend report the share as unavailable.
-func NewAPI(ctx context.Context, s Store, srv Server, cfg stores.IndexdConfig, mode stores.ServerMode) *API {
+func NewAPI(ctx context.Context, s Store, srv Server, cfg stores.Config) *API {
 	api := &API{
 		store:  s,
 		server: srv,
 		cfg:    cfg,
-		mode:   mode,
+		mode:   cfg.Mode,
 		ctx:    ctx,
 	}
 	api.buildHTTPRoutes()
@@ -307,6 +319,10 @@ func (api *API) buildHTTPRoutes() {
 		api.orphansHandlerDELETE(w, req, ps)
 	})
 
+	router.PUT("/share/:name", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.shareHandlerPUT(w, req, ps)
+	})
+
 	router.GET("/share/:name/fragmentation", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.fragmentationHandlerGET(w, req, ps)
 	})
@@ -357,6 +373,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.GET("/stats", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.statsHandlerGET(w, req, ps)
+	})
+
+	router.GET("/settings", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.settingsHandlerGET(w, req, ps)
 	})
 
 	router.POST("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -509,6 +529,30 @@ func (api *API) accountHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 	}
 	acc.Workgroup = wg.UUID.String()
 
+	// An account with no password is one anybody can log in as, so it is only
+	// worth having where a share takes guests. Without one it could connect
+	// nowhere, and the refusal says so rather than leaving an open account
+	// behind that never works.
+	if acc.Password == "" {
+		shares, err := api.store.GetAllShares()
+		if err != nil {
+			log.Printf("failed to retrieve shares: %v", err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		var guests bool
+		for _, share := range shares {
+			if share.AllowGuest {
+				guests = true
+				break
+			}
+		}
+		if !guests {
+			writeError(w, "no share offers guest access, so a passwordless account has nowhere to connect", http.StatusBadRequest)
+			return
+		}
+	}
+
 	if err := api.store.AddAccount(acc); err != nil {
 		log.Printf("failed to add account: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
@@ -573,6 +617,28 @@ func (api *API) accountsHandlerDELETE(w http.ResponseWriter, req *http.Request, 
 	writeSuccess(w)
 }
 
+// checkShareAccess validates what a share says about guest and anonymous
+// access, and reports the status and message to refuse it with. An anonymous
+// session is confined to the public folder, so a share that offers it has to
+// name one, and the server has to allow anonymous access at all.
+func checkShareAccess(share stores.Share, anonymous bool) (int, string) {
+	if share.PublicDir != "" && strings.ContainsAny(share.PublicDir, `/\`) {
+		return http.StatusBadRequest, "the public folder is a folder name, not a path"
+	}
+
+	if !share.AllowAnonymous {
+		return 0, ""
+	}
+	if !anonymous {
+		return http.StatusBadRequest, "anonymous access is turned off in the server config"
+	}
+	if share.PublicDir == "" {
+		return http.StatusBadRequest, "anonymous access needs a public folder to confine it to"
+	}
+
+	return 0, ""
+}
+
 // shareHandlerPOST handles the POST /share calls.
 func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	var share stores.Share
@@ -590,9 +656,60 @@ func (api *API) shareHandlerPOST(w http.ResponseWriter, req *http.Request, _ htt
 		writeError(w, "only renterd shares are supported in Lite mode", http.StatusBadRequest)
 		return
 	}
+	if status, msg := checkShareAccess(share, api.cfg.Anonymous); msg != "" {
+		writeError(w, msg, status)
+		return
+	}
 
 	if err := api.store.RegisterShare(share); err != nil {
 		log.Printf("failed to register share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeSuccess(w)
+}
+
+// shareHandlerPUT handles the PUT /share/:name calls. It changes what a share
+// offers its clients — guest and anonymous access, the public folder, and the
+// remark — and leaves what it is backed by alone: a share that changed its
+// server or its redundancy would be a different share holding the same files.
+func (api *API) shareHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	shareName := strings.ToLower(ps.ByName("name"))
+	if shareName == "" {
+		writeError(w, "share name cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	var settings stores.Share
+	if err := json.NewDecoder(req.Body).Decode(&settings); err != nil {
+		writeError(w, "invalid share structure", http.StatusBadRequest)
+		return
+	}
+
+	share, err := api.store.GetShare(shareName)
+	if err != nil {
+		log.Printf("failed to find share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if share.Name == "" {
+		writeError(w, "share not found", http.StatusNotFound)
+		return
+	}
+
+	share.Remark = settings.Remark
+	share.AllowGuest = settings.AllowGuest
+	share.AllowAnonymous = settings.AllowAnonymous
+	share.PublicDir = settings.PublicDir
+
+	if status, msg := checkShareAccess(share, api.cfg.Anonymous); msg != "" {
+		writeError(w, msg, status)
+		return
+	}
+
+	if err := api.store.UpdateShare(share); err != nil {
+		log.Printf("failed to update share: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -1341,6 +1458,14 @@ func (api *API) statsHandlerGET(w http.ResponseWriter, req *http.Request, _ http
 	writeJSON(w, stats)
 }
 
+// settingsHandlerGET handles the GET /settings calls.
+func (api *API) settingsHandlerGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	writeJSON(w, SettingsResponse{
+		Mode:      api.cfg.Mode.String(),
+		Anonymous: api.cfg.Anonymous,
+	})
+}
+
 // connectHandlerPOST handles the POST /connect/:workgroup/:share calls.
 // It initiates an indexd connection-approval flow by sending a registration request
 // to the indexer and returning the URL the admin must visit to approve it.
@@ -1367,11 +1492,11 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 	}
 
 	builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
-		ID:          types.HashBytes(append([]byte(api.cfg.Name), []byte(api.cfg.Description)...)),
-		Name:        api.cfg.Name,
-		Description: api.cfg.Description,
-		LogoURL:     api.cfg.LogoURL,
-		ServiceURL:  api.cfg.ServiceURL,
+		ID:          types.HashBytes(append([]byte(api.cfg.Indexd.Name), []byte(api.cfg.Indexd.Description)...)),
+		Name:        api.cfg.Indexd.Name,
+		Description: api.cfg.Indexd.Description,
+		LogoURL:     api.cfg.Indexd.LogoURL,
+		ServiceURL:  api.cfg.Indexd.ServiceURL,
 	})
 
 	approvalURL, err := builder.RequestConnection(req.Context())
@@ -1397,7 +1522,7 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 // Three paths:
 //  1. Body with appKey (hex) — reconnect using an existing key.
 //  2. No body, indexd share, pending builder present — complete the approval flow
-//     started by POST /connect/request, derive the app key, and return it.
+//     started by POST /connect/:workgroup/:share, derive the app key, and return it.
 //  3. No body, renterd share — no key required.
 //
 // :workgroup may be a UUID or a workgroup name.
@@ -1447,7 +1572,7 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 		pendingKey := wg.UUID.String() + "/" + share.Name
 		v, ok := api.pendingBuilders.Load(pendingKey)
 		if !ok {
-			writeError(w, "no pending connection request found; call POST /connect/request first", http.StatusBadRequest)
+			writeError(w, "no pending connection request found; call POST /connect/:workgroup/:share first", http.StatusBadRequest)
 			return
 		}
 		builder := v.(*sdk.Builder)
@@ -1462,7 +1587,7 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 			return
 		}
 
-		sdkInst, err := builder.Register(req.Context(), api.cfg.SeedPhrase)
+		sdkInst, err := builder.Register(req.Context(), api.cfg.Indexd.SeedPhrase)
 		if err != nil {
 			api.pendingBuilders.Delete(pendingKey)
 			log.Printf("failed to register app: %v", err)
