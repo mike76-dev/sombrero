@@ -422,6 +422,7 @@ type open struct {
 	treeConnect                     *treeConnect
 	connection                      *connection
 	grantedAccess                   uint32
+	shareMode                       uint32
 	pathName                        string
 	resumeKey                       []byte
 	fileName                        string
@@ -446,6 +447,11 @@ type open struct {
 	// connection it was made on.
 	clientGuid       [16]byte
 	isReplayEligible bool
+
+	// lockSequence is what the open remembers of the lock requests it has answered, so that one
+	// sent again over a reclaimed handle is answered the same way rather than weighed anew: a
+	// range the open already holds would otherwise be refused as a conflict with itself.
+	lockSequence [lockSequenceEntries]lockSequenceEntry
 
 	// An open may hold an opportunistic lock, which lets the client cache the file locally
 	// on the promise that nobody else gets at it without the client being told first.
@@ -725,6 +731,13 @@ type fileState struct {
 	// a read is served the object the store still holds, cut off at a length it never had.
 	sizeBefore      uint64
 	allocatedBefore uint64
+
+	// locks are the ranges of the file the opens on it have claimed, in the order they were taken.
+	// The same open may hold several over one range, and each is given back on its own. lockWait
+	// is closed whenever one of them is given back, which is how a request waiting for a range
+	// learns to look at them again.
+	locks    []byteRangeLock
+	lockWait chan struct{}
 
 	// inflight is how many writes are on their way into the upload, through any handle on the
 	// file, and writes is what waits for them to land. They are counted per file and not per
@@ -1091,6 +1104,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 		connection:    c,
 		treeConnect:   tc,
 		grantedAccess: access,
+		shareMode:     cr.ShareAccess(),
 		fileName:      filename,
 		pathName:      filepath,
 		resumeKey:     id[:24],
@@ -1167,6 +1181,10 @@ func (s *server) closeOpen(op *open) {
 // last handle on a file the store answers for has gone. A file the store has nothing for is left
 // where it is: the state is the only record that it exists.
 func (op *open) releaseFile() {
+	// The ranges the open had claimed go first, and go however the open came to an end: this is
+	// where a close, a tree disconnect, a logoff and a durable handle nobody reclaimed all meet.
+	op.file.releaseLocks(op)
+
 	if !op.file.detach() {
 		return
 	}

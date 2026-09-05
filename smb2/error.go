@@ -31,10 +31,13 @@ const (
 	STATUS_OBJECT_NAME_NOT_FOUND                 = 0xc0000034
 	STATUS_OBJECT_NAME_COLLISION                 = 0xc0000035
 	STATUS_DATA_ERROR                            = 0xc000003e
+	STATUS_SHARING_VIOLATION                     = 0xc0000043
 	STATUS_EAS_NOT_SUPPORTED                     = 0xc000004f
+	STATUS_LOCK_NOT_GRANTED                      = 0xc0000055
 	STATUS_DELETE_PENDING                        = 0xc0000056
 	STATUS_NO_SUCH_USER                          = 0xc0000064
 	STATUS_NONE_MAPPED                           = 0xc0000073
+	STATUS_RANGE_NOT_LOCKED                      = 0xc000007e
 	STATUS_INSUFFICIENT_RESOURCES                = 0xc000009a
 	STATUS_IO_TIMEOUT                            = 0xc00000b5
 	STATUS_NOT_SUPPORTED                         = 0xc00000bb

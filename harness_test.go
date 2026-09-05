@@ -953,6 +953,18 @@ func (cl *testClient) createAccessing(name string, oplock uint8, disposition, ac
 	return resp.Encode(), nil
 }
 
+// createSharing opens a file saying what it will put up with from every other open of it.
+func (cl *testClient) createSharing(name string, disposition, access, sharing uint32) ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(createRequestSharing(cl.mid, cl.ss.sessionID, cl.tc.treeID, name,
+		smb2.OPLOCK_LEVEL_NONE, disposition, access, 0, sharing, nil))
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Encode(), nil
+}
+
 // createLeased opens a file asking for a lease in the state given, and returns the response as
 // it goes on the wire together with whether the server had to answer asynchronously.
 func (cl *testClient) createLeased(name string, key [16]byte, state uint32, version int, disposition uint32) (buf []byte, async bool) {
@@ -1180,6 +1192,16 @@ func createRequest(mid, sid uint64, tid uint32, name string, oplock uint8, dispo
 
 // createRequestWithOptions is createRequest asking for particular create options.
 func createRequestWithOptions(mid, sid uint64, tid uint32, name string, oplock uint8, disposition, access, options uint32, contexts []byte) []byte {
+	return createRequestSharing(mid, sid, tid, name, oplock, disposition, access, options, everySharing, contexts)
+}
+
+// everySharing is the sharing mode the clients send for all but the files they mean to keep to
+// themselves, and the one the tests send unless they are about the sharing rules.
+const everySharing = smb2.FILE_SHARE_READ | smb2.FILE_SHARE_WRITE | smb2.FILE_SHARE_DELETE
+
+// createRequestSharing is createRequestWithOptions saying what the open will put up with from
+// everybody else.
+func createRequestSharing(mid, sid uint64, tid uint32, name string, oplock uint8, disposition, access, options, sharing uint32, contexts []byte) []byte {
 	encoded := utils.EncodeStringToBytes(name)
 
 	// The name follows the fixed part of the request, which is what puts it at the eight-byte
@@ -1198,6 +1220,7 @@ func createRequestWithOptions(mid, sid uint64, tid uint32, name string, oplock u
 	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2CreateRequestStructureSize)
 	body[3] = oplock
 	binary.LittleEndian.PutUint32(body[24:28], access)
+	binary.LittleEndian.PutUint32(body[32:36], sharing)
 	binary.LittleEndian.PutUint32(body[36:40], disposition)
 	binary.LittleEndian.PutUint32(body[40:44], options)
 	binary.LittleEndian.PutUint16(body[44:46], uint16(nameOff))
@@ -1547,9 +1570,11 @@ func (cl *testClient) flushHandle(fid []byte) ([]byte, error) {
 	return resp.Encode(), nil
 }
 
-// lockRequest builds the bytes of an SMB2_LOCK request carrying a single lock element.
-func lockRequest(mid, sid uint64, tid uint32, fid []byte, offset, length uint64, flags uint32) []byte {
-	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2LockRequestMinSize+24)
+// lockRequest builds the bytes of an SMB2_LOCK request carrying the given lock elements, under the
+// lock sequence a client numbers the requests it may have to send again by. An index of zero names
+// no entry, which is what a request that will never be sent again carries.
+func lockRequest(mid, sid uint64, tid uint32, fid []byte, locks []smb2.Lock, index uint32, number uint8) []byte {
+	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2LockRequestMinSize+24*len(locks))
 	h := smb2.NewHeader(msg)
 	h.SetCommand(smb2.SMB2_LOCK)
 	h.SetMessageID(mid)
@@ -1559,27 +1584,73 @@ func lockRequest(mid, sid uint64, tid uint32, fid []byte, offset, length uint64,
 
 	body := msg[smb2.SMB2HeaderSize:]
 	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2LockRequestStructureSize)
-	binary.LittleEndian.PutUint16(body[2:4], 1)
+	binary.LittleEndian.PutUint16(body[2:4], uint16(len(locks)))
+	binary.LittleEndian.PutUint32(body[4:8], index<<4|uint32(number&0x0f))
 	copy(body[8:24], fid)
 
-	lock := body[smb2.SMB2LockRequestMinSize:]
-	binary.LittleEndian.PutUint64(lock[0:8], offset)
-	binary.LittleEndian.PutUint64(lock[8:16], length)
-	binary.LittleEndian.PutUint32(lock[16:20], flags)
+	for i, l := range locks {
+		lock := body[smb2.SMB2LockRequestMinSize+24*i:]
+		binary.LittleEndian.PutUint64(lock[0:8], l.Offset)
+		binary.LittleEndian.PutUint64(lock[8:16], l.Length)
+		binary.LittleEndian.PutUint32(lock[16:20], l.Flags)
+	}
 
 	return msg
 }
 
-// lockRange asks for a byte range of the file behind the handle to be locked.
-func (cl *testClient) lockRange(fid []byte, offset, length uint64) ([]byte, error) {
+// lockSequenced sends a lock request of the given elements under a lock sequence, and returns the
+// answer to it.
+func (cl *testClient) lockSequenced(fid []byte, locks []smb2.Lock, index uint32, number uint8) ([]byte, error) {
 	cl.mid++
-	resp, err := cl.send(lockRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, offset, length,
-		smb2.LOCKFLAG_EXCLUSIVE_LOCK|smb2.LOCKFLAG_FAIL_IMMEDIATELY))
+	resp, err := cl.send(lockRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, locks, index, number))
 	if err != nil {
 		return nil, err
 	}
 
 	return resp.Encode(), nil
+}
+
+// lockElements sends a lock request of the given elements under no sequence at all, which is what a
+// client sends when it has no intention of sending the request again.
+func (cl *testClient) lockElements(fid []byte, locks []smb2.Lock) ([]byte, error) {
+	return cl.lockSequenced(fid, locks, 0, 0)
+}
+
+// lockRange asks for a byte range of the file behind the handle to be locked exclusively, and to
+// be told at once if it cannot be had.
+func (cl *testClient) lockRange(fid []byte, offset, length uint64) ([]byte, error) {
+	return cl.lockElements(fid, []smb2.Lock{{
+		Offset: offset,
+		Length: length,
+		Flags:  smb2.LOCKFLAG_EXCLUSIVE_LOCK | smb2.LOCKFLAG_FAIL_IMMEDIATELY,
+	}})
+}
+
+// lockRangeWaiting is lockRange willing to wait for the range instead of being told it is taken.
+func (cl *testClient) lockRangeWaiting(fid []byte, offset, length uint64) ([]byte, error) {
+	return cl.lockElements(fid, []smb2.Lock{{
+		Offset: offset,
+		Length: length,
+		Flags:  smb2.LOCKFLAG_EXCLUSIVE_LOCK,
+	}})
+}
+
+// lockRangeShared is lockRange asking for the range to be shared rather than its own.
+func (cl *testClient) lockRangeShared(fid []byte, offset, length uint64) ([]byte, error) {
+	return cl.lockElements(fid, []smb2.Lock{{
+		Offset: offset,
+		Length: length,
+		Flags:  smb2.LOCKFLAG_SHARED_LOCK | smb2.LOCKFLAG_FAIL_IMMEDIATELY,
+	}})
+}
+
+// unlockRange gives back a byte range of the file behind the handle.
+func (cl *testClient) unlockRange(fid []byte, offset, length uint64) ([]byte, error) {
+	return cl.lockElements(fid, []smb2.Lock{{
+		Offset: offset,
+		Length: length,
+		Flags:  smb2.LOCKFLAG_UNLOCK,
+	}})
 }
 
 // openIDOf returns the key under which the global open table holds the open a create response

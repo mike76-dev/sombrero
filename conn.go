@@ -1929,7 +1929,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		return resp, ss, nil
 
-	case smb2.SMB2_LOCK: // We don't do anything on an SMB2_LOCK request, only send a response
+	case smb2.SMB2_LOCK:
 		lr := smb2.LockRequest{Request: *req}
 		if err := lr.Validate(c.supportsMultiCredit); err != nil {
 			if errors.Is(err, smb2.ErrInvalidParameter) {
@@ -1946,16 +1946,124 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
-		// The handle is looked up even though nothing is locked with it, because [MS-SMB2]
-		// 3.3.5.14 answers one that names no open with STATUS_FILE_CLOSED, and a client that is
-		// told its lock was taken on a handle it has already closed has been told a lie.
-		if _, status := c.findOpen(ss, lr.FileID(), req); status != smb2.STATUS_OK {
+		op, status := c.findOpen(ss, lr.FileID(), req)
+		if status != smb2.STATUS_OK {
 			resp := smb2.NewErrorResponse(lr, status, 0, nil)
 			return resp, ss, nil
 		}
 
-		resp := &smb2.LockResponse{}
-		resp.FromRequest(lr)
+		// A client that has reclaimed a handle, or that holds it over several channels, sends its
+		// locks again without knowing which of them the server got to. Such a request carries a
+		// sequence the open remembers being answered for, and is answered from that rather than
+		// weighed anew ([MS-SMB2] 3.3.5.14): the range is one the open already holds, so weighing
+		// it a second time would refuse it as a conflict with itself. The dialects that number
+		// their locks are the ones that reconnect or bind, which is what makes this worth
+		// remembering at all.
+		op.mu.Lock()
+		durable := op.isDurable
+		op.mu.Unlock()
+		sequenced := c.dialect != "2.0.2" &&
+			(durable || c.serverCapabilities&smb2.GLOBAL_CAP_MULTI_CHANNEL != 0)
+		index, number := lr.LockSequenceIndex(), lr.LockSequenceNumber()
+
+		if sequenced && op.replayedLock(index, number) {
+			resp := &smb2.LockResponse{}
+			resp.FromRequest(lr)
+
+			return resp, ss, nil
+		}
+
+		// A request either locks or unlocks, and the first element of it says which: the rest
+		// are held to that, and one that disagrees is refused ([MS-SMB2] 3.3.5.14). There is at
+		// least one, a request naming no range having been turned away above.
+		locks := lr.Locks()
+		var wait bool
+		if locks[0].Flags&smb2.LOCKFLAG_UNLOCK != 0 {
+			status = op.file.unlockRanges(op, locks)
+		} else {
+			status, wait = op.file.lockRanges(op, locks)
+		}
+
+		if !wait {
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(lr, status, 0, nil)
+				return resp, ss, nil
+			}
+
+			// Only what came off is worth remembering: a request that was refused is one the
+			// client is free to send again and have weighed.
+			if sequenced {
+				op.rememberLock(index, number)
+			}
+
+			resp := &smb2.LockResponse{}
+			resp.FromRequest(lr)
+
+			return resp, ss, nil
+		}
+
+		// The range belongs to another open and this request asked to wait for it rather than to
+		// be told so. It is taken on asynchronously and answered once the range comes free, which
+		// may be a while: a client waiting on a lock is not a client whose connection has stalled.
+		aid := make([]byte, 8)
+		frand.Read(aid)
+		asyncID := binary.LittleEndian.Uint64(aid)
+		req.Header().SetAsyncID(asyncID)
+		req.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+
+		stop := make(chan struct{})
+		c.mu.Lock()
+		c.asyncCommandList[asyncID] = req
+		c.stopChans[req.CancelRequestID()] = stop
+		c.mu.Unlock()
+
+		interim := c.expectInterim(req.Header().MessageID())
+		go func() {
+			defer c.recoverConnection("waiting for a byte range")
+
+			waited := op.file.awaitLock(op, locks[0], stop, op.ctx.Done())
+
+			var resp smb2.GenericResponse
+			if waited == smb2.STATUS_OK {
+				if sequenced {
+					op.rememberLock(index, number)
+				}
+
+				granted := &smb2.LockResponse{}
+				granted.FromRequest(lr)
+				resp = granted
+			} else {
+				resp = smb2.NewErrorResponse(lr, waited, 0, nil)
+			}
+			finalAsync(resp, asyncID)
+
+			if !c.claimAnswer(asyncID, resp.Header().MessageID()) {
+				// A cancel got there first and has told the client the request is over, so a
+				// range taken in the meantime is one nobody asked to keep.
+				if waited == smb2.STATUS_OK {
+					op.file.dropLock(op, locks[0])
+				}
+				c.releaseOpen(req)
+
+				return
+			}
+
+			c.awaitInterim(interim)
+
+			c.mu.Lock()
+			delete(c.stopChans, req.CancelRequestID())
+			c.mu.Unlock()
+
+			c.releaseOpen(req)
+			c.server.trySendResponse(c, ss, resp)
+		}()
+
+		resp := smb2.NewErrorResponse(lr, smb2.STATUS_PENDING, 0, nil)
+		resp.Header().SetAsyncID(asyncID)
+		resp.Header().SetFlag(smb2.FLAGS_ASYNC_COMMAND)
+		resp.Header().ClearFlag(smb2.FLAGS_RELATED_OPERATIONS)
+		resp.Header().ClearFlag(smb2.FLAGS_SIGNED)
+		resp.Header()[len(resp.Header())-1] = 0x21
 
 		return resp, ss, nil
 
@@ -3764,6 +3872,17 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			return smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil), nil
 		}
 		own = l
+	}
+
+	// What the opens already on the file allow is weighed before anything is made or opened, so
+	// that a refusal leaves nothing behind. A named pipe is left out of it: every open of one is
+	// an instance of its own, so there is nothing for the sharing mode to be weighed against
+	// ([MS-SMB2] 2.2.13).
+	if tc.share.name != "ipc$" {
+		access := grantedFor(cr.DesiredAccess(), tc.maximalAccess)
+		if c.server.sharingViolation(tc.share, path, access, cr.ShareAccess()) {
+			return smb2.NewErrorResponse(cr, smb2.STATUS_SHARING_VIOLATION, 0, nil), nil
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
