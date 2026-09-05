@@ -87,16 +87,40 @@ func (fs *fileState) lockConflict(op *open, r byteRange, exclusive bool) bool {
 	return false
 }
 
+// lockWaiter is the channel closed the next time a range of the file is given back, which is what
+// a request waiting for one listens on. fs.mu must be held.
+func (fs *fileState) lockWaiter() chan struct{} {
+	if fs.lockWait == nil {
+		fs.lockWait = make(chan struct{})
+	}
+
+	return fs.lockWait
+}
+
+// lockChanged tells whatever is waiting for a range that the ones held have changed, so that it
+// looks again. fs.mu must be held.
+func (fs *fileState) lockChanged() {
+	if fs.lockWait != nil {
+		close(fs.lockWait)
+		fs.lockWait = nil
+	}
+}
+
 // lockRanges takes the ranges of a lock request for the open. A range that cannot be had puts back
 // the ones taken before it in the same request, so that a refused request leaves nothing behind;
 // one that is malformed does not, the ranges already taken being taken ([MS-SMB2] 3.3.5.14.2).
-func (fs *fileState) lockRanges(op *open, locks []smb2.Lock) uint32 {
+//
+// It reports separately that the request is one to wait on rather than one to answer: a range that
+// conflicts and was not to be reported at once is queued instead of refused. Such a request names
+// the one range, every element of a longer one having had to ask to fail immediately, so nothing
+// has been taken by the time it is met.
+func (fs *fileState) lockRanges(op *open, locks []smb2.Lock) (uint32, bool) {
 	// A request naming several ranges has one answer to give, so it cannot both wait for one of
 	// them and report on another: every element of it has to be one that fails immediately.
 	if len(locks) > 1 {
 		for _, l := range locks {
 			if l.Flags&smb2.LOCKFLAG_FAIL_IMMEDIATELY == 0 {
-				return smb2.STATUS_INVALID_PARAMETER
+				return smb2.STATUS_INVALID_PARAMETER, false
 			}
 		}
 	}
@@ -107,22 +131,82 @@ func (fs *fileState) lockRanges(op *open, locks []smb2.Lock) uint32 {
 	taken := 0
 	for _, l := range locks {
 		if !validLockFlags(l.Flags) {
-			return smb2.STATUS_INVALID_PARAMETER
+			return smb2.STATUS_INVALID_PARAMETER, false
 		}
 
 		r := byteRange{offset: l.Offset, length: l.Length}
 		exclusive := l.Flags&smb2.LOCKFLAG_EXCLUSIVE_LOCK != 0
 		if fs.lockConflict(op, r, exclusive) {
-			fs.locks = fs.locks[:len(fs.locks)-taken]
+			if l.Flags&smb2.LOCKFLAG_FAIL_IMMEDIATELY == 0 {
+				return smb2.STATUS_OK, true
+			}
 
-			return smb2.STATUS_LOCK_NOT_GRANTED
+			if taken > 0 {
+				fs.locks = fs.locks[:len(fs.locks)-taken]
+				fs.lockChanged()
+			}
+
+			return smb2.STATUS_LOCK_NOT_GRANTED, false
 		}
 
 		fs.locks = append(fs.locks, byteRangeLock{byteRange: r, open: op, exclusive: exclusive})
 		taken++
 	}
 
-	return smb2.STATUS_OK
+	return smb2.STATUS_OK, false
+}
+
+// awaitLock takes the range once nothing is in the way of it, which is what a lock that was not to
+// be refused does instead of being refused. The client is left waiting on the request until the
+// range comes free, until the wait is called off, or until the handle behind it goes.
+func (fs *fileState) awaitLock(op *open, l smb2.Lock, stop, gone <-chan struct{}) uint32 {
+	r := byteRange{offset: l.Offset, length: l.Length}
+	exclusive := l.Flags&smb2.LOCKFLAG_EXCLUSIVE_LOCK != 0
+
+	for {
+		fs.mu.Lock()
+		if !fs.lockConflict(op, r, exclusive) {
+			fs.locks = append(fs.locks, byteRangeLock{byteRange: r, open: op, exclusive: exclusive})
+			fs.mu.Unlock()
+
+			return smb2.STATUS_OK
+		}
+
+		// Taken before the lock of the file is let go of, or a range given back in between would
+		// be a change this never hears about and goes on waiting through.
+		freed := fs.lockWaiter()
+		fs.mu.Unlock()
+
+		select {
+		case <-freed:
+		case <-stop:
+			return smb2.STATUS_CANCELLED
+		case <-gone:
+			return smb2.STATUS_FILE_CLOSED
+		}
+	}
+}
+
+// dropLock gives back the range the open took last, which is what a lock granted to a client that
+// is no longer waiting for it comes to: what that client was told is that its request was over.
+func (fs *fileState) dropLock(op *open, l smb2.Lock) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	want := byteRangeLock{
+		byteRange: byteRange{offset: l.Offset, length: l.Length},
+		open:      op,
+		exclusive: l.Flags&smb2.LOCKFLAG_EXCLUSIVE_LOCK != 0,
+	}
+
+	for i := len(fs.locks) - 1; i >= 0; i-- {
+		if fs.locks[i] == want {
+			fs.locks = append(fs.locks[:i], fs.locks[i+1:]...)
+			fs.lockChanged()
+
+			return
+		}
+	}
 }
 
 // unlockRanges gives back the ranges of an unlock request. Each is named exactly as it was taken,
@@ -131,6 +215,15 @@ func (fs *fileState) lockRanges(op *open, locks []smb2.Lock) uint32 {
 func (fs *fileState) unlockRanges(op *open, locks []smb2.Lock) uint32 {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
+
+	// Whatever the request comes to, a range it did give back is one something may be waiting
+	// for. This runs before the lock of the file is let go of, the defers unwinding in reverse.
+	var given bool
+	defer func() {
+		if given {
+			fs.lockChanged()
+		}
+	}()
 
 	for _, l := range locks {
 		// An element that asks to lock has no place in a request that unlocks. Whether it is to
@@ -162,6 +255,7 @@ func (fs *fileState) unlockRanges(op *open, locks []smb2.Lock) uint32 {
 		}
 
 		fs.locks = append(fs.locks[:found], fs.locks[found+1:]...)
+		given = true
 	}
 
 	return smb2.STATUS_OK
@@ -178,6 +272,10 @@ func (fs *fileState) releaseLocks(op *open) {
 		if held.open != op {
 			kept = append(kept, held)
 		}
+	}
+
+	if len(kept) < len(fs.locks) {
+		fs.lockChanged()
 	}
 
 	fs.locks = kept

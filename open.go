@@ -727,8 +727,11 @@ type fileState struct {
 	allocatedBefore uint64
 
 	// locks are the ranges of the file the opens on it have claimed, in the order they were taken.
-	// The same open may hold several over one range, and each is given back on its own.
-	locks []byteRangeLock
+	// The same open may hold several over one range, and each is given back on its own. lockWait
+	// is closed whenever one of them is given back, which is how a request waiting for a range
+	// learns to look at them again.
+	locks    []byteRangeLock
+	lockWait chan struct{}
 
 	// inflight is how many writes are on their way into the upload, through any handle on the
 	// file, and writes is what waits for them to land. They are counted per file and not per

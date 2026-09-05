@@ -1593,6 +1593,15 @@ func (cl *testClient) lockRange(fid []byte, offset, length uint64) ([]byte, erro
 	}})
 }
 
+// lockRangeWaiting is lockRange willing to wait for the range instead of being told it is taken.
+func (cl *testClient) lockRangeWaiting(fid []byte, offset, length uint64) ([]byte, error) {
+	return cl.lockElements(fid, []smb2.Lock{{
+		Offset: offset,
+		Length: length,
+		Flags:  smb2.LOCKFLAG_EXCLUSIVE_LOCK,
+	}})
+}
+
 // lockRangeShared is lockRange asking for the range to be shared rather than its own.
 func (cl *testClient) lockRangeShared(fid []byte, offset, length uint64) ([]byte, error) {
 	return cl.lockElements(fid, []smb2.Lock{{

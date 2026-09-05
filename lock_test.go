@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/smb2"
 )
@@ -352,5 +353,215 @@ func TestTheLocksOfAHandleGoWhenItCloses(t *testing.T) {
 
 	if status := cl.lockStatus(cl.lockRange(other, 0, 512)); status != smb2.STATUS_OK {
 		t.Errorf("the range of the closed handle was answered %#x, want it free again", status)
+	}
+}
+
+// TestIntegrationALockThatMayWaitIsAnsweredWhenTheRangeComesFree is the request that was not told
+// to fail immediately: it is neither granted nor refused, it waits, and the client hears about it
+// when the range is given back ([MS-SMB2] 3.3.5.14.2).
+func TestIntegrationALockThatMayWaitIsAnsweredWhenTheRangeComesFree(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	first, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	second, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	held, other := createdFileID(first), createdFileID(second)
+
+	if status := cl.lockStatus(cl.lockRange(held, 0, 512)); status != smb2.STATUS_OK {
+		t.Fatalf("the lock standing in the way was answered %#x, want it granted", status)
+	}
+
+	if status := cl.lockStatus(cl.lockRangeWaiting(other, 0, 512)); status != smb2.STATUS_PENDING {
+		t.Fatalf("a lock willing to wait was answered %#x, want it taken on", status)
+	}
+
+	cl.quiet(200*time.Millisecond, "the waiting lock was answered while the range was still taken")
+
+	if status := cl.lockStatus(cl.unlockRange(held, 0, 512)); status != smb2.STATUS_OK {
+		t.Fatalf("the unlock was answered %#x, want the range given back", status)
+	}
+
+	answer := cl.recv(2 * time.Second)
+	if got := smb2.Header(answer).Command(); got != smb2.SMB2_LOCK {
+		t.Fatalf("what came back answers command %d, want the lock", got)
+	}
+	if status := smb2.Header(answer).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the waiting lock was answered %#x, want it granted", status)
+	}
+
+	// The range is the waiter's now, and not the handle's that gave it up.
+	if status := cl.lockStatus(cl.lockRange(held, 0, 512)); status != smb2.STATUS_LOCK_NOT_GRANTED {
+		t.Errorf("the range the waiter was given was answered %#x, want STATUS_LOCK_NOT_GRANTED", status)
+	}
+}
+
+// TestIntegrationAWaitingLockIsAnsweredWhenItIsCancelled is the client that stops waiting. The
+// request is answered as cancelled and the range it was waiting for is left where it was.
+func TestIntegrationAWaitingLockIsAnsweredWhenItIsCancelled(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	first, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	second, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	held, other := createdFileID(first), createdFileID(second)
+
+	if status := cl.lockStatus(cl.lockRange(held, 0, 512)); status != smb2.STATUS_OK {
+		t.Fatalf("the lock standing in the way was answered %#x, want it granted", status)
+	}
+
+	interim, err := cl.lockRangeWaiting(other, 0, 512)
+	if err != nil {
+		t.Fatalf("the waiting lock failed: %v", err)
+	}
+	if status := smb2.Header(interim).Status(); status != smb2.STATUS_PENDING {
+		t.Fatalf("a lock willing to wait was answered %#x, want it taken on", status)
+	}
+
+	asyncID := smb2.Header(interim).AsyncID()
+	if err := cl.cancel(asyncCancelRequest(asyncID, cl.ss.sessionID, cl.tc.treeID)); err != nil {
+		t.Fatalf("the cancel failed: %v", err)
+	}
+
+	answer := cl.recv(2 * time.Second)
+	if status := smb2.Header(answer).Status(); status != smb2.STATUS_CANCELLED {
+		t.Fatalf("the cancelled lock was answered %#x, want STATUS_CANCELLED", status)
+	}
+
+	// Nothing was taken for it. Were the waiter holding the range after all, this would be refused.
+	if status := cl.lockStatus(cl.unlockRange(held, 0, 512)); status != smb2.STATUS_OK {
+		t.Fatalf("the unlock was answered %#x, want the range given back", status)
+	}
+	if status := cl.lockStatus(cl.lockRange(held, 0, 512)); status != smb2.STATUS_OK {
+		t.Errorf("the range after the cancelled wait was answered %#x, want it free", status)
+	}
+}
+
+// TestIntegrationAWaitingLockIsAnsweredWhenTheHandleGoes is the handle closed out from under a
+// request that is still waiting. The client is waiting on that request, and a handle that is gone
+// is the answer to it: left unanswered, it is one the client counts as outstanding for as long as
+// it holds the connection.
+func TestIntegrationAWaitingLockIsAnsweredWhenTheHandleGoes(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	first, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	second, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	held, other := createdFileID(first), createdFileID(second)
+
+	if status := cl.lockStatus(cl.lockRange(held, 0, 512)); status != smb2.STATUS_OK {
+		t.Fatalf("the lock standing in the way was answered %#x, want it granted", status)
+	}
+
+	if status := cl.lockStatus(cl.lockRangeWaiting(other, 0, 512)); status != smb2.STATUS_PENDING {
+		t.Fatalf("a lock willing to wait was answered %#x, want it taken on", status)
+	}
+
+	if _, err := cl.closeHandle(other); err != nil {
+		t.Fatalf("the close failed: %v", err)
+	}
+
+	answer := cl.recv(2 * time.Second)
+	if got := smb2.Header(answer).Command(); got != smb2.SMB2_LOCK {
+		t.Fatalf("what came back answers command %d, want the lock", got)
+	}
+	if status := smb2.Header(answer).Status(); status != smb2.STATUS_FILE_CLOSED {
+		t.Errorf("the lock whose handle went was answered %#x, want STATUS_FILE_CLOSED", status)
+	}
+}
+
+// parked waits until a request is waiting for a range of the file behind the handle, so that what
+// follows reaches a waiter that has gone to sleep rather than one still on its way there.
+func (h *smbTest) parked(fid []byte) {
+	h.t.Helper()
+
+	fs := h.srv.globalOpenTable[openIDOf(fid)].file
+	for i := 0; i < 200; i++ {
+		fs.mu.Lock()
+		waiting := fs.lockWait != nil
+		fs.mu.Unlock()
+
+		if waiting {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	h.t.Fatal("nothing ever waited for the range")
+}
+
+// TestIntegrationAWokenLockLooksAtTheRangeAgain is the waiter told that the ranges have changed
+// when the one it wants has not. Every waiter is woken by any range being given back, so one that
+// took what it was waiting for on being woken would take a range that is still somebody else's.
+func TestIntegrationAWokenLockLooksAtTheRangeAgain(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	first, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	second, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	held, other := createdFileID(first), createdFileID(second)
+
+	// Two ranges, of which the waiter below wants only the first.
+	for _, offset := range []uint64{0, 512} {
+		if status := cl.lockStatus(cl.lockRange(held, offset, 512)); status != smb2.STATUS_OK {
+			t.Fatalf("the lock at %d was answered %#x, want it granted", offset, status)
+		}
+	}
+
+	if status := cl.lockStatus(cl.lockRangeWaiting(other, 0, 512)); status != smb2.STATUS_PENDING {
+		t.Fatalf("a lock willing to wait was answered %#x, want it taken on", status)
+	}
+	h.parked(other)
+
+	// The range given back is not the one being waited for, so the waiter is woken for nothing
+	// and has to go back to waiting.
+	if status := cl.lockStatus(cl.unlockRange(held, 512, 512)); status != smb2.STATUS_OK {
+		t.Fatalf("the unlock was answered %#x, want the range given back", status)
+	}
+
+	cl.quiet(200*time.Millisecond, "the waiting lock was granted a range that was still taken")
+
+	// The range it is waiting for, and the answer it has been waiting for.
+	if status := cl.lockStatus(cl.unlockRange(held, 0, 512)); status != smb2.STATUS_OK {
+		t.Fatalf("the unlock was answered %#x, want the range given back", status)
+	}
+
+	answer := cl.recv(2 * time.Second)
+	if got := smb2.Header(answer).Command(); got != smb2.SMB2_LOCK {
+		t.Fatalf("what came back answers command %d, want the lock", got)
+	}
+	if status := smb2.Header(answer).Status(); status != smb2.STATUS_OK {
+		t.Errorf("the waiting lock was answered %#x, want it granted", status)
+	}
+}
+
+// TestDropLockGivesBackOnlyTheRangeTakenLast is the range granted to a client that had already
+// given up on it. One lock goes back, not every lock the open holds over the range.
+func TestDropLockGivesBackOnlyTheRangeTakenLast(t *testing.T) {
+	fs := new(fileState)
+	holder, other := new(open), new(open)
+
+	taken := smb2.Lock{Offset: 0, Length: 512, Flags: smb2.LOCKFLAG_EXCLUSIVE_LOCK | smb2.LOCKFLAG_FAIL_IMMEDIATELY}
+	for i := 0; i < 2; i++ {
+		if status, wait := fs.lockRanges(holder, []smb2.Lock{taken}); status != smb2.STATUS_OK || wait {
+			t.Fatalf("lock %d was answered %#x (waiting %v), want it granted", i, status, wait)
+		}
+	}
+
+	fs.dropLock(holder, taken)
+
+	// One of the two is left, so the range is still the holder's.
+	if status, _ := fs.lockRanges(other, []smb2.Lock{taken}); status != smb2.STATUS_LOCK_NOT_GRANTED {
+		t.Errorf("the range after one lock went back was answered %#x, want STATUS_LOCK_NOT_GRANTED", status)
+	}
+
+	fs.dropLock(holder, taken)
+
+	if status, _ := fs.lockRanges(other, []smb2.Lock{taken}); status != smb2.STATUS_OK {
+		t.Errorf("the range after both locks went back was answered %#x, want it free", status)
 	}
 }
