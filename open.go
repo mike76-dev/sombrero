@@ -726,6 +726,10 @@ type fileState struct {
 	sizeBefore      uint64
 	allocatedBefore uint64
 
+	// locks are the ranges of the file the opens on it have claimed, in the order they were taken.
+	// The same open may hold several over one range, and each is given back on its own.
+	locks []byteRangeLock
+
 	// inflight is how many writes are on their way into the upload, through any handle on the
 	// file, and writes is what waits for them to land. They are counted per file and not per
 	// handle because the upload is the file's: a handle that finalizes it while another handle's
@@ -1167,6 +1171,10 @@ func (s *server) closeOpen(op *open) {
 // last handle on a file the store answers for has gone. A file the store has nothing for is left
 // where it is: the state is the only record that it exists.
 func (op *open) releaseFile() {
+	// The ranges the open had claimed go first, and go however the open came to an end: this is
+	// where a close, a tree disconnect, a logoff and a durable handle nobody reclaimed all meet.
+	op.file.releaseLocks(op)
+
 	if !op.file.detach() {
 		return
 	}

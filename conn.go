@@ -1929,7 +1929,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		return resp, ss, nil
 
-	case smb2.SMB2_LOCK: // We don't do anything on an SMB2_LOCK request, only send a response
+	case smb2.SMB2_LOCK:
 		lr := smb2.LockRequest{Request: *req}
 		if err := lr.Validate(c.supportsMultiCredit); err != nil {
 			if errors.Is(err, smb2.ErrInvalidParameter) {
@@ -1946,10 +1946,23 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
-		// The handle is looked up even though nothing is locked with it, because [MS-SMB2]
-		// 3.3.5.14 answers one that names no open with STATUS_FILE_CLOSED, and a client that is
-		// told its lock was taken on a handle it has already closed has been told a lie.
-		if _, status := c.findOpen(ss, lr.FileID(), req); status != smb2.STATUS_OK {
+		op, status := c.findOpen(ss, lr.FileID(), req)
+		if status != smb2.STATUS_OK {
+			resp := smb2.NewErrorResponse(lr, status, 0, nil)
+			return resp, ss, nil
+		}
+
+		// A request either locks or unlocks, and the first element of it says which: the rest
+		// are held to that, and one that disagrees is refused ([MS-SMB2] 3.3.5.14). There is at
+		// least one, a request naming no range having been turned away above.
+		locks := lr.Locks()
+		if locks[0].Flags&smb2.LOCKFLAG_UNLOCK != 0 {
+			status = op.file.unlockRanges(op, locks)
+		} else {
+			status = op.file.lockRanges(op, locks)
+		}
+
+		if status != smb2.STATUS_OK {
 			resp := smb2.NewErrorResponse(lr, status, 0, nil)
 			return resp, ss, nil
 		}
