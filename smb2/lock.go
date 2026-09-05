@@ -68,6 +68,18 @@ func (lr LockRequest) Validate(supportsMultiCredit bool) error {
 	return nil
 }
 
+// LockSequenceNumber returns the LockSequenceNumber field of the SMB2_LOCK request: the four least
+// significant bits of the word the sequence is packed into ([MS-SMB2] 2.2.26).
+func (lr LockRequest) LockSequenceNumber() uint8 {
+	return lr.data[SMB2HeaderSize+4] & 0x0f
+}
+
+// LockSequenceIndex returns the LockSequenceIndex field of the SMB2_LOCK request, which names an
+// entry of the lock sequence array of the open, counting from one. Zero names no entry.
+func (lr LockRequest) LockSequenceIndex() uint32 {
+	return binary.LittleEndian.Uint32(lr.data[SMB2HeaderSize+4:SMB2HeaderSize+8]) >> 4
+}
+
 // FileID returns the FileID field of the SMB2_LOCK request.
 func (lr LockRequest) FileID() []byte {
 	fid := make([]byte, 16)

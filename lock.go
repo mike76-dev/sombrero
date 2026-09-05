@@ -39,6 +39,57 @@ func (r byteRange) overlaps(other byteRange) bool {
 	}
 }
 
+// lockSequenceEntries is how many lock sequences an open remembers ([MS-SMB2] 3.3.1.5). The
+// entries are named by the request, counting from one.
+const lockSequenceEntries = 64
+
+// lockSequenceEntry is what an open remembers of one lock request: the sequence number it carried,
+// once it has carried one at all.
+type lockSequenceEntry struct {
+	number uint8
+	valid  bool
+}
+
+// replayedLock reports whether the request is one the open has already been answered for, which is
+// what a client sends again when it has reclaimed a handle and cannot know how far the server got
+// with it. An index naming no entry is one there is nothing remembered under.
+func (op *open) replayedLock(index uint32, number uint8) bool {
+	if index == 0 || index > lockSequenceEntries {
+		return false
+	}
+
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
+	entry := &op.lockSequence[index-1]
+	if !entry.valid {
+		return false
+	}
+
+	if entry.number == number {
+		return true
+	}
+
+	// A different sequence number under the same entry is the client having moved on, so what is
+	// remembered there answers for nothing any more.
+	entry.valid = false
+
+	return false
+}
+
+// rememberLock records that the request has been carried out, so that the same one arriving again
+// is answered from what is remembered rather than done a second time.
+func (op *open) rememberLock(index uint32, number uint8) {
+	if index == 0 || index > lockSequenceEntries {
+		return
+	}
+
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
+	op.lockSequence[index-1] = lockSequenceEntry{number: number, valid: true}
+}
+
 // byteRangeLock is a range of a file an open has claimed. The claim belongs to the open rather
 // than to the session or the client behind it: a second handle on the same file, however it was
 // come by, is as much a stranger to the range as anybody else ([FSBO] 3.2).

@@ -447,6 +447,11 @@ type open struct {
 	clientGuid       [16]byte
 	isReplayEligible bool
 
+	// lockSequence is what the open remembers of the lock requests it has answered, so that one
+	// sent again over a reclaimed handle is answered the same way rather than weighed anew: a
+	// range the open already holds would otherwise be refused as a conflict with itself.
+	lockSequence [lockSequenceEntries]lockSequenceEntry
+
 	// An open may hold an opportunistic lock, which lets the client cache the file locally
 	// on the promise that nobody else gets at it without the client being told first.
 	// oplockBreak is open while the client is being told, and is closed once it has answered,

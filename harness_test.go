@@ -1547,8 +1547,10 @@ func (cl *testClient) flushHandle(fid []byte) ([]byte, error) {
 	return resp.Encode(), nil
 }
 
-// lockRequest builds the bytes of an SMB2_LOCK request carrying the given lock elements.
-func lockRequest(mid, sid uint64, tid uint32, fid []byte, locks []smb2.Lock) []byte {
+// lockRequest builds the bytes of an SMB2_LOCK request carrying the given lock elements, under the
+// lock sequence a client numbers the requests it may have to send again by. An index of zero names
+// no entry, which is what a request that will never be sent again carries.
+func lockRequest(mid, sid uint64, tid uint32, fid []byte, locks []smb2.Lock, index uint32, number uint8) []byte {
 	msg := make([]byte, smb2.SMB2HeaderSize+smb2.SMB2LockRequestMinSize+24*len(locks))
 	h := smb2.NewHeader(msg)
 	h.SetCommand(smb2.SMB2_LOCK)
@@ -1560,6 +1562,7 @@ func lockRequest(mid, sid uint64, tid uint32, fid []byte, locks []smb2.Lock) []b
 	body := msg[smb2.SMB2HeaderSize:]
 	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2LockRequestStructureSize)
 	binary.LittleEndian.PutUint16(body[2:4], uint16(len(locks)))
+	binary.LittleEndian.PutUint32(body[4:8], index<<4|uint32(number&0x0f))
 	copy(body[8:24], fid)
 
 	for i, l := range locks {
@@ -1572,15 +1575,22 @@ func lockRequest(mid, sid uint64, tid uint32, fid []byte, locks []smb2.Lock) []b
 	return msg
 }
 
-// lockElements sends a lock request of the given elements and returns the answer to it.
-func (cl *testClient) lockElements(fid []byte, locks []smb2.Lock) ([]byte, error) {
+// lockSequenced sends a lock request of the given elements under a lock sequence, and returns the
+// answer to it.
+func (cl *testClient) lockSequenced(fid []byte, locks []smb2.Lock, index uint32, number uint8) ([]byte, error) {
 	cl.mid++
-	resp, err := cl.send(lockRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, locks))
+	resp, err := cl.send(lockRequest(cl.mid, cl.ss.sessionID, cl.tc.treeID, fid, locks, index, number))
 	if err != nil {
 		return nil, err
 	}
 
 	return resp.Encode(), nil
+}
+
+// lockElements sends a lock request of the given elements under no sequence at all, which is what a
+// client sends when it has no intention of sending the request again.
+func (cl *testClient) lockElements(fid []byte, locks []smb2.Lock) ([]byte, error) {
+	return cl.lockSequenced(fid, locks, 0, 0)
 }
 
 // lockRange asks for a byte range of the file behind the handle to be locked exclusively, and to

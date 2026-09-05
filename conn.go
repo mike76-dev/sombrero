@@ -1952,6 +1952,27 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// A client that has reclaimed a handle, or that holds it over several channels, sends its
+		// locks again without knowing which of them the server got to. Such a request carries a
+		// sequence the open remembers being answered for, and is answered from that rather than
+		// weighed anew ([MS-SMB2] 3.3.5.14): the range is one the open already holds, so weighing
+		// it a second time would refuse it as a conflict with itself. The dialects that number
+		// their locks are the ones that reconnect or bind, which is what makes this worth
+		// remembering at all.
+		op.mu.Lock()
+		durable := op.isDurable
+		op.mu.Unlock()
+		sequenced := c.dialect != "2.0.2" &&
+			(durable || c.serverCapabilities&smb2.GLOBAL_CAP_MULTI_CHANNEL != 0)
+		index, number := lr.LockSequenceIndex(), lr.LockSequenceNumber()
+
+		if sequenced && op.replayedLock(index, number) {
+			resp := &smb2.LockResponse{}
+			resp.FromRequest(lr)
+
+			return resp, ss, nil
+		}
+
 		// A request either locks or unlocks, and the first element of it says which: the rest
 		// are held to that, and one that disagrees is refused ([MS-SMB2] 3.3.5.14). There is at
 		// least one, a request naming no range having been turned away above.
@@ -1967,6 +1988,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			if status != smb2.STATUS_OK {
 				resp := smb2.NewErrorResponse(lr, status, 0, nil)
 				return resp, ss, nil
+			}
+
+			// Only what came off is worth remembering: a request that was refused is one the
+			// client is free to send again and have weighed.
+			if sequenced {
+				op.rememberLock(index, number)
 			}
 
 			resp := &smb2.LockResponse{}
@@ -1998,6 +2025,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 			var resp smb2.GenericResponse
 			if waited == smb2.STATUS_OK {
+				if sequenced {
+					op.rememberLock(index, number)
+				}
+
 				granted := &smb2.LockResponse{}
 				granted.FromRequest(lr)
 				resp = granted

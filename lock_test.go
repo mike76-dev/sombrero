@@ -565,3 +565,171 @@ func TestDropLockGivesBackOnlyTheRangeTakenLast(t *testing.T) {
 		t.Errorf("the range after both locks went back was answered %#x, want it free", status)
 	}
 }
+
+// exclusiveElement is the one lock element the sequence tests send, over and over.
+func exclusiveElement(offset, length uint64) []smb2.Lock {
+	return []smb2.Lock{{
+		Offset: offset,
+		Length: length,
+		Flags:  smb2.LOCKFLAG_EXCLUSIVE_LOCK | smb2.LOCKFLAG_FAIL_IMMEDIATELY,
+	}}
+}
+
+// unlockElement is exclusiveElement giving the range back.
+func unlockElement(offset, length uint64) []smb2.Lock {
+	return []smb2.Lock{{Offset: offset, Length: length, Flags: smb2.LOCKFLAG_UNLOCK}}
+}
+
+// TestAnUnlockSentAgainUnderItsSequenceIsAnsweredAsItWas is the request a client sends twice. It has
+// reclaimed a handle, or holds it over more than one channel, and cannot know how far the server
+// got; the second copy carries the sequence of the first and is answered from what the open
+// remembers, not weighed anew ([MS-SMB2] 3.3.5.14). Weighed again, it finds the range already given
+// back and reports a range that is not locked, for a request that succeeded.
+func TestAnUnlockSentAgainUnderItsSequenceIsAnsweredAsItWas(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	cl.conn.serverCapabilities |= smb2.GLOBAL_CAP_MULTI_CHANNEL
+
+	created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	fid := createdFileID(created)
+
+	if status := cl.lockStatus(cl.lockSequenced(fid, exclusiveElement(0, 512), 1, 1)); status != smb2.STATUS_OK {
+		t.Fatalf("the lock was answered %#x, want it granted", status)
+	}
+
+	if status := cl.lockStatus(cl.lockSequenced(fid, unlockElement(0, 512), 2, 1)); status != smb2.STATUS_OK {
+		t.Fatalf("the unlock was answered %#x, want the range given back", status)
+	}
+
+	if status := cl.lockStatus(cl.lockSequenced(fid, unlockElement(0, 512), 2, 1)); status != smb2.STATUS_OK {
+		t.Errorf("the unlock sent again was answered %#x, want the answer it got the first time", status)
+	}
+}
+
+// TestALockSentAgainUnderItsSequenceIsNotTakenTwice is the same request on the way in. Taking the
+// range a second time leaves the open holding two locks over it where the client believes it holds
+// one, and the range stays shut after the unlock the client does send.
+func TestALockSentAgainUnderItsSequenceIsNotTakenTwice(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	cl.conn.serverCapabilities |= smb2.GLOBAL_CAP_MULTI_CHANNEL
+
+	first, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	second, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	held, other := createdFileID(first), createdFileID(second)
+
+	for i := 0; i < 2; i++ {
+		if status := cl.lockStatus(cl.lockSequenced(held, exclusiveElement(0, 512), 1, 1)); status != smb2.STATUS_OK {
+			t.Fatalf("lock %d was answered %#x, want it granted", i, status)
+		}
+	}
+
+	if status := cl.lockStatus(cl.lockSequenced(held, unlockElement(0, 512), 2, 1)); status != smb2.STATUS_OK {
+		t.Fatalf("the unlock was answered %#x, want the range given back", status)
+	}
+
+	// One lock was taken, so one unlock gives the range back for good.
+	if status := cl.lockStatus(cl.lockRange(other, 0, 512)); status != smb2.STATUS_OK {
+		t.Errorf("the range after the one unlock was answered %#x, want it free", status)
+	}
+}
+
+// TestALockUnderANewSequenceNumberIsWeighedAgain is the entry reused. A client works through the
+// entries of its array and comes back around to one, and the number tells the new request from the
+// one that entry was remembering: only the number it was answered under is a request sent again.
+func TestALockUnderANewSequenceNumberIsWeighedAgain(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	cl.conn.serverCapabilities |= smb2.GLOBAL_CAP_MULTI_CHANNEL
+
+	created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	fid := createdFileID(created)
+
+	if status := cl.lockStatus(cl.lockSequenced(fid, exclusiveElement(0, 512), 1, 1)); status != smb2.STATUS_OK {
+		t.Fatalf("the lock was answered %#x, want it granted", status)
+	}
+	if status := cl.lockStatus(cl.lockSequenced(fid, unlockElement(0, 512), 2, 1)); status != smb2.STATUS_OK {
+		t.Fatalf("the unlock was answered %#x, want the range given back", status)
+	}
+
+	// The same entry under a number it was never answered under is a request of its own.
+	if status := cl.lockStatus(cl.lockSequenced(fid, unlockElement(0, 512), 2, 2)); status != smb2.STATUS_RANGE_NOT_LOCKED {
+		t.Errorf("an unlock under a new sequence number was answered %#x, want it weighed again", status)
+	}
+
+	// And what the entry remembered is gone with it, so the older number is weighed too.
+	if status := cl.lockStatus(cl.lockSequenced(fid, unlockElement(0, 512), 2, 1)); status != smb2.STATUS_RANGE_NOT_LOCKED {
+		t.Errorf("an unlock under the entry that was reset was answered %#x, want it weighed again", status)
+	}
+}
+
+// TestLockSequencesOutsideTheArrayAreNotRemembered is the request that names no entry of it. Zero is
+// reserved and the array holds 64, so neither end has anywhere to be remembered.
+func TestLockSequencesOutsideTheArrayAreNotRemembered(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+	cl.conn.serverCapabilities |= smb2.GLOBAL_CAP_MULTI_CHANNEL
+
+	created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	fid := createdFileID(created)
+
+	for _, index := range []uint32{0, lockSequenceEntries + 1} {
+		if status := cl.lockStatus(cl.lockSequenced(fid, exclusiveElement(0, 512), index, 1)); status != smb2.STATUS_OK {
+			t.Fatalf("the lock under index %d was answered %#x, want it granted", index, status)
+		}
+
+		if status := cl.lockStatus(cl.lockSequenced(fid, unlockElement(0, 512), index, 1)); status != smb2.STATUS_OK {
+			t.Fatalf("the unlock under index %d was answered %#x, want the range given back", index, status)
+		}
+
+		if status := cl.lockStatus(cl.lockSequenced(fid, unlockElement(0, 512), index, 1)); status != smb2.STATUS_RANGE_NOT_LOCKED {
+			t.Errorf("the unlock sent again under index %d was answered %#x, want it weighed again", index, status)
+		}
+	}
+}
+
+// TestADurableHandleRemembersItsLockSequences is the handle the numbering is really for: a client
+// that reclaims one has to send again what it cannot know the fate of. Such an open is sequenced
+// whatever the connection can do, where an ordinary one on a connection that neither binds nor
+// reconnects has no reason to remember anything.
+func TestADurableHandleRemembersItsLockSequences(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("file", 1024)
+
+	cl := h.dial("alice")
+
+	durable, _ := cl.createDurable("file", [16]byte{1}, false)
+	plain, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+
+	tests := []struct {
+		name string
+		fid  []byte
+		want uint32
+	}{
+		{"a durable handle", createdFileID(durable), smb2.STATUS_OK},
+		{"a handle that is nothing of the kind", createdFileID(plain), smb2.STATUS_RANGE_NOT_LOCKED},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if status := cl.lockStatus(cl.lockSequenced(tt.fid, exclusiveElement(0, 512), 1, 1)); status != smb2.STATUS_OK {
+				t.Fatalf("the lock was answered %#x, want it granted", status)
+			}
+			if status := cl.lockStatus(cl.lockSequenced(tt.fid, unlockElement(0, 512), 2, 1)); status != smb2.STATUS_OK {
+				t.Fatalf("the unlock was answered %#x, want the range given back", status)
+			}
+
+			if status := cl.lockStatus(cl.lockSequenced(tt.fid, unlockElement(0, 512), 2, 1)); status != tt.want {
+				t.Errorf("the unlock sent again was answered %#x, want %#x", status, tt.want)
+			}
+		})
+	}
+}
