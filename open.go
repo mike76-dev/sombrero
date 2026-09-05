@@ -422,6 +422,7 @@ type open struct {
 	treeConnect                     *treeConnect
 	connection                      *connection
 	grantedAccess                   uint32
+	shareMode                       uint32
 	pathName                        string
 	resumeKey                       []byte
 	fileName                        string
@@ -1103,6 +1104,7 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 		connection:    c,
 		treeConnect:   tc,
 		grantedAccess: access,
+		shareMode:     cr.ShareAccess(),
 		fileName:      filename,
 		pathName:      filepath,
 		resumeKey:     id[:24],

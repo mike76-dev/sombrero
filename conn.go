@@ -3874,6 +3874,17 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		own = l
 	}
 
+	// What the opens already on the file allow is weighed before anything is made or opened, so
+	// that a refusal leaves nothing behind. A named pipe is left out of it: every open of one is
+	// an instance of its own, so there is nothing for the sharing mode to be weighed against
+	// ([MS-SMB2] 2.2.13).
+	if tc.share.name != "ipc$" {
+		access := grantedFor(cr.DesiredAccess(), tc.maximalAccess)
+		if c.server.sharingViolation(tc.share, path, access, cr.ShareAccess()) {
+			return smb2.NewErrorResponse(cr, smb2.STATUS_SHARING_VIOLATION, 0, nil), nil
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	var info client.ObjectInfo
 	var result uint32

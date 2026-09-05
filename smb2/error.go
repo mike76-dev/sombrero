@@ -31,6 +31,7 @@ const (
 	STATUS_OBJECT_NAME_NOT_FOUND                 = 0xc0000034
 	STATUS_OBJECT_NAME_COLLISION                 = 0xc0000035
 	STATUS_DATA_ERROR                            = 0xc000003e
+	STATUS_SHARING_VIOLATION                     = 0xc0000043
 	STATUS_EAS_NOT_SUPPORTED                     = 0xc000004f
 	STATUS_LOCK_NOT_GRANTED                      = 0xc0000055
 	STATUS_DELETE_PENDING                        = 0xc0000056

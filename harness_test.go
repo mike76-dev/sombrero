@@ -953,6 +953,18 @@ func (cl *testClient) createAccessing(name string, oplock uint8, disposition, ac
 	return resp.Encode(), nil
 }
 
+// createSharing opens a file saying what it will put up with from every other open of it.
+func (cl *testClient) createSharing(name string, disposition, access, sharing uint32) ([]byte, error) {
+	cl.mid++
+	resp, err := cl.send(createRequestSharing(cl.mid, cl.ss.sessionID, cl.tc.treeID, name,
+		smb2.OPLOCK_LEVEL_NONE, disposition, access, 0, sharing, nil))
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Encode(), nil
+}
+
 // createLeased opens a file asking for a lease in the state given, and returns the response as
 // it goes on the wire together with whether the server had to answer asynchronously.
 func (cl *testClient) createLeased(name string, key [16]byte, state uint32, version int, disposition uint32) (buf []byte, async bool) {
@@ -1180,6 +1192,16 @@ func createRequest(mid, sid uint64, tid uint32, name string, oplock uint8, dispo
 
 // createRequestWithOptions is createRequest asking for particular create options.
 func createRequestWithOptions(mid, sid uint64, tid uint32, name string, oplock uint8, disposition, access, options uint32, contexts []byte) []byte {
+	return createRequestSharing(mid, sid, tid, name, oplock, disposition, access, options, everySharing, contexts)
+}
+
+// everySharing is the sharing mode the clients send for all but the files they mean to keep to
+// themselves, and the one the tests send unless they are about the sharing rules.
+const everySharing = smb2.FILE_SHARE_READ | smb2.FILE_SHARE_WRITE | smb2.FILE_SHARE_DELETE
+
+// createRequestSharing is createRequestWithOptions saying what the open will put up with from
+// everybody else.
+func createRequestSharing(mid, sid uint64, tid uint32, name string, oplock uint8, disposition, access, options, sharing uint32, contexts []byte) []byte {
 	encoded := utils.EncodeStringToBytes(name)
 
 	// The name follows the fixed part of the request, which is what puts it at the eight-byte
@@ -1198,6 +1220,7 @@ func createRequestWithOptions(mid, sid uint64, tid uint32, name string, oplock u
 	binary.LittleEndian.PutUint16(body[0:2], smb2.SMB2CreateRequestStructureSize)
 	body[3] = oplock
 	binary.LittleEndian.PutUint32(body[24:28], access)
+	binary.LittleEndian.PutUint32(body[32:36], sharing)
 	binary.LittleEndian.PutUint32(body[36:40], disposition)
 	binary.LittleEndian.PutUint32(body[40:44], options)
 	binary.LittleEndian.PutUint16(body[44:46], uint16(nameOff))
