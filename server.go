@@ -242,6 +242,12 @@ func (c *connection) grantOnResponse(resp smb2.GenericResponse) {
 
 // closeConnection destroys the Connection object.
 func (s *server) closeConnection(c *connection) {
+	// Everything that tears a connection down comes through here, so this is the one place that
+	// records it happening at all. What led to it is named by whoever called.
+	if s.debug {
+		log.Printf("Tearing down the connection from %s", c.clientName)
+	}
+
 	s.mu.Lock()
 	delete(s.connectionList, c.clientName)
 	s.mu.Unlock()

@@ -3152,6 +3152,10 @@ func (c *connection) readLoop(host string) {
 			// every time it is asked.
 			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, net.ErrClosed) {
 				log.Println("Error reading message:", err)
+			} else if c.server.debug {
+				// Which of the two it was is the difference between the client having gone and
+				// this server having dropped it, and nothing else records the answer.
+				log.Printf("Connection from %s ended while reading: %v", c.clientName, err)
 			}
 			c.server.closeConnection(c)
 
@@ -3763,11 +3767,38 @@ func (c *connection) findCancelTarget(cr smb2.CancelRequest, ss *session) (*smb2
 	return nil, nil
 }
 
+// working reports whether the connection has a request outstanding that this server is still doing
+// the work of: a create, a read or a write waiting on the backend, which on the Sia network can
+// take longer than a client is given before it is judged idle.
+//
+// A change notify and a blocking lock are left out. They wait on something that may never happen,
+// so one left behind by a client that has gone looks exactly like one a client is still waiting on,
+// and counting them would keep every connection that ever browsed a directory.
+// c.mu must be held.
+func (c *connection) working() bool {
+	for _, req := range c.asyncCommandList {
+		switch req.Header().Command() {
+		case smb2.SMB2_CREATE, smb2.SMB2_READ, smb2.SMB2_WRITE:
+			return true
+		}
+	}
+
+	return false
+}
+
 // isStale returns true if the connection hasn't been used for a certain amount of time.
 // This is done to drop unused connections.
 func (c *connection) isStale() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// A connection this server owes an answer on is in use, however long it has been since anything
+	// last arrived over it: the client is waiting on that answer, and while it waits it has nothing
+	// to send and no credits to send it with. Judged by arrivals alone, a client being kept waiting
+	// is indistinguishable from one that has gone away, and dropping it loses the work as well.
+	if c.working() {
+		return false
+	}
 
 	// A connection nobody has authenticated over yet is judged by its age alone, and the answer
 	// has to be given here. Letting it fall through to the end reaches an answer arrived at with
