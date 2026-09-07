@@ -320,12 +320,14 @@ func (s *server) encodeResponse(c *connection, ss *session, resp smb2.GenericRes
 	if ss != nil && ss.stateNow() == sessionValid { // A session exists, sign if required
 		if resp.ShouldEncrypt() {
 			wipeSignatures(buf)
+			stampSessionID(buf, ss.sessionID)
 			if resp.MayCompress() {
 				buf = c.compress(buf)
 			}
 			buf = ss.encrypt(buf, c)
 		} else if resp.Header().Command() != smb2.SMB2_SESSION_SETUP && ss.encryptData {
 			wipeSignatures(buf)
+			stampSessionID(buf, ss.sessionID)
 			if resp.MayCompress() {
 				buf = c.compress(buf)
 			}

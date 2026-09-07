@@ -153,6 +153,35 @@ func TestAZeroLengthReadIsAnsweredAtOnce(t *testing.T) {
 	}
 }
 
+// TestACachedReadIsDeclinedRatherThanServedShort is the read the cache cannot wholly answer. A
+// chunk holding fewer bytes than the range asks of it was served as a read that succeeded with
+// whatever it had, so the client was handed less than it asked for and told nothing was wrong.
+func TestACachedReadIsDeclinedRatherThanServedShort(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	// The state records a file far larger than the bytes the store holds.
+	h.files.putData("clip.mp4", bytes.Repeat([]byte("O"), 64))
+
+	created := cl.createWithOptions("clip.mp4", smb2.FILE_OPEN, 0)
+	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
+	file.file.setAllocated(4096)
+	file.file.mu.Lock()
+	file.file.size = 4096
+	file.file.mu.Unlock()
+
+	// The cache is filled with the whole of what there is, which is a chunk 64 bytes long.
+	if _, err := file.read(0, 64); err != nil {
+		t.Fatalf("the read failed: %v", err)
+	}
+
+	// A read of the range the file claims to have there cannot be answered from that chunk, so
+	// the cache must stand aside and let the read fetch it.
+	if data, ok := file.tryReadCached(0, 1024); ok {
+		t.Errorf("the cache answered a 1024-byte read with %d bytes, want it declined", len(data))
+	}
+}
+
 // TestAShortChunkEndsTheReadInsteadOfPanicking is the object that turns out smaller than the state
 // says. The chunk is sliced at the offset the read starts from, so a chunk that does not reach that
 // far took the slice out of range: on the reading goroutine that is a panic, contained only by

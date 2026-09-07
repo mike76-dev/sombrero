@@ -223,6 +223,28 @@ func compressOffset(msg []byte) int {
 	return off
 }
 
+// sendCompressionPreference is what this server compresses with, in its own order rather than the
+// peer's: Windows offers plain LZ77 first and then drops the connection over what this server sends
+// under it, for a reason never found - the output is valid [MS-XCA] and Samba's is accepted. It
+// stays advertised so an incoming one is still read; dropping it would turn compression off outright.
+var sendCompressionPreference = []uint16{
+	smb2.COMPRESSION_LZ77_HUFFMAN,
+	smb2.COMPRESSION_LZNT1,
+	smb2.COMPRESSION_LZ4,
+}
+
+// pickCompression chooses what to compress with out of what the peer offered, or COMPRESSION_NONE
+// where nothing it offered can be used.
+func pickCompression(offered []uint16) uint16 {
+	for _, want := range sendCompressionPreference {
+		if slices.Contains(offered, want) {
+			return want
+		}
+	}
+
+	return smb2.COMPRESSION_NONE
+}
+
 // compress compresses the message before encrypting and putting on the wire.
 //
 // What goes out is one segment under the unchained transform header of [MS-SMB2] 2.2.42.1, whatever
@@ -247,13 +269,7 @@ func (c *connection) compress(msg []byte) []byte {
 
 	// A pattern payload cannot carry a message that is not all one byte, so there has to be an
 	// algorithm among what the peer offered to compress with.
-	algo := uint16(smb2.COMPRESSION_NONE)
-	for _, id := range c.compressionIDs {
-		if id != smb2.COMPRESSION_PATTERN_V1 {
-			algo = id
-			break
-		}
-	}
+	algo := pickCompression(c.compressionIDs)
 	if algo == smb2.COMPRESSION_NONE {
 		return msg
 	}

@@ -3397,8 +3397,8 @@ func finalAsync(resp smb2.GenericResponse, asyncID uint64) {
 // findOpen is a helper function that tries to find an open by its ID. It returns the status
 // to fail the request with, or STATUS_OK if the request may be processed.
 func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open, uint32) {
-	fid := binary.LittleEndian.Uint64(id[:8])
-	dfid := binary.LittleEndian.Uint64(id[8:16])
+	dfid := binary.LittleEndian.Uint64(id[:8])
+	fid := binary.LittleEndian.Uint64(id[8:16])
 
 	ss.mu.Lock()
 	op, found := ss.openTable[fid]
@@ -3619,7 +3619,7 @@ func (c *connection) findOpenByGroupID(groupID uint64) *open {
 		return nil
 	}
 
-	dfid := binary.LittleEndian.Uint64(id[8:16])
+	dfid := binary.LittleEndian.Uint64(id[:8])
 	c.server.mu.Lock()
 	op := c.server.globalOpenTable[dfid]
 	c.server.mu.Unlock()
@@ -3666,8 +3666,8 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		wr := smb2.WriteRequest{Request: *target}
 		var op *open
 		id := wr.FileID()
-		fid := binary.LittleEndian.Uint64(id[:8])
-		dfid := binary.LittleEndian.Uint64(id[8:16])
+		dfid := binary.LittleEndian.Uint64(id[:8])
+		fid := binary.LittleEndian.Uint64(id[8:16])
 		ss.mu.Lock()
 		op, found := ss.openTable[fid]
 		ss.mu.Unlock()

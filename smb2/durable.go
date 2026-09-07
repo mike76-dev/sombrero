@@ -69,8 +69,8 @@ func ParseDurableHandleReconnectV2(data []byte) (DurableHandleReconnectV2, bool)
 	}
 
 	rec := DurableHandleReconnectV2{
-		FileID:    binary.LittleEndian.Uint64(data[:8]),
-		DurableID: binary.LittleEndian.Uint64(data[8:16]),
+		DurableID: binary.LittleEndian.Uint64(data[:8]),
+		FileID:    binary.LittleEndian.Uint64(data[8:16]),
 		Flags:     binary.LittleEndian.Uint32(data[32:36]),
 	}
 	copy(rec.CreateGuid[:], data[16:32])

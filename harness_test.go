@@ -1656,7 +1656,7 @@ func (cl *testClient) unlockRange(fid []byte, offset, length uint64) ([]byte, er
 // openIDOf returns the key under which the global open table holds the open a create response
 // names: the durable half of the file ID.
 func openIDOf(fid []byte) uint64 {
-	return binary.LittleEndian.Uint64(fid[8:16])
+	return binary.LittleEndian.Uint64(fid[:8])
 }
 
 // createdOplockLevel returns the oplock level of an SMB2_CREATE response.

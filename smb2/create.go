@@ -486,9 +486,11 @@ func (cr *CreateResponse) Generate(
 		cr.SetFilesize(size, allocated)
 	}
 
+	// The persistent half is the one that outlives a lost connection and names the open at a
+	// reconnect, so the durable ID goes there ([MS-SMB2] 2.2.14.1).
 	fid := make([]byte, 16)
-	binary.LittleEndian.PutUint64(fid[:8], fileID)
-	binary.LittleEndian.PutUint64(fid[8:], durableFileID)
+	binary.LittleEndian.PutUint64(fid[:8], durableFileID)
+	binary.LittleEndian.PutUint64(fid[8:], fileID)
 	cr.SetFileID(fid)
 
 	cr.SetCreateContexts(createContexts)

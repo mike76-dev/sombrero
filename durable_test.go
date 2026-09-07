@@ -414,3 +414,25 @@ func TestIntegrationLogoffKeepsTheDurableHandles(t *testing.T) {
 		t.Errorf("the reconnect handed back % x, want the handle % x", createdFileID(buf), fid)
 	}
 }
+
+// TestTheDurableIDTravelsInThePersistentHalf is the FileId a client was given coming back in a
+// reconnect. The persistent half is the one that outlives the lost connection, so the durable ID
+// has to ride there: taken from the volatile half, a reclaim looks for an ID the client no longer
+// sends ([MS-SMB2] 2.2.14.1).
+func TestTheDurableIDTravelsInThePersistentHalf(t *testing.T) {
+	op := &open{fileID: 0x1111222233334444, durableFileID: 0x5555666677778888}
+
+	// A reconnect context is the FileId, the create GUID and the flags.
+	ctx := append(op.id(), make([]byte, 20)...)
+	rec, ok := smb2.ParseDurableHandleReconnectV2(ctx)
+	if !ok {
+		t.Fatal("the reconnect context did not parse")
+	}
+
+	if rec.DurableID != op.durableFileID {
+		t.Errorf("the reconnect names durable ID %#x, want the %#x the open holds", rec.DurableID, op.durableFileID)
+	}
+	if rec.FileID != op.fileID {
+		t.Errorf("the reconnect names file ID %#x, want %#x", rec.FileID, op.fileID)
+	}
+}

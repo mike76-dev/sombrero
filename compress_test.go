@@ -109,6 +109,58 @@ func compressedWith(t *testing.T, buf, msg []byte, algo uint16) []byte {
 	return buf
 }
 
+// TestPlainLZ77IsNeverChosenToSendUnder is the choice made on this server's own order rather than
+// the peer's. Windows offers plain LZ77 ahead of the rest and will not take what this server sends
+// under it, so taking the peer's first choice is what put a broken algorithm on the wire.
+func TestPlainLZ77IsNeverChosenToSendUnder(t *testing.T) {
+	tests := []struct {
+		name    string
+		offered []uint16
+		want    uint16
+	}{
+		{
+			// The order Windows sends, which used to yield plain LZ77.
+			name:    "what Windows offers",
+			offered: []uint16{smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77, smb2.COMPRESSION_LZ77_HUFFMAN, smb2.COMPRESSION_LZNT1},
+			want:    smb2.COMPRESSION_LZ77_HUFFMAN,
+		},
+		{
+			name:    "Huffman is preferred wherever the peer put it",
+			offered: []uint16{smb2.COMPRESSION_LZNT1, smb2.COMPRESSION_LZ77_HUFFMAN},
+			want:    smb2.COMPRESSION_LZ77_HUFFMAN,
+		},
+		{
+			name:    "LZNT1 where Huffman is not on offer",
+			offered: []uint16{smb2.COMPRESSION_LZ77, smb2.COMPRESSION_LZNT1},
+			want:    smb2.COMPRESSION_LZNT1,
+		},
+		{
+			// Nothing usable is left, so the message goes out as it is.
+			name:    "plain LZ77 alone is declined",
+			offered: []uint16{smb2.COMPRESSION_LZ77},
+			want:    smb2.COMPRESSION_NONE,
+		},
+		{
+			name:    "a pattern payload cannot carry an ordinary message",
+			offered: []uint16{smb2.COMPRESSION_PATTERN_V1},
+			want:    smb2.COMPRESSION_NONE,
+		},
+		{
+			name:    "nothing offered",
+			offered: nil,
+			want:    smb2.COMPRESSION_NONE,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pickCompression(tt.offered); got != tt.want {
+				t.Errorf("chose algorithm %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestCompressionRoundTrip walks a message through every algorithm the server compresses with.
 // What one connection sends is what the other has to be able to read back.
 func TestCompressionRoundTrip(t *testing.T) {
@@ -116,8 +168,9 @@ func TestCompressionRoundTrip(t *testing.T) {
 		name string
 		algo uint16
 	}{
+		// Plain LZ77 is not here because nothing is sent under it any more; that it still comes
+		// apart when a peer sends it is what TestPlainLZ77StillComesApartWhenAPeerSendsIt covers.
 		{"LZNT1", smb2.COMPRESSION_LZNT1},
-		{"LZ77", smb2.COMPRESSION_LZ77},
 		{"LZ77+Huffman", smb2.COMPRESSION_LZ77_HUFFMAN},
 		{"LZ4", smb2.COMPRESSION_LZ4},
 	} {
@@ -153,13 +206,13 @@ func TestCompressionRoundTrip(t *testing.T) {
 // megabyte in a few dozen bytes.
 func TestCompressionIsNeverChained(t *testing.T) {
 	h := newSMBTest(t)
-	c := h.compressing(true, smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77)
+	c := h.compressing(true, smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77_HUFFMAN)
 
 	// A message with a run at the end, which is what a pattern payload used to be spent on.
 	msg := writeRequest(1, 1, 1, make([]byte, 16), 0,
 		append(bytes.Repeat([]byte("sombrero "), 8192), make([]byte, 4096)...))
 
-	buf := compressedWith(t, c.compress(msg), msg, smb2.COMPRESSION_LZ77)
+	buf := compressedWith(t, c.compress(msg), msg, smb2.COMPRESSION_LZ77_HUFFMAN)
 
 	// The flags of the transform header are where a peer reads whether the message is chained, and
 	// they lie where the first payload header of a chained message keeps its own.
@@ -187,7 +240,7 @@ func TestCompressionIsNeverChained(t *testing.T) {
 // file stops on the first response that does not.
 func TestCompressionLeavesTheHeadOfAReadResponseAlone(t *testing.T) {
 	h := newSMBTest(t)
-	c := h.compressing(true, smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77)
+	c := h.compressing(true, smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77_HUFFMAN)
 
 	data := bytes.Repeat([]byte("sombrero rides again "), 4096)
 	msg := readResponse(t, data)
@@ -226,7 +279,7 @@ func TestCompressionIsSkippedWhenItWouldNotHelp(t *testing.T) {
 	h := newSMBTest(t)
 
 	for _, chained := range []bool{false, true} {
-		c := h.compressing(chained, smb2.COMPRESSION_LZ77)
+		c := h.compressing(chained, smb2.COMPRESSION_LZ77_HUFFMAN)
 
 		// Hashes of counting numbers: as far from a pattern as anything the server will be asked
 		// to send, and the same on every run.
@@ -249,7 +302,7 @@ func TestCompressionIsSkippedWhenNotNegotiated(t *testing.T) {
 	h := newSMBTest(t)
 	msg := compressibleMessage(8192)
 
-	c := h.compressing(false, smb2.COMPRESSION_LZ77)
+	c := h.compressing(false, smb2.COMPRESSION_LZ77_HUFFMAN)
 	h.srv.compressionSupported = false
 	if buf := c.compress(msg); !bytes.Equal(buf, msg) {
 		t.Error("the server compressed although it does not support compression")
@@ -342,7 +395,7 @@ func TestDecompressChainedPayloads(t *testing.T) {
 // connection that never settled on compression has no algorithm to read it with.
 func TestDecompressRefusesWhatWasNotNegotiated(t *testing.T) {
 	h := newSMBTest(t)
-	c := h.compressing(false, smb2.COMPRESSION_LZ77)
+	c := h.compressing(false, smb2.COMPRESSION_LZ77_HUFFMAN)
 
 	msg := compressibleMessage(8192)
 	buf := c.compress(msg)
@@ -389,7 +442,7 @@ func TestDecompressRefusesAnOversizeSegment(t *testing.T) {
 func TestDecompressRefusesAnUnnegotiatedAlgorithm(t *testing.T) {
 	h := newSMBTest(t)
 
-	sender := h.compressing(false, smb2.COMPRESSION_LZ77)
+	sender := h.compressing(false, smb2.COMPRESSION_LZ77_HUFFMAN)
 	msg := compressibleMessage(8192)
 	buf := sender.compress(msg)
 
@@ -460,9 +513,10 @@ func TestDecompressRefusesAWrongOriginalSize(t *testing.T) {
 	h := newSMBTest(t)
 	c := h.compressing(false, smb2.COMPRESSION_LZ77)
 
+	// Framed by hand, the way a peer sends one: nothing goes out under plain LZ77 any more, and
+	// this is the algorithm whose reading side still has to hold up.
 	msg := compressibleMessage(8192)
-	buf := c.compress(msg)
-	smb2.Header(buf).SetOriginalCompressedSegmentSize(uint32(len(msg)) + 1)
+	buf := unchained(smb2.COMPRESSION_LZ77, uint32(len(msg))+1, 0, squeeze(t, smb2.COMPRESSION_LZ77, msg))
 
 	if _, err := c.decompress(buf); !errors.Is(err, smb2.ErrWrongLength) {
 		t.Errorf("the server answered %v, want it to refuse a size that is not the one it got", err)
@@ -597,7 +651,7 @@ func TestCompressionOfEveryShapeOfRead(t *testing.T) {
 		msg := readResponse(t, buf)
 
 		for _, chained := range []bool{true, false} {
-			c := h.compressing(chained, smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77)
+			c := h.compressing(chained, smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77_HUFFMAN)
 
 			out := c.compress(msg)
 			if bytes.Equal(out, msg) {
@@ -644,7 +698,7 @@ func TestCompressionLeavesSmallMessagesAlone(t *testing.T) {
 	h := newSMBTest(t)
 
 	for _, chained := range []bool{false, true} {
-		c := h.compressing(chained, smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77)
+		c := h.compressing(chained, smb2.COMPRESSION_PATTERN_V1, smb2.COMPRESSION_LZ77_HUFFMAN)
 
 		// Read responses of a page and of two, and a message that is nothing but a header and a
 		// structure. All three are as compressible as anything the server sends.
@@ -829,5 +883,43 @@ func TestASegmentTooShortToBeAMessageIsRefused(t *testing.T) {
 		if _, err := c.decompress(msg); !errors.Is(err, smb2.ErrWrongLength) {
 			t.Errorf("a segment of %d bytes failed with %v, want %v", size, err, smb2.ErrWrongLength)
 		}
+	}
+}
+
+// TestTheSessionIsStampedBeforeCompression is the stamp landing in the SMB2 header rather than in
+// the compression header that a compressed message begins with.
+func TestTheSessionIsStampedBeforeCompression(t *testing.T) {
+	h := newSMBTest(t)
+	alice := h.dial("alice").encrypting()
+
+	h.srv.compressionSupported = true
+	alice.conn.compressionIDs = []uint16{smb2.COMPRESSION_LZ77_HUFFMAN}
+
+	// A read response big enough to compress, built the way a client that asked for compressed
+	// reads leaves one, and naming no session - which is what a lease break does.
+	data := bytes.Repeat([]byte("sombrero rides again "), minCompressedSegment/21+64)
+	reqs, err := smb2.GetRequests(readRequest(1, alice.ss.sessionID, alice.tc.treeID, make([]byte, 16), 0, uint32(len(data))), 0, false)
+	if err != nil || len(reqs) != 1 {
+		t.Fatalf("could not build the read request: %v", err)
+	}
+	rr := smb2.ReadRequest{Request: *reqs[0]}
+	rr.SetCompressReply(true)
+
+	resp := &smb2.ReadResponse{}
+	resp.FromRequest(rr)
+	resp.Generate(data, smb2.SMB2HeaderSize+smb2.SMB2ReadResponseMinSize)
+	resp.Header().SetSessionID(0)
+
+	buf := h.srv.encodeResponse(alice.conn, alice.ss, resp)
+
+	inner, err := alice.conn.decompress(alice.decrypted(buf))
+	if err != nil {
+		t.Fatalf("the answer did not come apart: %v", err)
+	}
+	if id := smb2.Header(inner).ProtocolID(); id != smb2.PROTOCOL_SMB2 {
+		t.Fatalf("what came apart carries protocol ID %#x, want an SMB2 message", id)
+	}
+	if got := smb2.Header(inner).SessionID(); got != alice.ss.sessionID {
+		t.Errorf("the answer names session %#x, want the %#x it went out on", got, alice.ss.sessionID)
 	}
 }

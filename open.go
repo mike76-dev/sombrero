@@ -184,7 +184,10 @@ func (u *upload) cutTo(n uint64) bool {
 // that leaves a hole behind meant the zeros, so they are written - but the offset of a write is a
 // 64-bit number of the client's choosing, and the hole in front of what it queues is an upload of
 // that many bytes to a backend that charges for them. Past this the file is refused instead.
-const maxGapFilled = 1 << 30 // 1GiB
+//
+// Held well down, because every byte of it is one the server invents and stores as though the
+// client had written it: the wider this is, the more of a file a lost write window can cost.
+const maxGapFilled = 64 << 20 // 64MiB
 
 // uploadHeadKept is how much of the front of a file being written is kept in memory to answer reads of it.
 var uploadHeadKept uint64 = 8 * 1024 * 1024
@@ -1262,11 +1265,13 @@ func (op *open) queryDirectory(acc stores.Account, pattern string) error {
 	return nil
 }
 
-// id is a helper method that marshals the volatile and persistent ID parts into a byte sequence.
+// id is a helper method that marshals the persistent and volatile ID parts into a byte sequence.
+// The durable ID is the persistent one: it is what names the open again after a lost connection
+// ([MS-SMB2] 2.2.14.1).
 func (op *open) id() []byte {
 	i := make([]byte, 16)
-	binary.LittleEndian.PutUint64(i[:8], op.fileID)
-	binary.LittleEndian.PutUint64(i[8:], op.durableFileID)
+	binary.LittleEndian.PutUint64(i[:8], op.durableFileID)
+	binary.LittleEndian.PutUint64(i[8:], op.fileID)
 	return i
 }
 
@@ -1650,13 +1655,22 @@ func (op *open) tryReadCached(offset, length uint64) ([]byte, bool) {
 		}
 	}
 
+	// This path answers the client on its own, so anything short of the whole range is declined
+	// rather than handed back: a short chunk used to be served as a successful read of fewer bytes.
 	result := make([]byte, 0, length)
 	for i, chunk := range chunks {
 		part, ok := chunkSlice(chunk.data, firstChunk+uint64(i)*chunkSize, offset, length)
 		if !ok {
-			break
+			op.mu.Unlock()
+
+			return nil, false
 		}
 		result = append(result, part...)
+	}
+	if uint64(len(result)) != length {
+		op.mu.Unlock()
+
+		return nil, false
 	}
 	op.mu.Unlock()
 
@@ -2262,11 +2276,23 @@ func (op *open) flush() error {
 	// wrote. Those bytes are zeros, and writing them is what lets the rest be stored. They go a part
 	// at a time, each one sent before the next is made, so that what the server holds of a hole is a
 	// part of it rather than the whole.
-	var filled uint64
+	var filled, filledFrom uint64
 	for {
 		gap := u.gapAhead()
 		if gap == 0 {
 			break
+		}
+
+		// A hole at the very front of the file is the one thing a client never means by one. A file
+		// written sparsely still carries something near its beginning, so a first byte that never
+		// arrived while the rest of the file did is the writes that carried it having been lost.
+		// Filling it stores a file the client never wrote and answers the close as though nothing
+		// were wrong, which is worse than refusing: the client keeps a copy it believes was made,
+		// and finds out what is in it whenever it next opens the file.
+		if u.nextOffset == 0 {
+			u.mu.Unlock()
+
+			return errors.New("flush: the front of the file never arrived")
 		}
 
 		// Measured before any of it is written, so that a hole nobody would store costs the
@@ -2277,6 +2303,10 @@ func (op *open) flush() error {
 			u.mu.Unlock()
 
 			return errors.New("flush: the file leaves more unwritten than the server will fill in")
+		}
+
+		if filled == 0 {
+			filledFrom = u.nextOffset
 		}
 
 		hole := u.fillGap(gap)
@@ -2295,6 +2325,14 @@ func (op *open) flush() error {
 			op.sendPart(u, numbers[i], slab)
 		}
 		u.mu.Lock()
+	}
+
+	// Bytes the client never wrote are about to be stored as though it had, so this is put on record
+	// whatever comes of the rest of the flush. Nothing else says it happened, and a file that comes
+	// back holding zeros where its contents were is otherwise a corruption with no history at all.
+	if filled > 0 {
+		log.Printf("Filling %d bytes of %s with zeros from offset %d: the client left them unwritten",
+			filled, u.path, filledFrom)
 	}
 
 	if len(u.pending) != 0 {

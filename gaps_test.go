@@ -90,6 +90,41 @@ func TestIntegrationAFileWithAHoleInItIsStoredAsZeros(t *testing.T) {
 	}
 }
 
+// TestIntegrationAFileWhoseFrontNeverArrivedIsRefused is the hole that is never the client's doing.
+// A copy whose first writes were lost - the connection went, and what came back carried on from
+// where the client had got to - leaves everything in front of that point unwritten. Filled in, it
+// is stored as a file whose front is zeros and the close is answered as a success, so the client
+// keeps a copy it believes was made and finds out what is in it whenever it next opens the file.
+func TestIntegrationAFileWhoseFrontNeverArrivedIsRefused(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	handle, _ := cl.create("report.pdf", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(handle).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+	fid := createdFileID(handle)
+
+	// Nothing is ever written at the front: the only write there is lands well into the file.
+	if _, err := cl.write(fid, 4096, bytes.Repeat([]byte("t"), 16)); err != nil {
+		t.Fatalf("the write failed: %v", err)
+	}
+
+	closed, err := cl.closeHandle(fid)
+	if err != nil {
+		t.Fatalf("the close failed outright: %v", err)
+	}
+	if status := smb2.Header(closed).Status(); status == smb2.STATUS_OK {
+		t.Error("the close was answered with success, want the file refused")
+	}
+
+	// Refused rather than stored as zeros: a file the client cannot use is worse than none, because
+	// nothing tells it which of the two it has.
+	if got := h.files.dataOf("report.pdf"); len(got) > 0 {
+		t.Errorf("the store holds %d bytes of a file whose front never arrived", len(got))
+	}
+}
+
 // TestIntegrationAHoleThatIsFilledBeforeTheCloseIsNotZeroed is the ordinary case the one above must
 // not spoil: a gap is only the client's business until the writes stop arriving. Filled in time, the
 // file is what was written and nothing is zeroed.
