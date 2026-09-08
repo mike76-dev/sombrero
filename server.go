@@ -71,6 +71,10 @@ type server struct {
 	// every look.
 	watchInterval time.Duration
 
+	// offeredSDKs holds the SDK instances the API has already built while registering
+	// an app key, keyed by "workgroupUUID/shareName", for AddConnection to pick up.
+	offeredSDKs sync.Map
+
 	connectionCount map[string]int
 	store           stores.Store
 	debug           bool

@@ -51,5 +51,9 @@ this only works when the request is not subject to CORS restrictions.
 
 ## Notes
 
-* When a workgroup connects to an indexd share for the first time, the returned
-  app key is shown once — store it safely; it is required for reconnecting.
+* Connecting a workgroup to a share runs in the background, and the Connections page
+  polls `GET /connect/:workgroup/:share` to show which phase it is in. A first-time
+  indexd connection needs no second press: approving the registration with the indexer
+  is what carries it through.
+* When a workgroup connects to an indexd share for the first time, the app key it
+  derives is shown once — store it safely; it is required for reconnecting.

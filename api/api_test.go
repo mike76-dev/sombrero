@@ -16,6 +16,7 @@ import (
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
+	sdk "go.sia.tech/siastorage"
 )
 
 var errStore = errors.New("store error")
@@ -54,6 +55,7 @@ type mockStore struct {
 	getAccounts         func(stores.Share) ([]stores.AccessRights, error)
 	addConnection       func(stores.Workgroup, stores.Share, types.PrivateKey) error
 	removeConnection    func(stores.Workgroup, stores.Share) error
+	isConnected         func(stores.Workgroup, stores.Share) (bool, types.PrivateKey, error)
 }
 
 func (m *mockStore) IsBanned(h string) (bool, string, error) {
@@ -237,11 +239,18 @@ func (m *mockStore) RemoveConnection(wg stores.Workgroup, s stores.Share) error 
 	}
 	return nil
 }
+func (m *mockStore) IsConnected(wg stores.Workgroup, s stores.Share) (bool, types.PrivateKey, error) {
+	if m.isConnected != nil {
+		return m.isConnected(wg, s)
+	}
+	return false, nil, nil
+}
 
 // mockServer stands in for the running SMB server.
 type mockServer struct {
 	stats            ServerStats
 	shareConnections func(string) (map[string]client.Client, map[string]string, error)
+	offered          *sdk.SDK
 }
 
 func (m *mockServer) Stats() ServerStats { return m.stats }
@@ -252,6 +261,12 @@ func (m *mockServer) ShareConnections(name string) (map[string]client.Client, ma
 	}
 	return nil, nil, nil
 }
+
+func (m *mockServer) OfferSDK(_ stores.Workgroup, _ stores.Share, sdkClient *sdk.SDK) {
+	m.offered = sdkClient
+}
+
+func (m *mockServer) DiscardSDK(_ stores.Workgroup, _ stores.Share) { m.offered = nil }
 
 // mockClient implements only the parts of client.Client that the slab scan
 // uses. The embedded interface is nil, so any other call panics rather than
@@ -1474,22 +1489,50 @@ func TestConnectRequest(t *testing.T) {
 	})
 }
 
+// awaitConnect polls the connection status until the attempt has ended, and
+// fails the test if it does not end at all.
+func awaitConnect(t *testing.T, api *API, path string) ConnectStatusResponse {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		w := doRequest(api, http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusOK)
+		res := decodeJSON[ConnectStatusResponse](t, w)
+		if res.State == ConnectConnected || res.State == ConnectFailed {
+			return res
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatalf("the connection attempt did not finish")
+	return ConnectStatusResponse{}
+}
+
 func TestConnect(t *testing.T) {
 	path := "/connect/" + testUUID.String() + "/myshare"
 
 	t.Run("PUT connects workgroup to renterd share (no body)", func(t *testing.T) {
-		called := false
+		called := make(chan struct{})
 		ms := &mockStore{
 			findWorkgroup: foundWorkgroup(),
 			getShare:      foundShare("myshare", "renterd"),
 			addConnection: func(stores.Workgroup, stores.Share, types.PrivateKey) error {
-				called = true
+				close(called)
 				return nil
 			},
 		}
-		w := doRequest(newTestAPI(ms), http.MethodPut, path, nil)
-		checkStatus(t, w, http.StatusNoContent)
-		if !called {
+		api := newTestAPI(ms)
+		w := doRequest(api, http.MethodPut, path, nil)
+		checkStatus(t, w, http.StatusAccepted)
+		if state := decodeJSON[ConnectStatusResponse](t, w).State; state != ConnectConnecting {
+			t.Errorf("state: want %q, got %q", ConnectConnecting, state)
+		}
+
+		if res := awaitConnect(t, api, path); res.State != ConnectConnected {
+			t.Errorf("state: want %q, got %q (%s)", ConnectConnected, res.State, res.Error)
+		}
+		select {
+		case <-called:
+		default:
 			t.Error("AddConnection not called")
 		}
 	})
@@ -1499,27 +1542,34 @@ func TestConnect(t *testing.T) {
 		for i := range appKey {
 			appKey[i] = byte(i)
 		}
-		var gotKey types.PrivateKey
+		gotKey := make(chan types.PrivateKey, 1)
 		ms := &mockStore{
 			findWorkgroup: foundWorkgroup(),
 			getShare:      foundShare("myshare", "indexd"),
 			addConnection: func(_ stores.Workgroup, _ stores.Share, k types.PrivateKey) error {
-				gotKey = k
+				gotKey <- k
 				return nil
 			},
 		}
+		api := newTestAPI(ms)
 		body := map[string]string{"appKey": hex.EncodeToString(appKey)}
-		w := doRequest(newTestAPI(ms), http.MethodPut, path, body)
-		checkStatus(t, w, http.StatusOK)
-		resp := decodeJSON[ConnectResponse](t, w)
-		if resp.AppKey != hex.EncodeToString(appKey) {
-			t.Errorf("appKey in response: want %q, got %q", hex.EncodeToString(appKey), resp.AppKey)
+		w := doRequest(api, http.MethodPut, path, body)
+		checkStatus(t, w, http.StatusAccepted)
+
+		res := awaitConnect(t, api, path)
+		if res.State != ConnectConnected {
+			t.Fatalf("state: want %q, got %q (%s)", ConnectConnected, res.State, res.Error)
 		}
-		if len(gotKey) != 64 {
-			t.Errorf("app key length stored: want 64, got %d", len(gotKey))
+
+		// The caller passed the key in, so it is not one to hand back.
+		if res.AppKey != "" {
+			t.Errorf("appKey in response: want none, got %q", res.AppKey)
 		}
-		if gotKey[1] != 1 {
-			t.Errorf("app key[1]: want 1, got %d", gotKey[1])
+		k := <-gotKey
+		if len(k) != 64 {
+			t.Errorf("app key length stored: want 64, got %d", len(k))
+		} else if k[1] != 1 {
+			t.Errorf("app key[1]: want 1, got %d", k[1])
 		}
 	})
 
@@ -1564,7 +1614,7 @@ func TestConnect(t *testing.T) {
 		checkStatus(t, w, http.StatusBadRequest)
 	})
 
-	t.Run("PUT indexd share without pending builder returns 400", func(t *testing.T) {
+	t.Run("PUT indexd share without an app key returns 400", func(t *testing.T) {
 		ms := &mockStore{
 			findWorkgroup: foundWorkgroup(),
 			getShare:      foundShare("myshare", "indexd"),
@@ -1573,14 +1623,46 @@ func TestConnect(t *testing.T) {
 		checkStatus(t, w, http.StatusBadRequest)
 	})
 
-	t.Run("PUT store error", func(t *testing.T) {
+	t.Run("PUT store error fails the attempt", func(t *testing.T) {
 		ms := &mockStore{
 			findWorkgroup: foundWorkgroup(),
 			getShare:      foundShare("myshare", "renterd"),
 			addConnection: func(stores.Workgroup, stores.Share, types.PrivateKey) error { return errStore },
 		}
-		w := doRequest(newTestAPI(ms), http.MethodPut, path, nil)
-		checkStatus(t, w, http.StatusInternalServerError)
+		api := newTestAPI(ms)
+		w := doRequest(api, http.MethodPut, path, nil)
+		checkStatus(t, w, http.StatusAccepted)
+
+		res := awaitConnect(t, api, path)
+		if res.State != ConnectFailed {
+			t.Errorf("state: want %q, got %q", ConnectFailed, res.State)
+		}
+		if res.Error == "" {
+			t.Error("a failed attempt must say what went wrong")
+		}
+	})
+
+	t.Run("PUT refuses a second attempt while the first is running", func(t *testing.T) {
+		release := make(chan struct{})
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "renterd"),
+			addConnection: func(stores.Workgroup, stores.Share, types.PrivateKey) error {
+				<-release
+				return nil
+			},
+		}
+		api := newTestAPI(ms)
+		checkStatus(t, doRequest(api, http.MethodPut, path, nil), http.StatusAccepted)
+		checkStatus(t, doRequest(api, http.MethodPut, path, nil), http.StatusConflict)
+
+		close(release)
+		if res := awaitConnect(t, api, path); res.State != ConnectConnected {
+			t.Errorf("state: want %q, got %q", ConnectConnected, res.State)
+		}
+
+		// The attempt is finished now, so the next one is allowed to start.
+		checkStatus(t, doRequest(api, http.MethodPut, path, nil), http.StatusAccepted)
 	})
 
 	t.Run("DELETE disconnects workgroup from share", func(t *testing.T) {
@@ -1625,6 +1707,112 @@ func TestConnect(t *testing.T) {
 		}
 		w := doRequest(newTestAPI(ms), http.MethodDelete, path, nil)
 		checkStatus(t, w, http.StatusInternalServerError)
+	})
+}
+
+// TestConnectStatus tests GET /connect/:workgroup/:share.
+func TestConnectStatus(t *testing.T) {
+	path := "/connect/" + testUUID.String() + "/myshare"
+
+	t.Run("GET reports a share that is not connected as idle", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusOK)
+		if state := decodeJSON[ConnectStatusResponse](t, w).State; state != ConnectIdle {
+			t.Errorf("state: want %q, got %q", ConnectIdle, state)
+		}
+	})
+
+	t.Run("GET reports a stored connection with no attempt in flight", func(t *testing.T) {
+		key := types.GeneratePrivateKey()
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+			isConnected: func(stores.Workgroup, stores.Share) (bool, types.PrivateKey, error) {
+				return true, key, nil
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusOK)
+		res := decodeJSON[ConnectStatusResponse](t, w)
+		if res.State != ConnectConnected {
+			t.Errorf("state: want %q, got %q", ConnectConnected, res.State)
+		}
+
+		// The stored key belongs to whoever saved it when it was made.
+		if res.AppKey != "" {
+			t.Error("a stored app key must not be reported")
+		}
+	})
+
+	t.Run("GET store error returns 500", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+			isConnected: func(stores.Workgroup, stores.Share) (bool, types.PrivateKey, error) {
+				return false, nil, errStore
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("GET unknown workgroup returns 404", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/connect/unknown-name/myshare", nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("GET share not found returns 404", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      func(string) (stores.Share, error) { return stores.Share{}, nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("the app key of a first-time connection is reported once", func(t *testing.T) {
+		key := types.GeneratePrivateKey()
+		api := newTestAPI(&mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+		})
+		attempt, started := api.connects.begin(connectKey(stores.Workgroup{UUID: testUUID}, stores.Share{Name: "myshare"}), ConnectConnecting)
+		if !started {
+			t.Fatal("the attempt did not start")
+		}
+		attempt.finish(key)
+
+		res := decodeJSON[ConnectStatusResponse](t, doRequest(api, http.MethodGet, path, nil))
+		if res.AppKey != hex.EncodeToString(key) {
+			t.Errorf("appKey: want %q, got %q", hex.EncodeToString(key), res.AppKey)
+		}
+
+		res = decodeJSON[ConnectStatusResponse](t, doRequest(api, http.MethodGet, path, nil))
+		if res.State != ConnectConnected {
+			t.Errorf("state: want %q, got %q", ConnectConnected, res.State)
+		}
+		if res.AppKey != "" {
+			t.Error("the app key must be reported once and no more")
+		}
+	})
+
+	t.Run("DELETE forgets the attempt", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "renterd"),
+		}
+		api := newTestAPI(ms)
+		checkStatus(t, doRequest(api, http.MethodPut, path, nil), http.StatusAccepted)
+		awaitConnect(t, api, path)
+		checkStatus(t, doRequest(api, http.MethodDelete, path, nil), http.StatusNoContent)
+
+		if state := decodeJSON[ConnectStatusResponse](t, doRequest(api, http.MethodGet, path, nil)).State; state != ConnectIdle {
+			t.Errorf("state: want %q, got %q", ConnectIdle, state)
+		}
 	})
 }
 

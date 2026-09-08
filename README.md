@@ -158,6 +158,12 @@ curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/share" -d '{"name":
 ```
 
 ### 4. Connect the workgroup to the share
+Connecting takes a while — the client warms up a connection to every host, and an `indexd`
+share waits for a person to approve the registration first — so the calls that start a
+connection return right away and the connection is made in the background. `GET` reports how
+far along it is: `awaiting-approval`, `registering` or `connecting` while it runs, and
+`connected` or `failed` when it is over.
+
 In case of a `renterd` share, simply call
 ```Bash
 curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/home/shared-renterd"
@@ -168,15 +174,21 @@ curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/connect/8303eeb8-f3
 ```
 Example of the output:
 ```Bash
-{"url":"https://sia.storage/auth/connect/d10f2a960d7dfc947248f58758619b74"}
+{"state":"awaiting-approval","started":"2026-09-08T10:15:04Z","since":"2026-09-08T10:15:04Z","url":"https://sia.storage/auth/connect/d10f2a960d7dfc947248f58758619b74"}
 ```
-After visiting the URL provided and accepting the connection, run
+Visit the URL provided and accept the connection. That is all it takes: the server picks the
+approval up and connects the share. Follow it with
 ```Bash
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
+curl -u "":<API_PASSWORD> "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
 ```
-Example of the output:
+Example of the output once it is done:
 ```Bash
-{"appKey":"03a2aab52b79f674354af35b0030cd0cd45b51f53a1a75795a58c85844767b3d3ac38242c05637cac5b8b7fbcea55d29826845fdfc0ef19894d7640438f43a22"}
+{"state":"connected","started":"2026-09-08T10:15:04Z","since":"2026-09-08T10:15:41Z","appKey":"03a2aab52b79f674354af35b0030cd0cd45b51f53a1a75795a58c85844767b3d3ac38242c05637cac5b8b7fbcea55d29826845fdfc0ef19894d7640438f43a22"}
+```
+Keep that app key: it is what reconnects this workgroup to the share, and it is reported
+once and never again.
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd" -d '{"appKey":"03a2aab5..."}'
 ```
 
 ### 5. Grant access to the share
@@ -247,9 +259,8 @@ An anonymous session reaches that folder and nothing else: what it calls the roo
 On an `indexd` share the folder is served by a connection of its own, made once under the reserved workgroup `00000000-0000-0000-0000-000000000000`:
 ```Bash
 curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/connect/00000000-0000-0000-0000-000000000000/<SHARE_NAME>"
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/00000000-0000-0000-0000-000000000000/<SHARE_NAME>"
 ```
-The first call returns a URL to approve, exactly as for any other workgroup. What anonymous uploads is then pinned under an app account of its own, with its own quota, so no workgroup pays for it. The server makes the folder itself; if a folder of that name is already there and belongs to somebody else, the share turns anonymous sessions away and says so in the log rather than handing that folder to everyone.
+The call returns a URL to approve, exactly as for any other workgroup. What anonymous uploads is then pinned under an app account of its own, with its own quota, so no workgroup pays for it. The server makes the folder itself; if a folder of that name is already there and belongs to somebody else, the share turns anonymous sessions away and says so in the log rather than handing that folder to everyone.
 
 ## Lite Mode
 If you only intend to connect to `renterd` shares, you can run the server in the Lite mode by setting `mode: lite` in the config file. In this mode, no PostgreSQL database is required: the shares, workgroups, accounts, access policies, and the ban list are kept in a JSON file (`store.json`) in the data directory, and the `database` and `indexd` sections of the config file may be omitted. `indexd` shares are not supported in the Lite mode.

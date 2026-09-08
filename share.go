@@ -389,6 +389,30 @@ func (s *server) ensureShare(ss stores.Share) (*share, error) {
 	return sh, nil
 }
 
+// offerKey names an SDK instance offered for a workgroup's connection to a share.
+func offerKey(wg stores.Workgroup, share stores.Share) string {
+	return wg.UUID.String() + "/" + share.Name
+}
+
+// OfferSDK hands over an SDK instance that is already authorized for the workgroup,
+// so that the connection AddConnection is about to make reuses it. Building one warms
+// up a connection to every host, which is not work worth doing twice.
+func (s *server) OfferSDK(wg stores.Workgroup, share stores.Share, sdkClient *sdk.SDK) {
+	s.offeredSDKs.Store(offerKey(wg, share), sdkClient)
+}
+
+// DiscardSDK closes an offered SDK instance that AddConnection has not taken up,
+// and does nothing if it has.
+func (s *server) DiscardSDK(wg stores.Workgroup, share stores.Share) {
+	v, ok := s.offeredSDKs.LoadAndDelete(offerKey(wg, share))
+	if !ok {
+		return
+	}
+	if err := v.(*sdk.SDK).Close(); err != nil {
+		log.Printf("failed to close the unused SDK offer: %v", err)
+	}
+}
+
 // AddConnection initializes a per-workgroup indexd SDK client and populates
 // the security maps for the connecting workgroup's accounts.
 func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey types.PrivateKey) error {
@@ -396,6 +420,21 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 	if err != nil {
 		return err
 	}
+
+	// An offer the connection below does not use is closed here rather than left
+	// running with nothing to serve.
+	var offered *sdk.SDK
+	if v, ok := s.offeredSDKs.LoadAndDelete(offerKey(wg, share)); ok {
+		offered = v.(*sdk.SDK)
+	}
+	offerTaken := false
+	defer func() {
+		if offered != nil && !offerTaken {
+			if err := offered.Close(); err != nil {
+				log.Printf("failed to close the unused SDK offer: %v", err)
+			}
+		}
+	}()
 
 	// A workgroup gets one client per share and no more: a second one would
 	// claim part of the same buffered pieces, leaving neither with enough to
@@ -410,17 +449,22 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 		if !ok {
 			return errors.New("indexd shares require a database-backed store")
 		}
-		builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
-			ID:          types.HashBytes(append([]byte(s.cfg.Indexd.Name), []byte(s.cfg.Indexd.Description)...)),
-			Name:        s.cfg.Indexd.Name,
-			Description: s.cfg.Indexd.Description,
-			LogoURL:     s.cfg.Indexd.LogoURL,
-			ServiceURL:  s.cfg.Indexd.ServiceURL,
-		})
-		sdkClient, err := builder.SDK(appKey)
-		if err != nil {
-			return err
+		sdkClient := offered
+		if sdkClient == nil {
+			builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
+				ID:          types.HashBytes(append([]byte(s.cfg.Indexd.Name), []byte(s.cfg.Indexd.Description)...)),
+				Name:        s.cfg.Indexd.Name,
+				Description: s.cfg.Indexd.Description,
+				LogoURL:     s.cfg.Indexd.LogoURL,
+				ServiceURL:  s.cfg.Indexd.ServiceURL,
+			})
+			sdkClient, err = builder.SDK(appKey)
+			if err != nil {
+				return err
+			}
 		}
+		offerTaken = true
+
 		fragLevel, fragInterval, defragment := s.cfg.Indexd.Fragmentation()
 		c := client.NewIndexdClient(db, sdkClient, share.Name, wg.ID, share.DataShards, share.ParityShards, client.PackingOptions{
 			MinSize: s.cfg.Indexd.MinPackedSlabSize,
@@ -435,6 +479,9 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 		defer cancel()
 		info, err := c.Info(ctx)
 		if err != nil {
+			if err := c.Close(); err != nil {
+				log.Printf("failed to close the client of an unavailable share: %v", err)
+			}
 			return errShareUnavailable
 		}
 

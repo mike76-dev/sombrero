@@ -87,12 +87,24 @@ export interface WorkgroupResponse {
   name?: string
 }
 
-export interface ConnectRequestResponse {
-  url: string
-}
+export type ConnectState =
+  | 'idle'
+  | 'awaiting-approval'
+  | 'registering'
+  | 'connecting'
+  | 'connected'
+  | 'failed'
 
-export interface ConnectResponse {
-  appKey: string
+// The progress of one workgroup's connection to one share. appKey is the key a
+// first-time registration derived: it is reported once, when the attempt reaches
+// 'connected', and never again.
+export interface ConnectStatusResponse {
+  state: ConnectState
+  started?: string
+  since?: string
+  url?: string
+  appKey?: string
+  error?: string
 }
 
 export interface OrphanedSlab {
