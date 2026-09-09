@@ -282,7 +282,7 @@ func (js *JSONStore) AddAccount(acc Account) error {
 		}
 		for _, a := range d.Accounts {
 			if a.Username == acc.Username && a.Workgroup == acc.Workgroup {
-				return fmt.Errorf("failed to add account: account already exists")
+				return ErrAccountExists
 			}
 		}
 
@@ -436,7 +436,7 @@ func (js *JSONStore) AddWorkgroup(wg Workgroup) error {
 				return fmt.Errorf("failed to add workgroup: workgroup already exists")
 			}
 			if wg.Name != "" && w.Name == wg.Name {
-				return fmt.Errorf("failed to add workgroup: name already taken")
+				return ErrWorkgroupExists
 			}
 		}
 		wg.ID = d.NextWorkgroupID
@@ -619,7 +619,7 @@ func (js *JSONStore) RegisterShare(s Share) error {
 	return js.update(func(d *jsonData) error {
 		for _, sh := range d.Shares {
 			if sh.Name == s.Name {
-				return fmt.Errorf("failed to register share: share already exists")
+				return ErrShareExists
 			}
 		}
 		d.Shares = append(d.Shares, s)

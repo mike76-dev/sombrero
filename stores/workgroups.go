@@ -11,6 +11,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ErrWorkgroupExists is returned when a workgroup is created under a name that
+// another one already has. A name is what a client may connect by, so two
+// workgroups cannot share one.
+var ErrWorkgroupExists = errors.New("a workgroup with this name already exists")
+
 // PublicDir is a folder whose contents are visible to every member of the
 // workgroup it belongs to. ReadOnly decides what the other members may do with
 // the files placed into that folder: if it is set, only the account that owns a
@@ -362,6 +367,16 @@ func (db *Database) AddWorkgroup(wg Workgroup) error {
 		var name any
 		if n := NormalizeWorkgroupName(wg.Name); n != "" {
 			name = n
+
+			// The unique constraint would refuse this anyway; asking first is
+			// what tells a taken name from a database that is having trouble.
+			const taken = `SELECT 1 FROM workgroups WHERE name = $1`
+			var exists int
+			if err := tx.QueryRow(ctx, taken, n).Scan(&exists); err == nil {
+				return ErrWorkgroupExists
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("failed to look up the workgroup name: %w", err)
+			}
 		}
 		var id int
 		if err := tx.QueryRow(ctx, query, wg.UUID[:], name).Scan(&id); err != nil {
