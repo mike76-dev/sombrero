@@ -25,7 +25,6 @@ var (
 	errShareUnavailable = errors.New("share currently unavailable")
 	errShareExists      = errors.New("share with the same name already exists")
 	errShareNotFound    = errors.New("share not found")
-	errShareInUse       = errors.New("share currently in use by one or more clients")
 )
 
 // persistedKey names a file that has been created but not yet uploaded: the workgroup whose
@@ -270,17 +269,21 @@ func (s *server) UpdateShare(ss stores.Share) error {
 
 // RemoveShare removes a share from the SMB server.
 func (s *server) RemoveShare(ss stores.Share) error {
+	// A share is only in the list once something has needed it: a renterd share
+	// that no client has connected to since the server started is registered in
+	// the database and nowhere else. There is nothing to close for one of those,
+	// and nothing holding it either, so unregistering it is all there is to do.
 	s.mu.Lock()
 	sh, found := s.shareList[ss.Name]
 	s.mu.Unlock()
 	if !found {
-		return errShareNotFound
+		return nil
 	}
 
 	sh.mu.Lock()
 	if sh.currentUses > 0 {
 		sh.mu.Unlock()
-		return errShareInUse
+		return stores.ErrShareInUse
 	}
 	sh.mu.Unlock()
 
