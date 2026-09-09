@@ -37,6 +37,23 @@ type Connection struct {
 	AppKey    types.PrivateKey
 }
 
+// HasConnections reports whether any workgroup is connected to the share, for
+// the callers that only need to know that much and have no business with the
+// app keys that ShareConnections returns. Only the database-backed store has
+// it: a Lite server serves renterd shares alone, which nothing asks this of.
+func (db *Database) HasConnections(share string) (bool, error) {
+	var exists bool
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `SELECT EXISTS (SELECT 1 FROM connections WHERE share_name = $1)`
+		return tx.QueryRow(ctx, query, share).Scan(&exists)
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to check the connections of the share: %w", err)
+	}
+
+	return exists, nil
+}
+
 // ShareConnections returns the connections of the given share. A connection
 // outlives the client that serves it — the app key is what it is made of — so
 // this is what a share is connected to, whether or not anything is running for

@@ -396,6 +396,12 @@ textarea {
   color: var(--text-muted);
 }
 
+/* What a single field has to say for itself, said next to it rather than in a
+   banner at the foot of the card. */
+.field-error {
+  color: var(--danger);
+}
+
 .appkey {
   overflow-wrap: anywhere;
 }
@@ -418,6 +424,20 @@ textarea {
   margin: 0 0 8px;
   padding: 0;
   list-style: none;
+}
+
+/* The wizard's step bar: the same marks as the phases of a connection, laid out
+   across the top of the page rather than down it. */
+.steps-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 20px;
+  margin: 0;
+  padding: 14px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
 }
 
 .step {

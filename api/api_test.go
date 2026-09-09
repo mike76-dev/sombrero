@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +25,14 @@ import (
 var errStore = errors.New("store error")
 
 var testUUID = uuid.MustParse("12345678-1234-1234-1234-123456789abc")
+
+// The addresses a share is registered with. A share is refused without one that
+// names a scheme and a host, so the tests that are about something else still
+// have to carry a usable address.
+const (
+	testIndexer = "https://indexer.example.com"
+	testRenterd = "http://127.0.0.1:9980"
+)
 
 // mockStore implements Store with optional per-method overrides.
 type mockStore struct {
@@ -56,6 +67,7 @@ type mockStore struct {
 	addConnection       func(stores.Workgroup, stores.Share, types.PrivateKey) error
 	removeConnection    func(stores.Workgroup, stores.Share) error
 	isConnected         func(stores.Workgroup, stores.Share) (bool, types.PrivateKey, error)
+	hasConnections      func(string) (bool, error)
 }
 
 func (m *mockStore) IsBanned(h string) (bool, string, error) {
@@ -244,6 +256,15 @@ func (m *mockStore) IsConnected(wg stores.Workgroup, s stores.Share) (bool, type
 		return m.isConnected(wg, s)
 	}
 	return false, nil, nil
+}
+
+// The store the API runs against in the Normal mode can say whether a share is
+// connected to anything, so the stand-in for it can too.
+func (m *mockStore) HasConnections(share string) (bool, error) {
+	if m.hasConnections != nil {
+		return m.hasConnections(share)
+	}
+	return false, nil
 }
 
 // mockServer stands in for the running SMB server.
@@ -629,6 +650,20 @@ func TestAccount(t *testing.T) {
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
+	t.Run("POST taken username returns 409", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			addAccount:    func(stores.Account) error { return stores.ErrAccountExists },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/account", stores.Account{
+			Username: "alice", Password: "secret123", Workgroup: testUUID.String(),
+		})
+		checkStatus(t, w, http.StatusConflict)
+		if msg := decodeJSON[string](t, w); msg != stores.ErrAccountExists.Error() {
+			t.Errorf("message: want %q, got %q", stores.ErrAccountExists, msg)
+		}
+	})
+
 	t.Run("DELETE removes account", func(t *testing.T) {
 		var gotUser, gotWG string
 		ms := &mockStore{
@@ -716,7 +751,7 @@ func TestShares(t *testing.T) {
 		var got stores.Share
 		ms := &mockStore{registerShare: func(s stores.Share) error { got = s; return nil }}
 		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{
-			Name: "MyShare", Type: "renterd", ServerName: "srv",
+			Name: "MyShare", Type: "renterd", ServerName: testRenterd,
 		})
 		checkStatus(t, w, http.StatusNoContent)
 		if got.Name != "myshare" {
@@ -729,14 +764,18 @@ func TestShares(t *testing.T) {
 
 	t.Run("POST registers indexd share", func(t *testing.T) {
 		ms := &mockStore{registerShare: func(s stores.Share) error { return nil }}
-		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{Name: "s2", Type: "indexd"})
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s2", Type: "indexd", ServerName: testIndexer,
+		})
 		checkStatus(t, w, http.StatusNoContent)
 	})
 
 	t.Run("POST indexd share in Lite mode returns 400", func(t *testing.T) {
 		registered := false
 		ms := &mockStore{registerShare: func(stores.Share) error { registered = true; return nil }}
-		w := doRequest(newTestLiteAPI(ms), http.MethodPost, "/share", stores.Share{Name: "s2", Type: "indexd"})
+		w := doRequest(newTestLiteAPI(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s2", Type: "indexd", ServerName: testIndexer,
+		})
 		checkStatus(t, w, http.StatusBadRequest)
 		if registered {
 			t.Error("indexd share must not be registered in Lite mode")
@@ -746,7 +785,7 @@ func TestShares(t *testing.T) {
 	t.Run("POST renterd share in Lite mode succeeds", func(t *testing.T) {
 		ms := &mockStore{registerShare: func(s stores.Share) error { return nil }}
 		w := doRequest(newTestLiteAPI(ms), http.MethodPost, "/share", stores.Share{
-			Name: "s1", Type: "renterd", ServerName: "srv",
+			Name: "s1", Type: "renterd", ServerName: testRenterd,
 		})
 		checkStatus(t, w, http.StatusNoContent)
 	})
@@ -760,7 +799,8 @@ func TestShares(t *testing.T) {
 		var got stores.Share
 		ms := &mockStore{registerShare: func(s stores.Share) error { got = s; return nil }}
 		w := doRequest(newTestAPIWithAnonymous(ms), http.MethodPost, "/share", stores.Share{
-			Name: "s", Type: "indexd", AllowGuest: true, AllowAnonymous: true, PublicDir: "Drop",
+			Name: "s", Type: "indexd", ServerName: testIndexer,
+			AllowGuest: true, AllowAnonymous: true, PublicDir: "Drop",
 		})
 		checkStatus(t, w, http.StatusNoContent)
 		if !got.AllowGuest || !got.AllowAnonymous || got.PublicDir != "Drop" {
@@ -773,7 +813,7 @@ func TestShares(t *testing.T) {
 		// an account of a workgroup like any other.
 		ms := &mockStore{registerShare: func(stores.Share) error { return nil }}
 		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{
-			Name: "s", Type: "indexd", AllowGuest: true,
+			Name: "s", Type: "indexd", ServerName: testIndexer, AllowGuest: true,
 		})
 		checkStatus(t, w, http.StatusNoContent)
 	})
@@ -803,7 +843,7 @@ func TestShares(t *testing.T) {
 		// nothing to do with what the share is backed by.
 		ms := &mockStore{registerShare: func(stores.Share) error { return nil }}
 		w := doRequest(newTestAPIWithAnonymous(ms), http.MethodPost, "/share", stores.Share{
-			Name: "s", Type: "renterd", ServerName: "srv", AllowAnonymous: true, PublicDir: "Drop",
+			Name: "s", Type: "renterd", ServerName: testRenterd, AllowAnonymous: true, PublicDir: "Drop",
 		})
 		checkStatus(t, w, http.StatusNoContent)
 	})
@@ -828,8 +868,217 @@ func TestShares(t *testing.T) {
 
 	t.Run("POST store error", func(t *testing.T) {
 		ms := &mockStore{registerShare: func(stores.Share) error { return errStore }}
-		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{Name: "s", Type: "renterd"})
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s", Type: "renterd", ServerName: testRenterd,
+		})
 		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("POST taken share name returns 409", func(t *testing.T) {
+		ms := &mockStore{registerShare: func(stores.Share) error { return stores.ErrShareExists }}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s", Type: "renterd", ServerName: testRenterd,
+		})
+		checkStatus(t, w, http.StatusConflict)
+		if msg := decodeJSON[string](t, w); msg != stores.ErrShareExists.Error() {
+			t.Errorf("message: want %q, got %q", stores.ErrShareExists, msg)
+		}
+	})
+
+	// A backend is spoken to over HTTP, so an address that names no scheme is a
+	// typo, and one that is stored is one that cannot be connected to.
+	t.Run("POST a bad server address returns 400", func(t *testing.T) {
+		for _, addr := range []string{"", "   ", "indexer.example.com", "ftp://indexer.example.com", "https://"} {
+			registered := false
+			ms := &mockStore{registerShare: func(stores.Share) error { registered = true; return nil }}
+			w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{
+				Name: "s", Type: "indexd", ServerName: addr,
+			})
+			checkStatus(t, w, http.StatusBadRequest)
+			if registered {
+				t.Errorf("the share was registered with the address %q", addr)
+			}
+		}
+	})
+
+	t.Run("POST trims the server address", func(t *testing.T) {
+		var got stores.Share
+		ms := &mockStore{registerShare: func(s stores.Share) error { got = s; return nil }}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/share", stores.Share{
+			Name: "s", Type: "indexd", ServerName: "  " + testIndexer + "  ",
+		})
+		checkStatus(t, w, http.StatusNoContent)
+		if got.ServerName != testIndexer {
+			t.Errorf("address: want %q, got %q", testIndexer, got.ServerName)
+		}
+	})
+
+	t.Run("PUT changes the server address and the bucket", func(t *testing.T) {
+		var got stores.Share
+		ms := &mockStore{
+			getShare: func(string) (stores.Share, error) {
+				return stores.Share{
+					Name: "myshare", Type: "renterd", ServerName: testRenterd, Bucket: "old",
+				}, nil
+			},
+			updateShare: func(s stores.Share) error { got = s; return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/share/myshare", stores.Share{
+			ServerName: "http://10.0.0.2:9980", Bucket: "new", Remark: "moved",
+		})
+		checkStatus(t, w, http.StatusNoContent)
+		if got.ServerName != "http://10.0.0.2:9980" {
+			t.Errorf("address: want the new one, got %q", got.ServerName)
+		}
+		if got.Bucket != "new" {
+			t.Errorf("bucket: want %q, got %q", "new", got.Bucket)
+		}
+		if got.Remark != "moved" {
+			t.Errorf("remark: want %q, got %q", "moved", got.Remark)
+		}
+	})
+
+	// The address has no empty value that means anything, so leaving it out is
+	// how a caller changes the rest and keeps it.
+	t.Run("PUT without an address keeps the one that is there", func(t *testing.T) {
+		var got stores.Share
+		ms := &mockStore{
+			getShare: func(string) (stores.Share, error) {
+				return stores.Share{Name: "myshare", Type: "indexd", ServerName: testIndexer}, nil
+			},
+			updateShare: func(s stores.Share) error { got = s; return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/share/myshare", stores.Share{Remark: "note"})
+		checkStatus(t, w, http.StatusNoContent)
+		if got.ServerName != testIndexer {
+			t.Errorf("address: want %q, got %q", testIndexer, got.ServerName)
+		}
+	})
+
+	// On indexd the bucket is the app's own, reported by the backend rather than
+	// chosen here, so a bucket in the request is not the share's to take.
+	t.Run("PUT leaves the bucket of an indexd share alone", func(t *testing.T) {
+		var got stores.Share
+		ms := &mockStore{
+			getShare: func(string) (stores.Share, error) {
+				return stores.Share{Name: "myshare", Type: "indexd", Bucket: "app"}, nil
+			},
+			updateShare: func(s stores.Share) error { got = s; return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/share/myshare", stores.Share{Bucket: "other"})
+		checkStatus(t, w, http.StatusNoContent)
+		if got.Bucket != "app" {
+			t.Errorf("bucket: want %q, got %q", "app", got.Bucket)
+		}
+	})
+
+	// The app key of an indexd connection is registered with the indexer at the
+	// address the share has now, so a connected share stays where it is.
+	t.Run("PUT refuses to move a connected indexd share", func(t *testing.T) {
+		updated := false
+		ms := &mockStore{
+			getShare: func(string) (stores.Share, error) {
+				return stores.Share{Name: "myshare", Type: "indexd", ServerName: testIndexer}, nil
+			},
+			hasConnections: func(string) (bool, error) { return true, nil },
+			updateShare:    func(stores.Share) error { updated = true; return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/share/myshare", stores.Share{
+			ServerName: "https://other.example.com",
+		})
+		checkStatus(t, w, http.StatusConflict)
+		if updated {
+			t.Error("a connected indexd share was moved")
+		}
+	})
+
+	// The share that was registered with a mistyped address is the one this is
+	// all for, and nothing is connected to it.
+	t.Run("PUT moves an indexd share that nothing is connected to", func(t *testing.T) {
+		var got stores.Share
+		ms := &mockStore{
+			getShare: func(string) (stores.Share, error) {
+				return stores.Share{Name: "myshare", Type: "indexd", ServerName: testIndexer}, nil
+			},
+			hasConnections: func(string) (bool, error) { return false, nil },
+			updateShare:    func(s stores.Share) error { got = s; return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/share/myshare", stores.Share{
+			ServerName: "https://other.example.com",
+		})
+		checkStatus(t, w, http.StatusNoContent)
+		if got.ServerName != "https://other.example.com" {
+			t.Errorf("address: want the new one, got %q", got.ServerName)
+		}
+	})
+
+	// A renterd share is reached by its address alone, so a connected one may
+	// still be pointed elsewhere.
+	t.Run("PUT moves a connected renterd share", func(t *testing.T) {
+		var got stores.Share
+		ms := &mockStore{
+			getShare: func(string) (stores.Share, error) {
+				return stores.Share{Name: "myshare", Type: "renterd", ServerName: testRenterd}, nil
+			},
+			hasConnections: func(string) (bool, error) { return true, nil },
+			updateShare:    func(s stores.Share) error { got = s; return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/share/myshare", stores.Share{
+			ServerName: "http://10.0.0.2:9980",
+		})
+		checkStatus(t, w, http.StatusNoContent)
+		if got.ServerName != "http://10.0.0.2:9980" {
+			t.Errorf("address: want the new one, got %q", got.ServerName)
+		}
+	})
+
+	// The other settings of a connected indexd share are still the caller's to
+	// change: only the address is what its connections depend on.
+	t.Run("PUT changes the rest of a connected indexd share", func(t *testing.T) {
+		var got stores.Share
+		ms := &mockStore{
+			getShare: func(string) (stores.Share, error) {
+				return stores.Share{Name: "myshare", Type: "indexd", ServerName: testIndexer}, nil
+			},
+			hasConnections: func(string) (bool, error) { return true, nil },
+			updateShare:    func(s stores.Share) error { got = s; return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/share/myshare", stores.Share{
+			ServerName: testIndexer, Remark: "still here",
+		})
+		checkStatus(t, w, http.StatusNoContent)
+		if got.Remark != "still here" {
+			t.Errorf("remark: want %q, got %q", "still here", got.Remark)
+		}
+	})
+
+	t.Run("PUT connection check error returns 500", func(t *testing.T) {
+		ms := &mockStore{
+			getShare: func(string) (stores.Share, error) {
+				return stores.Share{Name: "myshare", Type: "indexd", ServerName: testIndexer}, nil
+			},
+			hasConnections: func(string) (bool, error) { return false, errStore },
+			updateShare:    func(stores.Share) error { return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/share/myshare", stores.Share{
+			ServerName: "https://other.example.com",
+		})
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("PUT a bad server address returns 400", func(t *testing.T) {
+		updated := false
+		ms := &mockStore{
+			getShare:    foundShare("myshare", "renterd"),
+			updateShare: func(stores.Share) error { updated = true; return nil },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, "/share/myshare", stores.Share{
+			ServerName: "127.0.0.1:9980",
+		})
+		checkStatus(t, w, http.StatusBadRequest)
+		if updated {
+			t.Error("the share was updated with an address that has no scheme")
+		}
 	})
 
 	t.Run("PUT changes what the share admits", func(t *testing.T) {
@@ -925,10 +1174,37 @@ func TestShares(t *testing.T) {
 		}
 	})
 
+	// A share is registered under a folded name, so a call that names it any
+	// other way has to reach the same share rather than quietly none at all.
+	t.Run("DELETE folds the share name", func(t *testing.T) {
+		var gotName string
+		ms := &mockStore{unregisterShare: func(n string) error { gotName = n; return nil }}
+		w := doRequest(newTestAPI(ms), http.MethodDelete, "/share/MyShare", nil)
+		checkStatus(t, w, http.StatusNoContent)
+		if gotName != "myshare" {
+			t.Errorf("name: want %q, got %q", "myshare", gotName)
+		}
+	})
+
 	t.Run("DELETE store error", func(t *testing.T) {
 		ms := &mockStore{unregisterShare: func(string) error { return errStore }}
 		w := doRequest(newTestAPI(ms), http.MethodDelete, "/share/myshare", nil)
 		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	// A share that clients still have open is the caller's to wait for, so it is
+	// told as much rather than that something went wrong here.
+	t.Run("DELETE a share in use returns 409", func(t *testing.T) {
+		ms := &mockStore{
+			unregisterShare: func(string) error {
+				return fmt.Errorf("failed to close share: %w", stores.ErrShareInUse)
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodDelete, "/share/myshare", nil)
+		checkStatus(t, w, http.StatusConflict)
+		if msg := decodeJSON[string](t, w); !strings.Contains(msg, stores.ErrShareInUse.Error()) {
+			t.Errorf("message: want it to name the reason, got %q", msg)
+		}
 	})
 
 	t.Run("GET /shares lists shares without passwords", func(t *testing.T) {
@@ -1250,6 +1526,19 @@ func TestWorkgroups(t *testing.T) {
 		ms := &mockStore{addWorkgroup: func(stores.Workgroup) error { return errStore }}
 		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", nil)
 		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	// A name that is taken is the caller's to fix, so it is told what the matter
+	// is rather than that something went wrong here.
+	t.Run("POST taken name returns 409", func(t *testing.T) {
+		ms := &mockStore{
+			addWorkgroup: func(stores.Workgroup) error { return stores.ErrWorkgroupExists },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPost, "/workgroup", map[string]string{"name": "acme"})
+		checkStatus(t, w, http.StatusConflict)
+		if msg := decodeJSON[string](t, w); msg != stores.ErrWorkgroupExists.Error() {
+			t.Errorf("message: want %q, got %q", stores.ErrWorkgroupExists, msg)
+		}
 	})
 
 	t.Run("GET returns workgroup by UUID", func(t *testing.T) {
@@ -2309,5 +2598,89 @@ func TestSettings(t *testing.T) {
 		if res.Anonymous || res.Mode != "lite" {
 			t.Errorf("want anonymous access off in Lite mode, got %+v", res)
 		}
+	})
+}
+
+// TestProbe tests POST /probe, which says whether the address a share would be
+// registered with has anything listening at it.
+func TestProbe(t *testing.T) {
+	probe := func(t *testing.T, addr string) *httptest.ResponseRecorder {
+		t.Helper()
+		return doRequest(newTestAPI(&mockStore{}), http.MethodPost, "/probe", map[string]string{
+			"serverName": addr,
+		})
+	}
+
+	t.Run("POST reaches a listener", func(t *testing.T) {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		defer l.Close()
+
+		w := probe(t, "http://"+l.Addr().String())
+		checkStatus(t, w, http.StatusOK)
+		res := decodeJSON[ProbeResponse](t, w)
+		if !res.Reachable {
+			t.Errorf("want the listener reached, got %+v", res)
+		}
+		if res.Address != l.Addr().String() {
+			t.Errorf("address: want %q, got %q", l.Addr().String(), res.Address)
+		}
+		if res.Warning != "" {
+			t.Errorf("want no warning for an address with a port, got %q", res.Warning)
+		}
+	})
+
+	t.Run("POST reports a port nothing listens on", func(t *testing.T) {
+		// A port that was listening a moment ago is one nothing has taken since.
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := l.Addr().String()
+		l.Close()
+
+		w := probe(t, "http://"+addr)
+		checkStatus(t, w, http.StatusOK)
+		res := decodeJSON[ProbeResponse](t, w)
+		if res.Reachable {
+			t.Error("want the closed port reported as unreachable")
+		}
+		if res.Error == "" {
+			t.Error("want a reason why the address could not be reached")
+		}
+	})
+
+	// http with no port means port 80, which is not where a node of one's own
+	// is usually found; https means 443, which is where one behind a proxy is.
+	// The host is one that cannot resolve, so the warning is reported without
+	// the test reaching for a network.
+	t.Run("POST warns about a missing port on http only", func(t *testing.T) {
+		w := probe(t, "http://indexer.invalid")
+		checkStatus(t, w, http.StatusOK)
+		if res := decodeJSON[ProbeResponse](t, w); res.Warning == "" {
+			t.Error("want a warning for http with no port")
+		}
+
+		w = probe(t, "https://indexer.invalid")
+		checkStatus(t, w, http.StatusOK)
+		if res := decodeJSON[ProbeResponse](t, w); res.Warning != "" {
+			t.Errorf("want no warning for https with no port, got %q", res.Warning)
+		}
+	})
+
+	t.Run("POST a bad address returns 400", func(t *testing.T) {
+		for _, addr := range []string{"", "indexer.example.com", "ftp://indexer.example.com"} {
+			checkStatus(t, probe(t, addr), http.StatusBadRequest)
+		}
+	})
+
+	t.Run("POST invalid JSON returns 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewBufferString("{bad}"))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		newTestAPI(&mockStore{}).ServeHTTP(w, req)
+		checkStatus(t, w, http.StatusBadRequest)
 	})
 }

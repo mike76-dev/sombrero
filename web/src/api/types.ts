@@ -26,9 +26,12 @@ export interface Share {
   publicDir?: string
 }
 
-// ShareSettings is what PUT /share/:name changes. What a share is backed by is
-// fixed when it is registered.
+// ShareSettings is what PUT /share/:name changes. serverName is only changed
+// when it is given, since a share has no use for an empty one; bucket is only
+// a renterd share's to have.
 export interface ShareSettings {
+  serverName?: string
+  bucket?: string
   remark?: string
   allowGuest?: boolean
   allowAnonymous?: boolean
@@ -85,6 +88,15 @@ export interface IsBannedResponse {
 export interface WorkgroupResponse {
   uuid: string
   name?: string
+}
+
+// What POST /probe found at the address of a share's backend: whether anything
+// is listening there, and what looks off about the address itself.
+export interface ProbeResponse {
+  address: string
+  reachable: boolean
+  error?: string
+  warning?: string
 }
 
 export type ConnectState =

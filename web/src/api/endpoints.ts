@@ -7,6 +7,7 @@ import type {
   FragmentationResponse,
   IsBannedResponse,
   OrphansResponse,
+  ProbeResponse,
   PublicDir,
   ServerSettings,
   ServerStats,
@@ -143,6 +144,9 @@ export const removeWorkgroup = (id: string) =>
 export const getStats = () => request<ServerStats>('/stats')
 
 export const getSettings = () => request<ServerSettings>('/settings')
+
+export const probeServer = (serverName: string) =>
+  request<ProbeResponse>('/probe', { method: 'POST', body: { serverName } })
 
 // Connections
 
