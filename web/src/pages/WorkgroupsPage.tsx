@@ -15,48 +15,7 @@ import {
   useApiAction,
   useApiData,
 } from '../components/common'
-
-function PublicDirRow({
-  dir,
-  onChange,
-  onRemove,
-}: {
-  dir: PublicDir
-  onChange: (dir: PublicDir) => void
-  onRemove: () => void
-}) {
-  return (
-    <div className="row">
-      <div className="field">
-        <input
-          type="text"
-          value={dir.path}
-          onChange={(e) => onChange({ ...dir, path: e.target.value })}
-          placeholder="e.g. Public"
-        />
-      </div>
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={!!dir.readOnly}
-          onChange={(e) => onChange({ ...dir, readOnly: e.target.checked })}
-        />
-        Read-only
-      </label>
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={!!dir.caseSensitive}
-          onChange={(e) => onChange({ ...dir, caseSensitive: e.target.checked })}
-        />
-        Case-sensitive
-      </label>
-      <button className="btn btn-small" onClick={onRemove}>
-        Remove
-      </button>
-    </div>
-  )
-}
+import { PublicDirsEditor, cleanPublicDirs } from '../components/publicdirs'
 
 function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void }) {
   const { run, busy, error, message } = useApiAction()
@@ -64,10 +23,7 @@ function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void
 
   const save = () =>
     run(async () => {
-      await updateWorkgroup(
-        wg.uuid,
-        publicDirs.map((d) => ({ ...d, path: d.path.trim() })).filter((d) => d.path),
-      )
+      await updateWorkgroup(wg.uuid, cleanPublicDirs(publicDirs))
       onChanged()
     }, 'Workgroup updated.')
 
@@ -93,32 +49,7 @@ function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void
         </button>
       </div>
       <div className="stack">
-        <Field label="Public folders">
-          {publicDirs.length === 0 && <p className="muted">No public folders.</p>}
-          {publicDirs.map((dir, i) => (
-            <PublicDirRow
-              key={i}
-              dir={dir}
-              onChange={(next) =>
-                setPublicDirs(publicDirs.map((d, j) => (i === j ? next : d)))
-              }
-              onRemove={() => setPublicDirs(publicDirs.filter((_, j) => i !== j))}
-            />
-          ))}
-        </Field>
-        <div className="row">
-          <button
-            className="btn btn-small"
-            onClick={() => setPublicDirs([...publicDirs, { path: '' }])}
-          >
-            Add folder
-          </button>
-        </div>
-        <p className="muted">
-          Files in a public folder are visible to every member of the workgroup. In a
-          read-only folder, only the account that uploaded a file may overwrite or delete
-          it.
-        </p>
+        <PublicDirsEditor dirs={publicDirs} onChange={setPublicDirs} disabled={busy} />
         <div className="row">
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             Save

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { WizardPage } from './pages/WizardPage'
 import { WorkgroupsPage } from './pages/WorkgroupsPage'
 import { AccountsPage } from './pages/AccountsPage'
 import { SharesPage } from './pages/SharesPage'
@@ -21,6 +22,7 @@ function useTheme(): [Theme, () => void] {
 }
 
 const pages = {
+  wizard: { label: 'Setup wizard', component: WizardPage },
   workgroups: { label: 'Workgroups', component: WorkgroupsPage },
   accounts: { label: 'Accounts', component: AccountsPage },
   shares: { label: 'Shares', component: SharesPage },

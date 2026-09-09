@@ -3,6 +3,11 @@
 A React + TypeScript single-page app for managing a Sombrero server through its HTTP API:
 workgroups, accounts, shares, access policies, share connections, and host bans.
 
+Each of those has a page of its own, and the **Setup wizard** page leads through them in the
+order that gets a client onto a share: workgroup → account → share → connection → policy. Every
+step either makes a new one or takes one that is already there, so the wizard is as good for
+adding an account to an existing setup as for a server with nothing on it yet.
+
 ## Development
 
 ```bash

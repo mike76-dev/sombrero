@@ -200,6 +200,8 @@ curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/
 ## Web UI
 The server ships with a web UI covering the same ground as the API: workgroups, accounts, shares, access policies, bans, and the server statistics. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` on the Settings page.
 
+The **Setup wizard** page walks through the workflow above — workgroup, account, share, connection, access policy — one step at a time, making each thing or letting you pick one that is already there. It is a way through the same pages, not a separate one: everything it does can be done on the pages themselves, which is also where anything is changed afterwards.
+
 ### Building the UI
 The UI is not built as part of `go build`. Release binaries are built by building the UI first and then the server:
 ```Bash
