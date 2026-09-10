@@ -265,6 +265,11 @@ func (fc *fakeClient) Object(_ context.Context, _ stores.Account, path string) (
 
 	oi, found := fc.objects[path]
 	if !found {
+		// The root of the share is there whether or not anything was put in it, and both real
+		// backends answer it with a directory keyed "/", which is what they do here too.
+		if path == "" {
+			return client.ObjectInfo{Key: "/"}, nil
+		}
 		return client.ObjectInfo{}, errNoObject
 	}
 
@@ -1226,7 +1231,12 @@ func createRequestSharing(mid, sid uint64, tid uint32, name string, oplock uint8
 	binary.LittleEndian.PutUint16(body[44:46], uint16(nameOff))
 	binary.LittleEndian.PutUint16(body[46:48], uint16(len(encoded)))
 
+	// The buffer is never empty, even for the root of the share, whose name is: the request's
+	// structure size counts one byte of it, and a client pads an empty name with that byte.
 	msg = append(msg, encoded...)
+	if len(encoded) == 0 {
+		msg = append(msg, 0)
+	}
 	if len(contexts) == 0 {
 		return msg
 	}

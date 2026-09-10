@@ -3911,7 +3911,10 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	// ([MS-SMB2] 2.2.13).
 	if tc.share.name != "ipc$" {
 		access := grantedFor(cr.DesiredAccess(), tc.maximalAccess)
-		if c.server.sharingViolation(tc.share, path, access, cr.ShareAccess()) {
+		if other := c.server.sharingViolation(tc.share, path, access, cr.ShareAccess()); other != nil {
+			if c.server.debug {
+				log.Println(describeSharingViolation(path, access, cr.ShareAccess(), other))
+			}
 			return smb2.NewErrorResponse(cr, smb2.STATUS_SHARING_VIOLATION, 0, nil), nil
 		}
 	}
