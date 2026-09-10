@@ -332,6 +332,8 @@ In the guides below, `<SERVER_NET_ADDRESS>` stands for the network address of th
 2. Type the address of the share in the `Folder` field (`\\<SERVER_NET_ADDRESS>\<SHARE_NAME>`). Pick any drive letter. Check the `Connect using different credentials` box, then click `Finish`.
 3. In the next popup window, enter the user credentials (matching one of the registered accounts) and click `OK`.
 
+If Windows doesn't offer you to specify the workgroup name, simply enter `<WORKGROUP>\<USERNAME>` as the username.
+
 Please note: Windows 2000/NT/XP and earlier are not supported. The earliest supported versions are Windows 7/Vista, because this is where the SMB2 protocol was first introduced.
 
 ### MacOS
