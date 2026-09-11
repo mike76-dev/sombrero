@@ -108,7 +108,7 @@ type connection struct {
 	mu         sync.Mutex
 	server     *server
 	ntlmServer *ntlm.Server
-	writeChan  chan []byte
+	sendQueue  *sendQueue
 	closeChan  chan struct{}
 	once       sync.Once
 
@@ -3295,21 +3295,16 @@ func (c *connection) processRequests() {
 	}
 }
 
-// sendResponses takes an SMB message from the sending queue and writes it to the underlying TCP connection.
+// sendResponses writes what is queued on the connection to the underlying TCP connection.
 func (c *connection) sendResponses() {
 	defer c.recoverConnection("sending responses")
 
-	for {
-		select {
-		case <-c.closeChan:
-			return
-		case msg := <-c.writeChan:
-			err := writeMessage(c.conn, msg)
-			if err != nil {
-				log.Println("Error sending message:", err)
-				c.server.closeConnection(c)
-			}
-		}
+	err := c.drainSendQueue(func(msg []byte) error {
+		return writeMessage(c.conn, msg)
+	})
+	if err != nil {
+		log.Println("Error sending message:", err)
+		c.server.closeConnection(c)
 	}
 }
 

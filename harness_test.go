@@ -780,18 +780,48 @@ func (h *smbTest) newTestConnection(name string) *connection {
 func (h *smbTest) dial(user string) *testClient {
 	h.t.Helper()
 
+	return h.dialAs(user, nextClientGUID())
+}
+
+// nextClientGUID is the GUID the next client dialled gets.
+func nextClientGUID() [16]byte {
 	n := smbTestClients + 1
 	var guid [16]byte
 	guid[1] = byte(n)
 	guid[2] = byte(n >> 8)
 
-	return h.dialAs(user, guid)
+	return guid
 }
 
 // dialAs brings up a connection belonging to the client with the given GUID. Two connections
 // dialled with the same GUID are the same client as far as leases are concerned, however many
 // sessions they carry between them.
 func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
+	h.t.Helper()
+
+	cl := h.connectAs(user, guid)
+	deliverTo(cl.conn, cl.sent)
+
+	return cl
+}
+
+// deliverTo hands what the server queues on the connection to sent, in the order the sender would
+// put it on the wire, for the test to read in place of the wire.
+func deliverTo(c *connection, sent chan<- []byte) {
+	go func() {
+		_ = c.drainSendQueue(func(msg []byte) error {
+			select {
+			case sent <- msg:
+				return nil
+			case <-c.closeChan:
+				return net.ErrClosed
+			}
+		})
+	}()
+}
+
+// connectAs is dialAs with nothing yet taking what the server sends.
+func (h *smbTest) connectAs(user string, guid [16]byte) *testClient {
 	h.t.Helper()
 
 	smbTestClients++
@@ -808,10 +838,8 @@ func (h *smbTest) dialAs(user string, guid [16]byte) *testClient {
 	// connection built here without it would refuse every lease the tests ask for.
 	c.serverCapabilities |= smb2.GLOBAL_CAP_LEASING
 
-	// Nothing is draining the connection here, so what the server sends is queued for the test to
-	// read rather than handed to a sending goroutine.
+	// Where what the server sends goes for the test to read, once something takes it there.
 	sent := make(chan []byte, 16)
-	c.writeChan = sent
 
 	// What a session setup would have settled.
 	ss := newSessionState(uint64(smbTestClients), c)
@@ -853,7 +881,7 @@ func (cl *testClient) addChannel() *testClient {
 	c.dialect = cl.conn.dialect
 
 	sent := make(chan []byte, 16)
-	c.writeChan = sent
+	deliverTo(c, sent)
 
 	c.mu.Lock()
 	c.sessionTable[cl.ss.sessionID] = cl.ss
