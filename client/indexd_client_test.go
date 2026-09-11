@@ -20,6 +20,7 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/api/app"
 	"go.sia.tech/indexd/slabs"
+	sdk "go.sia.tech/siastorage"
 	"lukechampine.com/frand"
 )
 
@@ -32,6 +33,9 @@ type fakeBackend struct {
 	deleteErr  error
 	uploads    int
 	deletes    int
+
+	downloadErrs []error // returned by the next downloads, one each
+	downloads    int
 
 	// events mirrors the object event log of the real backend: an append-only
 	// record of every pin and unpin, ordered by a timestamp that ticks once
@@ -172,10 +176,34 @@ func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, pari
 	return key, nil
 }
 
+// failDownloads makes the next downloads fail with the given errors, one each.
+func (fb *fakeBackend) failDownloads(errs ...error) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	fb.downloadErrs = append(fb.downloadErrs, errs...)
+}
+
+// downloadAttempts returns how often a download has been started.
+func (fb *fakeBackend) downloadAttempts() int {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.downloads
+}
+
 func (fb *fakeBackend) Download(ctx context.Context, key types.Hash256, offset, length uint64, w io.Writer) error {
 	fb.mu.Lock()
+	fb.downloads++
+	var fail error
+	if len(fb.downloadErrs) > 0 {
+		fail, fb.downloadErrs = fb.downloadErrs[0], fb.downloadErrs[1:]
+	}
 	data, ok := fb.objects[key]
 	fb.mu.Unlock()
+
+	if fail != nil {
+		_, _ = w.Write([]byte("stray bytes")) // as a download that fails partway does
+		return fail
+	}
 
 	if !ok {
 		return errors.New("object not found")
@@ -653,6 +681,99 @@ func TestIndexdClient_RangedReads(t *testing.T) {
 	for _, r := range ranges {
 		mustReadRange(t, ctx, c, acc, path, content, r.offset, r.length)
 	}
+}
+
+// TestIndexdClient_SlabDownloadRetry covers retrying a slab download that reached too few hosts.
+func TestIndexdClient_SlabDownloadRetry(t *testing.T) {
+	shortage := fmt.Errorf("failed to download slab: %w", sdk.ErrNotEnoughShards)
+
+	// setup uploads one full slab, so that reading it goes to the backend.
+	setup := func(t *testing.T) (*IndexdClient, *fakeBackend, stores.Account, []byte) {
+		ctx := context.Background()
+		db := stores.NewTestStore(t, ctx)
+		t.Cleanup(db.Close)
+
+		acc := newTestAccount(t, db, "alice", "secret123")
+		share := newTestShare(t, db, "testshare")
+		grantFullAccess(t, db, share, acc)
+
+		backend := newFakeBackend()
+		c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false).(*IndexdClient)
+		t.Cleanup(func() { _ = c.Close() })
+		c.slabRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+
+		content := frand.Bytes(int(proto.SectorSize))
+		uploadFile(t, ctx, c, acc, "slab.bin", content)
+		waitForMixedState(t, db, acc, share.Name, "slab.bin", 1, 0)
+
+		return c, backend, acc, content
+	}
+
+	read := func(ctx context.Context, c *IndexdClient, acc stores.Account, n int) ([]byte, error) {
+		var buf bytes.Buffer
+		err := c.Read(ctx, acc, "slab.bin", 0, uint64(n), &buf)
+		return buf.Bytes(), err
+	}
+
+	t.Run("a passing shortage is retried", func(t *testing.T) {
+		c, backend, acc, content := setup(t)
+		before := backend.downloadAttempts()
+		backend.failDownloads(shortage, shortage)
+
+		got, err := read(context.Background(), c, acc, len(content))
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if !bytes.Equal(got, content) {
+			t.Fatal("the data read differs from what was written, stray bytes of a failed attempt included")
+		}
+		if n := backend.downloadAttempts() - before; n != 3 {
+			t.Errorf("%d attempts, want 3", n)
+		}
+	})
+
+	t.Run("a lasting shortage fails once the retries run out", func(t *testing.T) {
+		c, backend, acc, content := setup(t)
+		before := backend.downloadAttempts()
+		backend.failDownloads(shortage, shortage, shortage, shortage)
+
+		if _, err := read(context.Background(), c, acc, len(content)); !errors.Is(err, sdk.ErrNotEnoughShards) {
+			t.Fatalf("Read: %v, want ErrNotEnoughShards", err)
+		}
+		if n := backend.downloadAttempts() - before; n != 3 {
+			t.Errorf("%d attempts, want 3", n)
+		}
+	})
+
+	t.Run("other errors are not retried", func(t *testing.T) {
+		c, backend, acc, content := setup(t)
+		before := backend.downloadAttempts()
+		backend.failDownloads(errors.New("object not found"))
+
+		if _, err := read(context.Background(), c, acc, len(content)); err == nil {
+			t.Fatal("Read succeeded, want the error")
+		}
+		if n := backend.downloadAttempts() - before; n != 1 {
+			t.Errorf("%d attempts, want 1", n)
+		}
+	})
+
+	t.Run("a cancelled read stops waiting to retry", func(t *testing.T) {
+		c, backend, acc, content := setup(t)
+		c.slabRetryDelays = []time.Duration{time.Hour}
+		backend.failDownloads(shortage)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(50*time.Millisecond, cancel)
+
+		start := time.Now()
+		if _, err := read(ctx, c, acc, len(content)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Read: %v, want context.Canceled", err)
+		}
+		if waited := time.Since(start); waited > 2*time.Second {
+			t.Errorf("the cancelled read took %v to return", waited)
+		}
+	})
 }
 
 func mustReadRange(t *testing.T, ctx context.Context, c Client, acc stores.Account, path string, content []byte, offset, length uint64) {
