@@ -26,6 +26,7 @@ type RenterdClient struct {
 	baseURL  string
 	password string
 	bucket   string
+	storage  storageCache
 }
 
 // NewRenterdClient returns an initialized RenterdClient.
@@ -100,6 +101,11 @@ func (rc *RenterdClient) Info(ctx context.Context) (GeneralInfo, error) {
 
 // Storage queries the information about the underlying storage.
 func (rc *RenterdClient) Storage(ctx context.Context) (StorageInfo, error) {
+	return rc.storage.get(ctx, rc.queryStorage)
+}
+
+// queryStorage asks the node for its redundancy and storage figures.
+func (rc *RenterdClient) queryStorage(ctx context.Context) (StorageInfo, error) {
 	r, err := rc.redundancy(ctx)
 	if err != nil {
 		return StorageInfo{}, err
