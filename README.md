@@ -360,8 +360,10 @@ sudo chown $USER:$USER /mnt/sia
 ```
 3. Mount the share with
 ```Bash
-sudo mount -t cifs //<SERVER_NET_ADDRESS>/<SHARE_NAME> /mnt/sia -o username=<USERNAME>,workgroup=<WORKGROUP>,password=<PASSWORD>
+sudo mount -t cifs //<SERVER_NET_ADDRESS>/<SHARE_NAME> /mnt/sia -o username=<USERNAME>,workgroup=<WORKGROUP>,password=<PASSWORD>,uid=$(id -u),gid=$(id -g),rasize=33554432
 ```
+`uid=$(id -u),gid=$(id -g)` mounts the share under the current user's permissions, while `rasize=33554432` increases the buffer size for streaming media files. Both are optional.
+
 4. To unmount, type
 ```Bash
 sudo umount /mnt/sia
