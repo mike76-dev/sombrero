@@ -1299,6 +1299,11 @@ func (op *open) fileAllInformation() []byte {
 		pd = true
 	}
 
+	// NumberOfLinks counts the links not being deleted ([MS-FSCC] 2.4.41): one, until a delete is pending.
+	if !pd {
+		lc = 1
+	}
+
 	fai := smb2.FileAllInfo{
 		BasicInfo: smb2.FileBasicInfo{
 			CreationTime:   modified,
@@ -1353,9 +1358,12 @@ func (op *open) fileStandardInformation() []byte {
 		alloc = allocated
 	}
 
-	// As above: a file that is going says so.
+	// As above: a file that is going says so, and has no links left.
 	if op.createOptions&smb2.FILE_DELETE_ON_CLOSE > 0 {
 		pd = true
+	}
+	if !pd {
+		lc = 1
 	}
 
 	fsi := smb2.FileStandardInfo{

@@ -173,8 +173,8 @@ func TestIntegrationQueryStandardInformation(t *testing.T) {
 	if size := binary.LittleEndian.Uint64(info[8:16]); size != 8192 {
 		t.Errorf("the file holds %d bytes, want 8192", size)
 	}
-	if links := binary.LittleEndian.Uint32(info[16:20]); links != 0 {
-		t.Errorf("the file has %d links, want none counted for an ordinary file", links)
+	if links := binary.LittleEndian.Uint32(info[16:20]); links != 1 {
+		t.Errorf("the file has %d links, want 1", links)
 	}
 	if info[20] != 0 {
 		t.Error("the file is marked for deletion")
@@ -452,6 +452,45 @@ func TestIntegrationQueryInfoReportsADeletionCalledOff(t *testing.T) {
 
 	if info := queriedInfo(t, cl.queryInfo(fid, smb2.FileStandardInformation, 4096)); info[20] != 0 {
 		t.Error("the file is still reported as being on its way out")
+	}
+}
+
+// TestQueryInfoReportsTheLinkCount checks NumberOfLinks is 1 for what exists and 0 once a delete is
+// pending ([MS-FSCC] 2.4.41); a Linux client logs "bogus file nlink value 0" otherwise.
+func TestQueryInfoReportsTheLinkCount(t *testing.T) {
+	// NumberOfLinks is at 16 in the standard information, and at 40+16 in the whole of it.
+	links := func(t *testing.T, cl *testClient, fid []byte) (standard, all uint32) {
+		t.Helper()
+		standard = binary.LittleEndian.Uint32(queriedInfo(t, cl.queryInfo(fid, smb2.FileStandardInformation, 4096))[16:20])
+		all = binary.LittleEndian.Uint32(queriedInfo(t, cl.queryInfo(fid, smb2.FileAllInformation, 4096))[56:60])
+		return standard, all
+	}
+
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	file := h.openedFile(cl, "report.txt", 512)
+	if standard, all := links(t, cl, file); standard != 1 || all != 1 {
+		t.Errorf("a file: %d and %d links, want 1", standard, all)
+	}
+
+	dir := createdFileID(cl.openDir("docs"))
+	if standard, all := links(t, cl, dir); standard != 1 || all != 1 {
+		t.Errorf("a directory: %d and %d links, want 1", standard, all)
+	}
+
+	if _, err := cl.markForDeletion(file); err != nil {
+		t.Fatalf("could not mark the file for deletion: %v", err)
+	}
+	if standard, all := links(t, cl, file); standard != 0 || all != 0 {
+		t.Errorf("a file being deleted: %d and %d links, want 0", standard, all)
+	}
+
+	if _, err := cl.keepFile(file); err != nil {
+		t.Fatalf("could not call the deletion off: %v", err)
+	}
+	if standard, all := links(t, cl, file); standard != 1 || all != 1 {
+		t.Errorf("a file kept after all: %d and %d links, want 1", standard, all)
 	}
 }
 
