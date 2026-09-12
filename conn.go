@@ -1414,7 +1414,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			default:
 				if err := op.flush(); err != nil {
 					op.abandonUpload()
-					log.Println("Error completing write:", err)
+					log.Printf("Error completing write of %s from %s: %v", path, c.clientName, err)
 					unsaved = true
 				}
 			}
@@ -1893,7 +1893,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					op.cancelUpload()
 				}
 
-				log.Println("Error writing data:", err)
+				op.mu.Lock()
+				path := op.pathName
+				op.mu.Unlock()
+				log.Printf("Error writing %d bytes to %s at offset %d from %s: %v",
+					len(wr.Buffer()), path, wr.Offset(), c.clientName, err)
 				resp = smb2.NewErrorResponse(wr, status, 0, nil)
 			} else {
 				resp = &smb2.WriteResponse{}

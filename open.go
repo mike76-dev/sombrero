@@ -2098,8 +2098,10 @@ func (op *open) sendPart(u *upload, number int, slab uploadChunk) {
 		u.inFlightBytes -= uint64(len(slab.data))
 
 		if err != nil {
+			// Only the first: a backend that is down fails every part after it the same way.
 			if u.partErr == nil {
 				u.partErr = err
+				log.Printf("Error storing part %d of %s at offset %d: %v", number, u.path, slab.offset, err)
 			}
 
 			return
@@ -2316,7 +2318,7 @@ func (op *open) flush() error {
 		if u.nextOffset == 0 {
 			u.mu.Unlock()
 
-			return errors.New("flush: the front of the file never arrived")
+			return fmt.Errorf("flush: the first %d bytes of the file never arrived", gap)
 		}
 
 		// Measured before any of it is written, so that a hole nobody would store costs the
