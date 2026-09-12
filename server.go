@@ -198,6 +198,10 @@ func (s *server) newConnectionState(clientName string) *connection {
 
 // newConnection creates a new Connection object over a transport and starts serving it.
 func (s *server) newConnection(conn net.Conn) *connection {
+	if err := tuneConnection(conn); err != nil {
+		log.Printf("failed to tune the connection from %s: %v", conn.RemoteAddr(), err)
+	}
+
 	c := s.newConnectionState(conn.RemoteAddr().String())
 	c.conn = conn
 
