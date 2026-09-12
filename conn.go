@@ -1408,6 +1408,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				op.file.markDeleted()
 				op.cancelUpload()
 
+			case pu.leave(op):
+				// Another handle is still writing the file, and its close finishes the upload.
+
 			default:
 				if err := op.flush(); err != nil {
 					op.abandonUpload()

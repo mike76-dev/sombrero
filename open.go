@@ -106,7 +106,21 @@ type upload struct {
 	// is answered with, so the client sends less at a time of its own accord.
 	inFlightBytes uint64
 
+	// writers are the opens that have written into the upload and not closed yet. The last of them
+	// to close finishes it; a handle that only looked at the file never does.
+	writers map[*open]struct{}
+
 	mu sync.Mutex
+}
+
+// leave takes the open off the writers, and reports whether another writer is still on the file.
+func (u *upload) leave(op *open) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	delete(u.writers, op)
+
+	return len(u.writers) > 0
 }
 
 // readBuffered serves a range out of the data the upload is still holding, and says whether it
@@ -1957,6 +1971,7 @@ func (op *open) startUpload() error {
 		bufOffset:  0,
 		maxLength:  op.treeConnect.maxUploadSize,
 		slots:      make(chan struct{}, partsInFlight(op.treeConnect.maxUploadSize)),
+		writers:    make(map[*open]struct{}),
 	})
 
 	return nil
@@ -1990,6 +2005,7 @@ func (op *open) write(offset uint64, data []byte) error {
 		return err
 	}
 
+	u.writers[op] = struct{}{}
 	u.keepHead(offset, data)
 
 	// A client may write over what it has already written. The upload takes the bytes in the order
