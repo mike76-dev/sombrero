@@ -76,9 +76,17 @@ func TestFileDataLane(t *testing.T) {
 func (h *smbTest) dialPiped(user string) (*testClient, net.Conn) {
 	h.t.Helper()
 
-	cl := h.connectAs(user, nextClientGUID())
 	server, client := net.Pipe()
+	h.t.Cleanup(func() { client.Close() })
 
+	return h.dialOn(user, server), client
+}
+
+// dialOn is dial with the real dispatcher and sender running over the given server-side connection.
+func (h *smbTest) dialOn(user string, server net.Conn) *testClient {
+	h.t.Helper()
+
+	cl := h.connectAs(user, nextClientGUID())
 	c := cl.conn
 	c.conn = server
 	go c.sendResponses()
@@ -87,10 +95,9 @@ func (h *smbTest) dialPiped(user string) (*testClient, net.Conn) {
 	h.t.Cleanup(func() {
 		c.once.Do(func() { close(c.closeChan) })
 		server.Close()
-		client.Close()
 	})
 
-	return cl, client
+	return cl
 }
 
 // enqueue queues a request for the dispatcher, as the reading loop does, without waiting.
@@ -134,7 +141,7 @@ func readWire(t *testing.T, conn net.Conn) []byte {
 func TestSmallResponsesDoNotWaitBehindReads(t *testing.T) {
 	const (
 		fileSize = 24 << 20
-		readSize = 4 << 20
+		readSize = smb2.MaxReadSize
 		reads    = 4
 	)
 
