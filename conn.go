@@ -1136,6 +1136,14 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		path := strings.ReplaceAll(cr.Filename(), "\\", "/")
+
+		// The share has no named streams, so "file:stream" is refused as on FAT; accepted, it
+		// was stored as a file of its own that Windows can neither see nor delete.
+		if strings.Contains(path, ":") {
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_INVALID, 0, nil)
+			return resp, ss, nil
+		}
+
 		if !validPath(path) {
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 			return resp, ss, nil
@@ -2985,6 +2993,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				// Rename the file or the directory. The name it is moving to has to resolve
 				// inside the share, exactly as the one it was created under did.
 				newName := strings.ReplaceAll(fri.FileName, "\\", "/")
+				if strings.Contains(newName, ":") {
+					resp := smb2.NewErrorResponse(sir, smb2.STATUS_OBJECT_NAME_INVALID, 0, nil)
+					return resp, ss, nil
+				}
 				if newName == "" || !validPath(newName) {
 					resp := smb2.NewErrorResponse(sir, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 					return resp, ss, nil
