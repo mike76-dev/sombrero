@@ -927,12 +927,21 @@ func (fs *fileState) markDirectory() {
 	fs.attributes &^= smb2.FILE_ATTRIBUTE_NORMAL
 }
 
-// setAttributes replaces what the file is.
+// settableAttributes are the attributes a client may set, as on NTFS. The rest say what the file is:
+// Explorer copies OneDrive's placeholder bits over, and echoed back they make a copy look like a placeholder.
+const settableAttributes = smb2.FILE_ATTRIBUTE_READONLY | smb2.FILE_ATTRIBUTE_HIDDEN | smb2.FILE_ATTRIBUTE_SYSTEM |
+	smb2.FILE_ATTRIBUTE_ARCHIVE | smb2.FILE_ATTRIBUTE_TEMPORARY | smb2.FILE_ATTRIBUTE_NOT_CONTENT_INDEXED
+
+// setAttributes sets the attributes a client may set, and keeps the rest.
 func (fs *fileState) setAttributes(attributes uint32) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	fs.attributes = attributes
+	attrs := fs.attributes&^(settableAttributes|smb2.FILE_ATTRIBUTE_NORMAL) | attributes&settableAttributes
+	if attrs == 0 {
+		attrs = smb2.FILE_ATTRIBUTE_NORMAL
+	}
+	fs.attributes = attrs
 }
 
 // setAllocated sets the space the file is to occupy, which a client may ask for before it has
