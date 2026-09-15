@@ -66,15 +66,6 @@ Exit `psql` with:
 ```SQL
 \q
 ```
-Now we need to create the tables. Open the PostgreSQL shell under the newly created user:
-```Bash
-psql -U <USER> -d <DATABASE> -h localhost
-```
-Enter `<DB_PASSWORD>` when prompted to.
-Inside the `psql` prompt:
-```SQL
-\i <PATH_TO_INIT.SQL>
-```
 
 ## Running the Server
 A config file, `sombrero.yml`, needs to be created in the directory where the server will be running. It should contain the following lines:
@@ -233,7 +224,7 @@ docker rm -f sombrero
 and then run the `docker run` command above again.
 
 ### Running in the Normal mode
-`compose.yaml` runs the server together with PostgreSQL, which listens on the host's `127.0.0.1` only. It needs `init.sql` next to it, so run it from a clone of the repository, or download both files into the same directory. Create a `.env` file next to it with the database password, and the port if 5432 is already taken, e.g. by a PostgreSQL installed on the host:
+`compose.yaml` runs the server together with PostgreSQL, which listens on the host's `127.0.0.1` only. Create a `.env` file next to it with the database password, and the port if 5432 is already taken, e.g. by a PostgreSQL installed on the host:
 ```
 SOMBRERO_DB_PASSWORD=<DB_PASSWORD>
 SOMBRERO_DB_PORT=5432
@@ -252,7 +243,7 @@ Then start both containers:
 ```Bash
 docker compose up -d
 ```
-The tables are created from `init.sql` the first time the database is set up, and never again: the database is kept in the `postgres` volume, and changing `init.sql` later has no effect on it. To follow the server log, run `docker compose logs -f sombrero`; to stop both containers, `docker compose down`. To upgrade:
+The database is kept in the `postgres` volume. To follow the server log, run `docker compose logs -f sombrero`; to stop both containers, `docker compose down`. To upgrade:
 ```Bash
 docker compose pull
 docker compose up -d
@@ -438,7 +429,6 @@ export TEST_DB_USER=sombrero_test_user
 export TEST_DB_PASSWORD=sombrero
 export TEST_DB_NAME=sombrero_test
 export TEST_DB_SSLMODE=disable
-export TEST_INIT_SQL=./init.sql
 ```
 3. Run the tests
 ```Bash

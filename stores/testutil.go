@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -38,45 +37,33 @@ func NewTestStoreNamed(t *testing.T, ctx context.Context, dbName string) *Databa
 		SSLMode:  envOr(t, "TEST_DB_SSLMODE", "disable"),
 	}
 
+	// Emptied before NewStore, which would refuse a schema a test left behind,
+	// and which then creates the tables the way the server does.
+	resetDatabase(t, ctx, cfg)
+
 	db, err := NewStore(ctx, cfg)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
 	db.WithShares(noopShares{})
-
-	resetDatabaseFromInitSQL(t, db)
 	return db
 }
 
-func resetDatabaseFromInitSQL(t *testing.T, db *Database) {
+func resetDatabase(t *testing.T, ctx context.Context, cfg DatabaseConfig) {
 	t.Helper()
 
-	initSQLPath := envOr(t, "TEST_INIT_SQL", findInitSQL(t))
-	sqlBytes, err := os.ReadFile(initSQLPath)
+	conn, err := pgx.Connect(ctx, cfg.String())
 	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", initSQLPath, err)
+		t.Fatalf("resetDatabase: %v", err)
 	}
-	initSQL := string(sqlBytes)
+	defer conn.Close(ctx)
 
-	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const resetSQL = `
-			DROP SCHEMA public CASCADE;
-			CREATE SCHEMA public;
-		`
-
-		if _, err := tx.Exec(ctx, resetSQL); err != nil {
-			return fmt.Errorf("reset schema: %w", err)
-		}
-
-		if _, err := tx.Exec(ctx, initSQL); err != nil {
-			return fmt.Errorf("apply init.sql: %w", err)
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		t.Fatalf("resetDatabaseFromInitSQL: %v", err)
+	const resetSQL = `
+		DROP SCHEMA public CASCADE;
+		CREATE SCHEMA public;
+	`
+	if _, err := conn.Exec(ctx, resetSQL); err != nil {
+		t.Fatalf("resetDatabase: %v", err)
 	}
 }
 
@@ -100,23 +87,4 @@ func envOrInt(t *testing.T, key string, fallback int) int {
 		t.Fatalf("invalid %s: %q", key, v)
 	}
 	return n
-}
-
-func findInitSQL(t *testing.T) string {
-	t.Helper()
-
-	candidates := []string{
-		"init.sql",
-		filepath.Join("..", "init.sql"),
-		filepath.Join("..", "..", "init.sql"),
-	}
-
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-
-	t.Fatalf("couldn't find init.sql; set TEST_INIT_SQL")
-	return ""
 }

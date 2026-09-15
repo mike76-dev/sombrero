@@ -55,11 +55,18 @@ func NewStore(ctx context.Context, dc DatabaseConfig) (*Database, error) {
 
 	log.Printf("Connected to SQL database %s, %s:%d\n", dc.Database, dc.Host, dc.Port)
 	lifetime, cancel := context.WithCancel(context.Background())
-	return &Database{
+	db := &Database{
 		ctx:    lifetime,
 		cancel: cancel,
 		pool:   pool,
-	}, nil
+	}
+
+	if err := db.txn(prepareSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to prepare the database schema: %w", err)
+	}
+
+	return db, nil
 }
 
 // WithShares adds a share manager to the Database.

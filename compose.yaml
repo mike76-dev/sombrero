@@ -15,10 +15,8 @@ services:
       PGPORT: ${SOMBRERO_DB_PORT:-5432}
     volumes:
       - postgres:/var/lib/postgresql
-      # Creates the tables, but only when the database volume is first set up.
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      # Asking over TCP keeps it unhealthy while init.sql runs, when only the socket is up.
+      # Asking over TCP keeps it unhealthy during the first-time setup, when only the socket is up.
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U sombrero -d sombrero"]
       interval: 5s
       timeout: 5s
