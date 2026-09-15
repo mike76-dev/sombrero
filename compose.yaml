@@ -1,0 +1,43 @@
+# Runs Sombrero in the Normal mode together with its PostgreSQL database.
+# Set SOMBRERO_DB_PASSWORD, and SOMBRERO_DB_PORT if 5432 is taken, e.g. in a .env file.
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    # Listening on the host's localhost only, where Sombrero finds it.
+    network_mode: host
+    command: postgres -c listen_addresses=127.0.0.1
+    environment:
+      POSTGRES_USER: sombrero
+      POSTGRES_PASSWORD: ${SOMBRERO_DB_PASSWORD:?set SOMBRERO_DB_PASSWORD, e.g. in a .env file}
+      POSTGRES_DB: sombrero
+      # Read by both the server and pg_isready.
+      PGPORT: ${SOMBRERO_DB_PORT:-5432}
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      # Asking over TCP keeps it unhealthy during the first-time setup, when only the socket is up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U sombrero -d sombrero"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  sombrero:
+    # Pulled from the registry, or built from the source if that fails.
+    # `docker compose up --build` always builds it from the source.
+    image: ghcr.io/mike76-dev/sombrero
+    build: .
+    restart: unless-stopped
+    # On the host network, clients are seen by their real addresses, which the bans
+    # rely on, and multichannel offers the host's interfaces rather than the container's.
+    network_mode: host
+    volumes:
+      - ./data:/data
+    # Leaves time for the uploads in flight to drain on shutdown.
+    stop_grace_period: 1m
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres:
