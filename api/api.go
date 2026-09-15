@@ -180,6 +180,11 @@ type SettingsResponse struct {
 	Anonymous bool `json:"anonymous"`
 }
 
+// VersionResponse is the response type for GET /version.
+type VersionResponse struct {
+	Version string `json:"version"`
+}
+
 // ServerStats keeps track of the server statistics.
 type ServerStats struct {
 	Start      time.Time `json:"start"`      // The time the server started
@@ -236,6 +241,7 @@ type API struct {
 	server   Server
 	cfg      stores.Config
 	mode     stores.ServerMode
+	version  string
 	ctx      context.Context
 	connects connectTracker
 }
@@ -243,13 +249,14 @@ type API struct {
 // NewAPI returns an initialized API object. srv is the running SMB server and
 // may be nil, in which case the statistics come back empty and the endpoints
 // that need a storage backend report the share as unavailable.
-func NewAPI(ctx context.Context, s Store, srv Server, cfg stores.Config) *API {
+func NewAPI(ctx context.Context, s Store, srv Server, cfg stores.Config, version string) *API {
 	api := &API{
-		store:  s,
-		server: srv,
-		cfg:    cfg,
-		mode:   cfg.Mode,
-		ctx:    ctx,
+		store:   s,
+		server:  srv,
+		cfg:     cfg,
+		mode:    cfg.Mode,
+		version: version,
+		ctx:     ctx,
 	}
 	api.buildHTTPRoutes()
 	return api
@@ -406,6 +413,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.GET("/settings", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.settingsHandlerGET(w, req, ps)
+	})
+
+	router.GET("/version", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.versionHandlerGET(w, req, ps)
 	})
 
 	router.POST("/probe", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -1704,6 +1715,11 @@ func (api *API) settingsHandlerGET(w http.ResponseWriter, _ *http.Request, _ htt
 		Mode:      api.cfg.Mode.String(),
 		Anonymous: api.cfg.Anonymous,
 	})
+}
+
+// versionHandlerGET handles the GET /version calls.
+func (api *API) versionHandlerGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	writeJSON(w, VersionResponse{Version: api.version})
 }
 
 // connectHandlerGET handles the GET /connect/:workgroup/:share calls. It reports

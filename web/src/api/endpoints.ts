@@ -14,6 +14,7 @@ import type {
   ShareSettings,
   Share,
   UnpinOrphansResponse,
+  VersionResponse,
   Workgroup,
   WorkgroupResponse,
 } from './types'
@@ -144,6 +145,8 @@ export const removeWorkgroup = (id: string) =>
 export const getStats = () => request<ServerStats>('/stats')
 
 export const getSettings = () => request<ServerSettings>('/settings')
+
+export const getVersion = () => request<VersionResponse>('/version')
 
 export const probeServer = (serverName: string) =>
   request<ProbeResponse>('/probe', { method: 'POST', body: { serverName } })

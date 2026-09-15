@@ -80,6 +80,10 @@ export interface ServerStats {
   bytesRcvd: number
 }
 
+export interface VersionResponse {
+  version: string
+}
+
 export interface IsBannedResponse {
   banned: boolean
   reason: string

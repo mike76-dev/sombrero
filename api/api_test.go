@@ -331,22 +331,24 @@ func (m *mockClient) UnpinOrphanedSlabs(ctx context.Context, minAge time.Duratio
 	return m.unpinned, m.unpinErr
 }
 
+const testVersion = "1.2.3"
+
 func newTestAPI(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, nil, stores.Config{Mode: stores.ModeNormal})
+	return NewAPI(context.Background(), ms, nil, stores.Config{Mode: stores.ModeNormal}, testVersion)
 }
 
 func newTestAPIWithServer(ms *mockStore, srv Server) *API {
-	return NewAPI(context.Background(), ms, srv, stores.Config{Mode: stores.ModeNormal})
+	return NewAPI(context.Background(), ms, srv, stores.Config{Mode: stores.ModeNormal}, testVersion)
 }
 
 func newTestLiteAPI(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, nil, stores.Config{Mode: stores.ModeLite})
+	return NewAPI(context.Background(), ms, nil, stores.Config{Mode: stores.ModeLite}, testVersion)
 }
 
 // newTestAPIWithAnonymous is the server that allows anonymous sessions at all,
 // which is what a share's own flag hangs off.
 func newTestAPIWithAnonymous(ms *mockStore) *API {
-	return NewAPI(context.Background(), ms, nil, stores.Config{Mode: stores.ModeNormal, Anonymous: true})
+	return NewAPI(context.Background(), ms, nil, stores.Config{Mode: stores.ModeNormal, Anonymous: true}, testVersion)
 }
 
 func doRequest(api *API, method, path string, body any) *httptest.ResponseRecorder {
@@ -2599,6 +2601,15 @@ func TestSettings(t *testing.T) {
 			t.Errorf("want anonymous access off in Lite mode, got %+v", res)
 		}
 	})
+}
+
+func TestVersion(t *testing.T) {
+	w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/version", nil)
+	checkStatus(t, w, http.StatusOK)
+
+	if res := decodeJSON[VersionResponse](t, w); res.Version != testVersion {
+		t.Errorf("version: want %q, got %q", testVersion, res.Version)
+	}
 }
 
 // TestProbe tests POST /probe, which says whether the address a share would be

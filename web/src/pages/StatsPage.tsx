@@ -1,4 +1,4 @@
-import { getStats } from '../api/endpoints'
+import { getStats, getVersion } from '../api/endpoints'
 import { Card, ErrorBanner, formatBytes, useApiData } from '../components/common'
 
 function formatUptime(start: string): string {
@@ -14,7 +14,10 @@ function formatUptime(start: string): string {
 }
 
 export function StatsPage() {
-  const { data, error, busy, reload } = useApiData(() => getStats())
+  const { data, error, busy, reload } = useApiData(async () => {
+    const [stats, { version }] = await Promise.all([getStats(), getVersion()])
+    return { ...stats, version }
+  })
 
   return (
     <div className="page">
@@ -32,6 +35,10 @@ export function StatsPage() {
         {data && (
           <table className="table table-kv">
             <tbody>
+              <tr>
+                <th>Version</th>
+                <td>{data.version}</td>
+              </tr>
               <tr>
                 <th>Started</th>
                 <td>{new Date(data.start).toLocaleString()}</td>
