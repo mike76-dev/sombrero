@@ -10,8 +10,11 @@ import (
 
 const (
 	// defaultDurableTimeout is how long a durable open is kept for a client that didn't ask
-	// for any particular time.
-	defaultDurableTimeout = 60 * time.Second
+	// for any particular time, which is what Windows does. A minute covered a client that
+	// reconnects at once and nothing else: it has to outlast the loss itself - a wifi roam, a
+	// VPN coming back, a router forgetting the connection - or the reclaim it exists for never
+	// gets the chance to happen, and an unfinished upload starts again from nothing.
+	defaultDurableTimeout = 2 * time.Minute
 
 	// maxDurableTimeout caps what a client may ask for. An open waiting to be reclaimed
 	// holds on to whatever work has been done on it, an unfinished upload above all, so it
@@ -214,6 +217,12 @@ func (c *connection) reclaimDurableOpen(rec smb2.DurableHandleReconnectV2, ss *s
 	op, found := c.server.globalOpenTable[rec.DurableID]
 	c.server.mu.Unlock()
 	if !found {
+		// Most often the sweep got there first, which is the client having come back too late
+		// rather than anything being wrong with what it asked for.
+		if c.server.debug {
+			log.Printf("Nothing to hand back for durable ID %d: no such open is being kept", rec.DurableID)
+		}
+
 		return nil
 	}
 
@@ -222,6 +231,7 @@ func (c *connection) reclaimDurableOpen(rec smb2.DurableHandleReconnectV2, ss *s
 	// other finds the open no longer durable.
 	op.mu.Lock()
 	owner := op.session
+	path := op.pathName
 	granted := op.isDurable &&
 		// The GUID is what proves the request comes from the client that created the open:
 		// the file ID alone travels in the clear on every request that uses the handle.
@@ -240,9 +250,36 @@ func (c *connection) reclaimDurableOpen(rec smb2.DurableHandleReconnectV2, ss *s
 		op.connection = c
 		op.disconnectTime = time.Time{}
 	}
+
+	// Which of the conditions turned the reclaim away, named while the open is still held. A
+	// client that came back and was refused otherwise looks exactly like one that never came
+	// back at all, and the two call for opposite things.
+	var refusal string
+	if !granted {
+		switch {
+		case !op.isDurable:
+			refusal = "the open is no longer durable"
+		case op.createGuid != rec.CreateGuid:
+			refusal = "it was created under another GUID"
+		case op.fileID != rec.FileID:
+			refusal = "the file ID is not the one the open carries"
+		case op.disconnectTime.IsZero():
+			refusal = "the open never lost its connection"
+		case op.treeConnect.share != tc.share:
+			refusal = "the open is on another share"
+		case !strings.EqualFold(owner.userName, ss.userName):
+			refusal = "the open belongs to another user"
+		default:
+			refusal = "the open belongs to another workgroup"
+		}
+	}
 	op.mu.Unlock()
 
 	if !granted {
+		if c.server.debug {
+			log.Printf("Not handing back the durable handle for %s: %s", path, refusal)
+		}
+
 		return nil
 	}
 

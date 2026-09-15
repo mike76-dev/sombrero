@@ -143,6 +143,13 @@ func main() {
 					// Drop unused connections.
 					for _, cn := range cl {
 						if cn.isStale() {
+							// A connection this server drops itself and one whose client
+							// went away end the same way, so the reason is only on record
+							// if it is put there here.
+							if server.debug {
+								log.Printf("Dropping connection from %s: nothing has come over it for %v", cn.clientName, staleThreshold)
+							}
+
 							server.closeConnection(cn)
 						}
 					}

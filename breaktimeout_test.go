@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"testing"
 	"time"
 
@@ -35,7 +34,7 @@ func TestIntegrationOplockGoesWhenTheClientNeverAnswers(t *testing.T) {
 	}
 
 	h.srv.mu.Lock()
-	aliceOpen := h.srv.globalOpenTable[binary.LittleEndian.Uint64(createdFileID(held)[8:16])]
+	aliceOpen := h.srv.globalOpenTable[openIDOf(createdFileID(held))]
 	h.srv.mu.Unlock()
 	if aliceOpen == nil {
 		t.Fatal("the open alice was granted is not in the global table")

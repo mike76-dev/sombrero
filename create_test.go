@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"testing"
 	"time"
 
@@ -248,7 +247,7 @@ func breakEnding(t *testing.T, end func(h *smbTest, alice *testClient, held []by
 	// The open alice was given, so that it can be inspected once she is gone. Bob takes her
 	// place on the file, so asking who holds an oplock on it afterwards answers about him.
 	h.srv.mu.Lock()
-	aliceOpen := h.srv.globalOpenTable[binary.LittleEndian.Uint64(createdFileID(held)[8:16])]
+	aliceOpen := h.srv.globalOpenTable[openIDOf(createdFileID(held))]
 	h.srv.mu.Unlock()
 	if aliceOpen == nil {
 		t.Fatal("the open alice was granted is not in the global table")

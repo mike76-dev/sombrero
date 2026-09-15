@@ -3,6 +3,11 @@
 A React + TypeScript single-page app for managing a Sombrero server through its HTTP API:
 workgroups, accounts, shares, access policies, share connections, and host bans.
 
+Each of those has a page of its own, and the **Setup wizard** page leads through them in the
+order that gets a client onto a share: workgroup → account → share → connection → policy. Every
+step either makes a new one or takes one that is already there, so the wizard is as good for
+adding an account to an existing setup as for a server with nothing on it yet.
+
 ## Development
 
 ```bash
@@ -51,5 +56,9 @@ this only works when the request is not subject to CORS restrictions.
 
 ## Notes
 
-* When a workgroup connects to an indexd share for the first time, the returned
-  app key is shown once — store it safely; it is required for reconnecting.
+* Connecting a workgroup to a share runs in the background, and the Connections page
+  polls `GET /connect/:workgroup/:share` to show which phase it is in. A first-time
+  indexd connection needs no second press: approving the registration with the indexer
+  is what carries it through.
+* When a workgroup connects to an indexd share for the first time, the app key it
+  derives is shown once — store it safely; it is required for reconnecting.

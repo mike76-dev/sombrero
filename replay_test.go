@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"testing"
 	"time"
 
@@ -103,7 +102,7 @@ func TestIntegrationUsingTheHandleEndsTheReplayWindow(t *testing.T) {
 	first, _ := alice.createDurable("dir/file", replayGuid, false)
 
 	h.srv.mu.Lock()
-	op := h.srv.globalOpenTable[binary.LittleEndian.Uint64(createdFileID(first)[8:16])]
+	op := h.srv.globalOpenTable[openIDOf(createdFileID(first))]
 	h.srv.mu.Unlock()
 	if op == nil {
 		t.Fatal("the open the create made is not in the global table")

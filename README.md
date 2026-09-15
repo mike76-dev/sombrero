@@ -158,6 +158,12 @@ curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/share" -d '{"name":
 ```
 
 ### 4. Connect the workgroup to the share
+Connecting takes a while — the client warms up a connection to every host, and an `indexd`
+share waits for a person to approve the registration first — so the calls that start a
+connection return right away and the connection is made in the background. `GET` reports how
+far along it is: `awaiting-approval`, `registering` or `connecting` while it runs, and
+`connected` or `failed` when it is over.
+
 In case of a `renterd` share, simply call
 ```Bash
 curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/home/shared-renterd"
@@ -168,15 +174,21 @@ curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/connect/8303eeb8-f3
 ```
 Example of the output:
 ```Bash
-{"url":"https://sia.storage/auth/connect/d10f2a960d7dfc947248f58758619b74"}
+{"state":"awaiting-approval","started":"2026-09-08T10:15:04Z","since":"2026-09-08T10:15:04Z","url":"https://sia.storage/auth/connect/d10f2a960d7dfc947248f58758619b74"}
 ```
-After visiting the URL provided and accepting the connection, run
+Visit the URL provided and accept the connection. That is all it takes: the server picks the
+approval up and connects the share. Follow it with
 ```Bash
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
+curl -u "":<API_PASSWORD> "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd"
 ```
-Example of the output:
+Example of the output once it is done:
 ```Bash
-{"appKey":"03a2aab52b79f674354af35b0030cd0cd45b51f53a1a75795a58c85844767b3d3ac38242c05637cac5b8b7fbcea55d29826845fdfc0ef19894d7640438f43a22"}
+{"state":"connected","started":"2026-09-08T10:15:04Z","since":"2026-09-08T10:15:41Z","appKey":"03a2aab52b79f674354af35b0030cd0cd45b51f53a1a75795a58c85844767b3d3ac38242c05637cac5b8b7fbcea55d29826845fdfc0ef19894d7640438f43a22"}
+```
+Keep that app key: it is what reconnects this workgroup to the share, and it is reported
+once and never again.
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd" -d '{"appKey":"03a2aab5..."}'
 ```
 
 ### 5. Grant access to the share
@@ -187,6 +199,8 @@ curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/
 
 ## Web UI
 The server ships with a web UI covering the same ground as the API: workgroups, accounts, shares, access policies, bans, and the server statistics. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` on the Settings page.
+
+The **Setup wizard** page walks through the workflow above — workgroup, account, share, connection, access policy — one step at a time, making each thing or letting you pick one that is already there. It is a way through the same pages, not a separate one: everything it does can be done on the pages themselves, which is also where anything is changed afterwards.
 
 ### Building the UI
 The UI is not built as part of `go build`. Release binaries are built by building the UI first and then the server:
@@ -247,9 +261,8 @@ An anonymous session reaches that folder and nothing else: what it calls the roo
 On an `indexd` share the folder is served by a connection of its own, made once under the reserved workgroup `00000000-0000-0000-0000-000000000000`:
 ```Bash
 curl -u "":<API_PASSWORD> -X POST "http://127.0.0.1:9999/api/connect/00000000-0000-0000-0000-000000000000/<SHARE_NAME>"
-curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/00000000-0000-0000-0000-000000000000/<SHARE_NAME>"
 ```
-The first call returns a URL to approve, exactly as for any other workgroup. What anonymous uploads is then pinned under an app account of its own, with its own quota, so no workgroup pays for it. The server makes the folder itself; if a folder of that name is already there and belongs to somebody else, the share turns anonymous sessions away and says so in the log rather than handing that folder to everyone.
+The call returns a URL to approve, exactly as for any other workgroup. What anonymous uploads is then pinned under an app account of its own, with its own quota, so no workgroup pays for it. The server makes the folder itself; if a folder of that name is already there and belongs to somebody else, the share turns anonymous sessions away and says so in the log rather than handing that folder to everyone.
 
 ## Lite Mode
 If you only intend to connect to `renterd` shares, you can run the server in the Lite mode by setting `mode: lite` in the config file. In this mode, no PostgreSQL database is required: the shares, workgroups, accounts, access policies, and the ban list are kept in a JSON file (`store.json`) in the data directory, and the `database` and `indexd` sections of the config file may be omitted. `indexd` shares are not supported in the Lite mode.
@@ -319,6 +332,8 @@ In the guides below, `<SERVER_NET_ADDRESS>` stands for the network address of th
 2. Type the address of the share in the `Folder` field (`\\<SERVER_NET_ADDRESS>\<SHARE_NAME>`). Pick any drive letter. Check the `Connect using different credentials` box, then click `Finish`.
 3. In the next popup window, enter the user credentials (matching one of the registered accounts) and click `OK`.
 
+If Windows doesn't offer you to specify the workgroup name, simply enter `<WORKGROUP>\<USERNAME>` as the username.
+
 Please note: Windows 2000/NT/XP and earlier are not supported. The earliest supported versions are Windows 7/Vista, because this is where the SMB2 protocol was first introduced.
 
 ### MacOS
@@ -345,8 +360,10 @@ sudo chown $USER:$USER /mnt/sia
 ```
 3. Mount the share with
 ```Bash
-sudo mount -t cifs //<SERVER_NET_ADDRESS>/<SHARE_NAME> /mnt/sia -o username=<USERNAME>,workgroup=<WORKGROUP>,password=<PASSWORD>
+sudo mount -t cifs //<SERVER_NET_ADDRESS>/<SHARE_NAME> /mnt/sia -o username=<USERNAME>,workgroup=<WORKGROUP>,password=<PASSWORD>,uid=$(id -u),gid=$(id -g),rasize=33554432
 ```
+`uid=$(id -u),gid=$(id -g)` mounts the share under the current user's permissions, while `rasize=33554432` increases the buffer size for streaming media files. Both are optional.
+
 4. To unmount, type
 ```Bash
 sudo umount /mnt/sia

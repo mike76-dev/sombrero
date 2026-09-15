@@ -21,8 +21,11 @@ const (
 
 const (
 	MaxTransactSize = 1048576 * 8 // 8MiB
-	MaxReadSize     = 1048576 * 8 // 8MiB
 	MaxWriteSize    = 1048576 * 8 // 8MiB
+
+	// MaxReadSize is kept small: a read response can't be split, so other responses on the
+	// connection wait for the whole of one.
+	MaxReadSize = 1048576 // 1MiB
 )
 
 const (

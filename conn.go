@@ -108,7 +108,7 @@ type connection struct {
 	mu         sync.Mutex
 	server     *server
 	ntlmServer *ntlm.Server
-	writeChan  chan []byte
+	sendQueue  *sendQueue
 	closeChan  chan struct{}
 	once       sync.Once
 
@@ -1136,6 +1136,14 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		path := strings.ReplaceAll(cr.Filename(), "\\", "/")
+
+		// The share has no named streams, so "file:stream" is refused as on FAT; accepted, it
+		// was stored as a file of its own that Windows can neither see nor delete.
+		if strings.Contains(path, ":") {
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_INVALID, 0, nil)
+			return resp, ss, nil
+		}
+
 		if !validPath(path) {
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 			return resp, ss, nil
@@ -1408,10 +1416,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				op.file.markDeleted()
 				op.cancelUpload()
 
+			case pu.leave(op):
+				// Another handle is still writing the file, and its close finishes the upload.
+
 			default:
 				if err := op.flush(); err != nil {
 					op.abandonUpload()
-					log.Println("Error completing write:", err)
+					log.Printf("Error completing write of %s from %s: %v", path, c.clientName, err)
 					unsaved = true
 				}
 			}
@@ -1890,7 +1901,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					op.cancelUpload()
 				}
 
-				log.Println("Error writing data:", err)
+				op.mu.Lock()
+				path := op.pathName
+				op.mu.Unlock()
+				log.Printf("Error writing %d bytes to %s at offset %d from %s: %v",
+					len(wr.Buffer()), path, wr.Offset(), c.clientName, err)
 				resp = smb2.NewErrorResponse(wr, status, 0, nil)
 			} else {
 				resp = &smb2.WriteResponse{}
@@ -2978,6 +2993,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				// Rename the file or the directory. The name it is moving to has to resolve
 				// inside the share, exactly as the one it was created under did.
 				newName := strings.ReplaceAll(fri.FileName, "\\", "/")
+				if strings.Contains(newName, ":") {
+					resp := smb2.NewErrorResponse(sir, smb2.STATUS_OBJECT_NAME_INVALID, 0, nil)
+					return resp, ss, nil
+				}
 				if newName == "" || !validPath(newName) {
 					resp := smb2.NewErrorResponse(sir, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 					return resp, ss, nil
@@ -3152,6 +3171,10 @@ func (c *connection) readLoop(host string) {
 			// every time it is asked.
 			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, net.ErrClosed) {
 				log.Println("Error reading message:", err)
+			} else if c.server.debug {
+				// Which of the two it was is the difference between the client having gone and
+				// this server having dropped it, and nothing else records the answer.
+				log.Printf("Connection from %s ended while reading: %v", c.clientName, err)
 			}
 			c.server.closeConnection(c)
 
@@ -3291,21 +3314,16 @@ func (c *connection) processRequests() {
 	}
 }
 
-// sendResponses takes an SMB message from the sending queue and writes it to the underlying TCP connection.
+// sendResponses writes what is queued on the connection to the underlying TCP connection.
 func (c *connection) sendResponses() {
 	defer c.recoverConnection("sending responses")
 
-	for {
-		select {
-		case <-c.closeChan:
-			return
-		case msg := <-c.writeChan:
-			err := writeMessage(c.conn, msg)
-			if err != nil {
-				log.Println("Error sending message:", err)
-				c.server.closeConnection(c)
-			}
-		}
+	err := c.drainSendQueue(func(msg []byte) error {
+		return writeMessage(c.conn, msg)
+	})
+	if err != nil {
+		log.Println("Error sending message:", err)
+		c.server.closeConnection(c)
 	}
 }
 
@@ -3393,8 +3411,8 @@ func finalAsync(resp smb2.GenericResponse, asyncID uint64) {
 // findOpen is a helper function that tries to find an open by its ID. It returns the status
 // to fail the request with, or STATUS_OK if the request may be processed.
 func (c *connection) findOpen(ss *session, id []byte, req *smb2.Request) (*open, uint32) {
-	fid := binary.LittleEndian.Uint64(id[:8])
-	dfid := binary.LittleEndian.Uint64(id[8:16])
+	dfid := binary.LittleEndian.Uint64(id[:8])
+	fid := binary.LittleEndian.Uint64(id[8:16])
 
 	ss.mu.Lock()
 	op, found := ss.openTable[fid]
@@ -3615,7 +3633,7 @@ func (c *connection) findOpenByGroupID(groupID uint64) *open {
 		return nil
 	}
 
-	dfid := binary.LittleEndian.Uint64(id[8:16])
+	dfid := binary.LittleEndian.Uint64(id[:8])
 	c.server.mu.Lock()
 	op := c.server.globalOpenTable[dfid]
 	c.server.mu.Unlock()
@@ -3662,8 +3680,8 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		wr := smb2.WriteRequest{Request: *target}
 		var op *open
 		id := wr.FileID()
-		fid := binary.LittleEndian.Uint64(id[:8])
-		dfid := binary.LittleEndian.Uint64(id[8:16])
+		dfid := binary.LittleEndian.Uint64(id[:8])
+		fid := binary.LittleEndian.Uint64(id[8:16])
 		ss.mu.Lock()
 		op, found := ss.openTable[fid]
 		ss.mu.Unlock()
@@ -3763,11 +3781,38 @@ func (c *connection) findCancelTarget(cr smb2.CancelRequest, ss *session) (*smb2
 	return nil, nil
 }
 
+// working reports whether the connection has a request outstanding that this server is still doing
+// the work of: a create, a read or a write waiting on the backend, which on the Sia network can
+// take longer than a client is given before it is judged idle.
+//
+// A change notify and a blocking lock are left out. They wait on something that may never happen,
+// so one left behind by a client that has gone looks exactly like one a client is still waiting on,
+// and counting them would keep every connection that ever browsed a directory.
+// c.mu must be held.
+func (c *connection) working() bool {
+	for _, req := range c.asyncCommandList {
+		switch req.Header().Command() {
+		case smb2.SMB2_CREATE, smb2.SMB2_READ, smb2.SMB2_WRITE:
+			return true
+		}
+	}
+
+	return false
+}
+
 // isStale returns true if the connection hasn't been used for a certain amount of time.
 // This is done to drop unused connections.
 func (c *connection) isStale() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// A connection this server owes an answer on is in use, however long it has been since anything
+	// last arrived over it: the client is waiting on that answer, and while it waits it has nothing
+	// to send and no credits to send it with. Judged by arrivals alone, a client being kept waiting
+	// is indistinguishable from one that has gone away, and dropping it loses the work as well.
+	if c.working() {
+		return false
+	}
 
 	// A connection nobody has authenticated over yet is judged by its age alone, and the answer
 	// has to be given here. Letting it fall through to the end reaches an answer arrived at with
@@ -3880,7 +3925,10 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	// ([MS-SMB2] 2.2.13).
 	if tc.share.name != "ipc$" {
 		access := grantedFor(cr.DesiredAccess(), tc.maximalAccess)
-		if c.server.sharingViolation(tc.share, path, access, cr.ShareAccess()) {
+		if other := c.server.sharingViolation(tc.share, path, access, cr.ShareAccess()); other != nil {
+			if c.server.debug {
+				log.Println(describeSharingViolation(path, access, cr.ShareAccess(), other))
+			}
 			return smb2.NewErrorResponse(cr, smb2.STATUS_SHARING_VIOLATION, 0, nil), nil
 		}
 	}

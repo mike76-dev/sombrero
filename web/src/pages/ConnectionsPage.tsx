@@ -1,25 +1,42 @@
 import { useState } from 'react'
-import { connect, disconnect, requestConnection } from '../api/endpoints'
-import { Card, CopyButton, ErrorBanner, Field, SuccessBanner, useApiAction } from '../components/common'
+import { connect, disconnect, listShares, requestConnection } from '../api/endpoints'
+import {
+  Card,
+  ErrorBanner,
+  Field,
+  SuccessBanner,
+  useApiAction,
+  useApiData,
+} from '../components/common'
+import { ConnectStatusView, useConnectAttempt } from '../components/connect'
 import { ShareSelect, WorkgroupSelect } from '../components/selects'
 
 export function ConnectionsPage() {
   const { run, busy, error, message } = useApiAction()
+  const { data: shares } = useApiData(() => listShares())
   const [workgroup, setWorkgroup] = useState('')
   const [share, setShare] = useState('')
   const [appKey, setAppKey] = useState('')
-  const [approvalUrl, setApprovalUrl] = useState<string | null>(null)
-  const [newAppKey, setNewAppKey] = useState<string | null>(null)
-  const ready = workgroup.trim() && share.trim()
+  const ready = Boolean(workgroup.trim() && share.trim())
+  const attempt = useConnectAttempt(workgroup.trim(), share.trim())
+
+  // What the selected share is backed by decides how it is connected: an indexd
+  // share is connected for the first time by approving a request, and only a
+  // reconnection of one takes an app key.
+  const backend = shares?.find((s) => s.name === share.trim())?.type
+  const reconnecting = Boolean(appKey.trim())
+  const connectable = backend === 'renterd' || (backend === 'indexd' && reconnecting)
+  const running = attempt.running
 
   return (
     <div className="page">
       <Card title="Connect a workgroup to a share">
         <p className="muted">
           renterd shares: just press <em>Connect</em>. indexd shares connecting for the first
-          time: press <em>Request approval</em>, open the approval link, approve the
-          registration with the indexer, then press <em>Connect</em>. Reconnecting an indexd
-          share: paste the saved app key and press <em>Connect</em>.
+          time: press <em>Request approval</em> and open the approval link — approving the
+          registration with the indexer is what carries the connection through, and the app key
+          it derives is shown here once it has. Reconnecting an indexd share: paste the saved
+          app key and press <em>Connect</em>.
         </p>
         <div className="grid">
           <Field label="Workgroup">
@@ -41,11 +58,10 @@ export function ConnectionsPage() {
         <div className="row">
           <button
             className="btn"
-            disabled={busy || !ready}
+            disabled={busy || running || !ready || backend !== 'indexd'}
             onClick={() =>
               run(async () => {
-                const res = await requestConnection(workgroup.trim(), share.trim())
-                setApprovalUrl(res.url)
+                attempt.begin(await requestConnection(workgroup.trim(), share.trim()), true)
               })
             }
           >
@@ -53,53 +69,39 @@ export function ConnectionsPage() {
           </button>
           <button
             className="btn btn-primary"
-            disabled={busy || !ready}
+            disabled={busy || running || !ready || !connectable}
             onClick={() =>
               run(async () => {
-                setNewAppKey(null)
-                const res = await connect(workgroup.trim(), share.trim(), appKey.trim() || undefined)
-                if (res && 'appKey' in res) {
-                  setNewAppKey(res.appKey)
-                  setApprovalUrl(null)
-                }
-              }, 'Connected.')
+                const key = appKey.trim() || undefined
+                attempt.begin(await connect(workgroup.trim(), share.trim(), key), false)
+              })
             }
           >
             Connect
           </button>
           <button
             className="btn btn-danger"
-            disabled={busy || !ready}
+            disabled={busy || running || !ready}
             onClick={() => {
               if (!window.confirm(`Disconnect ${share.trim()} from this workgroup?`)) return
-              run(() => disconnect(workgroup.trim(), share.trim()), 'Disconnected.')
+              run(async () => {
+                await disconnect(workgroup.trim(), share.trim())
+                attempt.idle()
+              }, 'Disconnected.')
             }}
           >
             Disconnect
           </button>
         </div>
-        {approvalUrl && (
-          <div className="banner banner-success">
-            Approval requested. Open{' '}
-            <a href={approvalUrl} target="_blank" rel="noreferrer">
-              this link
-            </a>{' '}
-            to approve the registration, then press <em>Connect</em> (within 10 minutes).
-          </div>
+        {ready && backend === 'indexd' && !reconnecting && !running && (
+          <p className="muted">
+            This indexd share is connected by approving a request, not by pressing{' '}
+            <em>Connect</em>. Paste the app key of an existing connection to reconnect one.
+          </p>
         )}
-        {newAppKey && (
-          <div className="banner banner-success stack">
-            <div>
-              Connected. Save this app key — it is required to reconnect this workgroup to
-              the share and is shown only once:
-            </div>
-            <div className="mono appkey">
-              {newAppKey} <CopyButton value={newAppKey} />
-            </div>
-          </div>
-        )}
+        <ConnectStatusView attempt={attempt} />
         <ErrorBanner error={error} />
-        {!newAppKey && <SuccessBanner message={message} />}
+        {!attempt.appKey && <SuccessBanner message={message} />}
       </Card>
     </div>
   )

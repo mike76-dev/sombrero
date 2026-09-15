@@ -37,9 +37,10 @@ func newOplockOpen(t *testing.T, s *server, sh *share, path string) (*open, *con
 		clientGuid:       guid[:],
 		clientName:       fmt.Sprintf("client-%d", oplockTestClient),
 		negotiateDialect: smb2.SMB_DIALECT_311,
-		writeChan:        sent,
+		sendQueue:        newSendQueue(),
 		closeChan:        make(chan struct{}),
 	}
+	deliverTo(c, sent)
 
 	ss := &session{
 		sessionID:   uint64(oplockTestClient),

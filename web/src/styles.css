@@ -396,8 +396,118 @@ textarea {
   color: var(--text-muted);
 }
 
+/* What a single field has to say for itself, said next to it rather than in a
+   banner at the foot of the card. */
+.field-error {
+  color: var(--danger);
+}
+
 .appkey {
   overflow-wrap: anywhere;
+}
+
+/* Connection progress */
+
+.progress {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.connection-state {
+  margin-top: 12px;
+}
+
+.steps {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+/* The wizard's step bar: the same marks as the phases of a connection, laid out
+   across the top of the page rather than down it. */
+.steps-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 20px;
+  margin: 0;
+  padding: 14px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  color: var(--text-muted);
+}
+
+.step-mark {
+  flex: none;
+  width: 16px;
+  text-align: center;
+}
+
+/* The dot of the phase under way pulses: how long it takes is not known in
+   advance, so it says that something is happening rather than how much is
+   left. */
+.step-active .step-mark::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.step-pending .step-mark::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+}
+
+.step-active {
+  color: var(--text);
+}
+
+.step-active .step-label {
+  font-weight: 600;
+}
+
+.step-done,
+.step-done .step-mark {
+  color: var(--success);
+}
+
+.step-failed,
+.step-failed .step-mark {
+  color: var(--danger);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step-active .step-mark::before {
+    animation: none;
+  }
 }
 
 /* Responsive */

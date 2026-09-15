@@ -30,6 +30,44 @@ func TestDatabaseShareTypes(t *testing.T) {
 	}
 }
 
+// TestDatabaseHasConnections verifies what the API asks before it lets the
+// address of an indexd share be changed: whether anything is connected to it.
+func TestDatabaseHasConnections(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	db.WithShares(&recordingShares{})
+	sh := addShare(t, db, "idx")
+	other := addShare(t, db, "untouched")
+	wg := addWorkgroup(t, db, "acme")
+
+	for _, name := range []string{sh.Name, other.Name} {
+		if connected, err := db.HasConnections(name); err != nil || connected {
+			t.Fatalf("HasConnections %s before connecting: %v %v", name, connected, err)
+		}
+	}
+
+	if err := db.AddConnection(wg, sh, nil); err != nil {
+		t.Fatalf("AddConnection: %v", err)
+	}
+	if connected, err := db.HasConnections(sh.Name); err != nil || !connected {
+		t.Fatalf("HasConnections after connecting: %v %v", connected, err)
+	}
+
+	// One share's connection says nothing about another's.
+	if connected, err := db.HasConnections(other.Name); err != nil || connected {
+		t.Fatalf("HasConnections of another share: %v %v", connected, err)
+	}
+
+	if err := db.RemoveConnection(wg, sh); err != nil {
+		t.Fatalf("RemoveConnection: %v", err)
+	}
+	if connected, err := db.HasConnections(sh.Name); err != nil || connected {
+		t.Fatalf("HasConnections after disconnecting: %v %v", connected, err)
+	}
+}
+
 // TestDatabaseWorkgroupIDs verifies that the workgroup and account IDs are
 // assigned by the database and are never reused.
 func TestDatabaseWorkgroupIDs(t *testing.T) {

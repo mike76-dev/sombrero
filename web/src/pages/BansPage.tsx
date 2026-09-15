@@ -62,6 +62,10 @@ export function BansPage() {
       </Card>
 
       <Card title="Clear all bans">
+        <p className="muted">
+          Lifts every ban at once, the ones the server placed itself included: every bad actor
+          banned so far gets another chance at the server. This cannot be undone.
+        </p>
         <div className="row">
           <button
             className="btn btn-danger"

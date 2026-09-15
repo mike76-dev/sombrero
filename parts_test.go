@@ -540,3 +540,57 @@ func TestIntegrationARenameDuringAnUploadDoesNotRaceIt(t *testing.T) {
 		t.Errorf("the upload is keyed on %q, which is neither name the open went by", u.path)
 	}
 }
+
+// TestIntegrationALookerClosingMidCopyLeavesTheUploadRunning is Explorer reading a file's properties
+// while a copy is still writing it. Its close used to finish the upload mid-copy.
+func TestIntegrationALookerClosingMidCopyLeavesTheUploadRunning(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	cl.tc.maxUploadSize = 1024
+
+	handle, _ := cl.create("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if status := smb2.Header(handle).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+	fid := createdFileID(handle)
+
+	block := func(i int) []byte { return bytes.Repeat([]byte{byte('a' + i)}, 1024) }
+	writeBlock := func(i int) {
+		t.Helper()
+		if _, err := cl.write(fid, uint64(i)*1024, block(i)); err != nil {
+			t.Fatalf("the write of block %d failed: %v", i, err)
+		}
+	}
+
+	// Block 1 is still on the wire when the look comes, as parallel writes are.
+	writeBlock(0)
+	writeBlock(2)
+
+	looked, err := cl.createAccessing("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, attributesOnly, nil)
+	if err != nil || smb2.Header(looked).Status() != smb2.STATUS_OK {
+		t.Fatalf("the look at the file failed: %v", err)
+	}
+	if _, err := cl.closeHandle(createdFileID(looked)); err != nil {
+		t.Fatalf("closing the look failed: %v", err)
+	}
+
+	writeBlock(1)
+	writeBlock(3)
+
+	closed, err := cl.closeHandle(fid)
+	if err != nil {
+		t.Fatalf("the close failed outright: %v", err)
+	}
+	if status := smb2.Header(closed).Status(); status != smb2.STATUS_OK {
+		t.Errorf("the copy's close was answered with %#x, want the file stored", status)
+	}
+
+	want := slices.Concat(block(0), block(1), block(2), block(3))
+	if got := h.files.dataOf("big.bin"); !bytes.Equal(got, want) {
+		t.Errorf("the store holds %d bytes (%q...), want the %d written", len(got), got[:min(len(got), 8)], len(want))
+	}
+	if n := h.files.uploadsOf("big.bin"); n != 1 {
+		t.Errorf("the copy took %d uploads, want 1", n)
+	}
+}

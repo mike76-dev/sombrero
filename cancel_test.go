@@ -394,6 +394,14 @@ func TestFindOpenByGroupIDWithoutAnOpen(t *testing.T) {
 	}
 }
 
+// quietSince puts a session on the connection that nothing has arrived over for the given time,
+// which is the state every judgement below the first few is made against.
+func quietSince(c *connection, d time.Duration) {
+	ss := newSessionState(1, c)
+	ss.idleTime = time.Now().Add(-d)
+	c.sessionTable[1] = ss
+}
+
 // TestIsStale walks the states a connection may be in when the server looks over its connections
 // for ones worth keeping. A connection is worth keeping while anybody is using it.
 func TestIsStale(t *testing.T) {
@@ -447,6 +455,53 @@ func TestIsStale(t *testing.T) {
 				c.sessionTable[2] = busy
 			},
 			want: false,
+		},
+
+		// A client waiting on the backend sends nothing while it waits, so the arrivals say it has
+		// gone quiet at exactly the moment it is owed the most.
+		{
+			name: "the session went quiet, but a write is still being worked on",
+			setUp: func(h *smbTest, c *connection) {
+				quietSince(c, long)
+				c.asyncCommandList[1] = request(h.t, writeRequest(1, 1, 1, make([]byte, 16), 0, []byte("data")))
+			},
+			want: false,
+		},
+		{
+			name: "the session went quiet, but a read is still being worked on",
+			setUp: func(h *smbTest, c *connection) {
+				quietSince(c, long)
+				c.asyncCommandList[1] = request(h.t, readRequest(1, 1, 1, make([]byte, 16), 0, 1024))
+			},
+			want: false,
+		},
+		{
+			name: "the session went quiet, but a create is still being worked on",
+			setUp: func(h *smbTest, c *connection) {
+				quietSince(c, long)
+				c.asyncCommandList[1] = request(h.t, createRequest(1, 1, 1, "file", 0, smb2.FILE_OPEN, readAccess, nil))
+			},
+			want: false,
+		},
+
+		// The other way about: these wait on something that may never come, so a client that has
+		// gone leaves one behind for ever. A connection is not kept alive by one.
+		{
+			name: "nothing is outstanding but a change notify",
+			setUp: func(h *smbTest, c *connection) {
+				quietSince(c, long)
+				c.asyncCommandList[1] = request(h.t, changeNotifyRequest(1, 1, 1, make([]byte, 16)))
+			},
+			want: true,
+		},
+		{
+			name: "nothing is outstanding but a lock waiting for a range",
+			setUp: func(h *smbTest, c *connection) {
+				quietSince(c, long)
+				locks := []smb2.Lock{{Offset: 0, Length: 1, Flags: smb2.LOCKFLAG_EXCLUSIVE_LOCK}}
+				c.asyncCommandList[1] = request(h.t, lockRequest(1, 1, 1, make([]byte, 16), locks, 0, 0))
+			},
+			want: true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

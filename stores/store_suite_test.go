@@ -222,8 +222,8 @@ func TestStoreWorkgroups(t *testing.T) {
 		if err := st.AddWorkgroup(Workgroup{UUID: u1}); err == nil {
 			t.Fatal("AddWorkgroup: expected duplicate UUID error")
 		}
-		if err := st.AddWorkgroup(Workgroup{UUID: uuid.New(), Name: "first"}); err == nil {
-			t.Fatal("AddWorkgroup: expected duplicate name error")
+		if err := st.AddWorkgroup(Workgroup{UUID: uuid.New(), Name: "first"}); !errors.Is(err, ErrWorkgroupExists) {
+			t.Fatalf("AddWorkgroup: want ErrWorkgroupExists, got %v", err)
 		}
 
 		// FindWorkgroup by UUID.
@@ -527,8 +527,8 @@ func TestStoreAccounts(t *testing.T) {
 		if err := st.AddAccount(Account{Username: "alice", Password: "secret", Workgroup: u}); err != nil {
 			t.Fatalf("AddAccount: %v", err)
 		}
-		if err := st.AddAccount(Account{Username: "alice", Password: "other", Workgroup: u}); err == nil {
-			t.Fatal("AddAccount: expected duplicate account error")
+		if err := st.AddAccount(Account{Username: "alice", Password: "other", Workgroup: u}); !errors.Is(err, ErrAccountExists) {
+			t.Fatalf("AddAccount: want ErrAccountExists, got %v", err)
 		}
 
 		// The password is stored as an NT hash and never returned in plaintext.
@@ -678,8 +678,8 @@ func TestStoreShares(t *testing.T) {
 		}
 
 		// Share names are unique.
-		if err := st.RegisterShare(share); err == nil {
-			t.Fatal("RegisterShare: expected duplicate share error")
+		if err := st.RegisterShare(share); !errors.Is(err, ErrShareExists) {
+			t.Fatalf("RegisterShare: want ErrShareExists, got %v", err)
 		}
 
 		// GetShare round-trips every field.

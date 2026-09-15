@@ -40,10 +40,10 @@ func TestParseDurableHandleRequestV2(t *testing.T) {
 func TestParseDurableHandleReconnectV2(t *testing.T) {
 	data := make([]byte, durableHandleReconnectV2Size)
 
-	// The file ID is the one the server handed out, in the order the rest of the server
-	// reads it: the volatile half first, the durable half second.
-	binary.LittleEndian.PutUint64(data[0:8], 0x1111222233334444)
-	binary.LittleEndian.PutUint64(data[8:16], 0x5555666677778888)
+	// The file ID as it travels: the persistent half first, which is the durable ID, and the
+	// volatile half second ([MS-SMB2] 2.2.14.1).
+	binary.LittleEndian.PutUint64(data[0:8], 0x5555666677778888)
+	binary.LittleEndian.PutUint64(data[8:16], 0x1111222233334444)
 	guid := []byte{16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
 	copy(data[16:32], guid)
 	binary.LittleEndian.PutUint32(data[32:36], DHANDLE_FLAG_PERSISTENT)

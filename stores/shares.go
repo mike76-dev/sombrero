@@ -10,6 +10,16 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ErrShareExists is returned when a share is registered under a name that
+// another share already has.
+var ErrShareExists = errors.New("a share with this name already exists")
+
+// ErrShareInUse is returned when a share is unregistered while clients still
+// have it open. It comes from the share manager rather than from here, and is
+// declared alongside the other share errors so that the callers of the store
+// have one place to recognize it by.
+var ErrShareInUse = errors.New("the share is currently in use by one or more clients")
+
 // Share represents a renterd bucket, which is mounted as a remote share.
 //
 // AllowGuest lets the passwordless accounts of a workgroup connect to the
@@ -35,6 +45,16 @@ type Share struct {
 // RegisterShare registers a new share in the database.
 func (db *Database) RegisterShare(s Share) error {
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		// The unique constraint would refuse this anyway; asking first is what
+		// tells a taken name from a database that is having trouble.
+		const taken = `SELECT 1 FROM shares WHERE share_name = $1`
+		var exists int
+		if err := tx.QueryRow(ctx, taken, s.Name).Scan(&exists); err == nil {
+			return ErrShareExists
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("failed to look up the share name: %w", err)
+		}
+
 		const query = `
 			INSERT INTO shares (
 				share_name,

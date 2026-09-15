@@ -2,12 +2,12 @@ import { request } from './client'
 import type {
   Account,
   AccessRights,
-  ConnectRequestResponse,
-  ConnectResponse,
+  ConnectStatusResponse,
   DefragmentResponse,
   FragmentationResponse,
   IsBannedResponse,
   OrphansResponse,
+  ProbeResponse,
   PublicDir,
   ServerSettings,
   ServerStats,
@@ -145,18 +145,26 @@ export const getStats = () => request<ServerStats>('/stats')
 
 export const getSettings = () => request<ServerSettings>('/settings')
 
+export const probeServer = (serverName: string) =>
+  request<ProbeResponse>('/probe', { method: 'POST', body: { serverName } })
+
 // Connections
 
 export const requestConnection = (workgroup: string, share: string) =>
-  request<ConnectRequestResponse>(
+  request<ConnectStatusResponse>(
     `/connect/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
     { method: 'POST' },
   )
 
 export const connect = (workgroup: string, share: string, appKey?: string) =>
-  request<ConnectResponse | void>(
+  request<ConnectStatusResponse>(
     `/connect/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
     { method: 'PUT', body: appKey ? { appKey } : undefined },
+  )
+
+export const connectStatus = (workgroup: string, share: string) =>
+  request<ConnectStatusResponse>(
+    `/connect/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
   )
 
 export const disconnect = (workgroup: string, share: string) =>

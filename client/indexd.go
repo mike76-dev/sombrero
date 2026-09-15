@@ -58,6 +58,10 @@ const (
 	retryMax   = time.Minute
 )
 
+// defaultSlabRetryDelays are the waits before retrying a slab download that reached too few hosts,
+// which is usually transient.
+var defaultSlabRetryDelays = []time.Duration{time.Second, 3 * time.Second}
+
 // nextRetry doubles the wait after another failure, up to retryMax.
 func nextRetry(d time.Duration) time.Duration {
 	if d < retryDelay {
@@ -325,6 +329,9 @@ type IndexdClient struct {
 	// pieces does not mistake work in progress for a leftover of a crash.
 	claimedMu sync.Mutex
 	claimed   map[uint64]struct{}
+
+	storage         storageCache
+	slabRetryDelays []time.Duration // a field so tests can shorten it
 }
 
 // markClaimed records the given pieces as being worked on.
@@ -416,6 +423,8 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		jobsChan:     make(chan struct{}, uploadWorkers),
 		packChan:     make(chan struct{}, 1),
 		claimed:      make(map[uint64]struct{}),
+
+		slabRetryDelays: defaultSlabRetryDelays,
 	}
 
 	// Leftover data that reaches the slab size is uploaded as a full slab
@@ -498,6 +507,11 @@ func (ic *IndexdClient) Info(ctx context.Context) (GeneralInfo, error) {
 
 // Storage queries the information about the underlying storage.
 func (ic *IndexdClient) Storage(ctx context.Context) (StorageInfo, error) {
+	return ic.storage.get(ctx, ic.queryStorage)
+}
+
+// queryStorage asks the indexer about the space the account has.
+func (ic *IndexdClient) queryStorage(ctx context.Context) (StorageInfo, error) {
 	acc, err := ic.backend.Account(ctx)
 	if err != nil {
 		return StorageInfo{}, err
@@ -660,7 +674,7 @@ func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path strin
 			eg.Go(func() error {
 				var part bytes.Buffer
 				part.Grow(int(rangeLength))
-				if err := ic.backend.Download(egCtx, slab.Key, rangeOffset, rangeLength, &part); err != nil {
+				if err := ic.downloadSlab(egCtx, slab.Key, rangeOffset, rangeLength, &part); err != nil {
 					return err
 				}
 
@@ -686,6 +700,27 @@ func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path strin
 	}
 
 	return nil
+}
+
+// downloadSlab downloads a range of a slab into buf, retrying when too few of its hosts answered.
+// Other errors fail at once.
+func (ic *IndexdClient) downloadSlab(ctx context.Context, key types.Hash256, offset, length uint64, buf *bytes.Buffer) error {
+	for attempt := 0; ; attempt++ {
+		buf.Reset() // a failed attempt may have written part of the range
+		err := ic.backend.Download(ctx, key, offset, length, buf)
+		if err == nil || !errors.Is(err, sdk.ErrNotEnoughShards) || attempt >= len(ic.slabRetryDelays) {
+			return err
+		}
+
+		if ic.debug {
+			log.Printf("slab %s: %v, retrying in %v", key, err, ic.slabRetryDelays[attempt])
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(ic.slabRetryDelays[attempt]):
+		}
+	}
 }
 
 // StartUpload initiates a multipart upload.

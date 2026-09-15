@@ -19,6 +19,10 @@ import (
 // against a nil hash succeeds for anybody who bothers to compute NTOWFv2 over it.
 var ErrAccountNotFound = errors.New("account not found")
 
+// ErrAccountExists is returned when an account is added under a name that
+// another account of the same workgroup already has.
+var ErrAccountExists = errors.New("an account with this name already exists in this workgroup")
+
 // Account represents a user account that can connect to particular shares.
 type Account struct {
 	ID        int    `json:"id"`
@@ -109,6 +113,21 @@ func (db *Database) AddAccount(acc Account) error {
 		return fmt.Errorf("invalid workgroup UUID: %w", err)
 	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		// The unique constraint would refuse this anyway; asking first is what
+		// tells a taken name from a database that is having trouble.
+		const taken = `
+			SELECT 1
+			FROM accounts a
+			JOIN workgroups w ON w.id = a.workgroup
+			WHERE a.account_name = $1 AND w.uuid = $2
+		`
+		var exists int
+		if err := tx.QueryRow(ctx, taken, acc.Username, u[:]).Scan(&exists); err == nil {
+			return ErrAccountExists
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("failed to look up the account name: %w", err)
+		}
+
 		const query = `
 			INSERT INTO accounts (account_name, password_hash, workgroup)
 			VALUES ($1, $2, (SELECT id FROM workgroups WHERE uuid = $3))

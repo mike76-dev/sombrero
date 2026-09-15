@@ -71,6 +71,10 @@ type server struct {
 	// every look.
 	watchInterval time.Duration
 
+	// offeredSDKs holds the SDK instances the API has already built while registering
+	// an app key, keyed by "workgroupUUID/shareName", for AddConnection to pick up.
+	offeredSDKs sync.Map
+
 	connectionCount map[string]int
 	store           stores.Store
 	debug           bool
@@ -180,7 +184,7 @@ func (s *server) newConnectionState(clientName string) *connection {
 		maxWriteSize:          smb2.MaxWriteSize,
 		serverSecurityMode:    smb2.NEGOTIATE_SIGNING_ENABLED,
 		server:                s,
-		writeChan:             make(chan []byte),
+		sendQueue:             newSendQueue(),
 		closeChan:             make(chan struct{}),
 		wakeChan:              make(chan struct{}, 1),
 		stopChans:             make(map[uint64]chan struct{}),
@@ -194,6 +198,10 @@ func (s *server) newConnectionState(clientName string) *connection {
 
 // newConnection creates a new Connection object over a transport and starts serving it.
 func (s *server) newConnection(conn net.Conn) *connection {
+	if err := tuneConnection(conn); err != nil {
+		log.Printf("failed to tune the connection from %s: %v", conn.RemoteAddr(), err)
+	}
+
 	c := s.newConnectionState(conn.RemoteAddr().String())
 	c.conn = conn
 
@@ -314,12 +322,14 @@ func (s *server) encodeResponse(c *connection, ss *session, resp smb2.GenericRes
 	if ss != nil && ss.stateNow() == sessionValid { // A session exists, sign if required
 		if resp.ShouldEncrypt() {
 			wipeSignatures(buf)
+			stampSessionID(buf, ss.sessionID)
 			if resp.MayCompress() {
 				buf = c.compress(buf)
 			}
 			buf = ss.encrypt(buf, c)
 		} else if resp.Header().Command() != smb2.SMB2_SESSION_SETUP && ss.encryptData {
 			wipeSignatures(buf)
+			stampSessionID(buf, ss.sessionID)
 			if resp.MayCompress() {
 				buf = c.compress(buf)
 			}
@@ -346,28 +356,17 @@ func (s *server) writeResponse(c *connection, ss *session, resp smb2.GenericResp
 		c.updatePreauthHash(resp.Header().SessionID(), buf)
 	}
 
-	// Nothing drains the queue of a connection whose sender has stopped, so a message handed over
-	// after that would be waited on for as long as the process lives.
-	select {
-	case c.writeChan <- buf:
-	case <-c.closeChan:
-		return
-	}
+	// Never blocks, so the dispatcher isn't held up by what is ahead of it on the wire.
+	c.sendQueue.push(buf, carriesFileData(resp))
 
 	s.mu.Lock()
 	s.stats.BytesSent += uint64(len(buf))
 	s.mu.Unlock()
 }
 
-// trySendResponse is writeResponse for a message the server sends on its own initiative rather
-// than in reply to a request. It reports whether the message was handed over for sending, and
-// gives up instead of waiting forever when the connection has already gone: nothing drains the
-// sending queue of a connection whose sender has stopped.
+// trySendResponse is writeResponse for asynchronous answers and notifications. It reports whether
+// the message was queued, which it isn't once the connection has closed.
 func (s *server) trySendResponse(c *connection, ss *session, resp smb2.GenericResponse) bool {
-	// A connection that is already gone is given up on before anything is queued for it: the
-	// two cases of the select below are picked between at random whenever both are ready, so
-	// a message would otherwise stand a chance of being queued for a connection that will
-	// never send it.
 	select {
 	case <-c.closeChan:
 		return false
@@ -379,12 +378,7 @@ func (s *server) trySendResponse(c *connection, ss *session, resp smb2.GenericRe
 	c.grantOnResponse(resp)
 
 	buf := s.encodeResponse(c, ss, resp)
-
-	select {
-	case c.writeChan <- buf:
-	case <-c.closeChan:
-		return false
-	}
+	c.sendQueue.push(buf, carriesFileData(resp))
 
 	s.mu.Lock()
 	s.stats.BytesSent += uint64(len(buf))

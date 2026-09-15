@@ -34,6 +34,7 @@ import {
   useApiAction,
   useApiData,
 } from '../components/common'
+import { ServerAddressField } from '../components/serveraddress'
 import { WorkgroupSelect } from '../components/selects'
 
 const emptyShare: Share = {
@@ -62,14 +63,12 @@ function RegisterShareCard({ onRegistered }: { onRegistered: () => void }) {
             <option value="renterd">renterd</option>
           </select>
         </Field>
-        <Field label={share.type === 'indexd' ? 'Indexer address' : 'renterd address'}>
-          <input
-            type="text"
-            value={share.serverName}
-            onChange={(e) => set({ serverName: e.target.value })}
-            placeholder={share.type === 'indexd' ? 'https://indexer.example.com' : 'http://127.0.0.1:9980'}
-          />
-        </Field>
+        <ServerAddressField
+          value={share.serverName}
+          onChange={(serverName) => set({ serverName })}
+          backend={share.type}
+          disabled={busy}
+        />
         {share.type === 'renterd' && (
           <>
             <Field label="API password">
@@ -400,11 +399,12 @@ function FragmentationCard({ share }: { share: Share }) {
   )
 }
 
-// ShareAccess is who the share admits besides the accounts its policies name.
-// The anonymous box follows the server's own setting: a share cannot offer what
-// the server does not allow, so it is left unusable rather than misleading, and
-// the reason is said out loud.
-function ShareAccess({
+// ShareSettings is everything about a share that can be changed after it is
+// registered: where it is served from, and who it admits. The anonymous box
+// follows the server's own setting: a share cannot offer what the server does
+// not allow, so it is left unusable rather than misleading, and the reason is
+// said out loud.
+function ShareSettingsForm({
   share,
   settings,
   onChanged,
@@ -414,14 +414,65 @@ function ShareAccess({
   onChanged: () => void
 }) {
   const { run, busy, error, message, setMessage } = useApiAction()
+  const [serverName, setServerName] = useState(share.serverName)
+  const [bucket, setBucket] = useState(share.bucket || '')
+  const [remark, setRemark] = useState(share.remark || '')
   const [guest, setGuest] = useState(!!share.allowGuest)
   const [anonymous, setAnonymous] = useState(!!share.allowAnonymous)
   const [publicDir, setPublicDir] = useState(share.publicDir || '')
 
   const serverAllows = settings?.anonymous !== false
 
+  // Where the share is served from is not a setting like the others: point it
+  // somewhere else and the files stay where they were.
+  const moved = serverName.trim() !== share.serverName || bucket.trim() !== (share.bucket || '')
+
+  const save = () =>
+    run(async () => {
+      await updateShare(share.name, {
+        serverName: serverName.trim(),
+        bucket: bucket.trim(),
+        remark: remark.trim(),
+        allowGuest: guest,
+        allowAnonymous: anonymous,
+        publicDir,
+      })
+      setMessage('Saved. It applies to the connections made from now on.')
+      onChanged()
+    })
+
   return (
     <div className="stack">
+      <div className="grid">
+        <ServerAddressField
+          value={serverName}
+          onChange={setServerName}
+          backend={share.type}
+          disabled={busy}
+        />
+        {share.type === 'renterd' && (
+          <Field label="Bucket">
+            <input
+              value={bucket}
+              disabled={busy}
+              placeholder="default"
+              onChange={(e) => setBucket(e.target.value)}
+            />
+          </Field>
+        )}
+        <Field label="Remark">
+          <input value={remark} disabled={busy} onChange={(e) => setRemark(e.target.value)} />
+        </Field>
+      </div>
+      {moved && (
+        <p className="field-error">
+          The share is about to be served from somewhere else, and its files stay on the old
+          backend — change this to correct an address, not to move a share that is in use.
+          {share.type === 'indexd' &&
+            ' An indexd share is refused outright while workgroups are connected to it: their' +
+              ' app keys are registered with the indexer at the address it has now.'}
+        </p>
+      )}
       <p className="muted">
         A guest is an account of a workgroup that has no password, and reaches whatever the
         policies of the share grant it. An anonymous client presents no credentials at all, and
@@ -464,18 +515,17 @@ function ShareAccess({
         <button
           className="btn"
           disabled={busy}
-          onClick={() =>
-            run(async () => {
-              await updateShare(share.name, {
-                remark: share.remark,
-                allowGuest: guest,
-                allowAnonymous: anonymous,
-                publicDir,
-              })
-              setMessage('Saved. It applies to the connections made from now on.')
-              onChanged()
-            })
-          }
+          onClick={() => {
+            if (
+              moved &&
+              !window.confirm(
+                `Serve ${share.name} from ${serverName.trim()} instead? Its files stay where they are.`,
+              )
+            ) {
+              return
+            }
+            save()
+          }}
         >
           Save
         </button>
@@ -518,28 +568,12 @@ function ShareDetails({
     <div className="stack">
       <table className="table table-kv">
         <tbody>
-          <tr>
-            <th>Server</th>
-            <td className="mono">{share.serverName}</td>
-          </tr>
-          {share.bucket && (
-            <tr>
-              <th>Bucket</th>
-              <td>{share.bucket}</td>
-            </tr>
-          )}
           {!!share.dataShards && (
             <tr>
               <th>Redundancy</th>
               <td>
                 {share.dataShards} data / {share.parityShards} parity shards
               </td>
-            </tr>
-          )}
-          {share.remark && (
-            <tr>
-              <th>Remark</th>
-              <td>{share.remark}</td>
             </tr>
           )}
           {share.createdAt && (
@@ -550,7 +584,7 @@ function ShareDetails({
           )}
         </tbody>
       </table>
-      <ShareAccess share={share} settings={settings} onChanged={onChanged} />
+      <ShareSettingsForm share={share} settings={settings} onChanged={onChanged} />
       <div className="row">
         <button className="btn" disabled={busy} onClick={loadAccounts}>
           {accounts ? 'Reload accounts' : 'Show accounts with access'}

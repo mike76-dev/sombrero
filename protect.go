@@ -7,6 +7,8 @@ import (
 
 // blockHost adds a remote host to the bans store together with the provided reason.
 func (s *server) blockHost(host, reason string) {
+	log.Printf("Banning %s: %s", host, reason)
+
 	if err := s.store.BanHost(host, reason); err != nil {
 		log.Printf("Error banning host %s: %v", host, err)
 	}
