@@ -3192,7 +3192,6 @@ func (c *connection) readLoop(host string) {
 				// Ban the remote host if it keeps sending SMB requests after receiving
 				// an SMB2_NEGOTIATE response.
 				c.server.blockHost(host, "old protocol")
-				log.Printf("Blocked host %s for using old protocol\n", host)
 			}
 
 			return
