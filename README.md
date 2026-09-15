@@ -211,6 +211,44 @@ go build .
 ```
 A server built without this step runs normally and serves the API as usual; only the UI is missing, and it says so if you open it in a browser.
 
+## Running in Docker
+The server can also run in a container. The image is the same for both modes, since the mode is read from `sombrero.yml` at startup, and it builds the web UI in. Build it from the repository root:
+```Bash
+docker build -t sombrero .
+```
+The container runs on the host network, so the instructions below assume a Linux host. This way the server sees the real addresses of its clients, which the bans rely on, and offers them the host's network interfaces for multichannel rather than the container's. It also means the API listens wherever `api.address` says, exactly as without Docker: `127.0.0.1:9999` keeps it reachable from the host alone.
+
+The data directory is mounted at `/data` in the container. Put `sombrero.yml` there before the first start. The server runs as root inside the container, so the files it creates there, such as `store.json`, belong to root.
+
+### Running in the [Lite mode](#lite-mode)
+With `mode: lite` in `data/sombrero.yml`, nothing else is needed:
+```Bash
+docker run -d --name sombrero --network host --restart unless-stopped --stop-timeout 60 -v ./data:/data sombrero
+```
+`--stop-timeout` gives the server time to finish the uploads in flight when the container is stopped.
+
+### Running in the Normal mode
+`compose.yaml` runs the server together with PostgreSQL, which listens on the host's `127.0.0.1` only. Create a `.env` file next to it with the database password, and the port if 5432 is already taken, e.g. by a PostgreSQL installed on the host:
+```
+SOMBRERO_DB_PASSWORD=<DB_PASSWORD>
+SOMBRERO_DB_PORT=5432
+```
+The `database` section of `data/sombrero.yml` has to match:
+```YAML
+database:
+  host: 127.0.0.1
+  port: 5432               # SOMBRERO_DB_PORT
+  user: sombrero
+  password: <DB_PASSWORD>  # SOMBRERO_DB_PASSWORD
+  database: sombrero
+  sslMode: disable
+```
+Then start both containers:
+```Bash
+docker compose up -d
+```
+The tables are created from `init.sql` the first time the database is set up, and never again: the database is kept in the `postgres` volume, and changing `init.sql` later has no effect on it. To follow the server log, run `docker compose logs -f sombrero`; to stop both containers, `docker compose down`.
+
 ## Upload Packing
 A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Both config fields are optional: setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, while `minPackedSlabSize` (for example, `1048576`) holds that upload back until the leftover data of a share is worth a slab. On its own, `minPackedSlabSize` has no effect.
 
