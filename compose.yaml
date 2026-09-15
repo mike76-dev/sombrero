@@ -25,8 +25,10 @@ services:
       retries: 10
 
   sombrero:
+    # Pulled from the registry, or built from the source if that fails.
+    # `docker compose up --build` always builds it from the source.
+    image: ghcr.io/mike76-dev/sombrero
     build: .
-    image: sombrero
     restart: unless-stopped
     # On the host network, clients are seen by their real addresses, which the bans
     # rely on, and multichannel offers the host's interfaces rather than the container's.
