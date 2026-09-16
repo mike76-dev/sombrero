@@ -10,6 +10,16 @@ How to set up a `renterd` node is described here: [https://github.com/SiaFoundat
 The setup process of an `indexd` node is described here: [https://github.com/SiaFoundation/indexd](https://github.com/SiaFoundation/indexd). Alternatively, one can connect to the [Sia Foundation indexer](https://sia.storage/).
 * The SMB port 445 needs to be open on the machine where the server is running.
 
+## Installing on Ubuntu
+On Ubuntu, the installer script does the whole setup: it installs the server, sets PostgreSQL up in the Normal mode, writes the configuration, and runs the server as a systemd service under a user of its own.
+```Bash
+curl -fsSLO https://raw.githubusercontent.com/mike76-dev/sombrero/master/install-sombrero.sh
+sudo bash install-sombrero.sh
+```
+It asks for the mode and an API password, and prints how to reach the web UI when it is done. Run it again to upgrade the server to the latest release; the configuration and the data are kept. `sudo bash install-sombrero.sh --help` lists the options.
+
+The sections below describe the same setup by hand, which is also what to follow on the other systems.
+
 ## Installing PostgreSQL
 This section will assume you are running Ubuntu Server 24.04. On the other systems, the commands may be different.
 

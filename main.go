@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 const version = "3.0.0"
 
 var storesDir = flag.String("dir", ".", "directory for storing persistent data")
+var printVersion = flag.Bool("version", false, "print the version and exit")
 
 // newHTTPHandler wires the API and the web UI together. The API lives under
 // /api, behind the password and the ratelimiter. The web UI is served from
@@ -37,10 +39,14 @@ func newHTTPHandler(ctx context.Context, a http.Handler, password string) http.H
 }
 
 func main() {
-	log.Printf("Starting Sombrero v%s...\n", version)
-
 	// Parse command-line args.
 	flag.Parse()
+	if *printVersion {
+		fmt.Println(version)
+		return
+	}
+
+	log.Printf("Starting Sombrero v%s...\n", version)
 	dir, err := filepath.Abs(*storesDir)
 	if err != nil {
 		panic(err)
@@ -69,7 +75,9 @@ func main() {
 			if err := stores.SaveConfig(cfg, dir); err != nil {
 				log.Fatalf("failed to generate seed phrase: %v", err)
 			}
-			log.Printf("Generated seed phrase: %s", cfg.Indexd.SeedPhrase)
+			// The phrase itself stays out of the log, which outlives the process
+			// and is readable by more than whoever may read the config file.
+			log.Printf("Generated a new seed phrase and saved it to %s; back it up, as the data on indexd shares cannot be recovered without it", filepath.Join(dir, "sombrero.yml"))
 		}
 	} else {
 		log.Println("Running in Lite mode: only renterd shares are supported")
