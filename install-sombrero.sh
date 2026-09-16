@@ -34,7 +34,7 @@ Options:
   --mode normal|lite   the server mode; asked for if omitted
   --version X.Y.Z      the release to install; the latest one if omitted
   --binary PATH        install this binary instead of downloading a release
-  --yes                take the defaults instead of asking
+  -y, --yes            take the defaults instead of asking
   -h, --help           show this help
 
 The API password can be passed in SOMBRERO_API_PASSWORD; otherwise it is asked for or generated.
@@ -151,7 +151,7 @@ parse_args() {
 			BINARY=${2:-}
 			shift
 			;;
-		--yes) ASSUME_YES=true ;;
+		-y | --yes) ASSUME_YES=true ;;
 		-h | --help)
 			usage
 			exit 0
