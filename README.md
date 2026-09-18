@@ -330,7 +330,7 @@ Also banned are those remote hosts, which continue sending SMB1 requests after r
 
 The bans are saved in the database, and the reason for the ban is provided. If a host ends up banned by mistake, it can be removed manually:
 ```Bash
-curl -u "":<API_PASSWORD> -X DELETE "http://127.0.0.1:9999/api/bans/<IP_OF_THE_REMOTE_HOST>"
+curl -u "":<API_PASSWORD> -X DELETE "http://127.0.0.1:9999/api/ban/<IP_OF_THE_REMOTE_HOST>"
 ```
 
 ## Running Behind a Reverse Proxy
