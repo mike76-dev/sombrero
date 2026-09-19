@@ -31,7 +31,16 @@ const (
 
 	// How often a vacuum falling behind is reported, at most.
 	vacuumWarnInterval = time.Hour
+
+	// How much larger than its data the table may be regardless of the limit, for its own overhead.
+	vacuumSlack = 64 << 20
 )
+
+// vacuumLagging reports whether the table holds far more than its data: it keeps its largest
+// backlog, so past twice the limit the rest is dead rows.
+func vacuumLagging(buffered, onDisk, limit uint64) bool {
+	return onDisk > 2*limit && onDisk > buffered+vacuumSlack
+}
 
 // Backlog tracks the data all indexd shares keep buffered in the database, and
 // holds writes back while it is at the limit.
@@ -90,8 +99,7 @@ func (b *Backlog) refresh() {
 	close(b.changed)
 	b.changed = make(chan struct{})
 
-	// The table stays at its largest backlog, so twice the limit means dead rows piling up.
-	warn := onDisk > 2*b.limit && time.Since(b.lastWarn) >= vacuumWarnInterval
+	warn := vacuumLagging(buffered, onDisk, b.limit) && time.Since(b.lastWarn) >= vacuumWarnInterval
 	if warn {
 		b.lastWarn = time.Now()
 	}

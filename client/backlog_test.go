@@ -120,6 +120,26 @@ func TestBacklog_Reserve(t *testing.T) {
 	})
 }
 
+func TestBacklog_VacuumLagging(t *testing.T) {
+	const mib = 1 << 20
+	tests := []struct {
+		name                    string
+		buffered, onDisk, limit uint64
+		want                    bool
+	}{
+		{"an empty table's overhead under a tiny limit", 0, 22 * mib, 1, false},
+		{"a table at its peak within the limit", 100 * mib, 1000 * mib, 1000 * mib, false},
+		{"a table past twice the limit", 100 * mib, 2100 * mib, 1000 * mib, true},
+		{"a tiny limit with dead rows past the slack", 0, 100 * mib, 1, true},
+		{"a table past twice the limit but full of live data", 2000 * mib, 2050 * mib, 1000 * mib, false},
+	}
+	for _, tt := range tests {
+		if got := vacuumLagging(tt.buffered, tt.onDisk, tt.limit); got != tt.want {
+			t.Errorf("%s: want %v, got %v", tt.name, tt.want, got)
+		}
+	}
+}
+
 // TestIndexdClient_BacklogFull verifies that a full backlog uploads leftovers the
 // packer would otherwise keep, and fails writes that wait too long for room.
 func TestIndexdClient_BacklogFull(t *testing.T) {
