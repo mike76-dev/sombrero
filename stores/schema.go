@@ -23,7 +23,15 @@ type migration struct {
 
 // migrations upgrade an existing database, the first one from version 1 to 2. A schema change
 // goes into init.sql and is appended here; TestMigrations checks that the two agree.
-var migrations = []migration{}
+var migrations = []migration{
+	{name: "vacuum the buffers eagerly", sql: `
+		ALTER TABLE buffers SET (
+			toast.autovacuum_vacuum_scale_factor = 0,
+			toast.autovacuum_vacuum_threshold = 10000,
+			toast.autovacuum_vacuum_cost_limit = 2000
+		)
+	`},
+}
 
 // schemaVersion is the version of the schema that init.sql creates.
 func schemaVersion() int {
