@@ -3714,14 +3714,16 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		owner.grantOnResponse(resp)
 	}
 
-	// The request is answered and cleaned up on the connection that carries it, which is
-	// where its outstanding request count, its entry in the async command list and its stop
-	// channel all live.
-	owner.releaseOpen(target)
-	owner.server.writeResponse(owner, ss, resp)
-
+	// Claimed and stopped before it is answered, so that the work behind it can neither answer
+	// too nor act after the client was told it is over. A request already answered is left be.
 	owner.mu.Lock()
-	delete(owner.asyncCommandList, target.Header().AsyncID())
+	if target.Header().IsFlagSet(smb2.FLAGS_ASYNC_COMMAND) {
+		if _, owed := owner.asyncCommandList[target.Header().AsyncID()]; !owed {
+			owner.mu.Unlock()
+			return nil
+		}
+		delete(owner.asyncCommandList, target.Header().AsyncID())
+	}
 
 	ch, ok := owner.stopChans[target.CancelRequestID()]
 	if ok {
@@ -3729,6 +3731,10 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		delete(owner.stopChans, target.CancelRequestID())
 	}
 	owner.mu.Unlock()
+
+	// Answered on the connection that carries it, where its outstanding request count lives.
+	owner.releaseOpen(target)
+	owner.server.writeResponse(owner, ss, resp)
 
 	return nil
 }
