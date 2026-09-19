@@ -49,13 +49,13 @@ func main() {
 	log.Printf("Starting Sombrero v%s...\n", version)
 	dir, err := filepath.Abs(*storesDir)
 	if err != nil {
-		panic(err)
+		log.Fatalf("failed to resolve the data directory: %v", err)
 	}
 
 	// Read the config file.
 	cfg, err := stores.ReadConfig(dir)
 	if err != nil {
-		panic(err)
+		log.Fatalf("failed to read the config: %v", err)
 	}
 
 	// The API administers the whole server, so it must not be reachable
@@ -96,7 +96,7 @@ func main() {
 		db, err = stores.NewStore(ctx, cfg.Database)
 	}
 	if err != nil {
-		panic(err)
+		log.Fatalf("failed to open the store: %v", err)
 	}
 	defer db.Close()
 
