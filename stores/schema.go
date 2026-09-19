@@ -10,19 +10,30 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// initSQL creates the tables of an empty database.
+// initSQL creates the tables of an empty database at the current version.
 //
 //go:embed init.sql
 var initSQL string
 
-// schemaVersion is the version of the schema that init.sql creates. A change to
-// the schema bumps it and has to upgrade the databases at the previous version.
-const schemaVersion = 1
+// migration upgrades the schema by one version.
+type migration struct {
+	name string
+	sql  string
+}
+
+// migrations upgrade an existing database, the first one from version 1 to 2. A schema change
+// goes into init.sql and is appended here; TestMigrations checks that the two agree.
+var migrations = []migration{}
+
+// schemaVersion is the version of the schema that init.sql creates.
+func schemaVersion() int {
+	return 1 + len(migrations)
+}
 
 // prepareSchema brings the database to the schema this server works with,
-// creating the tables in an empty one.
+// creating the tables in an empty one and migrating an older one.
 func prepareSchema(ctx context.Context, tx pgx.Tx) error {
-	// Two servers starting on the same empty database must not both create it.
+	// Two servers starting on the same database must not both create or migrate it.
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('sombrero_schema'))"); err != nil {
 		return fmt.Errorf("failed to lock the schema: %w", err)
 	}
@@ -47,13 +58,26 @@ func prepareSchema(ctx context.Context, tx pgx.Tx) error {
 			log.Println("Created the database tables")
 		}
 
-		if _, err := tx.Exec(ctx, "INSERT INTO schema_version (version) VALUES ($1)", schemaVersion); err != nil {
+		if _, err := tx.Exec(ctx, "INSERT INTO schema_version (version) VALUES ($1)", schemaVersion()); err != nil {
 			return fmt.Errorf("failed to record the schema version: %w", err)
 		}
+		return nil
 	case err != nil:
 		return fmt.Errorf("failed to read the schema version: %w", err)
-	case version != schemaVersion:
-		return fmt.Errorf("the database schema is at version %d, but this server works with version %d", version, schemaVersion)
+	case version < 1 || version > schemaVersion():
+		return fmt.Errorf("the database schema is at version %d, but this server works with version %d", version, schemaVersion())
+	}
+
+	// All in the one transaction: a failed migration leaves the database as it was.
+	for ; version < schemaVersion(); version++ {
+		m := migrations[version-1]
+		if _, err := tx.Exec(ctx, m.sql); err != nil {
+			return fmt.Errorf("failed to migrate the schema to version %d (%s): %w", version+1, m.name, err)
+		}
+		if _, err := tx.Exec(ctx, "UPDATE schema_version SET version = $1", version+1); err != nil {
+			return fmt.Errorf("failed to record the schema version: %w", err)
+		}
+		log.Printf("Migrated the database schema to version %d: %s", version+1, m.name)
 	}
 
 	return nil
