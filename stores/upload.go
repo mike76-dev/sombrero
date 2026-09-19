@@ -831,6 +831,25 @@ func (db *Database) BufferedBytes(share string, workgroup int) (bytes uint64, er
 	return
 }
 
+// BufferUsage returns how much data all shares keep buffered, and how much disk
+// the buffers table takes, which also counts dead rows not yet vacuumed.
+func (db *Database) BufferUsage() (buffered, onDisk uint64, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT COALESCE(SUM(octet_length(data)), 0), pg_total_relation_size('buffers')
+			FROM buffers
+		`
+
+		var b, d int64
+		if err := tx.QueryRow(ctx, query).Scan(&b, &d); err != nil {
+			return fmt.Errorf("failed to measure the buffers: %w", err)
+		}
+		buffered, onDisk = uint64(b), uint64(d)
+		return nil
+	})
+	return
+}
+
 // StrandedPieces returns the metadata entries of the given share and
 // workgroup that reference a buffer but have no entry in the upload queue.
 // This is what a claim leaves behind when the process stops between claiming

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/api"
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/rpc"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
@@ -80,6 +81,9 @@ type server struct {
 	debug           bool
 	cfg             stores.Config
 	ctx             context.Context
+
+	// backlog caps what the indexd shares keep buffered; nil when there is no cap.
+	backlog *client.Backlog
 }
 
 // newServerState returns a server with its tables in place and nothing running behind it: no
@@ -140,6 +144,11 @@ func (s *server) applyCapabilities() {
 // newServer returns an initialized SMB server, listening and reaping.
 func newServer(ctx context.Context, l net.Listener, db stores.Store, cfg stores.Config) *server {
 	s := newServerState(ctx, db, cfg)
+
+	// Only indexd shares buffer in the database, and only the Normal mode has them.
+	if sdb, ok := db.(*stores.Database); ok && cfg.Mode == stores.ModeNormal && cfg.Indexd.MaxBufferedData > 0 {
+		s.backlog = client.NewBacklog(ctx, sdb, cfg.Indexd.MaxBufferedData)
+	}
 
 	go s.reapDurableOpens()
 	go s.reapConnections()

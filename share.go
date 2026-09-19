@@ -476,7 +476,7 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 			Threshold:  fragLevel,
 			Interval:   fragInterval,
 			Defragment: defragment,
-		}, s.debug)
+		}, s.backlog, s.debug)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

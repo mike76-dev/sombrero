@@ -1875,6 +1875,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		waiting := op.file.waitingOnTheBackend()
 		wanted := creditsToGrant(wr.Header().CreditCharge(), wr.Header().CreditRequest(),
 			waiting, pacingCapacity(op.treeConnect.maxUploadSize))
+
+		// A backend that buffers locally paces the client by all it holds, not just this file.
+		if br, ok := op.treeConnect.client.(client.BacklogReporter); ok {
+			buffered, limit := br.Backlog()
+			wanted = min(wanted, creditsToGrant(wr.Header().CreditCharge(), wr.Header().CreditRequest(), buffered, limit))
+		}
 		resp.Header().SetCreditResponse(wanted)
 
 		// Every write is named as it arrives, however many there are: the timestamps of the
@@ -1898,6 +1904,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				if errors.Is(err, errFileDeleted) {
 					status = smb2.STATUS_DELETE_PENDING
 				} else {
+					if errors.Is(err, client.ErrBacklogFull) {
+						status = smb2.STATUS_DISK_FULL
+					}
 					op.cancelUpload()
 				}
 

@@ -240,6 +240,10 @@ type IndexdConfig struct {
 	// dead space in them at the cost of uploading what is left in them again.
 	// Unset, the check only reports.
 	Defragment bool `yaml:"defragment,omitempty"`
+
+	// MaxBufferedData caps the bytes all shares keep in the database waiting to be uploaded,
+	// holding clients' writes back at the cap. Unset, nothing is capped.
+	MaxBufferedData uint64 `yaml:"maxBufferedData,omitempty"`
 }
 
 // Fragmentation returns the monitor's settings with the defaults filled in. A

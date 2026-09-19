@@ -38,6 +38,7 @@ const (
 	STATUS_NO_SUCH_USER                          = 0xc0000064
 	STATUS_NONE_MAPPED                           = 0xc0000073
 	STATUS_RANGE_NOT_LOCKED                      = 0xc000007e
+	STATUS_DISK_FULL                             = 0xc000007f
 	STATUS_INSUFFICIENT_RESOURCES                = 0xc000009a
 	STATUS_IO_TIMEOUT                            = 0xc00000b5
 	STATUS_NOT_SUPPORTED                         = 0xc00000bb
