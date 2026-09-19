@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"log"
 	"net"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/api"
 	"github.com/mike76-dev/sombrero/client"
+	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/rpc"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
@@ -155,6 +157,57 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, cfg stores.
 	go s.restoreConnections()
 
 	return s
+}
+
+// acceptConnections serves what the listener takes until it is closed. A connection arriving
+// during the shutdown is turned away uncounted, or a client reclaiming its handles gets banned.
+func (s *server) acceptConnections(l net.Listener) {
+	for {
+		conn, err := l.Accept()
+		if errors.Is(err, net.ErrClosed) {
+			return
+		}
+		if err != nil {
+			continue
+		}
+
+		s.mu.Lock()
+		enabled := s.enabled
+		s.mu.Unlock()
+		if !enabled {
+			conn.Close()
+			continue
+		}
+
+		// Check if the remote host is on the ban list.
+		host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+		banned, _, err := s.store.IsBanned(host)
+		if err != nil {
+			log.Printf("Error checking ban status for host %s: %v", host, err)
+		} else if banned {
+			conn.Close()
+			continue
+		}
+
+		// Ban the remote host if it forms too many connections.
+		s.mu.Lock()
+		num := s.connectionCount[host]
+		s.connectionCount[host] = num + 1
+		s.mu.Unlock()
+		if num >= s.cfg.MaxConnections {
+			s.blockHost(host, "too many connections")
+			conn.Close()
+			continue
+		}
+
+		// Start serving the connection.
+		go func() {
+			log.Println("Incoming connection from", conn.RemoteAddr())
+			c := s.newConnection(conn)
+			c.ntlmServer = ntlm.NewServer("SERVER", "", s.store, s.cfg.Anonymous)
+			c.readLoop(host)
+		}()
+	}
 }
 
 // Stats returns a snapshot of the current server statistics.

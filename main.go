@@ -16,7 +16,6 @@ import (
 
 	"github.com/mike76-dev/sombrero/api"
 	"github.com/mike76-dev/sombrero/client"
-	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/web"
 	sdk "go.sia.tech/siastorage"
@@ -178,6 +177,9 @@ func main() {
 		}
 		server.mu.Unlock()
 
+		// Refused from now on rather than accepted and dropped, which clients answer by reconnecting.
+		l.Close()
+
 		for _, connection := range conns {
 			log.Printf("Closing connection from client %s\n", connection.clientName)
 			connection.conn.Close()
@@ -206,7 +208,6 @@ func main() {
 
 		apiSrv.Close()
 		lAPI.Close()
-		l.Close()
 
 		// Only now, with nothing left that needs the store: the clients spend
 		// their shutdown recording, requeueing and unpinning what they were in
@@ -216,44 +217,8 @@ func main() {
 		os.Exit(0)
 	}()
 
-	for {
-		if conn, err := l.Accept(); err == nil {
-			// Check if the remote host is on the ban list.
-			host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-			banned, _, err := db.IsBanned(host)
-			if err != nil {
-				log.Printf("Error checking ban status for host %s: %v", host, err)
-			} else if banned {
-				conn.Close()
-				continue
-			}
+	server.acceptConnections(l)
 
-			// Ban the remote host if it forms too many connections.
-			server.mu.Lock()
-			num := server.connectionCount[host]
-			server.connectionCount[host] = num + 1
-			server.mu.Unlock()
-			if num >= cfg.MaxConnections {
-				server.blockHost(host, "too many connections")
-				conn.Close()
-				continue
-			}
-
-			// Start serving the connection.
-			go func() {
-				server.mu.Lock()
-				enabled := server.enabled
-				server.mu.Unlock()
-				if !enabled {
-					conn.Close()
-					return
-				}
-
-				log.Println("Incoming connection from", conn.RemoteAddr())
-				c := server.newConnection(conn)
-				c.ntlmServer = ntlm.NewServer("SERVER", "", db, cfg.Anonymous)
-				c.readLoop(host)
-			}()
-		}
-	}
+	// The listener is closed by the shutdown, which exits the process once it is done.
+	select {}
 }
