@@ -3335,19 +3335,18 @@ func (c *connection) sendResponses() {
 	}
 }
 
-// The credits a client is answered with are how fast it is allowed to write. A client may only have
-// as many requests outstanding as it has credits, so granting fewer is how a server tells it to send
-// less at a time - and it is the only way of doing so that costs the client nothing: every request is
-// answered at once, and the client paces itself.
+// The credits a client is answered with are how fast it is allowed to write: it may only have as
+// many requests outstanding as it holds, so refusing it more is how a server holds it where it is.
+// What is never refused is what the request spent, which is what keeps the client sending at all.
 func creditsToGrant(charge, request uint16, waiting, capacity uint64) uint16 {
 	spent := max(charge, 1)
 
 	switch {
 	case capacity == 0:
 		return max(spent, request)
-	case waiting >= capacity:
-		return 1
 	case waiting >= capacity/2:
+		// Never below what the request spent: less than that shrinks the window with every
+		// write, and a client down to no credits cannot send anything at all, ever again.
 		return spent
 	default:
 		return max(spent, request)

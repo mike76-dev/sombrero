@@ -268,7 +268,7 @@ A file whose size is not a multiple of the slab size leaves a piece of data behi
 What clients write to an `indexd` share is stored in the database first and uploaded to the network in the background. If clients write faster than the network takes the data, the backlog grows until the database runs out of disk space. Setting `maxBufferedData` caps the backlog across all shares:
 
 - Once half of it is used, clients are no longer allowed more writes in flight than they already have, so they stop speeding up.
-- At the limit, clients are allowed one write in flight, and writes wait for the backlog to drain. A write that waits for more than 5 minutes fails: the client reports that the disk is full, and the file being written is not stored.
+- At the limit, writes wait for the backlog to drain, which is what holds the client back: it is left waiting for the answers it needs before it can send more. A write that waits for more than 5 minutes fails: the client reports that the disk is full, and the file being written is not stored.
 - While the backlog is at the limit, the leftover pieces waiting to be packed are uploaded straight away, even if they don't fill a slab, as though `maxBufferAge` had passed.
 
 Uploading frees the data in the database, but PostgreSQL reclaims the disk space only when it vacuums the table. Even then the table keeps its largest size and reuses the space instead of returning it. The disk the database uses therefore grows to about `maxBufferedData` plus whatever the vacuum has not reclaimed yet, so set it to about half the free space on that disk. The server logs a warning when the table takes more than twice `maxBufferedData` and at least 64 MiB more than the data it holds, which means the vacuum is falling behind.
