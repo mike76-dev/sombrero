@@ -2126,6 +2126,29 @@ func TestStats(t *testing.T) {
 		}
 	})
 
+	t.Run("GET carries the upload backlog when there is one", func(t *testing.T) {
+		stats := ServerStats{Backlog: &BacklogStats{Buffered: 1 << 20, Limit: 1 << 30, OnDisk: 3 << 20}}
+		api := newTestAPIWithServer(&mockStore{}, &mockServer{stats: stats})
+		w := doRequest(api, http.MethodGet, "/stats", nil)
+		checkStatus(t, w, http.StatusOK)
+		got := decodeJSON[ServerStats](t, w)
+		if got.Backlog == nil {
+			t.Fatal("the backlog was left out of the stats")
+		}
+		if *got.Backlog != *stats.Backlog {
+			t.Errorf("backlog: want %+v, got %+v", *stats.Backlog, *got.Backlog)
+		}
+	})
+
+	t.Run("GET leaves the backlog out on a server without one", func(t *testing.T) {
+		api := newTestAPIWithServer(&mockStore{}, &mockServer{stats: ServerStats{SOpens: 1}})
+		w := doRequest(api, http.MethodGet, "/stats", nil)
+		checkStatus(t, w, http.StatusOK)
+		if body := w.Body.String(); strings.Contains(body, "backlog") {
+			t.Errorf("the stats name a backlog the server has none of: %s", body)
+		}
+	})
+
 	t.Run("GET with nil provider returns zero stats", func(t *testing.T) {
 		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/stats", nil)
 		checkStatus(t, w, http.StatusOK)

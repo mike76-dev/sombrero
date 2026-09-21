@@ -80,7 +80,7 @@ func TestIntegrationSettingAttributesKeepsAFolderAFolder(t *testing.T) {
 	h := newSMBTest(t)
 	cl := h.dial("alice")
 
-	dir := createdFileID(cl.createWithOptions("docs",smb2.FILE_CREATE, smb2.FILE_DIRECTORY_FILE))
+	dir := createdFileID(cl.createWithOptions("docs", smb2.FILE_CREATE, smb2.FILE_DIRECTORY_FILE))
 	for _, attrs := range []uint32{smb2.FILE_ATTRIBUTE_UNPINNED, smb2.FILE_ATTRIBUTE_HIDDEN} {
 		if resp, err := cl.setInfo(dir, smb2.FileBasicInformation, basicInfo(attrs)); err != nil || smb2.Header(resp).Status() != smb2.STATUS_OK {
 			t.Fatalf("setting attributes %#x failed: %v", attrs, err)

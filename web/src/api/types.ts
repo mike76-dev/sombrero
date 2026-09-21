@@ -70,6 +70,12 @@ export interface AccessRights {
   ExecuteAccess: boolean
 }
 
+export interface BacklogStats {
+  buffered: number
+  limit: number
+  onDisk: number
+}
+
 export interface ServerStats {
   start: string
   fOpens: number
@@ -78,6 +84,7 @@ export interface ServerStats {
   permErrors: number
   bytesSent: number
   bytesRcvd: number
+  backlog?: BacklogStats
 }
 
 export interface VersionResponse {

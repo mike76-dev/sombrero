@@ -332,6 +332,17 @@ type IndexdClient struct {
 
 	storage         storageCache
 	slabRetryDelays []time.Duration // a field so tests can shorten it
+
+	// backlog holds writes back while too much is waiting to be uploaded; nil means no limit.
+	backlog *Backlog
+}
+
+// Backlog returns how much all shares keep buffered, and the limit.
+func (ic *IndexdClient) Backlog() (buffered, limit uint64) {
+	if ic.backlog == nil {
+		return 0, 0
+	}
+	return ic.backlog.Load()
 }
 
 // markClaimed records the given pieces as being worked on.
@@ -390,17 +401,25 @@ type FragmentationOptions struct {
 }
 
 // NewIndexdClient returns an initialized IndexdClient serving the given
-// workgroup's connection to the share.
-func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, fragmentation FragmentationOptions, debug bool) Client {
+// workgroup's connection to the share. A nil backlog puts no limit on the buffered data.
+func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, fragmentation FragmentationOptions, backlog *Backlog, debug bool) Client {
 	backend := &sdkBackend{
 		sdk:      sdkClient,
 		objCache: make(map[types.Hash256]sdk.Object),
 	}
-	return newIndexdClient(db, backend, share, workgroup, dataShards, parityShards, packing, fragmentation, debug)
+	return newIndexdClient(db, backend, share, workgroup, dataShards, parityShards, packing, fragmentation, debug, withBacklog(backlog))
+}
+
+// indexdOption sets what most tests leave out.
+type indexdOption func(*IndexdClient)
+
+// withBacklog limits the buffered data by the given backlog.
+func withBacklog(b *Backlog) indexdOption {
+	return func(ic *IndexdClient) { ic.backlog = b }
 }
 
 // newIndexdClient allows using a mock SDK for testing.
-func newIndexdClient(db *stores.Database, backend storageBackend, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, fragmentation FragmentationOptions, debug bool) Client {
+func newIndexdClient(db *stores.Database, backend storageBackend, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, fragmentation FragmentationOptions, debug bool, opts ...indexdOption) Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	ic := &IndexdClient{
 		share:        share,
@@ -425,6 +444,9 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		claimed:      make(map[uint64]struct{}),
 
 		slabRetryDelays: defaultSlabRetryDelays,
+	}
+	for _, opt := range opts {
+		opt(ic)
 	}
 
 	// Leftover data that reaches the slab size is uploaded as a full slab
@@ -789,6 +811,19 @@ func (ic *IndexdClient) Write(ctx context.Context, r io.Reader, path string, upl
 	}
 	if uint64(len(buf)) != length {
 		return "", fmt.Errorf("short read: expected %d bytes, got %d", length, len(buf))
+	}
+
+	if ic.backlog != nil {
+		// The packer may be all that can drain a full backlog, so it is not left asleep.
+		if ic.backlog.full() {
+			select {
+			case ic.packChan <- struct{}{}:
+			default:
+			}
+		}
+		if err := ic.backlog.reserve(ctx, ic.drainChan, length); err != nil {
+			return "", fmt.Errorf("couldn't buffer the data: %w", err)
+		}
 	}
 
 	if err := ic.db.AddBufferedSlab(uploadID, offset, buf); err != nil {
@@ -1260,10 +1295,20 @@ func (ic *IndexdClient) logPackedSlab(jobs []stores.UploadJob, size int) {
 	log.Println(b.String())
 }
 
+// packing returns when an incomplete slab is uploaded. A full backlog uploads any
+// leftovers at once, since writes held back by it would never complete them.
+func (ic *IndexdClient) packing() (minSize uint64, maxAge time.Duration) {
+	if ic.backlog != nil && ic.backlog.full() {
+		return 0, time.Nanosecond
+	}
+	return ic.minPackSize, ic.maxBufferAge
+}
+
 // processPackedSlab checks if the buffered pieces of several files add up to a
 // slab and, if so, uploads them together as a single packed slab.
 func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
-	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.workgroup, ic.slabSize, ic.minPackSize, ic.maxBufferAge)
+	minSize, maxAge := ic.packing()
+	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.workgroup, ic.slabSize, minSize, maxAge)
 	if err != nil {
 		return err
 	}

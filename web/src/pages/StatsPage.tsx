@@ -71,6 +71,23 @@ export function StatsPage() {
                 <th>Total data received</th>
                 <td>{formatBytes(data.bytesRcvd)}</td>
               </tr>
+              {data.backlog && (
+                <>
+                  <tr>
+                    <th>Waiting to be uploaded</th>
+                    <td>
+                      {formatBytes(data.backlog.buffered)}
+                      {data.backlog.limit > 0
+                        ? ` of ${formatBytes(data.backlog.limit)}`
+                        : ' (no limit)'}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>Database space for buffers</th>
+                    <td>{formatBytes(data.backlog.onDisk)}</td>
+                  </tr>
+                </>
+              )}
             </tbody>
           </table>
         )}

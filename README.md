@@ -113,6 +113,8 @@ indexd:
                                                                                  # it to the web UI and the API to report on demand
   defragment: false                                                              # optional: whether the check also repacks the slabs it reports, instead of only reporting
                                                                                  # them; if omitted, nothing is repacked on its own
+  maxBufferedData: 0                                                             # optional: the most data, in bytes, that all shares may keep in the database waiting
+                                                                                 # to be uploaded before clients' writes are held back; if omitted, there is no limit
 ```
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash
@@ -261,6 +263,19 @@ docker compose up -d
 
 ## Upload Packing
 A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Both config fields are optional: setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, while `minPackedSlabSize` (for example, `1048576`) holds that upload back until the leftover data of a share is worth a slab. On its own, `minPackedSlabSize` has no effect.
+
+## Upload Backlog
+What clients write to an `indexd` share is stored in the database first and uploaded to the network in the background. If clients write faster than the network takes the data, the backlog grows until the database runs out of disk space. Setting `maxBufferedData` caps the backlog across all shares:
+
+- Once half of it is used, clients are no longer allowed more writes in flight than they already have, so they stop speeding up.
+- At the limit, writes wait for the backlog to drain, which is what holds the client back: it is left waiting for the answers it needs before it can send more. A write that waits for more than 5 minutes fails: the client reports that the disk is full, and the file being written is not stored.
+- While the backlog is at the limit, the leftover pieces waiting to be packed are uploaded straight away, even if they don't fill a slab, as though `maxBufferAge` had passed.
+
+Uploading frees the data in the database, but PostgreSQL reclaims the disk space only when it vacuums the table. Even then the table keeps its largest size and reuses the space instead of returning it. The disk the database uses therefore grows to about `maxBufferedData` plus whatever the vacuum has not reclaimed yet, so set it to about half the free space on that disk. The server logs a warning when the table takes more than twice `maxBufferedData` and at least 64 MiB more than the data it holds, which means the vacuum is falling behind.
+
+The web UI reports both figures on its Statistics page, across all shares: how much is waiting to be uploaded right now, and how much database space the buffers occupy. The second one grows to the largest backlog the server has ever held and stays there, even once everything has been uploaded, because the space is reused rather than given back.
+
+The limit only applies to `indexd` shares, so it has no effect in the [Lite mode](#lite-mode). `renterd` keeps its own upload cache, which Sombrero cannot see.
 
 ## Slab Fragmentation
 Deleting or overwriting a file punches a hole in the slab it was packed into, and the share keeps paying for the whole slab. A slab belongs to the workgroup that uploaded it, so each workgroup's connection to the share looks for it in its own slabs every `fragmentationCheck` (`1h` by default, `never` to turn the check off) and reports the slabs that are at least `fragmentationThreshold` dead space (`0.25` by default).

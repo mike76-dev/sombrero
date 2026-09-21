@@ -1875,6 +1875,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		waiting := op.file.waitingOnTheBackend()
 		wanted := creditsToGrant(wr.Header().CreditCharge(), wr.Header().CreditRequest(),
 			waiting, pacingCapacity(op.treeConnect.maxUploadSize))
+
+		// A backend that buffers locally paces the client by all it holds, not just this file.
+		if br, ok := op.treeConnect.client.(client.BacklogReporter); ok {
+			buffered, limit := br.Backlog()
+			wanted = min(wanted, creditsToGrant(wr.Header().CreditCharge(), wr.Header().CreditRequest(), buffered, limit))
+		}
 		resp.Header().SetCreditResponse(wanted)
 
 		// Every write is named as it arrives, however many there are: the timestamps of the
@@ -1898,6 +1904,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				if errors.Is(err, errFileDeleted) {
 					status = smb2.STATUS_DELETE_PENDING
 				} else {
+					if errors.Is(err, client.ErrBacklogFull) {
+						status = smb2.STATUS_DISK_FULL
+					}
 					op.cancelUpload()
 				}
 
@@ -3326,19 +3335,18 @@ func (c *connection) sendResponses() {
 	}
 }
 
-// The credits a client is answered with are how fast it is allowed to write. A client may only have
-// as many requests outstanding as it has credits, so granting fewer is how a server tells it to send
-// less at a time - and it is the only way of doing so that costs the client nothing: every request is
-// answered at once, and the client paces itself.
+// The credits a client is answered with are how fast it is allowed to write: it may only have as
+// many requests outstanding as it holds, so refusing it more is how a server holds it where it is.
+// What is never refused is what the request spent, which is what keeps the client sending at all.
 func creditsToGrant(charge, request uint16, waiting, capacity uint64) uint16 {
 	spent := max(charge, 1)
 
 	switch {
 	case capacity == 0:
 		return max(spent, request)
-	case waiting >= capacity:
-		return 1
 	case waiting >= capacity/2:
+		// Never below what the request spent: less than that shrinks the window with every
+		// write, and a client down to no credits cannot send anything at all, ever again.
 		return spent
 	default:
 		return max(spent, request)
@@ -3705,14 +3713,16 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		owner.grantOnResponse(resp)
 	}
 
-	// The request is answered and cleaned up on the connection that carries it, which is
-	// where its outstanding request count, its entry in the async command list and its stop
-	// channel all live.
-	owner.releaseOpen(target)
-	owner.server.writeResponse(owner, ss, resp)
-
+	// Claimed and stopped before it is answered, so that the work behind it can neither answer
+	// too nor act after the client was told it is over. A request already answered is left be.
 	owner.mu.Lock()
-	delete(owner.asyncCommandList, target.Header().AsyncID())
+	if target.Header().IsFlagSet(smb2.FLAGS_ASYNC_COMMAND) {
+		if _, owed := owner.asyncCommandList[target.Header().AsyncID()]; !owed {
+			owner.mu.Unlock()
+			return nil
+		}
+		delete(owner.asyncCommandList, target.Header().AsyncID())
+	}
 
 	ch, ok := owner.stopChans[target.CancelRequestID()]
 	if ok {
@@ -3720,6 +3730,10 @@ func (c *connection) cancelRequest(req *smb2.Request) error {
 		delete(owner.stopChans, target.CancelRequestID())
 	}
 	owner.mu.Unlock()
+
+	// Answered on the connection that carries it, where its outstanding request count lives.
+	owner.releaseOpen(target)
+	owner.server.writeResponse(owner, ss, resp)
 
 	return nil
 }

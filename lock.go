@@ -216,6 +216,18 @@ func (fs *fileState) awaitLock(op *open, l smb2.Lock, stop, gone <-chan struct{}
 
 	for {
 		fs.mu.Lock()
+
+		// Checked before taking the range: a freed range and a stop can arrive together.
+		select {
+		case <-stop:
+			fs.mu.Unlock()
+			return smb2.STATUS_CANCELLED
+		case <-gone:
+			fs.mu.Unlock()
+			return smb2.STATUS_FILE_CLOSED
+		default:
+		}
+
 		if !fs.lockConflict(op, r, exclusive) {
 			fs.locks = append(fs.locks, byteRangeLock{byteRange: r, open: op, exclusive: exclusive})
 			fs.mu.Unlock()

@@ -130,6 +130,10 @@ CREATE TABLE buffers (
     share_name TEXT NOT NULL,
     data BYTEA STORAGE EXTERNAL NOT NULL,
     CONSTRAINT buffers_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE
+) WITH (
+    toast.autovacuum_vacuum_scale_factor = 0,
+    toast.autovacuum_vacuum_threshold = 10000,
+    toast.autovacuum_vacuum_cost_limit = 2000
 );
 CREATE INDEX idx_buffers_share ON buffers (share_name);
 

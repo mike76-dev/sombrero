@@ -40,9 +40,10 @@ func TestCreditsToGrantPacesTheClient(t *testing.T) {
 		{what: "a backend falling behind", charge: 16, request: 32, waiting: budget / 2, want: 16},
 		{what: "one falling further", charge: 16, request: 64, waiting: budget - 1, want: 16},
 
-		// Over it: a request at a time until the backend has caught up, and never nothing at all.
-		{what: "a backend that is behind", charge: 16, request: 32, waiting: budget, want: 1},
-		{what: "one far behind", charge: 16, request: 32, waiting: 4 * budget, want: 1},
+		// Over it the window is held there and cut no further: a grant below what the write spent
+		// takes credits off the client with every one, and at none it stops sending for good.
+		{what: "a backend that is behind", charge: 16, request: 32, waiting: budget, want: 16},
+		{what: "one far behind", charge: 16, request: 32, waiting: 4 * budget, want: 16},
 
 		// A charge of zero is a charge of one, which is the least a request can cost.
 		{what: "a request charging nothing", charge: 0, request: 0, waiting: 0, want: 1},
@@ -288,6 +289,25 @@ func TestAFullWindowStillGivesBackWhatWasSpent(t *testing.T) {
 	}
 }
 
+// TestCreditsNeverShrinkTheClientsWindow is what a client copying a file ran into: a write charging
+// 16 answered with 1 takes 15 credits off it, and after enough of them it holds none, cannot send so
+// much as an echo, and the copy stops with the file complete on the share and the dialog at 99%.
+func TestCreditsNeverShrinkTheClientsWindow(t *testing.T) {
+	for _, capacity := range []uint64{0, 4 << 20, 64 << 20, pacingCapacity(40 << 20)} {
+		for _, waiting := range []uint64{0, 1, capacity / 2, capacity, 100 * capacity} {
+			for _, charge := range []uint16{0, 1, 6, 16, 64} {
+				for _, request := range []uint16{0, 1, 32, 512} {
+					got := creditsToGrant(charge, request, waiting, capacity)
+					if spent := max(charge, uint16(1)); got < spent {
+						t.Fatalf("a request charging %d with %s waiting of %s was granted %d, which leaves the client %d short",
+							charge, traceBytes(waiting), traceBytes(capacity), got, spent-got)
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestPacingScalesWithThePartSize is why the measure is the pipeline and not a number of bytes. A
 // part is a sector on renterd and a whole slab on indexd, so a figure that leaves room on the one is
 // a figure three parts of the other overrun: a client writing to indexd would be cut back to a
@@ -310,9 +330,9 @@ func TestPacingScalesWithThePartSize(t *testing.T) {
 		t.Errorf("two slabs on their way had the client granted %d credit(s), want the 16 it spent", got)
 	}
 
-	// And the same amount on renterd, where it is the whole pipeline over, holds it right back.
-	if got := creditsToGrant(16, 256, 2*(40<<20), renterd); got != 1 {
-		t.Errorf("%s on their way to a pipeline of %s had the client granted %d credit(s), want one",
+	// And the same amount on renterd, where it is the whole pipeline over, holds the window there.
+	if got := creditsToGrant(16, 256, 2*(40<<20), renterd); got != 16 {
+		t.Errorf("%s on their way to a pipeline of %s had the client granted %d credit(s), want the 16 it spent",
 			traceBytes(2*(40<<20)), traceBytes(renterd), got)
 	}
 
