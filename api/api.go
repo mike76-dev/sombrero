@@ -194,6 +194,16 @@ type ServerStats struct {
 	PermErrors uint32    `json:"permErrors"` // The number of access permission errors
 	BytesSent  uint64    `json:"bytesSent"`  // The total number of bytes sent
 	BytesRcvd  uint64    `json:"bytesRcvd"`  // The total number of bytes received
+
+	// Backlog is what the indexd shares keep buffered, absent on a server that has none.
+	Backlog *BacklogStats `json:"backlog,omitempty"`
+}
+
+// BacklogStats describes the data waiting in the database to be uploaded.
+type BacklogStats struct {
+	Buffered uint64 `json:"buffered"` // How much is waiting right now
+	Limit    uint64 `json:"limit"`    // What it may reach before writes are held back; 0 is no limit
+	OnDisk   uint64 `json:"onDisk"`   // What the buffers take up, dead rows awaiting a vacuum included
 }
 
 // IsBannedResponse is the response type for GET /banned request.

@@ -51,6 +51,7 @@ type Backlog struct {
 
 	mu       sync.Mutex
 	buffered uint64
+	onDisk   uint64
 	changed  chan struct{} // closed and replaced on every measurement
 	lastWarn time.Time
 }
@@ -96,10 +97,12 @@ func (b *Backlog) refresh() {
 
 	b.mu.Lock()
 	b.buffered = buffered
+	b.onDisk = onDisk
 	close(b.changed)
 	b.changed = make(chan struct{})
 
-	warn := vacuumLagging(buffered, onDisk, b.limit) && time.Since(b.lastWarn) >= vacuumWarnInterval
+	// Nothing to measure the table against while the backlog is uncapped.
+	warn := b.limit > 0 && vacuumLagging(buffered, onDisk, b.limit) && time.Since(b.lastWarn) >= vacuumWarnInterval
 	if warn {
 		b.lastWarn = time.Now()
 	}
@@ -117,8 +120,19 @@ func (b *Backlog) Load() (buffered, limit uint64) {
 	return b.buffered, b.limit
 }
 
-// full reports whether the backlog is at the limit.
+// Stats returns the last measurement, together with the limit it is held to.
+func (b *Backlog) Stats() (buffered, limit, onDisk uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffered, b.limit, b.onDisk
+}
+
+// full reports whether the backlog is at the limit. An unset limit is never reached.
 func (b *Backlog) full() bool {
+	if b.limit == 0 {
+		return false
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buffered >= b.limit
@@ -127,6 +141,11 @@ func (b *Backlog) full() bool {
 // reserve waits until the backlog is below the limit, then counts n bytes into it
 // until the next measurement does.
 func (b *Backlog) reserve(ctx context.Context, closing <-chan struct{}, n uint64) error {
+	// An unset limit holds nothing back; the backlog is only measured for the stats.
+	if b.limit == 0 {
+		return nil
+	}
+
 	timer := time.NewTimer(b.wait)
 	defer timer.Stop()
 

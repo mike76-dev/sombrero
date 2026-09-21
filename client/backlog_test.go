@@ -101,6 +101,25 @@ func TestBacklog_Reserve(t *testing.T) {
 		}
 	})
 
+	t.Run("an unset limit measures but holds nothing back", func(t *testing.T) {
+		u := &fakeUsage{buffered: 100 << 30}
+		b := newBacklog(u.usage, 0)
+		b.wait = 20 * time.Millisecond
+		b.refresh()
+
+		if b.full() {
+			t.Fatal("full with no limit to reach")
+		}
+		if err := b.reserve(ctx, nil, 1<<30); err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+
+		buffered, limit, onDisk := b.Stats()
+		if buffered != 100<<30 || limit != 0 || onDisk != 100<<30 {
+			t.Fatalf("stats: got %d buffered, limit %d, %d on disk", buffered, limit, onDisk)
+		}
+	})
+
 	t.Run("a waiting write gives up on cancellation and on close", func(t *testing.T) {
 		u := &fakeUsage{buffered: 100}
 		b := newBacklog(u.usage, 100)

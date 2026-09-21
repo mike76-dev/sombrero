@@ -147,8 +147,9 @@ func (s *server) applyCapabilities() {
 func newServer(ctx context.Context, l net.Listener, db stores.Store, cfg stores.Config) *server {
 	s := newServerState(ctx, db, cfg)
 
-	// Only indexd shares buffer in the database, and only the Normal mode has them.
-	if sdb, ok := db.(*stores.Database); ok && cfg.Mode == stores.ModeNormal && cfg.Indexd.MaxBufferedData > 0 {
+	// Only indexd shares buffer in the database, and only the Normal mode has them. An unset
+	// limit still measures, so that the stats show the backlog before one is settled on.
+	if sdb, ok := db.(*stores.Database); ok && cfg.Mode == stores.ModeNormal {
 		s.backlog = client.NewBacklog(ctx, sdb, cfg.Indexd.MaxBufferedData)
 	}
 
@@ -213,8 +214,15 @@ func (s *server) acceptConnections(l net.Listener) {
 // Stats returns a snapshot of the current server statistics.
 func (s *server) Stats() api.ServerStats {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.stats
+	stats := s.stats
+	s.mu.Unlock()
+
+	if s.backlog != nil {
+		buffered, limit, onDisk := s.backlog.Stats()
+		stats.Backlog = &api.BacklogStats{Buffered: buffered, Limit: limit, OnDisk: onDisk}
+	}
+
+	return stats
 }
 
 // newConnectionState returns a Connection object as it stands before a negotiate, with its

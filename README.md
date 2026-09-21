@@ -273,6 +273,8 @@ What clients write to an `indexd` share is stored in the database first and uplo
 
 Uploading frees the data in the database, but PostgreSQL reclaims the disk space only when it vacuums the table. Even then the table keeps its largest size and reuses the space instead of returning it. The disk the database uses therefore grows to about `maxBufferedData` plus whatever the vacuum has not reclaimed yet, so set it to about half the free space on that disk. The server logs a warning when the table takes more than twice `maxBufferedData` and at least 64 MiB more than the data it holds, which means the vacuum is falling behind.
 
+The web UI reports both figures on its Statistics page, across all shares: how much is waiting to be uploaded right now, and how much database space the buffers occupy. The second one grows to the largest backlog the server has ever held and stays there, even once everything has been uploaded, because the space is reused rather than given back.
+
 The limit only applies to `indexd` shares, so it has no effect in the [Lite mode](#lite-mode). `renterd` keeps its own upload cache, which Sombrero cannot see.
 
 ## Slab Fragmentation
