@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -30,9 +31,24 @@ var printVersion = flag.Bool("version", false, "print the version and exit")
 // /api, behind the password and the ratelimiter. The web UI is served from
 // the root: it holds nothing secret, and asking for the password itself
 // beats leaving it to the browser's basic auth prompt.
-func newHTTPHandler(ctx context.Context, a http.Handler, password string) http.Handler {
+func newHTTPHandler(ctx context.Context, a http.Handler, password string, debug bool) http.Handler {
+	inner := a
+
+	// The profiles go behind the password with the rest of the API, and only in the debug mode:
+	// left on, they are a way for whoever reaches them to load the server down at will.
+	if debug {
+		dbg := http.NewServeMux()
+		dbg.Handle("/", a)
+		dbg.HandleFunc("/debug/pprof/", pprof.Index)
+		dbg.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		dbg.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		dbg.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		dbg.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		inner = dbg
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle("/api/", http.StripPrefix("/api", api.Ratelimit(ctx)(api.BasicAuth(password)(a))))
+	mux.Handle("/api/", http.StripPrefix("/api", api.Ratelimit(ctx)(api.BasicAuth(password)(inner))))
 	mux.Handle("/", web.Handler())
 	return mux
 }
@@ -86,6 +102,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	watchStackDumps()
+
 	// Open the store: a SQL database in the Normal mode,
 	// a JSON file in the Lite mode.
 	var db stores.Store
@@ -127,7 +145,7 @@ func main() {
 	}
 	defer lAPI.Close()
 	a := api.NewAPI(ctx, db, server, cfg, version)
-	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, cfg.API.Password)}
+	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, cfg.API.Password, cfg.Debug)}
 	go apiSrv.Serve(lAPI)
 	log.Printf("API and web UI: listening at http://%s ...\n", lAPI.Addr())
 
