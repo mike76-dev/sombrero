@@ -333,6 +333,11 @@ type IndexdClient struct {
 	storage         storageCache
 	slabRetryDelays []time.Duration // a field so tests can shorten it
 
+	// A backend that is down fails every job it is given, so each loop collapses the
+	// run of identical failures it reports into one line at a time.
+	uploadFailures *repeatedFailure
+	packFailures   *repeatedFailure
+
 	// backlog holds writes back while too much is waiting to be uploaded; nil means no limit.
 	backlog *Backlog
 }
@@ -444,6 +449,8 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		claimed:      make(map[uint64]struct{}),
 
 		slabRetryDelays: defaultSlabRetryDelays,
+		uploadFailures:  newRepeatedFailure(),
+		packFailures:    newRepeatedFailure(),
 	}
 	for _, opt := range opts {
 		opt(ic)
@@ -1398,7 +1405,7 @@ func (ic *IndexdClient) packSlabs(ctx context.Context) {
 				return
 			}
 
-			log.Printf("failed to pack a slab, retrying in %s: %v", delay, err)
+			ic.packFailures.report("failed to pack a slab", delay, err)
 
 			// The pieces are back in the queue, so the wait is what
 			// keeps a backend that fails every slab from being asked
@@ -1731,7 +1738,7 @@ func (ic *IndexdClient) processUploads(ctx context.Context) {
 			return
 		}
 
-		log.Printf("failed to run upload job, retrying in %s: %v", delay, err)
+		ic.uploadFailures.report("failed to run upload job", delay, err)
 
 		select {
 		case <-ic.drainChan:
