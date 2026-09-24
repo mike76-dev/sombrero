@@ -1907,6 +1907,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					if errors.Is(err, client.ErrBacklogFull) {
 						status = smb2.STATUS_DISK_FULL
 					}
+					op.file.failUpload(err)
 					op.cancelUpload()
 				}
 

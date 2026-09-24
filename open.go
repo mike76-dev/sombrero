@@ -731,6 +731,11 @@ type fileState struct {
 	// piece of it at a time, under a handle nobody asked to keep.
 	deleted bool
 
+	// cancelled is what an upload was called off with, kept so that the writes still on their way
+	// fail the same way. Left to start an upload of their own, they would store, piece by piece,
+	// the file the client has already been told it cannot have. The next handle clears it.
+	cancelled error
+
 	// handles is how many opens share the state. The state of a file the store answers for is
 	// worth keeping for exactly as long as one of them is alive: kept longer, it would go on
 	// answering with the size the last writer left behind, which is the size of a file the store
@@ -814,7 +819,26 @@ func (fs *fileState) attach() {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
+	// Whoever opens the file next is writing it anew, and what the last upload came to is no
+	// answer to them.
+	fs.cancelled = nil
 	fs.handles++
+}
+
+// failUpload records what the upload of the file was called off with.
+func (fs *fileState) failUpload(err error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.cancelled = err
+}
+
+// uploadCancelled returns what the upload was called off with, or nil if it was not.
+func (fs *fileState) uploadCancelled() error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.cancelled
 }
 
 // detach counts a handle that is gone, and reports whether the state has done its work: no handle
@@ -1990,6 +2014,12 @@ func (op *open) startUpload() error {
 func (op *open) write(offset uint64, data []byte) error {
 	u := op.file.uploadNow()
 	if u == nil {
+		// The writes that were on their way when an upload was called off answer for what
+		// called it off, rather than starting another one of their own.
+		if err := op.file.uploadCancelled(); err != nil {
+			return err
+		}
+
 		if err := op.startUpload(); err != nil {
 			return err
 		}

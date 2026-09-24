@@ -594,3 +594,58 @@ func TestIntegrationALookerClosingMidCopyLeavesTheUploadRunning(t *testing.T) {
 		t.Errorf("the copy took %d uploads, want 1", n)
 	}
 }
+
+// TestWritesAfterACancelledUploadDoNotStartAnother is what the writes still on their way come to.
+// A part that fails calls the upload off, and a write arriving after that used to start a fresh
+// upload of the same file: the client had been told its copy was over, while the server went on
+// storing the file under an upload nobody asked for, which then stood in the way of the retry.
+func TestWritesAfterACancelledUploadDoNotStartAnother(t *testing.T) {
+	h := newSMBTest(t)
+
+	cl := h.dial("alice")
+	cl.tc.maxUploadSize = 1024
+
+	handle, _ := cl.create("big.bin", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	fid := createdFileID(handle)
+
+	h.files.failParts(errors.New("the host would not take the sector"))
+
+	if _, err := cl.write(fid, 0, bytes.Repeat([]byte("s"), 1024)); err != nil {
+		t.Fatalf("the first write failed: %v", err)
+	}
+
+	// The write the failed part is reported to is the one that calls the upload off.
+	offset := uint64(1024)
+	deadline := time.Now().Add(2 * time.Second)
+	var refused uint32
+	for ; time.Now().Before(deadline); offset += 1024 {
+		answer, err := cl.write(fid, offset, bytes.Repeat([]byte("s"), 1024))
+		if err != nil {
+			t.Fatalf("the write at %d failed outright: %v", offset, err)
+		}
+		if refused = smb2.Header(answer).Status(); refused != smb2.STATUS_OK {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if refused == smb2.STATUS_OK {
+		t.Fatal("no write was refused after a part had failed")
+	}
+
+	// Whatever the client had in flight is refused the same way, rather than taken into an upload
+	// of its own.
+	for range 3 {
+		offset += 1024
+		answer, err := cl.write(fid, offset, bytes.Repeat([]byte("s"), 1024))
+		if err != nil {
+			t.Fatalf("the write at %d failed outright: %v", offset, err)
+		}
+		if status := smb2.Header(answer).Status(); status != refused {
+			t.Errorf("the write at %d was answered %#x, want %#x like the one before it", offset, status, refused)
+		}
+	}
+
+	if n := h.files.uploadsOf("big.bin"); n != 1 {
+		t.Errorf("the file was taken into %d uploads, want the one that was called off", n)
+	}
+}
