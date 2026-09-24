@@ -273,6 +273,8 @@ What clients write to an `indexd` share is stored in the database first and uplo
 
 Uploading frees the data in the database, but PostgreSQL reclaims the disk space only when it vacuums the table. Even then the table keeps its largest size and reuses the space instead of returning it. The disk the database uses therefore grows to about `maxBufferedData` plus whatever the vacuum has not reclaimed yet, so set it to about half the free space on that disk. The server logs a warning when the table takes more than twice `maxBufferedData` and at least 64 MiB more than the data it holds, which means the vacuum is falling behind.
 
+The limit also has to be large enough for the clients. A client on a local network can write twenty times faster than the Sia network takes the data, and the limit is what covers the difference: a gigabyte of it holds about half a minute of one fast copy. Set it too low and copies fail with a full disk instead of slowing down.
+
 The web UI reports both figures on its Statistics page, across all shares: how much is waiting to be uploaded right now, and how much database space the buffers occupy. The second one grows to the largest backlog the server has ever held and stays there, even once everything has been uploaded, because the space is reused rather than given back.
 
 The limit only applies to `indexd` shares, so it has no effect in the [Lite mode](#lite-mode). `renterd` keeps its own upload cache, which Sombrero cannot see.
@@ -462,6 +464,14 @@ go test ./... -v
 
 ## Bug Reporting
 Please do not hesitate to open an issue if you discover any bugs.
+
+If the server stops responding, send it a `SIGUSR1` (`kill -USR1 <pid>`) before killing it. It writes the stacks of all its goroutines to the log and keeps running, which usually shows what it is waiting for. Attach that to the issue.
+
+With `debug: true` the API also serves the Go profiles under `/api/debug/pprof/`:
+```
+curl -u "":<API_PASSWORD> "http://127.0.0.1:9999/api/debug/pprof/goroutine?debug=2"
+```
+They are only there in the debug mode, because a CPU profile takes 30 seconds and slows the server down while it runs.
 
 ## Acknowledgement
 This project was supported by a [Sia Foundation](https://sia.tech) grant.

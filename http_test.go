@@ -18,7 +18,7 @@ func TestHTTPHandlerRouting(t *testing.T) {
 		seen = req.URL.Path
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := newHTTPHandler(context.Background(), stub, "hunter2")
+	h := newHTTPHandler(context.Background(), stub, "hunter2", false)
 
 	get := func(path, password string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -69,13 +69,53 @@ func TestHTTPHandlerRouting(t *testing.T) {
 	}
 }
 
+// TestHTTPHandlerServesTheProfilesInDebugOnly verifies that the profiles are there to be asked
+// for in the debug mode, behind the password, and are not registered at all without it.
+func TestHTTPHandlerServesTheProfilesInDebugOnly(t *testing.T) {
+	stub := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	get := func(h http.Handler, path, password string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		if password != "" {
+			req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(":"+password)))
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+
+	debug := newHTTPHandler(context.Background(), stub, "hunter2", true)
+	if w := get(debug, "/api/debug/pprof/goroutine?debug=1", "hunter2"); w.Code != http.StatusOK {
+		t.Errorf("the goroutine profile was answered %d, want it served", w.Code)
+	}
+
+	// Without the password the profiles are as unreachable as the rest of the API.
+	if w := get(debug, "/api/debug/pprof/goroutine?debug=1", ""); w.Code != http.StatusUnauthorized {
+		t.Errorf("the goroutine profile without a password was answered %d, want it refused", w.Code)
+	}
+
+	// The API itself is still served in the debug mode, profiles or no profiles.
+	if w := get(debug, "/api/bans", "hunter2"); w.Code != http.StatusNoContent {
+		t.Errorf("the API in the debug mode was answered %d, want it served", w.Code)
+	}
+
+	// Off, the path reaches the API instead, which knows nothing of it.
+	plain := newHTTPHandler(context.Background(), stub, "hunter2", false)
+	if w := get(plain, "/api/debug/pprof/goroutine?debug=1", "hunter2"); w.Code != http.StatusNoContent {
+		t.Errorf("without the debug mode the profile path was answered %d, want it left to the API", w.Code)
+	}
+}
+
 // TestHTTPHandlerRatelimitsOnlyTheAPI verifies that loading the UI cannot
 // exhaust the request budget that guards the API.
 func TestHTTPHandlerRatelimitsOnlyTheAPI(t *testing.T) {
 	stub := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := newHTTPHandler(context.Background(), stub, "hunter2")
+	h := newHTTPHandler(context.Background(), stub, "hunter2", false)
 
 	for i := range 500 {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
