@@ -1,10 +1,12 @@
 package stores
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
 	"github.com/google/uuid"
+	"go.sia.tech/core/types"
 )
 
 // The behavior the PostgreSQL store shares with the JSON store is tested by
@@ -65,6 +67,96 @@ func TestDatabaseHasConnections(t *testing.T) {
 	}
 	if connected, err := db.HasConnections(sh.Name); err != nil || connected {
 		t.Fatalf("HasConnections after disconnecting: %v %v", connected, err)
+	}
+}
+
+// TestDatabaseAppKeyForServer verifies the lookup a connection without a key of
+// its own is made from: what the workgroup already has for the same indexer.
+func TestDatabaseAppKeyForServer(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	db.WithShares(&recordingShares{})
+	key := make(types.PrivateKey, 64)
+	for i := range key {
+		key[i] = byte(i)
+	}
+
+	addIndexdShare := func(name, server string) Share {
+		t.Helper()
+		if err := db.RegisterShare(Share{Name: name, Type: "indexd", ServerName: server}); err != nil {
+			t.Fatalf("RegisterShare(%q): %v", name, err)
+		}
+		sh, err := db.GetShare(name)
+		if err != nil {
+			t.Fatalf("GetShare(%q): %v", name, err)
+		}
+		return sh
+	}
+
+	connected := addIndexdShare("connected", "one.indexer")
+	elsewhere := addIndexdShare("elsewhere", "two.indexer")
+	renterd := addShare(t, db, "renterd-share") // "srv"
+	wg := addWorkgroup(t, db, "acme")
+	other := addWorkgroup(t, db, "other")
+
+	if got, err := db.AppKeyForServer(wg, connected.ServerName); err != nil || got != nil {
+		t.Fatalf("AppKeyForServer before connecting: %x %v", got, err)
+	}
+
+	if err := db.AddConnection(wg, connected, key); err != nil {
+		t.Fatalf("AddConnection: %v", err)
+	}
+	got, err := db.AppKeyForServer(wg, connected.ServerName)
+	if err != nil {
+		t.Fatalf("AppKeyForServer: %v", err)
+	}
+	if !bytes.Equal(got, key) {
+		t.Fatalf("AppKeyForServer: want the key of the connection, got %x", got)
+	}
+
+	// A key belongs to the workgroup's account with one indexer, so it is not
+	// handed to another indexer or to another workgroup.
+	if got, err := db.AppKeyForServer(wg, elsewhere.ServerName); err != nil || got != nil {
+		t.Errorf("AppKeyForServer of another indexer: %x %v", got, err)
+	}
+	if got, err := db.AppKeyForServer(other, connected.ServerName); err != nil || got != nil {
+		t.Errorf("AppKeyForServer of another workgroup: %x %v", got, err)
+	}
+
+	// A renterd share is connected without a key, which is nothing to reuse.
+	if err := db.AddConnection(wg, renterd, nil); err != nil {
+		t.Fatalf("AddConnection of the renterd share: %v", err)
+	}
+	if got, err := db.AppKeyForServer(wg, renterd.ServerName); err != nil || got != nil {
+		t.Errorf("AppKeyForServer of a renterd share: %x %v", got, err)
+	}
+
+	// The workgroups that hold a key are what a connection made from another
+	// workgroup's key is offered, so one is listed for the indexer it holds it for.
+	holders, err := db.AppKeyHolders(connected.ServerName)
+	if err != nil {
+		t.Fatalf("AppKeyHolders: %v", err)
+	}
+	if len(holders) != 1 || holders[0].UUID != wg.UUID {
+		t.Fatalf("AppKeyHolders: want %v alone, got %+v", wg.UUID, holders)
+	}
+	if holders, err := db.AppKeyHolders(elsewhere.ServerName); err != nil || len(holders) != 0 {
+		t.Errorf("AppKeyHolders of another indexer: %+v %v", holders, err)
+	}
+	if holders, err := db.AppKeyHolders(renterd.ServerName); err != nil || len(holders) != 0 {
+		t.Errorf("AppKeyHolders of a renterd share: %+v %v", holders, err)
+	}
+
+	if err := db.RemoveConnection(wg, connected); err != nil {
+		t.Fatalf("RemoveConnection: %v", err)
+	}
+	if got, err := db.AppKeyForServer(wg, connected.ServerName); err != nil || got != nil {
+		t.Errorf("AppKeyForServer after disconnecting: %x %v", got, err)
+	}
+	if holders, err := db.AppKeyHolders(connected.ServerName); err != nil || len(holders) != 0 {
+		t.Errorf("AppKeyHolders after disconnecting: %+v %v", holders, err)
 	}
 }
 

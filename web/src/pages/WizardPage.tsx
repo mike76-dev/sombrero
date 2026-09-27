@@ -4,6 +4,7 @@ import {
   addAccount,
   connect,
   createWorkgroup,
+  getPolicy,
   listAccounts,
   registerShare,
   requestConnection,
@@ -11,7 +12,7 @@ import {
   updateWorkgroup,
 } from '../api/endpoints'
 import { Card, ErrorBanner, Field, SuccessBanner, useApiAction } from '../components/common'
-import { ConnectStatusView, useConnectAttempt } from '../components/connect'
+import { ConnectStatusView, ShareKeyField, useConnectAttempt } from '../components/connect'
 import { PublicDirsEditor, cleanPublicDirs, samePublicDirs } from '../components/publicdirs'
 import { ServerAddressField } from '../components/serveraddress'
 import { ShareSelect, WorkgroupSelect } from '../components/selects'
@@ -37,6 +38,10 @@ interface Setup {
   workgroupLabel: string
   publicDirs: string[]
   username: string
+
+  // accountSkipped tells an empty username apart from one that is not filled in
+  // yet: the setup that leaves the accounts for later also leaves out the policy.
+  accountSkipped: boolean
   share: string
   shareType: string
 }
@@ -46,14 +51,15 @@ const emptySetup: Setup = {
   workgroupLabel: '',
   publicDirs: [],
   username: '',
+  accountSkipped: false,
   share: '',
   shareType: '',
 }
 
-function StepBar({ at }: { at: number }) {
+function StepBar({ at, steps }: { at: number; steps: readonly { key: string; label: string }[] }) {
   return (
     <ol className="steps steps-row">
-      {STEPS.map((step, i) => (
+      {steps.map((step, i) => (
         <li
           key={step.key}
           className={`step step-${i < at ? 'done' : i === at ? 'active' : 'pending'}`}
@@ -78,6 +84,9 @@ function StepCard({
   onNext,
   nextLabel = 'Continue',
   nextDisabled,
+  onSkip,
+  skipLabel = 'Skip',
+  skipDisabled,
 }: {
   title: string
   intro: ReactNode
@@ -86,6 +95,12 @@ function StepCard({
   onNext: () => void
   nextLabel?: string
   nextDisabled: boolean
+
+  // onSkip is for a step that can be left out altogether, which is not the same
+  // as continuing: it says the setup wants nothing of what the step makes.
+  onSkip?: () => void
+  skipLabel?: string
+  skipDisabled?: boolean
 }) {
   return (
     <Card title={title}>
@@ -100,32 +115,30 @@ function StepCard({
         <button className="btn btn-primary" disabled={nextDisabled} onClick={onNext}>
           {nextLabel}
         </button>
+        {onSkip && (
+          <button className="btn" disabled={skipDisabled} onClick={onSkip}>
+            {skipLabel}
+          </button>
+        )}
       </div>
     </Card>
   )
 }
 
-// Choice is the pick every step but the last offers: make a new one, or use
-// something that is there already.
-function Choice({
+// Choice is the pick every step but the last offers: make a new one, use
+// something that is there already, or leave the step out where it may be left out.
+function Choice<T extends string>({
   value,
   onChange,
-  make,
-  use,
+  options,
 }: {
-  value: 'new' | 'existing'
-  onChange: (value: 'new' | 'existing') => void
-  make: string
-  use: string
+  value: T
+  onChange: (value: T) => void
+  options: readonly (readonly [T, string])[]
 }) {
   return (
     <div className="row">
-      {(
-        [
-          ['new', make],
-          ['existing', use],
-        ] as const
-      ).map(([key, label]) => (
+      {options.map(([key, label]) => (
         <label className="checkbox" key={key}>
           <input type="radio" checked={value === key} onChange={() => onChange(key)} />
           {label}
@@ -198,8 +211,10 @@ function WorkgroupStep({
       <Choice
         value={mode}
         onChange={setMode}
-        make="Create a new workgroup"
-        use="Use an existing one"
+        options={[
+          ['new', 'Create a new workgroup'],
+          ['existing', 'Use an existing one'],
+        ]}
       />
       <div className="grid">
         {mode === 'new' ? (
@@ -269,28 +284,35 @@ function AccountStep({
           The account is what a client logs in as. It belongs to workgroup{' '}
           <span className="mono">{setup.workgroupLabel}</span>, and what it may do on a share is
           decided by the policy in the last step. A guest account has no password, and reaches
-          only the shares that offer guest access.
+          only the shares that offer guest access. The accounts can also wait: the workgroup is
+          what connects to a share, so <em>Skip</em> goes on to the connection and leaves the
+          accounts for the Accounts page and their access for the Shares page.
         </>
       }
       onBack={onBack}
       onNext={() =>
         run(async () => {
           if (mode === 'existing') {
-            onDone({ username: existing })
+            onDone({ username: existing, accountSkipped: false })
             return
           }
           await addAccount(username.trim(), guest ? '' : password, setup.workgroup)
-          onDone({ username: username.trim() })
+          onDone({ username: username.trim(), accountSkipped: false })
         })
       }
       nextLabel={mode === 'new' ? 'Add and continue' : 'Continue'}
       nextDisabled={busy || !ready}
+      onSkip={() => onDone({ username: '', accountSkipped: true })}
+      skipLabel="Skip"
+      skipDisabled={busy}
     >
       <Choice
         value={mode}
         onChange={setMode}
-        make="Add a new account"
-        use="Use an account of this workgroup"
+        options={[
+          ['new', 'Add a new account'],
+          ['existing', 'Use an account of this workgroup'],
+        ]}
       />
       {mode === 'new' ? (
         <>
@@ -392,8 +414,10 @@ function ShareStep({ onBack, onDone }: { onBack: () => void; onDone: (patch: Par
       <Choice
         value={mode}
         onChange={setMode}
-        make="Register a new share"
-        use="Use a registered share"
+        options={[
+          ['new', 'Register a new share'],
+          ['existing', 'Use a registered share'],
+        ]}
       />
       {mode === 'new' ? (
         <div className="grid">
@@ -494,19 +518,34 @@ function ConnectStep({
   const { run, busy, error } = useApiAction()
   const [appKey, setAppKey] = useState('')
   const attempt = useConnectAttempt(setup.workgroup, setup.share)
+  const [keyFrom, setKeyFrom] = useState('')
   const indexd = setup.shareType === 'indexd'
   const reconnecting = Boolean(appKey.trim())
+  const reusable = indexd && attempt.reusable
+
+  // Another workgroup's key is offered where this one has none of its own, and the
+  // choice is dropped where the workgroup it was for is no longer among them.
+  const holders = indexd && !reusable && !reconnecting ? attempt.keyFrom : []
+  const sharing = holders.some((holder) => holder.workgroup === keyFrom) ? keyFrom : ''
 
   return (
     <StepCard
       title="4. Connect the workgroup to the share"
       intro={
-        indexd ? (
+        attempt.connected ? (
+          <>
+            This workgroup is on the share already, and that connection is the one the rest of
+            the setup works from. It is taken apart on the Connections page, not here.
+          </>
+        ) : indexd ? (
           <>
             An indexd share connects for the first time by approving a registration with the
             indexer: press <em>Request approval</em>, open the link, and approve it. The rest
             follows on its own, and the app key it derives is shown once, below. Reconnecting a
-            workgroup that was connected before takes that saved key instead.
+            workgroup that was connected before takes that saved key instead, and a workgroup
+            already on another share of this indexer reuses the key it has there. A workgroup
+            with no key of its own can also share another workgroup's, joining its indexer
+            account and quota.
           </>
         ) : (
           <>
@@ -520,7 +559,7 @@ function ConnectStep({
       nextLabel={attempt.connected ? 'Continue' : 'Skip for now'}
       nextDisabled={attempt.running}
     >
-      {indexd && (
+      {indexd && !attempt.connected && (
         <div className="grid">
           <Field label="App key (only to reconnect)">
             <input
@@ -531,42 +570,59 @@ function ConnectStep({
               autoComplete="off"
             />
           </Field>
+          <ShareKeyField holders={holders} value={sharing} onChange={setKeyFrom} />
         </div>
       )}
-      <div className="row">
-        {indexd && (
+      {!attempt.connected && (
+        <div className="row">
+          {indexd && (
+            <button
+              className={reusable && !reconnecting ? 'btn' : 'btn btn-primary'}
+              disabled={busy || attempt.running || reconnecting}
+              onClick={() =>
+                run(async () => {
+                  attempt.begin(await requestConnection(setup.workgroup, setup.share), true)
+                })
+              }
+            >
+              Request approval
+            </button>
+          )}
           <button
-            className="btn btn-primary"
-            disabled={busy || attempt.running || reconnecting}
+            className={indexd && !reusable && !sharing ? 'btn' : 'btn btn-primary'}
+            disabled={
+              busy || attempt.running || (indexd && !reconnecting && !reusable && !sharing)
+            }
             onClick={() =>
               run(async () => {
-                attempt.begin(await requestConnection(setup.workgroup, setup.share), true)
+                attempt.begin(
+                  await connect(setup.workgroup, setup.share, {
+                    appKey: appKey.trim() || undefined,
+                    fromWorkgroup: sharing || undefined,
+                  }),
+                  false,
+                )
               })
             }
           >
-            Request approval
+            {!indexd
+              ? 'Connect'
+              : reconnecting
+                ? 'Reconnect with the app key'
+                : reusable
+                  ? 'Connect with the key of this indexer'
+                  : sharing
+                    ? "Connect with that workgroup's key"
+                    : 'Reconnect with the app key'}
           </button>
-        )}
-        <button
-          className={indexd ? 'btn' : 'btn btn-primary'}
-          disabled={busy || attempt.running || (indexd && !reconnecting)}
-          onClick={() =>
-            run(async () => {
-              attempt.begin(
-                await connect(setup.workgroup, setup.share, appKey.trim() || undefined),
-                false,
-              )
-            })
-          }
-        >
-          {indexd ? 'Reconnect with the app key' : 'Connect'}
-        </button>
-      </div>
+        </div>
+      )}
       <ConnectStatusView attempt={attempt} />
       {!attempt.connected && !attempt.running && (
         <p className="muted">
-          The policy in the next step can be set either way — it is kept with the share and
-          applies as soon as the connection is made, here or on the Connections page.
+          The policy in the next step belongs to this connection and can only be set once it is
+          made — here, or later on the Connections page, with the access granted on the Shares
+          page.
         </p>
       )}
       <ErrorBanner error={error} />
@@ -586,7 +642,36 @@ function PolicyStep({
   onDone: () => void
 }) {
   const { run, busy, error } = useApiAction()
+  const load = useApiAction()
   const [rights, setRights] = useState({ ...noRights, read: true, execute: true })
+
+  // A policy is kept with the workgroup's connection to the share, so a setup that
+  // skipped the connection finishes without one rather than failing on it.
+  const attempt = useConnectAttempt(setup.workgroup, setup.share)
+  const connected = attempt.connected
+
+  // The access this account already has on this share is what to show: an account
+  // set up before keeps what it was granted then, rather than being offered the
+  // defaults again.
+  useEffect(() => {
+    let cancelled = false
+    load.run(async () => {
+      const ar = await getPolicy(setup.share, setup.username, setup.workgroup)
+      if (cancelled) return
+      if (ar.ReadAccess || ar.WriteAccess || ar.DeleteAccess || ar.ExecuteAccess) {
+        setRights({
+          read: ar.ReadAccess,
+          write: ar.WriteAccess,
+          delete: ar.DeleteAccess,
+          execute: ar.ExecuteAccess,
+        })
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the setup is fixed by now
+  }, [setup.share, setup.username, setup.workgroup])
 
   return (
     <StepCard
@@ -595,17 +680,21 @@ function PolicyStep({
         <>
           What <span className="mono">{setup.username}</span> may do on{' '}
           <span className="mono">{setup.share}</span>. Read and execute are what it takes to open
-          the share and browse it; write and delete let the account change what is there.
+          the share and browse it; write and delete let the account change what is there. An
+          account that has been granted access before is shown what it has now.
         </>
       }
       onBack={onBack}
-      onNext={() =>
-        run(async () => {
-          await setPolicy(setup.share, setup.username, setup.workgroup, rights)
-          onDone()
-        })
+      onNext={
+        connected
+          ? () =>
+              run(async () => {
+                await setPolicy(setup.share, setup.username, setup.workgroup, rights)
+                onDone()
+              })
+          : onDone
       }
-      nextLabel="Save and finish"
+      nextLabel={connected ? 'Save and finish' : 'Finish without a policy'}
       nextDisabled={busy}
     >
       <div className="row">
@@ -614,13 +703,22 @@ function PolicyStep({
             <input
               type="checkbox"
               checked={rights[key]}
-              disabled={busy}
+              disabled={busy || load.busy || !connected}
               onChange={(e) => setRights((r) => ({ ...r, [key]: e.target.checked }))}
             />
             {key}
           </label>
         ))}
       </div>
+      {!connected && (
+        <p className="muted">
+          <span className="mono">{setup.workgroupLabel}</span> is not connected to{' '}
+          <span className="mono">{setup.share}</span>, and a policy needs that connection to hang
+          on. Go back a step to make it, or connect later on the Connections page and grant the
+          access on the Shares page.
+        </p>
+      )}
+      <ErrorBanner error={load.error} />
       <ErrorBanner error={error} />
     </StepCard>
   )
@@ -630,7 +728,11 @@ function DoneStep({ setup, onRestart }: { setup: Setup; onRestart: () => void })
   return (
     <Card title="Set up">
       <SuccessBanner
-        message={`${setup.username} of ${setup.workgroupLabel} may now use ${setup.share}.`}
+        message={
+          setup.username
+            ? `${setup.username} of ${setup.workgroupLabel} may now use ${setup.share}.`
+            : `${setup.workgroupLabel} is now set up on ${setup.share}.`
+        }
       />
       <table className="table table-kv">
         <tbody>
@@ -646,7 +748,7 @@ function DoneStep({ setup, onRestart }: { setup: Setup; onRestart: () => void })
           )}
           <tr>
             <th>Account</th>
-            <td className="mono">{setup.username}</td>
+            <td className="mono">{setup.username || '— none yet —'}</td>
           </tr>
           <tr>
             <th>Share</th>
@@ -657,9 +759,16 @@ function DoneStep({ setup, onRestart }: { setup: Setup; onRestart: () => void })
         </tbody>
       </table>
       <p className="muted">
-        A client reaches it as <span className="mono">\\&lt;server&gt;\{setup.share}</span>,
-        logging in as <span className="mono">{setup.username}</span>. Everything set up here can
-        be changed from the pages on the left; the wizard only puts the first of each in place.
+        A client reaches it as <span className="mono">\\&lt;server&gt;\{setup.share}</span>
+        {setup.username ? (
+          <>
+            , logging in as <span className="mono">{setup.username}</span>
+          </>
+        ) : (
+          ', once an account of this workgroup has been granted access to it'
+        )}
+        . Everything set up here can be changed from the pages on the left; the wizard only puts
+        the first of each in place.
       </p>
       <div className="row">
         <button className="btn" onClick={onRestart}>
@@ -680,13 +789,23 @@ export function WizardPage() {
   }
   const back = () => setStep((i) => i - 1)
 
+  // A setup without an account has no access to grant, so the last step is the
+  // connection, and the bar says so rather than showing a step that never comes.
+  const steps = setup.accountSkipped ? STEPS.filter((s) => s.key !== 'policy') : STEPS
+
   return (
     <div className="page">
-      <StepBar at={step} />
+      <StepBar at={step} steps={steps} />
       {step === 0 && <WorkgroupStep setup={setup} onDone={advance} />}
       {step === 1 && <AccountStep setup={setup} onBack={back} onDone={advance} />}
       {step === 2 && <ShareStep onBack={back} onDone={advance} />}
-      {step === 3 && <ConnectStep setup={setup} onBack={back} onDone={() => setStep(4)} />}
+      {step === 3 && (
+        <ConnectStep
+          setup={setup}
+          onBack={back}
+          onDone={() => setStep(setup.accountSkipped ? 5 : 4)}
+        />
+      )}
       {step === 4 && <PolicyStep setup={setup} onBack={back} onDone={() => setStep(5)} />}
       {step === 5 && (
         <DoneStep

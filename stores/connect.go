@@ -134,6 +134,77 @@ func (db *Database) IsConnected(wg Workgroup, share Share) (bool, types.PrivateK
 	return connected, appKey, nil
 }
 
+// AppKeyForServer returns the app key of a connection the workgroup already has
+// to an indexd share on the given server, or nil where it has none.
+func (db *Database) AppKeyForServer(wg Workgroup, serverName string) (types.PrivateKey, error) {
+	var appKey types.PrivateKey
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT c.app_key
+			FROM connections c
+			JOIN shares s ON s.share_name = c.share_name
+			WHERE c.workgroup = $1
+			AND s.server_name = $2
+			AND s.share_type = 'indexd'
+			AND c.app_key IS NOT NULL
+			LIMIT 1
+		`
+		err := tx.QueryRow(ctx, query, wg.ID, serverName).Scan(&appKey)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("failed to retrieve the app key of the workgroup: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return appKey, nil
+}
+
+// AppKeyHolders returns the workgroups that hold an app key for the given server,
+// for the connections that are made from another workgroup's key.
+func (db *Database) AppKeyHolders(serverName string) (wgs []Workgroup, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT DISTINCT w.id, w.uuid, w.name
+			FROM connections c
+			JOIN shares s ON s.share_name = c.share_name
+			JOIN workgroups w ON w.id = c.workgroup
+			WHERE s.server_name = $1
+			AND s.share_type = 'indexd'
+			AND c.app_key IS NOT NULL
+			ORDER BY w.id
+		`
+		rows, err := tx.Query(ctx, query, serverName)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve the holders of an app key: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var id int
+			var u uuid.UUID
+			var name *string
+			if err := rows.Scan(&id, &u, &name); err != nil {
+				return fmt.Errorf("failed to scan the holder of an app key: %w", err)
+			}
+			wg := Workgroup{ID: id, UUID: u}
+			if name != nil {
+				wg.Name = *name
+			}
+			wgs = append(wgs, wg)
+		}
+
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
 // SetAppKey sets the app key for the connection between a workgroup and a share.
 func (db *Database) SetAppKey(wg Workgroup, share Share, key types.PrivateKey) error {
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
