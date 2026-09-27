@@ -71,7 +71,7 @@ export function ConnectionsPage() {
         <div className="row">
           <button
             className="btn"
-            disabled={busy || running || !ready || backend !== 'indexd'}
+            disabled={busy || running || !ready || backend !== 'indexd' || attempt.connected}
             onClick={() =>
               run(async () => {
                 attempt.begin(await requestConnection(workgroup.trim(), share.trim()), true)
@@ -82,7 +82,7 @@ export function ConnectionsPage() {
           </button>
           <button
             className="btn btn-primary"
-            disabled={busy || running || !ready || !connectable}
+            disabled={busy || running || !ready || !connectable || attempt.connected}
             onClick={() =>
               run(async () => {
                 const from = {
