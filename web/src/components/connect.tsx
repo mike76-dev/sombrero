@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { connectStatus } from '../api/endpoints'
-import { ConnectState, ConnectStatusResponse } from '../api/types'
-import { CopyButton, ErrorBanner } from './common'
+import { AppKeyHolder, ConnectState, ConnectStatusResponse } from '../api/types'
+import { CopyButton, ErrorBanner, Field } from './common'
 
 // Following a connection: the phases it goes through, the poll that keeps them
 // up to date, and the panel that shows them. The Connections page and the setup
@@ -56,6 +56,12 @@ export interface ConnectAttempt {
   // workgroup is on the share, whether by this attempt or an earlier one.
   running: boolean
   connected: boolean
+
+  // reusable is true where the share can be connected without an approval, from
+  // the key the workgroup already has for the same indexer, and keyFrom names the
+  // other workgroups whose key could be shared with it instead.
+  reusable: boolean
+  keyFrom: AppKeyHolder[]
 
   // begin takes over from an action that started an attempt: what the action
   // returned is the first status, and the poll carries it from there.
@@ -164,6 +170,8 @@ export function useConnectAttempt(workgroup: string, share: string): ConnectAtte
     error,
     running: tracking !== null,
     connected: status?.state === 'connected',
+    reusable: status?.reusable === true,
+    keyFrom: status?.keyFrom ?? [],
     begin: (res, fromApproval) => {
       setApproval(fromApproval)
       setPhase(isInFlight(res.state) ? res.state : null)
@@ -228,6 +236,32 @@ function ConnectProgress({ attempt }: { attempt: ConnectAttempt }) {
         </div>
       )}
     </div>
+  )
+}
+
+// ShareKeyField offers the workgroups whose app key for this indexer can be
+// shared with the one being connected, and nothing where there are none.
+export function ShareKeyField({
+  holders,
+  value,
+  onChange,
+}: {
+  holders: AppKeyHolder[]
+  value: string
+  onChange: (value: string) => void
+}) {
+  if (holders.length === 0) return null
+  return (
+    <Field label="Share the app key of">
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">— none, approve a new connection —</option>
+        {holders.map((holder) => (
+          <option key={holder.workgroup} value={holder.workgroup}>
+            {holder.name || holder.workgroup}
+          </option>
+        ))}
+      </select>
+    </Field>
   )
 }
 

@@ -120,14 +120,25 @@ export type ConnectState =
 
 // The progress of one workgroup's connection to one share. appKey is the key a
 // first-time registration derived: it is reported once, when the attempt reaches
-// 'connected', and never again.
+// 'connected', and never again. reusable says that an indexd share can be
+// connected from the key the workgroup has for the same indexer, without approval,
+// and keyFrom names the other workgroups whose key could be shared instead.
 export interface ConnectStatusResponse {
   state: ConnectState
   started?: string
   since?: string
   url?: string
   appKey?: string
+  reusable?: boolean
+  keyFrom?: AppKeyHolder[]
   error?: string
+}
+
+// A workgroup whose app key for an indexer another workgroup can be connected
+// with, which puts both on one indexer account and one quota.
+export interface AppKeyHolder {
+  workgroup: string
+  name?: string
 }
 
 export interface OrphanedSlab {

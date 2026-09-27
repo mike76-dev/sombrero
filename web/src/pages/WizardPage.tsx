@@ -11,7 +11,7 @@ import {
   updateWorkgroup,
 } from '../api/endpoints'
 import { Card, ErrorBanner, Field, SuccessBanner, useApiAction } from '../components/common'
-import { ConnectStatusView, useConnectAttempt } from '../components/connect'
+import { ConnectStatusView, ShareKeyField, useConnectAttempt } from '../components/connect'
 import { PublicDirsEditor, cleanPublicDirs, samePublicDirs } from '../components/publicdirs'
 import { ServerAddressField } from '../components/serveraddress'
 import { ShareSelect, WorkgroupSelect } from '../components/selects'
@@ -494,8 +494,15 @@ function ConnectStep({
   const { run, busy, error } = useApiAction()
   const [appKey, setAppKey] = useState('')
   const attempt = useConnectAttempt(setup.workgroup, setup.share)
+  const [keyFrom, setKeyFrom] = useState('')
   const indexd = setup.shareType === 'indexd'
   const reconnecting = Boolean(appKey.trim())
+  const reusable = indexd && attempt.reusable
+
+  // Another workgroup's key is offered where this one has none of its own, and the
+  // choice is dropped where the workgroup it was for is no longer among them.
+  const holders = indexd && !reusable && !reconnecting ? attempt.keyFrom : []
+  const sharing = holders.some((holder) => holder.workgroup === keyFrom) ? keyFrom : ''
 
   return (
     <StepCard
@@ -506,7 +513,10 @@ function ConnectStep({
             An indexd share connects for the first time by approving a registration with the
             indexer: press <em>Request approval</em>, open the link, and approve it. The rest
             follows on its own, and the app key it derives is shown once, below. Reconnecting a
-            workgroup that was connected before takes that saved key instead.
+            workgroup that was connected before takes that saved key instead, and a workgroup
+            already on another share of this indexer reuses the key it has there. A workgroup
+            with no key of its own can also share another workgroup's, joining its indexer
+            account and quota.
           </>
         ) : (
           <>
@@ -531,12 +541,13 @@ function ConnectStep({
               autoComplete="off"
             />
           </Field>
+          <ShareKeyField holders={holders} value={sharing} onChange={setKeyFrom} />
         </div>
       )}
       <div className="row">
         {indexd && (
           <button
-            className="btn btn-primary"
+            className={reusable && !reconnecting ? 'btn' : 'btn btn-primary'}
             disabled={busy || attempt.running || reconnecting}
             onClick={() =>
               run(async () => {
@@ -548,18 +559,29 @@ function ConnectStep({
           </button>
         )}
         <button
-          className={indexd ? 'btn' : 'btn btn-primary'}
-          disabled={busy || attempt.running || (indexd && !reconnecting)}
+          className={indexd && !reusable && !sharing ? 'btn' : 'btn btn-primary'}
+          disabled={busy || attempt.running || (indexd && !reconnecting && !reusable && !sharing)}
           onClick={() =>
             run(async () => {
               attempt.begin(
-                await connect(setup.workgroup, setup.share, appKey.trim() || undefined),
+                await connect(setup.workgroup, setup.share, {
+                  appKey: appKey.trim() || undefined,
+                  fromWorkgroup: sharing || undefined,
+                }),
                 false,
               )
             })
           }
         >
-          {indexd ? 'Reconnect with the app key' : 'Connect'}
+          {!indexd
+            ? 'Connect'
+            : reconnecting
+              ? 'Reconnect with the app key'
+              : reusable
+                ? 'Connect with the key of this indexer'
+                : sharing
+                  ? "Connect with that workgroup's key"
+                  : 'Reconnect with the app key'}
         </button>
       </div>
       <ConnectStatusView attempt={attempt} />
