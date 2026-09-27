@@ -1456,6 +1456,19 @@ func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps ht
 		return
 	}
 
+	// A policy belongs to the workgroup's connection to the share and goes with it
+	// when that is removed, so there has to be one to hang it on.
+	connected, _, err := api.store.IsConnected(wg, share)
+	if err != nil {
+		log.Printf("failed to check the connection: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !connected {
+		writeError(w, "the workgroup has to be connected to the share before a policy can be set for it", http.StatusConflict)
+		return
+	}
+
 	if err := api.store.SetAccessRights(stores.AccessRights{
 		ShareName:     shareName,
 		AccountID:     acc.ID,

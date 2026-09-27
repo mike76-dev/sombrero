@@ -418,6 +418,14 @@ func foundWorkgroupByName() func(string) (stores.Workgroup, error) {
 	}
 }
 
+// A policy needs the workgroup connected to the share, so the stand-in for the
+// store says it is where a test is about something else.
+func isConnected() func(stores.Workgroup, stores.Share) (bool, types.PrivateKey, error) {
+	return func(stores.Workgroup, stores.Share) (bool, types.PrivateKey, error) {
+		return true, nil, nil
+	}
+}
+
 func foundShare(name, typ string) func(string) (stores.Share, error) {
 	return func(n string) (stores.Share, error) {
 		if n == name {
@@ -1340,6 +1348,7 @@ func TestPolicy(t *testing.T) {
 			findWorkgroup:   foundWorkgroup(),
 			getShare:        foundShare("myshare", "renterd"),
 			findAccount:     foundAccount("alice", testUUID.String()),
+			isConnected:     isConnected(),
 			setAccessRights: func(ar stores.AccessRights) error { gotAR = ar; return nil },
 		}
 		w := doRequest(newTestAPI(ms), http.MethodPut,
@@ -1374,7 +1383,40 @@ func TestPolicy(t *testing.T) {
 			findWorkgroup:   foundWorkgroup(),
 			getShare:        foundShare("myshare", "renterd"),
 			findAccount:     foundAccount("alice", testUUID.String()),
+			isConnected:     isConnected(),
 			setAccessRights: func(stores.AccessRights) error { return errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut,
+			"/share/myshare/policy?username=alice&workgroup="+testUUID.String(), nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	// A policy row belongs to the connection and is removed with it, so setting one
+	// for a workgroup that is not connected is refused rather than left to the
+	// database to reject as a broken reference.
+	t.Run("PUT without a connection returns 409", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "renterd"),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			setAccessRights: func(stores.AccessRights) error {
+				t.Error("a policy was set for a workgroup that is not connected")
+				return nil
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut,
+			"/share/myshare/policy?username=alice&workgroup="+testUUID.String()+"&read=true", nil)
+		checkStatus(t, w, http.StatusConflict)
+	})
+
+	t.Run("PUT isConnected store error", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "renterd"),
+			findAccount:   foundAccount("alice", testUUID.String()),
+			isConnected: func(stores.Workgroup, stores.Share) (bool, types.PrivateKey, error) {
+				return false, nil, errStore
+			},
 		}
 		w := doRequest(newTestAPI(ms), http.MethodPut,
 			"/share/myshare/policy?username=alice&workgroup="+testUUID.String(), nil)
