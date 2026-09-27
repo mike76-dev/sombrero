@@ -65,11 +65,18 @@ type Store interface {
 	IsConnected(wg stores.Workgroup, share stores.Share) (bool, types.PrivateKey, error)
 }
 
-// Connections is the part of a store that says whether a share is connected to
-// anything. Only the database-backed store has it, and only an indexd share is
-// asked about: the Lite mode serves renterd shares alone.
+// Connections is the part of a store that knows what is connected to a share and
+// with which app key. Only the database-backed store has it, and only an indexd
+// share is asked about: the Lite mode serves renterd shares alone.
 type Connections interface {
 	HasConnections(share string) (bool, error)
+
+	// AppKeyForServer returns the app key of a connection the workgroup already
+	// has to an indexd share on the given server, or nil where it has none.
+	AppKeyForServer(wg stores.Workgroup, serverName string) (types.PrivateKey, error)
+
+	// AppKeyHolders returns the workgroups that hold an app key for the server.
+	AppKeyHolders(serverName string) ([]stores.Workgroup, error)
 }
 
 // Server is as much of the running SMB server as the API needs: the statistics
@@ -224,14 +231,25 @@ type WorkgroupResponse struct {
 // approval link while the attempt waits for one. AppKey is the key a first-time
 // registration derived, which the caller should persist for future reconnections:
 // it is reported once, on the first read after the attempt connected, and never
-// again.
+// again. Reusable says that an unconnected indexd share can be connected without
+// an approval, from the key the workgroup has for the same indexer, and KeyFrom
+// names the other workgroups whose key for it could be shared instead.
 type ConnectStatusResponse struct {
-	State   ConnectState `json:"state"`
-	Started *time.Time   `json:"started,omitempty"`
-	Since   *time.Time   `json:"since,omitempty"`
-	URL     string       `json:"url,omitempty"`
-	AppKey  string       `json:"appKey,omitempty"`
-	Error   string       `json:"error,omitempty"`
+	State    ConnectState   `json:"state"`
+	Started  *time.Time     `json:"started,omitempty"`
+	Since    *time.Time     `json:"since,omitempty"`
+	URL      string         `json:"url,omitempty"`
+	AppKey   string         `json:"appKey,omitempty"`
+	Reusable bool           `json:"reusable,omitempty"`
+	KeyFrom  []AppKeyHolder `json:"keyFrom,omitempty"`
+	Error    string         `json:"error,omitempty"`
+}
+
+// AppKeyHolder is a workgroup whose app key for an indexer another workgroup can
+// be connected with, sharing the indexer account and its quota.
+type AppKeyHolder struct {
+	Workgroup uuid.UUID `json:"workgroup"`
+	Name      string    `json:"name,omitempty"`
 }
 
 // ProbeResponse is the response type for POST /probe. Reachable says whether
@@ -1754,11 +1772,52 @@ func (api *API) connectHandlerGET(w http.ResponseWriter, _ *http.Request, ps htt
 		return
 	}
 
-	state := ConnectIdle
+	res := ConnectStatusResponse{State: ConnectIdle}
 	if connected {
-		state = ConnectConnected
+		res.State = ConnectConnected
+	} else if share.Type == "indexd" {
+		appKey, err := api.appKeyForServer(wg, share)
+		if err != nil {
+			log.Printf("failed to look up the app key of the workgroup: %v", err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		res.Reusable = appKey != nil
+
+		// A key of its own is the one to use, so the keys of the other workgroups
+		// are only worth naming where it has none.
+		if !res.Reusable {
+			if res.KeyFrom, ok = api.appKeyHolders(w, wg, share); !ok {
+				return
+			}
+		}
 	}
-	writeJSON(w, ConnectStatusResponse{State: state})
+	writeJSON(w, res)
+}
+
+// appKeyHolders returns the workgroups other than this one that hold an app key
+// for the share's indexer, and writes the error where the store fails.
+func (api *API) appKeyHolders(w http.ResponseWriter, wg stores.Workgroup, share stores.Share) ([]AppKeyHolder, bool) {
+	conns, ok := api.store.(Connections)
+	if !ok {
+		return nil, true
+	}
+
+	holders, err := conns.AppKeyHolders(share.ServerName)
+	if err != nil {
+		log.Printf("failed to look up the holders of an app key: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return nil, false
+	}
+
+	var res []AppKeyHolder
+	for _, holder := range holders {
+		if holder.UUID != wg.UUID {
+			res = append(res, AppKeyHolder{Workgroup: holder.UUID, Name: holder.Name})
+		}
+	}
+
+	return res, true
 }
 
 // connectHandlerPOST handles the POST /connect/:workgroup/:share calls.
@@ -1865,9 +1924,64 @@ func (api *API) runConnect(attempt *connectAttempt, builder *sdk.Builder, wg sto
 	attempt.finish(derived)
 }
 
-// connectHandlerPUT handles the PUT /connect/:workgroup/:share calls. Two paths:
+// appKeyForServer returns the app key the workgroup already has for the share's
+// indexer, which is derived from its account there and authorizes every share on
+// it. It is nil where the workgroup has none, and where the store cannot say.
+func (api *API) appKeyForServer(wg stores.Workgroup, share stores.Share) (types.PrivateKey, error) {
+	conns, ok := api.store.(Connections)
+	if !ok {
+		return nil, nil
+	}
+	return conns.AppKeyForServer(wg, share.ServerName)
+}
+
+// sharedAppKey returns the app key another workgroup holds for the share's
+// indexer, which puts both on one indexer account, and writes the refusal where
+// that workgroup has none.
+func (api *API) sharedAppKey(w http.ResponseWriter, from string, share stores.Share) (types.PrivateKey, bool) {
+	holder, ok := api.resolveWorkgroup(w, from)
+	if !ok {
+		return nil, false
+	}
+
+	appKey, err := api.appKeyForServer(holder, share)
+	if err != nil {
+		log.Printf("failed to look up the app key of the workgroup: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return nil, false
+	}
+	if appKey == nil {
+		writeError(w, "that workgroup has no app key for this indexer to share", http.StatusBadRequest)
+		return nil, false
+	}
+
+	return appKey, true
+}
+
+// reusableAppKey returns the key a connection can be made from without an
+// approval, and writes the refusal where there is none to reuse.
+func (api *API) reusableAppKey(w http.ResponseWriter, wg stores.Workgroup, share stores.Share) (types.PrivateKey, bool) {
+	appKey, err := api.appKeyForServer(wg, share)
+	if err != nil {
+		log.Printf("failed to look up the app key of the workgroup: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return nil, false
+	}
+	if appKey != nil {
+		return appKey, true
+	}
+
+	writeError(w, "an indexd share is connected for the first time by approving a request from POST /connect/:workgroup/:share, and reconnected with the app key that made it: this workgroup has none for this indexer to reuse, and named no workgroup to share one from", http.StatusBadRequest)
+	return nil, false
+}
+
+// connectHandlerPUT handles the PUT /connect/:workgroup/:share calls. Four paths:
 //  1. No body, renterd share — no key required.
 //  2. Body with appKey (hex) — indexd, reconnecting with an existing key.
+//  3. Body with fromWorkgroup — indexd, sharing the indexer account of the named
+//     workgroup, which is what its key for this indexer is of.
+//  4. No body, indexd share — the key of another connection the workgroup has to
+//     the same indexer, where it has one.
 //
 // A first-time indexd connection has no PUT of its own: it is the approval of
 // the request POST /connect/:workgroup/:share makes that carries it through.
@@ -1882,7 +1996,8 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 	}
 
 	var body struct {
-		AppKey string `json:"appKey,omitempty"` // hex-encoded
+		AppKey        string `json:"appKey,omitempty"`        // hex-encoded
+		FromWorkgroup string `json:"fromWorkgroup,omitempty"` // UUID or name
 	}
 	if req.ContentLength > 0 {
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
@@ -1890,9 +2005,14 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 			return
 		}
 	}
+	if body.FromWorkgroup != "" && share.Type != "indexd" {
+		writeError(w, "only an indexd share is connected with the app key of another workgroup", http.StatusBadRequest)
+		return
+	}
 
 	var appKey types.PrivateKey
-	if body.AppKey != "" {
+	switch {
+	case body.AppKey != "":
 		keyBytes, err := hex.DecodeString(body.AppKey)
 		if err != nil {
 			writeError(w, "invalid app key encoding", http.StatusBadRequest)
@@ -1903,9 +2023,14 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 			writeError(w, "indexd share requires a valid 64-byte app key", http.StatusBadRequest)
 			return
 		}
-	} else if share.Type == "indexd" {
-		writeError(w, "an indexd share is connected for the first time by approving a request from POST /connect/:workgroup/:share, and reconnected with the app key that made it", http.StatusBadRequest)
-		return
+	case body.FromWorkgroup != "":
+		if appKey, ok = api.sharedAppKey(w, body.FromWorkgroup, share); !ok {
+			return
+		}
+	case share.Type == "indexd":
+		if appKey, ok = api.reusableAppKey(w, wg, share); !ok {
+			return
+		}
 	}
 
 	attempt, started := api.connects.begin(connectKey(wg, share), ConnectConnecting)

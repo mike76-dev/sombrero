@@ -68,6 +68,8 @@ type mockStore struct {
 	removeConnection    func(stores.Workgroup, stores.Share) error
 	isConnected         func(stores.Workgroup, stores.Share) (bool, types.PrivateKey, error)
 	hasConnections      func(string) (bool, error)
+	appKeyForServer     func(stores.Workgroup, string) (types.PrivateKey, error)
+	appKeyHolders       func(string) ([]stores.Workgroup, error)
 }
 
 func (m *mockStore) IsBanned(h string) (bool, string, error) {
@@ -265,6 +267,20 @@ func (m *mockStore) HasConnections(share string) (bool, error) {
 		return m.hasConnections(share)
 	}
 	return false, nil
+}
+
+func (m *mockStore) AppKeyForServer(wg stores.Workgroup, serverName string) (types.PrivateKey, error) {
+	if m.appKeyForServer != nil {
+		return m.appKeyForServer(wg, serverName)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) AppKeyHolders(serverName string) ([]stores.Workgroup, error) {
+	if m.appKeyHolders != nil {
+		return m.appKeyHolders(serverName)
+	}
+	return nil, nil
 }
 
 // mockServer stands in for the running SMB server.
@@ -1905,13 +1921,135 @@ func TestConnect(t *testing.T) {
 		checkStatus(t, w, http.StatusBadRequest)
 	})
 
-	t.Run("PUT indexd share without an app key returns 400", func(t *testing.T) {
+	t.Run("PUT reuses the key the workgroup has for the same indexer", func(t *testing.T) {
+		appKey := make([]byte, 64)
+		for i := range appKey {
+			appKey[i] = byte(i)
+		}
+		askedFor := make(chan string, 1)
+		gotKey := make(chan types.PrivateKey, 1)
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare: func(n string) (stores.Share, error) {
+				return stores.Share{Name: n, Type: "indexd", ServerName: "indexer.example"}, nil
+			},
+			appKeyForServer: func(_ stores.Workgroup, server string) (types.PrivateKey, error) {
+				askedFor <- server
+				return types.PrivateKey(appKey), nil
+			},
+			addConnection: func(_ stores.Workgroup, _ stores.Share, k types.PrivateKey) error {
+				gotKey <- k
+				return nil
+			},
+		}
+		api := newTestAPI(ms)
+		w := doRequest(api, http.MethodPut, path, nil)
+		checkStatus(t, w, http.StatusAccepted)
+
+		if res := awaitConnect(t, api, path); res.State != ConnectConnected {
+			t.Fatalf("state: want %q, got %q (%s)", ConnectConnected, res.State, res.Error)
+		}
+
+		// The key is looked up by the indexer the share names, and the connection is
+		// made of the one that comes back.
+		if server := <-askedFor; server != "indexer.example" {
+			t.Errorf("app key looked up for %q, want %q", server, "indexer.example")
+		}
+		if k := <-gotKey; !bytes.Equal(k, appKey) {
+			t.Errorf("app key stored: want the one the workgroup has, got %x", k)
+		}
+	})
+
+	t.Run("PUT connects from the key of another workgroup", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321")
+		appKey := types.GeneratePrivateKey()
+		askedFor := make(chan stores.Workgroup, 1)
+		gotKey := make(chan types.PrivateKey, 1)
+		ms := &mockStore{
+			findWorkgroup: func(u uuid.UUID) (stores.Workgroup, error) {
+				switch u {
+				case testUUID:
+					return stores.Workgroup{ID: 1, UUID: testUUID, Name: testWorkgroupName}, nil
+				case other:
+					return stores.Workgroup{ID: 2, UUID: other, Name: "holder"}, nil
+				}
+				return stores.Workgroup{}, nil
+			},
+			getShare: foundShare("myshare", "indexd"),
+			appKeyForServer: func(wg stores.Workgroup, _ string) (types.PrivateKey, error) {
+				askedFor <- wg
+				if wg.UUID == other {
+					return appKey, nil
+				}
+				return nil, nil
+			},
+			addConnection: func(_ stores.Workgroup, _ stores.Share, k types.PrivateKey) error {
+				gotKey <- k
+				return nil
+			},
+		}
+		api := newTestAPI(ms)
+		w := doRequest(api, http.MethodPut, path, map[string]string{"fromWorkgroup": other.String()})
+		checkStatus(t, w, http.StatusAccepted)
+
+		if res := awaitConnect(t, api, path); res.State != ConnectConnected {
+			t.Fatalf("state: want %q, got %q (%s)", ConnectConnected, res.State, res.Error)
+		}
+
+		// The key looked up is the named workgroup's, not the connecting one's.
+		if wg := <-askedFor; wg.UUID != other {
+			t.Errorf("app key looked up for %v, want %v", wg.UUID, other)
+		}
+		if k := <-gotKey; !bytes.Equal(k, appKey) {
+			t.Errorf("app key stored: want the one that was shared, got %x", k)
+		}
+	})
+
+	t.Run("PUT from a workgroup without a key returns 400", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup:       foundWorkgroup(),
+			findWorkgroupByName: foundWorkgroupByName(),
+			getShare:            foundShare("myshare", "indexd"),
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, path, map[string]string{"fromWorkgroup": testWorkgroupName})
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("PUT from an unknown workgroup returns 404", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, path, map[string]string{"fromWorkgroup": "nobody"})
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("PUT renterd share refuses another workgroup's key", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "renterd"),
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, path, map[string]string{"fromWorkgroup": testWorkgroupName})
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("PUT indexd share with no key to reuse returns 400", func(t *testing.T) {
 		ms := &mockStore{
 			findWorkgroup: foundWorkgroup(),
 			getShare:      foundShare("myshare", "indexd"),
 		}
 		w := doRequest(newTestAPI(ms), http.MethodPut, path, nil)
 		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("PUT indexd share fails where the key lookup does", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup:   foundWorkgroup(),
+			getShare:        foundShare("myshare", "indexd"),
+			appKeyForServer: func(stores.Workgroup, string) (types.PrivateKey, error) { return nil, errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodPut, path, nil)
+		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
 	t.Run("PUT store error fails the attempt", func(t *testing.T) {
@@ -2063,6 +2201,95 @@ func TestConnectStatus(t *testing.T) {
 		}
 		w := doRequest(newTestAPI(ms), http.MethodGet, path, nil)
 		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("GET reports a key the workgroup can reuse", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+			appKeyForServer: func(stores.Workgroup, string) (types.PrivateKey, error) {
+				return types.GeneratePrivateKey(), nil
+			},
+		}
+		res := decodeJSON[ConnectStatusResponse](t, doRequest(newTestAPI(ms), http.MethodGet, path, nil))
+		if res.State != ConnectIdle {
+			t.Errorf("state: want %q, got %q", ConnectIdle, res.State)
+		}
+		if !res.Reusable {
+			t.Error("reusable: want the key of another connection to be offered")
+		}
+	})
+
+	t.Run("GET reports no reusable key where there is none", func(t *testing.T) {
+		for _, backend := range []string{"indexd", "renterd"} {
+			ms := &mockStore{
+				findWorkgroup: foundWorkgroup(),
+				getShare:      foundShare("myshare", backend),
+			}
+			res := decodeJSON[ConnectStatusResponse](t, doRequest(newTestAPI(ms), http.MethodGet, path, nil))
+			if res.Reusable {
+				t.Errorf("reusable on a %s share: want none", backend)
+			}
+		}
+	})
+
+	t.Run("GET names the workgroups a key could be shared from", func(t *testing.T) {
+		other := uuid.MustParse("87654321-4321-4321-4321-cba987654321")
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+			appKeyHolders: func(string) ([]stores.Workgroup, error) {
+				return []stores.Workgroup{
+					{ID: 1, UUID: testUUID, Name: testWorkgroupName},
+					{ID: 2, UUID: other, Name: "holder"},
+				}, nil
+			},
+		}
+		res := decodeJSON[ConnectStatusResponse](t, doRequest(newTestAPI(ms), http.MethodGet, path, nil))
+
+		// The workgroup being connected is not one to share a key from.
+		if len(res.KeyFrom) != 1 {
+			t.Fatalf("keyFrom: want the one other workgroup, got %+v", res.KeyFrom)
+		}
+		if res.KeyFrom[0].Workgroup != other || res.KeyFrom[0].Name != "holder" {
+			t.Errorf("keyFrom: want %v (holder), got %+v", other, res.KeyFrom[0])
+		}
+	})
+
+	t.Run("GET names no workgroup where the key is the workgroup's own", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup:   foundWorkgroup(),
+			getShare:        foundShare("myshare", "indexd"),
+			appKeyForServer: func(stores.Workgroup, string) (types.PrivateKey, error) { return types.GeneratePrivateKey(), nil },
+			appKeyHolders: func(string) ([]stores.Workgroup, error) {
+				t.Error("the holders of a key were looked up although the workgroup has its own")
+				return nil, nil
+			},
+		}
+		res := decodeJSON[ConnectStatusResponse](t, doRequest(newTestAPI(ms), http.MethodGet, path, nil))
+		if !res.Reusable || res.KeyFrom != nil {
+			t.Errorf("want its own key alone, got reusable %v and keyFrom %+v", res.Reusable, res.KeyFrom)
+		}
+	})
+
+	t.Run("GET fails where the holder lookup does", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+			appKeyHolders: func(string) ([]stores.Workgroup, error) { return nil, errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusInternalServerError)
+	})
+
+	t.Run("GET fails where the key lookup does", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup:   foundWorkgroup(),
+			getShare:        foundShare("myshare", "indexd"),
+			appKeyForServer: func(stores.Workgroup, string) (types.PrivateKey, error) { return nil, errStore },
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusInternalServerError)
 	})
 
 	t.Run("the app key of a first-time connection is reported once", func(t *testing.T) {
