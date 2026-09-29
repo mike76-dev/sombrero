@@ -174,7 +174,9 @@ func (db *Database) ApplyFile(target TransferTarget, file transfer.File) (ApplyR
 			return nil
 		}
 
-		dirID, _, err := ensureDirectory(ctx, tx, target, dirPath, true, false, file.CreatedAt, file.ModifiedAt)
+		// A folder the description did not name is made for the workgroup rather
+		// than for the one account, since nothing says it was ever private.
+		dirID, _, err := ensureDirectory(ctx, tx, target, dirPath, false, false, file.CreatedAt, file.ModifiedAt)
 		if err != nil {
 			return err
 		}
