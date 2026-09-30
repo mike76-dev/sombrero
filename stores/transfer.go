@@ -198,6 +198,29 @@ func (db *Database) ApplyFile(target TransferTarget, file transfer.File) (ApplyR
 	return res, err
 }
 
+// SetFileTimes puts back the times a file was made and last changed, which an
+// upload of it stamps with the time of the upload instead.
+func (db *Database) SetFileTimes(share, path string, createdAt, modifiedAt time.Time) error {
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			UPDATE objects
+			SET created_at = $3, modified_at = $4
+			WHERE share_name = $1
+			AND full_path = $2
+			AND temporary = FALSE
+		`
+		tag, err := tx.Exec(ctx, query, share, normalizePath(path), at(createdAt), at(modifiedAt))
+		if err != nil {
+			return fmt.Errorf("failed to set the times of %q: %w", path, err)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("%w: the file %q", ErrNotFound, path)
+		}
+
+		return nil
+	})
+}
+
 // ensureDirectory returns the id of the folder at the path, creating it and the
 // folders above it where they are not there yet.
 func ensureDirectory(ctx context.Context, tx pgx.Tx, target TransferTarget, path string, private, readOnly bool, createdAt, modifiedAt time.Time) (id *uint64, created bool, err error) {

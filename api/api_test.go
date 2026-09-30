@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
+	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
 	sdk "go.sia.tech/siastorage"
 )
@@ -70,6 +71,9 @@ type mockStore struct {
 	hasConnections      func(string) (bool, error)
 	appKeyForServer     func(stores.Workgroup, string) (types.PrivateKey, error)
 	appKeyHolders       func(string) ([]stores.Workgroup, error)
+	applyDirectory      func(stores.TransferTarget, transfer.Directory) (stores.ApplyResult, error)
+	applyFile           func(stores.TransferTarget, transfer.File) (stores.ApplyResult, error)
+	setFileTimes        func(share, path string, createdAt, modifiedAt time.Time) error
 }
 
 func (m *mockStore) IsBanned(h string) (bool, string, error) {
@@ -281,6 +285,29 @@ func (m *mockStore) AppKeyHolders(serverName string) ([]stores.Workgroup, error)
 		return m.appKeyHolders(serverName)
 	}
 	return nil, nil
+}
+
+// The store an import writes to takes the rows of what was pinned, and puts back
+// the times an upload stamps over, so the stand-in for it does too.
+func (m *mockStore) ApplyDirectory(target stores.TransferTarget, dir transfer.Directory) (stores.ApplyResult, error) {
+	if m.applyDirectory != nil {
+		return m.applyDirectory(target, dir)
+	}
+	return stores.Applied, nil
+}
+
+func (m *mockStore) ApplyFile(target stores.TransferTarget, file transfer.File) (stores.ApplyResult, error) {
+	if m.applyFile != nil {
+		return m.applyFile(target, file)
+	}
+	return stores.Applied, nil
+}
+
+func (m *mockStore) SetFileTimes(share, path string, createdAt, modifiedAt time.Time) error {
+	if m.setFileTimes != nil {
+		return m.setFileTimes(share, path, createdAt, modifiedAt)
+	}
+	return nil
 }
 
 // mockServer stands in for the running SMB server.

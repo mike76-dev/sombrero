@@ -12,6 +12,13 @@ import (
 	sdk "go.sia.tech/siastorage"
 )
 
+// TransferStore is the part of a store an import writes the rows of what it
+// pinned to.
+type TransferStore interface {
+	ApplyDirectory(target stores.TransferTarget, dir transfer.Directory) (stores.ApplyResult, error)
+	ApplyFile(target stores.TransferTarget, file transfer.File) (stores.ApplyResult, error)
+}
+
 // ObjectPinner takes over an object that is already on the network by pinning the
 // sectors it is made of into this account. The bytes are not moved: the host
 // keeps them and the indexer takes on paying for them.
@@ -85,7 +92,7 @@ type ImportStats struct {
 //
 // A file that can be had neither way is reported and counted, and the import goes
 // on to the next one.
-func Import(ctx context.Context, store *stores.Database, dst Client, src PartReader, pinner ObjectPinner, r *transfer.Reader, opts ImportOptions) (stats ImportStats, err error) {
+func Import(ctx context.Context, store TransferStore, dst Client, src PartReader, pinner ObjectPinner, r *transfer.Reader, opts ImportOptions) (stats ImportStats, err error) {
 	copyOpts := opts.CopyOptions
 	if copyOpts.ChunkSize == 0 {
 		copyOpts.ChunkSize = defaultCopyChunk
@@ -132,7 +139,7 @@ func Import(ctx context.Context, store *stores.Database, dst Client, src PartRea
 
 // importFile takes over one file, by pinning what it is made of where that is to
 // be had and by copying it where it is not.
-func importFile(ctx context.Context, store *stores.Database, dst Client, src PartReader, pinner ObjectPinner, file transfer.File, opts ImportOptions, copyOpts CopyOptions, stats *ImportStats) error {
+func importFile(ctx context.Context, store TransferStore, dst Client, src PartReader, pinner ObjectPinner, file transfer.File, opts ImportOptions, copyOpts CopyOptions, stats *ImportStats) error {
 	if !opts.Copy && pinner != nil && pinnable(file) {
 		pinned, err := PinFile(ctx, pinner, file)
 		if err == nil {

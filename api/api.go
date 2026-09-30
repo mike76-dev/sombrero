@@ -272,6 +272,7 @@ type API struct {
 	version  string
 	ctx      context.Context
 	connects connectTracker
+	imports  importTracker
 }
 
 // NewAPI returns an initialized API object. srv is the running SMB server and
@@ -465,6 +466,18 @@ func (api *API) buildHTTPRoutes() {
 
 	router.DELETE("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.connectHandlerDELETE(w, req, ps)
+	})
+
+	router.GET("/import/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.importHandlerGET(w, req, ps)
+	})
+
+	router.POST("/import/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.importHandlerPOST(w, req, ps)
+	})
+
+	router.DELETE("/import/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.importHandlerDELETE(w, req, ps)
 	})
 
 	api.router = *router
