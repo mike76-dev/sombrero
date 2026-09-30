@@ -4,6 +4,7 @@ import { WorkgroupsPage } from './pages/WorkgroupsPage'
 import { AccountsPage } from './pages/AccountsPage'
 import { SharesPage } from './pages/SharesPage'
 import { ConnectionsPage } from './pages/ConnectionsPage'
+import { ImportPage } from './pages/ImportPage'
 import { BansPage } from './pages/BansPage'
 import { StatsPage } from './pages/StatsPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -27,6 +28,7 @@ const pages = {
   accounts: { label: 'Accounts', component: AccountsPage },
   shares: { label: 'Shares', component: SharesPage },
   connections: { label: 'Connections', component: ConnectionsPage },
+  import: { label: 'Import', component: ImportPage },
   bans: { label: 'Bans', component: BansPage },
   stats: { label: 'Stats', component: StatsPage },
   settings: { label: 'Settings', component: SettingsPage },

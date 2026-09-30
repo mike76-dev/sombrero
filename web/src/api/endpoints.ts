@@ -5,6 +5,8 @@ import type {
   ConnectStatusResponse,
   DefragmentResponse,
   FragmentationResponse,
+  ImportRequest,
+  ImportStatusResponse,
   IsBannedResponse,
   OrphansResponse,
   ProbeResponse,
@@ -181,3 +183,22 @@ export const disconnect = (workgroup: string, share: string) =>
   request(`/connect/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`, {
     method: 'DELETE',
   })
+
+// Imports
+
+export const startImport = (workgroup: string, share: string, body: ImportRequest) =>
+  request<ImportStatusResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
+    { method: 'POST', body },
+  )
+
+export const importStatus = (workgroup: string, share: string) =>
+  request<ImportStatusResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
+  )
+
+export const cancelImport = (workgroup: string, share: string) =>
+  request<ImportStatusResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
+    { method: 'DELETE' },
+  )

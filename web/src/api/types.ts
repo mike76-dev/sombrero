@@ -141,6 +141,41 @@ export interface AppKeyHolder {
   name?: string
 }
 
+export type ImportState = 'idle' | 'running' | 'done' | 'failed' | 'cancelled'
+
+// What an import of another server's data is to read, and who the files it
+// brings over belong to here.
+export interface ImportRequest {
+  source: 'renterd' | 'indexd'
+  address: string
+  username: string
+  password?: string
+  bucket?: string
+  appKey?: string
+  prefix?: string
+  copy?: boolean
+}
+
+// The progress of one import. path is the file it has in hand, pinned what it
+// took over where it lies, copied what it had to move, and waits how often it had
+// to wait for room in the share's staging area.
+export interface ImportStatusResponse {
+  state: ImportState
+  source?: string
+  started?: string
+  since?: string
+  path?: string
+  directories: number
+  pinned: number
+  copied: number
+  skipped: number
+  failed: number
+  bytes: number
+  waits: number
+  failures?: string[]
+  error?: string
+}
+
 export interface OrphanedSlab {
   workgroup: string
   key: string
