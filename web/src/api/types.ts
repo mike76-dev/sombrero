@@ -156,15 +156,18 @@ export interface ImportRequest {
   copy?: boolean
 }
 
-// The progress of one import. path is the file it has in hand, pinned what it
-// took over where it lies, copied what it had to move, and waits how often it had
-// to wait for room in the share's staging area.
+// The progress of one import. path is the file it has in hand, with fileBytes of
+// its fileSize moved so far; pinned is what it took over where it lies, copied
+// what it had to move, and waits how often it had to wait for room in the share's
+// staging area.
 export interface ImportStatusResponse {
   state: ImportState
   source?: string
   started?: string
   since?: string
   path?: string
+  fileBytes?: number
+  fileSize?: number
   directories: number
   pinned: number
   copied: number

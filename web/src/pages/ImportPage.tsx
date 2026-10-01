@@ -277,6 +277,30 @@ export function ImportPage() {
   )
 }
 
+// CurrentFile is the file the import has in hand. A large one is copied a chunk
+// at a time, so how much of it has moved is worth showing.
+function CurrentFile({ status }: { status: ImportStatusResponse }) {
+  const size = status.fileSize ?? 0
+  const copied = status.fileBytes ?? 0
+  const share = size > 0 ? Math.min(100, Math.round((copied / size) * 100)) : 0
+
+  return (
+    <div className="stack">
+      <div className="mono">{status.path}</div>
+      {size > 0 && (
+        <>
+          <div className="bar">
+            <div className="bar-fill" style={{ width: `${share}%` }} />
+          </div>
+          <div className="muted">
+            {formatBytes(copied)} of {formatBytes(size)} ({share}%)
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 // ImportStatusView is everything an import has to say: where it has got to, what
 // it came to, and what it could not bring over.
 function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
@@ -296,8 +320,8 @@ function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
       >
         {label[status.state] || status.state}
         {status.source ? ` — from ${status.source}` : ''}
-        {status.path ? `: ${status.path}` : ''}
       </div>
+      {status.path && <CurrentFile status={status} />}
       <table className="table table-kv">
         <tbody>
           <tr>

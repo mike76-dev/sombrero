@@ -80,7 +80,12 @@ type ImportStatusResponse struct {
 	Source  string      `json:"source,omitempty"`
 	Started *time.Time  `json:"started,omitempty"`
 	Since   *time.Time  `json:"since,omitempty"`
-	Path    string      `json:"path,omitempty"`
+
+	// Path is the file the import has in hand, with FileBytes of its FileSize
+	// moved so far. A file that is pinned rather than copied moves none of it.
+	Path      string `json:"path,omitempty"`
+	FileBytes uint64 `json:"fileBytes,omitempty"`
+	FileSize  uint64 `json:"fileSize,omitempty"`
 
 	Directories int    `json:"directories"`
 	Pinned      int    `json:"pinned"`
@@ -108,28 +113,40 @@ type importRun struct {
 	source string
 	cancel context.CancelFunc
 
-	mu       sync.Mutex
-	state    ImportState
-	started  time.Time
-	since    time.Time
+	mu      sync.Mutex
+	state   ImportState
+	started time.Time
+	since   time.Time
+	stats   client.ImportStats
+
+	// The file the import has in hand, and how much of it has moved. A large file
+	// is one record of the description for a long time, so what it is doing is
+	// only visible from inside it.
 	path     string
-	stats    client.ImportStats
+	copied   uint64
+	size     uint64
 	failures []string
 	err      string
 }
 
-// working records the file the import has in hand.
-func (r *importRun) working(path string) {
+// working records the file the import has in hand and how much of it has moved.
+func (r *importRun) working(path string, copied, total uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.path = path
+	r.copied = copied
+	r.size = total
 }
 
-// count keeps what the import has done so far, which it reports as it goes.
+// count keeps what the import has done so far, which it reports as it goes. It
+// comes once a file is done with, so what was moved of it is counted in the
+// totals by now and no longer belongs to a file in hand.
 func (r *importRun) count(stats client.ImportStats) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stats = stats
+	r.path = ""
+	r.copied, r.size = 0, 0
 }
 
 // failure keeps a path the import could not have, up to the first few of them.
@@ -148,6 +165,7 @@ func (r *importRun) finish(state ImportState, stats client.ImportStats, err erro
 	r.state = state
 	r.since = time.Now()
 	r.path = ""
+	r.copied, r.size = 0, 0
 	r.stats = stats
 	if err != nil {
 		r.err = err.Error()
@@ -174,15 +192,20 @@ func (r *importRun) status() ImportStatusResponse {
 		Started:     &started,
 		Since:       &since,
 		Path:        r.path,
+		FileBytes:   r.copied,
+		FileSize:    r.size,
 		Directories: r.stats.Directories,
 		Pinned:      r.stats.Pinned,
 		Copied:      r.stats.Copied,
 		Skipped:     r.stats.Skipped,
 		Failed:      r.stats.Failed,
-		Bytes:       r.stats.Bytes,
-		Waits:       r.stats.Waits,
-		Failures:    append([]string(nil), r.failures...),
-		Error:       r.err,
+
+		// What has moved of the file in hand is not in the totals yet, and is
+		// counted here so that the bytes do not stand still through a large one.
+		Bytes:    r.stats.Bytes + r.copied,
+		Waits:    r.stats.Waits,
+		Failures: append([]string(nil), r.failures...),
+		Error:    r.err,
 	}
 }
 
@@ -337,7 +360,7 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 			Stamp: func(_ context.Context, file transfer.File) error {
 				return store.SetFileTimes(share.Name, file.Path, file.CreatedAt, file.ModifiedAt)
 			},
-			Progress: func(path string, copied, total uint64) { run.working(path) },
+			Progress: run.working,
 			OnError:  run.failure,
 		},
 		Target: stores.TransferTarget{Share: share.Name, Workgroup: wg.ID, Owner: acc},

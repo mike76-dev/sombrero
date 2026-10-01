@@ -222,6 +222,35 @@ func TestImportStampsAndReports(t *testing.T) {
 	}
 }
 
+// TestImportReportsTheFileInHand verifies what the status says while a large file
+// is being copied, which is one record of the description for a long time.
+func TestImportReportsTheFileInHand(t *testing.T) {
+	run := &importRun{state: ImportRunning}
+	run.count(client.ImportStats{Copied: 1, Bytes: 100})
+
+	run.working("/big.mp4", 40<<20, 1<<30)
+	res := run.status()
+	if res.Path != "/big.mp4" || res.FileBytes != 40<<20 || res.FileSize != 1<<30 {
+		t.Errorf("the file in hand: got %q, %d of %d", res.Path, res.FileBytes, res.FileSize)
+	}
+
+	// What has moved of it is counted in the total, so that the bytes do not
+	// stand still until the file lands.
+	if res.Bytes != 100+(40<<20) {
+		t.Errorf("bytes: want the totals plus what has moved of the file, got %d", res.Bytes)
+	}
+
+	// Once the file is done with, what moved of it belongs to the totals alone.
+	run.count(client.ImportStats{Copied: 2, Bytes: 100 + (1 << 30)})
+	res = run.status()
+	if res.Path != "" || res.FileBytes != 0 || res.FileSize != 0 {
+		t.Errorf("after the file: got %q, %d of %d", res.Path, res.FileBytes, res.FileSize)
+	}
+	if res.Bytes != 100+(1<<30) {
+		t.Errorf("bytes after the file: want the totals, got %d", res.Bytes)
+	}
+}
+
 // TestImportAppMetadata verifies that an import names this server to the source
 // indexer the way the rest of the server does, which is what its keys hang off.
 func TestImportAppMetadata(t *testing.T) {
