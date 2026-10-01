@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   cancelImport,
   importStatus,
@@ -64,46 +64,45 @@ export function ImportPage() {
       (source === 'renterd' || appKey.trim()),
   )
 
-  // The status of the pair on show is asked for as soon as both are named, and
-  // then again while an import is running.
+  // One poll follows an import to its end, whether it was started here or was
+  // already running when the pair was named: every answer that is still running
+  // asks again.
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const stopped = useRef(false)
+  const poll = useCallback(async (wg: string, sh: string) => {
+    try {
+      const res = await importStatus(wg, sh)
+      if (stopped.current) return
+      setPollError(null)
+      setStatus(res)
+      if (res.state === 'running') {
+        timer.current = setTimeout(() => poll(wg, sh), pollInterval)
+      }
+    } catch (e) {
+      if (!stopped.current) setPollError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
   useEffect(() => {
+    stopped.current = false
     setStatus(null)
     setPollError(null)
-    if (!workgroup.trim() || !share.trim()) return
-
-    let cancelled = false
-    const look = async () => {
-      try {
-        const res = await importStatus(workgroup.trim(), share.trim())
-        if (cancelled) return
-        setPollError(null)
-        setStatus(res)
-        if (res.state === 'running') timer.current = setTimeout(look, pollInterval)
-      } catch (e) {
-        if (cancelled) return
-        setPollError(e instanceof Error ? e.message : String(e))
-      }
-    }
-    look()
+    clearTimeout(timer.current)
+    if (workgroup.trim() && share.trim()) poll(workgroup.trim(), share.trim())
 
     return () => {
-      cancelled = true
+      stopped.current = true
       clearTimeout(timer.current)
     }
-  }, [workgroup, share])
+  }, [workgroup, share, poll])
 
+  // follow takes over from a call that started or called off an import: what it
+  // answered is the first status, and the poll carries it from there.
   const follow = (res: ImportStatusResponse) => {
     setStatus(res)
+    clearTimeout(timer.current)
     if (res.state === 'running') {
-      clearTimeout(timer.current)
-      timer.current = setTimeout(async () => {
-        try {
-          setStatus(await importStatus(workgroup.trim(), share.trim()))
-        } catch (e) {
-          setPollError(e instanceof Error ? e.message : String(e))
-        }
-      }, pollInterval)
+      timer.current = setTimeout(() => poll(workgroup.trim(), share.trim()), pollInterval)
     }
   }
 

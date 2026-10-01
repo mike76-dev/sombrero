@@ -251,6 +251,49 @@ func TestImportLeavesWhatIsThere(t *testing.T) {
 	}
 }
 
+// TestImportReportsAsItGoes verifies that an import says how far it has got
+// while it is running, rather than only once it has finished.
+func TestImportReportsAsItGoes(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	files := []transfer.File{foreignFile("/taken/one.bin", 128), foreignFile("/taken/two.bin", 256)}
+	var reports []ImportStats
+	stats, err := Import(ctx, db, c, &fakeSource{}, &fakePinner{},
+		describeFiles(t, files, transfer.Directory{Path: "/taken"}),
+		ImportOptions{
+			CopyOptions: CopyOptions{Account: acc},
+			Target:      importTarget(t, db, acc, share.Name),
+			Report:      func(s ImportStats) { reports = append(reports, s) },
+		})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	// One report per folder and file, each with the totals as they stood then.
+	if len(reports) != 3 {
+		t.Fatalf("want a report for each of the 3 records, got %d", len(reports))
+	}
+	if reports[0].Directories != 1 || reports[0].Pinned != 0 {
+		t.Errorf("after the folder: got %+v", reports[0])
+	}
+	if reports[1].Pinned != 1 || reports[2].Pinned != 2 {
+		t.Errorf("after the files: got %+v and %+v", reports[1], reports[2])
+	}
+	if reports[len(reports)-1] != stats {
+		t.Errorf("the last report is %+v, want what the import came to, %+v", reports[len(reports)-1], stats)
+	}
+}
+
 // TestPinFileRewritesTheParts verifies what pinning makes of a description: the
 // parts name the objects this account holds, with nothing left to pin.
 func TestPinFileRewritesTheParts(t *testing.T) {

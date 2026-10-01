@@ -71,6 +71,10 @@ type ImportOptions struct {
 	// Copy has everything copied, even what could have been pinned, for a source
 	// whose data is to be left behind rather than taken over.
 	Copy bool
+
+	// Report is called with the running totals as each folder and file is done
+	// with, for a caller that says how far an import has got.
+	Report func(stats ImportStats)
 }
 
 // ImportStats is what taking over a description came to.
@@ -121,9 +125,9 @@ func Import(ctx context.Context, store TransferStore, dst Client, src PartReader
 			if _, err := store.ApplyDirectory(opts.Target, *dir); err != nil {
 				stats.Failed++
 				report(opts.CopyOptions, dir.Path, err)
-				continue
+			} else {
+				stats.Directories++
 			}
-			stats.Directories++
 
 		case file != nil:
 			if err := importFile(ctx, store, dst, src, pinner, *file, opts, copyOpts, &stats); err != nil {
@@ -133,6 +137,10 @@ func Import(ctx context.Context, store TransferStore, dst Client, src PartReader
 				stats.Failed++
 				report(opts.CopyOptions, file.Path, err)
 			}
+		}
+
+		if opts.Report != nil {
+			opts.Report(stats)
 		}
 	}
 }

@@ -342,6 +342,7 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 		},
 		Target: stores.TransferTarget{Share: share.Name, Workgroup: wg.ID, Owner: acc},
 		Copy:   body.Copy,
+		Report: run.count,
 	}
 
 	go api.runImport(ctx, cancel, run, connectKey(wg, share), store, dst, src, pinner, describe, opts)
