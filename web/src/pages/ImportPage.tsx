@@ -51,6 +51,10 @@ export function ImportPage() {
   // The share has to be one this server keeps the files of, since that is what
   // an import writes its rows to.
   const backend = shares?.find((s) => s.name === share.trim())?.type
+
+  // Nothing of renterd's can be pinned, so an import from one copies whether it
+  // is asked to or not.
+  const copying = source === 'renterd' || copy
   const ready = Boolean(
     workgroup.trim() &&
       share.trim() &&
@@ -113,6 +117,7 @@ export function ImportPage() {
           renterd data, is downloaded from the source and uploaded again, so the same data is
           paid for twice until you delete it at the source.
         </p>
+        <div className="group-label">Where the files are imported to</div>
         <div className="grid">
           <Field label="Workgroup">
             <WorkgroupSelect value={workgroup} onChange={setWorkgroup} />
@@ -138,11 +143,12 @@ export function ImportPage() {
           </Field>
         </div>
 
+        <div className="group-label">Where the files come from</div>
         <div className="row">
           {(
             [
-              ['renterd', 'From a renterd server'],
-              ['indexd', 'From another indexd account'],
+              ['renterd', 'A renterd server'],
+              ['indexd', 'Another indexd account'],
             ] as const
           ).map(([key, label]) => (
             <label className="checkbox" key={key}>
@@ -217,7 +223,7 @@ export function ImportPage() {
         <label className="checkbox">
           <input
             type="checkbox"
-            checked={copy}
+            checked={copying}
             onChange={(e) => setCopy(e.target.checked)}
             disabled={running(status) || source === 'renterd'}
           />
@@ -234,7 +240,7 @@ export function ImportPage() {
                   source,
                   address: address.trim(),
                   username: username.trim(),
-                  copy,
+                  copy: copying,
                   ...(source === 'renterd'
                     ? { password, bucket: bucket.trim() }
                     : { appKey: appKey.trim(), prefix: prefix.trim() || undefined }),

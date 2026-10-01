@@ -262,6 +262,20 @@ textarea {
   height: 16px;
 }
 
+/* A checkbox nobody can toggle does not invite the pointer. */
+.checkbox:has(input:disabled) {
+  cursor: default;
+  color: var(--text-muted);
+}
+
+/* A heading over a group of fields, for a form that does more than one thing. */
+.group-label {
+  margin: 16px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 /* Buttons */
 
 .btn {
