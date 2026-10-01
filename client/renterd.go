@@ -380,7 +380,9 @@ func (rc *RenterdClient) Read(ctx context.Context, _ stores.Account, path string
 	values.Set("bucket", rc.bucket)
 
 	// url.PathEscape does the full escape, so we need to convert any escaped forward slashes back.
-	path = strings.ReplaceAll(url.PathEscape(path), "%2F", "/")
+	// The key is taken with or without the leading slash, since the endpoint carries its own and
+	// two of them name an object renterd does not have.
+	path = strings.ReplaceAll(url.PathEscape(strings.TrimPrefix(path, "/")), "%2F", "/")
 	path = "/api/worker/object/" + path + "?" + values.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%v%v", rc.baseURL, path), nil)
