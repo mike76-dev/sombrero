@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
+	"strings"
 
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
@@ -23,14 +25,22 @@ type AccountObjects interface {
 	Object(ctx context.Context, key types.Hash256) (sdk.Object, error)
 }
 
+// AccountContents is what an account turned out to hold: the files its objects
+// could name, and the objects that could name nothing.
+type AccountContents struct {
+	Files   int
+	Objects int
+}
+
 // DescribeAccount walks an indexd account's object log and describes what it
-// holds, each object at a path of its own under prefix.
+// holds.
 //
-// The names the objects went by are not the account's to know — it keeps objects,
-// not paths — so this describes data that was stranded, or that is being taken
-// over from a server that cannot say what it called it. Each part carries what it
-// takes to pin the object as well as where to fetch its bytes, so whoever applies
-// the description can do either.
+// An object written by a server that tagged it says which runs of which files
+// are in it, so those files are described as themselves, under the names they
+// went by. An object that says nothing about itself can only be described as
+// itself, under prefix, since an account keeps objects rather than paths. Each
+// part carries what it takes to pin the object as well as where to fetch its
+// bytes, so whoever applies the description can do either.
 func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer, origin, prefix string) (stats DescribeStats, err error) {
 	if prefix == "" {
 		prefix = LostAndFound
@@ -41,18 +51,17 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 		return stats, err
 	}
 
-	if err := w.Directory(transfer.Directory{Path: prefix}); err != nil {
-		return stats, err
-	}
-	stats.Directories++
-
 	// The log is walked by time, which says nothing about what an account holds
-	// now, so the objects are described in an order that reads the same twice.
+	// now, so the objects are read in an order that reads the same twice.
 	keys := make([]types.Hash256, 0, len(pinned))
 	for key := range pinned {
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+
+	files := make(map[string]*transfer.File)
+	var shares []string
+	var untagged []sdk.Object
 
 	for _, key := range keys {
 		if err := ctx.Err(); err != nil {
@@ -64,32 +73,136 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 			return stats, fmt.Errorf("failed to retrieve the object %s: %w", key, err)
 		}
 
-		size := obj.Size()
-		file := transfer.File{
-			Path:       path.Join(prefix, key.String()),
-			Size:       size,
+		tag, ok := parseTag(obj.Metadata())
+		if !ok {
+			untagged = append(untagged, obj)
+			continue
+		}
+
+		for _, piece := range tag.Pieces {
+			if !slices.Contains(shares, piece.Share) {
+				shares = append(shares, piece.Share)
+			}
+			collectPiece(files, piece, obj, origin)
+		}
+	}
+
+	if err := writeNamedFiles(w, files, shares, &stats); err != nil {
+		return stats, err
+	}
+
+	// What said nothing about itself goes under the prefix, one file per object,
+	// which is the most that can be said of it.
+	if len(untagged) > 0 {
+		if err := w.Directory(transfer.Directory{Path: prefix}); err != nil {
+			return stats, err
+		}
+		stats.Directories++
+
+		for _, obj := range untagged {
+			if err := describeObject(w, obj, prefix, origin); err != nil {
+				return stats, err
+			}
+			stats.Files++
+		}
+	}
+
+	return stats, nil
+}
+
+// collectPiece adds one run of a file to what is known of that file so far.
+func collectPiece(files map[string]*transfer.File, piece objectPiece, obj sdk.Object, origin string) {
+	key := piece.Share + piece.Path
+	file, ok := files[key]
+	if !ok {
+		file = &transfer.File{
+			Path:       piece.Path,
+			Size:       piece.Size,
 			CreatedAt:  obj.CreatedAt(),
 			ModifiedAt: obj.UpdatedAt(),
 		}
+		files[key] = file
+	}
 
-		// An object of no bytes is made of no parts, the same as an empty file.
-		if size > 0 {
-			dataKey := obj.UnsafeDataKey()
-			file.Parts = []transfer.Part{{
-				Offset: 0,
-				Length: size,
-				Pin:    &transfer.Pin{DataKey: dataKey, Slabs: obj.Slabs()},
-				Source: &transfer.Source{Kind: "indexd", Origin: origin, Key: key.String()},
-			}}
+	// The size the piece carries was what the file measured then, and the runs
+	// themselves say what it measures at least.
+	if piece.Size > file.Size {
+		file.Size = piece.Size
+	}
+	if end := piece.Offset + piece.Length; end > file.Size {
+		file.Size = end
+	}
+	if obj.UpdatedAt().After(file.ModifiedAt) {
+		file.ModifiedAt = obj.UpdatedAt()
+	}
+
+	// The object is named as the source's, not as one this server holds: the key
+	// is the same either way, but a row may only name an object this account has
+	// pinned, which is what applying the description after pinning it does.
+	dataKey := obj.UnsafeDataKey()
+	file.Parts = append(file.Parts, transfer.Part{
+		Offset:     piece.Offset,
+		DataOffset: piece.At,
+		Length:     piece.Length,
+		Pin:        &transfer.Pin{DataKey: dataKey, Slabs: obj.Slabs()},
+		Source:     &transfer.Source{Kind: "indexd", Origin: origin, Key: obj.ID().String()},
+	})
+}
+
+// writeNamedFiles writes the files the objects could name, their runs in order.
+// A run that is missing is a hole rather than a reason to leave the file out: the
+// object that held it is no longer the account's.
+func writeNamedFiles(w *transfer.Writer, files map[string]*transfer.File, shares []string, stats *DescribeStats) error {
+	keys := make([]string, 0, len(files))
+	for key := range files {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		file := files[key]
+		sort.Slice(file.Parts, func(i, j int) bool { return file.Parts[i].Offset < file.Parts[j].Offset })
+
+		// One account is one share's, unless its key was shared with another
+		// workgroup. Where the objects name more than one share, the files are
+		// kept apart by it rather than merged into one tree.
+		if len(shares) > 1 {
+			share := strings.TrimSuffix(key, file.Path)
+			file.Path = path.Join("/", share, file.Path)
 		}
 
-		if err := w.File(file); err != nil {
-			return stats, err
+		if err := w.File(*file); err != nil {
+			return err
 		}
 		stats.Files++
 	}
 
-	return stats, nil
+	return nil
+}
+
+// describeObject writes an object as a file of its own, which is what an object
+// that says nothing about itself amounts to.
+func describeObject(w *transfer.Writer, obj sdk.Object, prefix, origin string) error {
+	size := obj.Size()
+	file := transfer.File{
+		Path:       path.Join(prefix, obj.ID().String()),
+		Size:       size,
+		CreatedAt:  obj.CreatedAt(),
+		ModifiedAt: obj.UpdatedAt(),
+	}
+
+	// An object of no bytes is made of no parts, the same as an empty file.
+	if size > 0 {
+		dataKey := obj.UnsafeDataKey()
+		file.Parts = []transfer.Part{{
+			Offset: 0,
+			Length: size,
+			Pin:    &transfer.Pin{DataKey: dataKey, Slabs: obj.Slabs()},
+			Source: &transfer.Source{Kind: "indexd", Origin: origin, Key: obj.ID().String()},
+		}}
+	}
+
+	return w.File(file)
 }
 
 // listPinned folds an account's object log into what it holds now, which is the

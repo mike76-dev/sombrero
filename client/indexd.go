@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -105,7 +106,10 @@ func completeWithRetry(complete func() error) (err error) {
 // storageBackend is the minimal interface for `indexd` SDK.
 type storageBackend interface {
 	Account(ctx context.Context) (app.AccountResponse, error)
-	Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8) (types.Hash256, error)
+
+	// Upload stores the data and pins it. meta is what the object comes to say
+	// about its own contents, and may be nil for an object that says nothing.
+	Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8, meta json.RawMessage) (types.Hash256, error)
 	Download(ctx context.Context, key types.Hash256, offset, length uint64, w io.Writer) error
 	DeleteObject(ctx context.Context, key types.Hash256) error
 	PruneSlabs(ctx context.Context) error
@@ -192,11 +196,15 @@ func (b *sdkBackend) Account(ctx context.Context) (app.AccountResponse, error) {
 	return b.sdk.Account(ctx)
 }
 
-// Upload uploads the object and directly pins it.
-func (b *sdkBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8) (types.Hash256, error) {
+// Upload uploads the object and directly pins it. The tag goes with it, sealed
+// by the SDK with the app key, so that the object can later say what it holds.
+func (b *sdkBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8, meta json.RawMessage) (types.Hash256, error) {
 	obj := sdk.NewEmptyObject()
 	if err := b.sdk.Upload(ctx, &obj, r, sdk.WithRedundancy(dataShards, parityShards)); err != nil {
 		return types.Hash256{}, err
+	}
+	if len(meta) > 0 {
+		obj.UpdateMetadata(meta)
 	}
 
 	key := obj.ID()
@@ -1236,7 +1244,7 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 	ic.markClaimed(job.MetadataID)
 	defer ic.unmarkClaimed(job.MetadataID)
 
-	key, err := ic.backend.Upload(ctx, bytes.NewReader(job.Data), ic.dataShards, ic.parityShards)
+	key, err := ic.backend.Upload(ctx, bytes.NewReader(job.Data), ic.dataShards, ic.parityShards, ic.tag([]stores.UploadJob{job}))
 	if err != nil {
 		_ = ic.db.RequeueUploadJob(job.UploadID, job.MetadataID)
 		return fmt.Errorf("couldn't upload slab: %v", err)
@@ -1333,7 +1341,7 @@ func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
 		ic.logPackedSlab(jobs, len(slab))
 	}
 
-	key, err := ic.backend.Upload(ctx, bytes.NewReader(slab), ic.dataShards, ic.parityShards)
+	key, err := ic.backend.Upload(ctx, bytes.NewReader(slab), ic.dataShards, ic.parityShards, ic.tag(jobs))
 	if err != nil {
 		for _, job := range jobs {
 			if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {

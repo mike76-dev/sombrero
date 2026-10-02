@@ -39,6 +39,54 @@ type UploadJob struct {
 // ErrNoUploadJobs is returned when there are no pending upload jobs available for processing.
 var ErrNoUploadJobs = errors.New("no upload jobs available")
 
+// PieceOwner is the file a piece of an upload belongs to. Size is what the file
+// measured when the piece was claimed, which is zero while it is still being
+// written.
+type PieceOwner struct {
+	Share string
+	Path  string
+	Size  uint64
+}
+
+// PieceOwners returns the file each of the given metadata entries belongs to,
+// which is what an object is tagged with so that it can say what it holds.
+func (db *Database) PieceOwners(ids []uint64) (owners map[uint64]PieceOwner, err error) {
+	owners = make(map[uint64]PieceOwner, len(ids))
+	if len(ids) == 0 {
+		return owners, nil
+	}
+
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT m.id, o.share_name, o.full_path, o.size
+			FROM metadata m
+			JOIN objects o ON o.id = m.object_id
+			WHERE m.id = ANY($1)
+		`
+		rows, err := tx.Query(ctx, query, ids)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve the files of the pieces: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var id, size uint64
+			var share, path string
+			if err := rows.Scan(&id, &share, &path, &size); err != nil {
+				return fmt.Errorf("failed to scan the file of a piece: %w", err)
+			}
+			owners[id] = PieceOwner{Share: share, Path: path, Size: size}
+		}
+
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return owners, nil
+}
+
 // collectStorage scans pairs of buffer IDs and slab keys, as returned by the
 // queries that gather the storage referenced by a set of metadata entries.
 // Exactly one of the two is set in any given row.

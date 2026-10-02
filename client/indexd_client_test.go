@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,10 @@ type fakeBackend struct {
 	deleteErr  error
 	uploads    int
 	deletes    int
+
+	// tags keeps what each uploaded object was told to say about its contents,
+	// in the order the uploads were made.
+	tags []json.RawMessage
 
 	downloadErrs []error // returned by the next downloads, one each
 	downloads    int
@@ -145,9 +150,10 @@ func (fb *fakeBackend) Account(ctx context.Context) (app.AccountResponse, error)
 	}, nil
 }
 
-func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8) (types.Hash256, error) {
+func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8, meta json.RawMessage) (types.Hash256, error) {
 	fb.mu.Lock()
 	fb.uploads++
+	fb.tags = append(fb.tags, meta)
 	fb.mu.Unlock()
 
 	if fb.uploadGate != nil {
@@ -2376,7 +2382,7 @@ func TestIndexdClient_LateCompletionSharedSlab(t *testing.T) {
 	mustReadEquals(t, ctx, c, acc, "a.bin", content)
 
 	// A key that no file references is deleted as before.
-	orphan, err := fb.Upload(ctx, bytes.NewReader([]byte("orphaned")), 1, 0)
+	orphan, err := fb.Upload(ctx, bytes.NewReader([]byte("orphaned")), 1, 0, nil)
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
@@ -2523,7 +2529,7 @@ func TestIndexdClient_StrandedPieceRecovery(t *testing.T) {
 // left behind by an upload the database never recorded looks like.
 func pinUnrecorded(t *testing.T, ctx context.Context, backend *fakeBackend, size int) types.Hash256 {
 	t.Helper()
-	key, err := backend.Upload(ctx, bytes.NewReader(frand.Bytes(size)), 1, 0)
+	key, err := backend.Upload(ctx, bytes.NewReader(frand.Bytes(size)), 1, 0, nil)
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
