@@ -260,6 +260,76 @@ func TestImportProbe(t *testing.T) {
 	})
 }
 
+// sortingClient stands in for a share's connection that sorts out the objects
+// whose names are gone.
+type sortingClient struct {
+	mockClient
+	report client.SortReport
+	asked  struct {
+		prefix, after string
+		limit         int
+	}
+}
+
+func (sc *sortingClient) SortLostAndFound(ctx context.Context, acc stores.Account, prefix, after string, limit int) (client.SortReport, error) {
+	sc.asked.prefix, sc.asked.after, sc.asked.limit = prefix, after, limit
+
+	return sc.report, nil
+}
+
+// TestImportSort verifies what one round of sorting out the lost and found
+// reports, and that the round is asked for as the caller asked for it.
+func TestImportSort(t *testing.T) {
+	path := "/import/" + testUUID.String() + "/myshare/sort"
+
+	t.Run("a round reports what it found", func(t *testing.T) {
+		sorter := &sortingClient{report: client.SortReport{
+			Objects: 2, Recovered: 3, Skipped: 1, Bytes: 4096, Leftover: 512,
+			Last: "/lost+found/02.bin", More: true,
+		}}
+		srv := &mockServer{
+			shareConnections: func(string) (map[string]client.Client, map[string]string, error) {
+				return map[string]client.Client{testUUID.String(): sorter}, nil, nil
+			},
+		}
+
+		w := doRequest(newTestAPIWithServer(importingStore("myshare"), srv), http.MethodPost, path, ImportSortRequest{
+			Username: "alice", Prefix: "/lost+found", After: "/lost+found/00.bin", Limit: 2,
+		})
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[ImportSortResponse](t, w)
+		if res.Objects != 2 || res.Recovered != 3 || res.Skipped != 1 || !res.More {
+			t.Errorf("the round: got %+v", res)
+		}
+		if res.Last != "/lost+found/02.bin" {
+			t.Errorf("the round stopped at %q", res.Last)
+		}
+		if sorter.asked.prefix != "/lost+found" || sorter.asked.after != "/lost+found/00.bin" || sorter.asked.limit != 2 {
+			t.Errorf("the round was asked for as %+v", sorter.asked)
+		}
+	})
+
+	t.Run("a renterd share is refused", func(t *testing.T) {
+		ms := importingStore("myshare")
+		ms.getShare = foundShare("myshare", "renterd")
+		w := doRequest(newTestAPIWithServer(ms, connectedServer()), http.MethodPost, path, ImportSortRequest{Username: "alice"})
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("an account that is not there is refused", func(t *testing.T) {
+		ms := importingStore("myshare")
+		ms.findAccount = func(string, string) (stores.Account, error) { return stores.Account{}, nil }
+		w := doRequest(newTestAPIWithServer(ms, connectedServer()), http.MethodPost, path, ImportSortRequest{Username: "nobody"})
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("a share that cannot sort is refused", func(t *testing.T) {
+		w := doRequest(newTestAPIWithServer(importingStore("myshare"), connectedServer()), http.MethodPost, path, ImportSortRequest{Username: "alice"})
+		checkStatus(t, w, http.StatusBadRequest)
+	})
+}
+
 // TestImportReportsTheFileInHand verifies what the status says while a large file
 // is being copied, which is one record of the description for a long time.
 func TestImportReportsTheFileInHand(t *testing.T) {

@@ -114,6 +114,37 @@ type ImportProbeResponse struct {
 	Warning string `json:"warning,omitempty"`
 }
 
+// ImportSortRequest is the body of POST /import/:workgroup/:share/sort: whose
+// the recovered files are, where to look, and where to take up from.
+type ImportSortRequest struct {
+	Username string `json:"username"`
+	Prefix   string `json:"prefix,omitempty"`
+
+	// After is the path the round before this one stopped at, and Limit how many
+	// files to look inside in this one.
+	After string `json:"after,omitempty"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+// ImportSortResponse is what one round of sorting out the lost and found came
+// to. Last is where it stopped and More says there is further to go, which the
+// caller asks for in a round of its own.
+type ImportSortResponse struct {
+	Objects   int    `json:"objects"`
+	Recovered int    `json:"recovered"`
+	Skipped   int    `json:"skipped"`
+	Bytes     uint64 `json:"bytes"`
+	Leftover  uint64 `json:"leftover"`
+	Last      string `json:"last,omitempty"`
+	More      bool   `json:"more,omitempty"`
+}
+
+// LostAndFound is the part of a client that sorts out the objects whose names are
+// gone. Only an indexd connection has one.
+type LostAndFound interface {
+	SortLostAndFound(ctx context.Context, acc stores.Account, prefix, after string, limit int) (client.SortReport, error)
+}
+
 // Transfers is the part of a store an import needs: the rows of what it pinned,
 // and the times an upload stamps over. Only the database-backed store has it.
 type Transfers interface {
@@ -365,6 +396,66 @@ func (api *API) importProbeHandlerPOST(w http.ResponseWriter, req *http.Request,
 	}
 
 	writeJSON(w, res)
+}
+
+// importSortHandlerPOST handles the POST /import/:workgroup/:share/sort calls.
+// It looks inside the objects whose names are gone and makes a file of whatever
+// it recognizes in them, one round at a time: each object is downloaded whole, so
+// the caller comes back for the next round rather than waiting for all of them.
+// :workgroup may be a UUID or a workgroup name.
+func (api *API) importSortHandlerPOST(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	wg, share, ok := api.resolveConnection(w, ps)
+	if !ok {
+		return
+	}
+	if share.Type != "indexd" {
+		writeError(w, "only an indexd share keeps the objects this sorts out", http.StatusBadRequest)
+		return
+	}
+
+	var body ImportSortRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	acc, err := api.store.FindAccount(strings.ToLower(body.Username), wg.UUID.String())
+	if err != nil {
+		log.Printf("failed to find account: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if acc.ID == 0 {
+		writeError(w, "the recovered files belong to an account of this workgroup, and there is no such account", http.StatusBadRequest)
+		return
+	}
+
+	dst, ok := api.destination(w, wg, share)
+	if !ok {
+		return
+	}
+	sorter, ok := dst.(LostAndFound)
+	if !ok {
+		writeError(w, "this share does not keep the objects this sorts out", http.StatusBadRequest)
+		return
+	}
+
+	report, err := sorter.SortLostAndFound(req.Context(), acc, body.Prefix, body.After, body.Limit)
+	if err != nil {
+		log.Printf("failed to sort out the lost and found of %s: %v", share.Name, err)
+		writeError(w, "the objects could not be sorted out: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	writeJSON(w, ImportSortResponse{
+		Objects:   report.Objects,
+		Recovered: report.Recovered,
+		Skipped:   report.Skipped,
+		Bytes:     report.Bytes,
+		Leftover:  report.Leftover,
+		Last:      report.Last,
+		More:      report.More,
+	})
 }
 
 // importHandlerPOST handles the POST /import/:workgroup/:share calls. It starts

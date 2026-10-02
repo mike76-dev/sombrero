@@ -484,6 +484,10 @@ func (api *API) buildHTTPRoutes() {
 		api.importProbeHandlerPOST(w, req, ps)
 	})
 
+	router.POST("/import/:workgroup/:share/sort", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.importSortHandlerPOST(w, req, ps)
+	})
+
 	api.router = *router
 }
 
