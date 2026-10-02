@@ -5,9 +5,15 @@ import {
   listAccounts,
   listShares,
   probeImportSource,
+  sortLostAndFound,
   startImport,
 } from '../api/endpoints'
-import { ImportProbeResponse, ImportRequest, ImportStatusResponse } from '../api/types'
+import {
+  ImportProbeResponse,
+  ImportRequest,
+  ImportSortResponse,
+  ImportStatusResponse,
+} from '../api/types'
 import {
   Card,
   ErrorBanner,
@@ -44,6 +50,8 @@ export function ImportPage() {
   const [status, setStatus] = useState<ImportStatusResponse | null>(null)
   const [pollError, setPollError] = useState<string | null>(null)
   const [probe, setProbe] = useState<ImportProbeResponse | null>(null)
+  const [sorted, setSorted] = useState<ImportSortResponse | null>(null)
+  const [sorting, setSorting] = useState(false)
 
   const { data: accounts } = useApiData(
     () => (workgroup ? listAccounts(workgroup) : Promise.resolve(null)),
@@ -113,6 +121,42 @@ export function ImportPage() {
       ? { password, bucket: bucket.trim() }
       : { appKey: appKey.trim(), prefix: prefix.trim() || undefined }),
   })
+
+  // sortOut looks inside the objects whose names are gone, a round at a time,
+  // adding up what the rounds found: each object is downloaded whole, so one
+  // call of its own would take as long as all of them.
+  const sortOut = async () => {
+    setSorting(true)
+    const total: ImportSortResponse = {
+      objects: 0,
+      recovered: 0,
+      skipped: 0,
+      bytes: 0,
+      leftover: 0,
+    }
+    try {
+      let after: string | undefined
+      for (;;) {
+        const round = await sortLostAndFound(workgroup.trim(), share.trim(), {
+          username: username.trim(),
+          prefix: prefix.trim() || undefined,
+          after,
+        })
+        total.objects += round.objects
+        total.recovered += round.recovered
+        total.skipped += round.skipped
+        total.bytes += round.bytes
+        total.leftover += round.leftover
+        total.last = round.last
+        setSorted({ ...total, more: round.more })
+        if (!round.more || !round.last) break
+        after = round.last
+      }
+      setSorted({ ...total, more: false })
+    } finally {
+      setSorting(false)
+    }
+  }
 
   // follow takes over from a call that started or called off an import: what it
   // answered is the first status, and the poll carries it from there.
@@ -296,6 +340,76 @@ export function ImportPage() {
         <ErrorBanner error={pollError} />
         <ErrorBanner error={error} />
       </Card>
+
+      <Card title="Sort out what came over without names">
+        <p className="muted">
+          Objects imported from an account that could not name its files arrive under{' '}
+          <span className="mono">/lost+found</span>, each holding whatever was packed into it.
+          Sorting looks inside them for files it can recognize by what they begin and end
+          with — PDFs, JPEGs, PNGs, GIFs and ZIPs, including Office documents — and makes each
+          one a file of its own under <span className="mono">/lost+found/recovered</span>. The
+          contents are right; the names are not the ones they had, since nothing on the network
+          remembers those.
+        </p>
+        <p className="muted">
+          Nothing is uploaded and nothing is paid for twice: a recovered file points at the
+          bytes that are already there. A file larger than one object is left alone, because
+          only part of it is in here.
+        </p>
+        <div className="row">
+          <button
+            className="btn btn-primary"
+            disabled={busy || sorting || !workgroup.trim() || !share.trim() || !username.trim()}
+            onClick={() => run(sortOut)}
+          >
+            {sorting ? 'Sorting…' : 'Sort out /lost+found'}
+          </button>
+        </div>
+        <SortResult sorted={sorted} sorting={sorting} />
+      </Card>
+    </div>
+  )
+}
+
+// SortResult is what the rounds of a sort have added up to so far.
+function SortResult({
+  sorted,
+  sorting,
+}: {
+  sorted: ImportSortResponse | null
+  sorting: boolean
+}) {
+  if (!sorted) return null
+
+  return (
+    <div className="stack">
+      <div className="banner banner-success">
+        {sorting ? 'Sorting' : 'Sorted'} {sorted.objects} object
+        {sorted.objects === 1 ? '' : 's'}: {sorted.recovered} file
+        {sorted.recovered === 1 ? '' : 's'} recovered ({formatBytes(sorted.bytes)}).
+      </div>
+      <table className="table table-kv">
+        <tbody>
+          <tr>
+            <th>Belonged to no file</th>
+            <td>{formatBytes(sorted.leftover)}</td>
+          </tr>
+          {sorted.skipped > 0 && (
+            <tr>
+              <th>Left alone</th>
+              <td>
+                {sorted.skipped} file{sorted.skipped === 1 ? '' : 's'}
+              </td>
+            </tr>
+          )}
+          {sorting && sorted.last && (
+            <tr>
+              <th>Up to</th>
+              <td className="mono">{sorted.last}</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
     </div>
   )
 }

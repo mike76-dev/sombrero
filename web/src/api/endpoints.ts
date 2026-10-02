@@ -7,6 +7,8 @@ import type {
   FragmentationResponse,
   ImportProbeResponse,
   ImportRequest,
+  ImportSortRequest,
+  ImportSortResponse,
   ImportStatusResponse,
   IsBannedResponse,
   OrphansResponse,
@@ -196,6 +198,12 @@ export const startImport = (workgroup: string, share: string, body: ImportReques
 export const probeImportSource = (workgroup: string, share: string, body: ImportRequest) =>
   request<ImportProbeResponse>(
     `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}/probe`,
+    { method: 'POST', body },
+  )
+
+export const sortLostAndFound = (workgroup: string, share: string, body: ImportSortRequest) =>
+  request<ImportSortResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}/sort`,
     { method: 'POST', body },
   )
 

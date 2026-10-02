@@ -167,6 +167,27 @@ export interface ImportRequest {
   copy?: boolean
 }
 
+// What to sort out of the objects whose names are gone: whose the recovered
+// files are, where to look, and where the round before this one stopped.
+export interface ImportSortRequest {
+  username: string
+  prefix?: string
+  after?: string
+  limit?: number
+}
+
+// What one round of sorting came to. last is where it stopped and more says
+// there is further to go.
+export interface ImportSortResponse {
+  objects: number
+  recovered: number
+  skipped: number
+  bytes: number
+  leftover: number
+  last?: string
+  more?: boolean
+}
+
 // The progress of one import. path is the file it has in hand, with fileBytes of
 // its fileSize moved so far; pinned is what it took over where it lies, copied
 // what it had to move, and waits how often it had to wait for room in the share's
