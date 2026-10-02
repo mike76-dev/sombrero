@@ -5,6 +5,7 @@ import type {
   ConnectStatusResponse,
   DefragmentResponse,
   FragmentationResponse,
+  ImportProbeResponse,
   ImportRequest,
   ImportStatusResponse,
   IsBannedResponse,
@@ -189,6 +190,12 @@ export const disconnect = (workgroup: string, share: string) =>
 export const startImport = (workgroup: string, share: string, body: ImportRequest) =>
   request<ImportStatusResponse>(
     `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
+    { method: 'POST', body },
+  )
+
+export const probeImportSource = (workgroup: string, share: string, body: ImportRequest) =>
+  request<ImportProbeResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}/probe`,
     { method: 'POST', body },
   )
 

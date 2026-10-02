@@ -251,6 +251,49 @@ func TestImportLeavesWhatIsThere(t *testing.T) {
 	}
 }
 
+// TestTheDestinationPinsWhatIsImported verifies whose account the objects end up
+// in: the share's own, since pinning them where they already are does nothing and
+// would leave the rows naming objects this share does not hold.
+func TestTheDestinationPinsWhatIsImported(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newFakeBackend()
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	pinner, ok := c.(ObjectPinner)
+	if !ok {
+		t.Fatal("the client of a share cannot pin what is imported into it")
+	}
+
+	file := foreignFile("/taken/over.bin", 2048)
+	stats, err := Import(ctx, db, c, &fakeSource{}, pinner,
+		describeFiles(t, []transfer.File{file}),
+		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: importTarget(t, db, acc, share.Name)})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if stats.Pinned != 1 {
+		t.Fatalf("stats: want the file pinned, got %+v", stats)
+	}
+
+	// The object is the destination's now, under the key the description named.
+	want := sdk.NewUnsafeObject(file.Parts[0].Pin.DataKey, file.Parts[0].Pin.Slabs)
+	backend.mu.Lock()
+	_, held := backend.pinned[want.ID()]
+	backend.mu.Unlock()
+	if !held {
+		t.Errorf("the destination did not take over the object %s", want.ID())
+	}
+}
+
 // TestImportReportsAsItGoes verifies that an import says how far it has got
 // while it is running, rather than only once it has finished.
 func TestImportReportsAsItGoes(t *testing.T) {

@@ -25,11 +25,55 @@ type AccountObjects interface {
 	Object(ctx context.Context, key types.Hash256) (sdk.Object, error)
 }
 
-// AccountContents is what an account turned out to hold: the files its objects
-// could name, and the objects that could name nothing.
-type AccountContents struct {
-	Files   int
+// probeSample is how many of an account's objects are looked at to see whether
+// they say what they hold. The answer is the same for all of them in practice —
+// a server either tags what it writes or does not — so this is enough to tell
+// what an import of it would come to.
+const probeSample = 20
+
+// AccountProbe is what an account looks like before anything is taken over:
+// how many objects it holds, how many of them were looked at, and how many of
+// those say which files they are of.
+type AccountProbe struct {
 	Objects int
+	Looked  int
+	Tagged  int
+}
+
+// ProbeAccount reports what an import of the account would find, so that nobody
+// has to run one to learn that its objects cannot be named.
+func ProbeAccount(ctx context.Context, src AccountObjects) (probe AccountProbe, err error) {
+	pinned, err := listPinned(ctx, src)
+	if err != nil {
+		return probe, err
+	}
+	probe.Objects = len(pinned)
+
+	keys := make([]types.Hash256, 0, len(pinned))
+	for key := range pinned {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+
+	for _, key := range keys {
+		if probe.Looked >= probeSample {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return probe, err
+		}
+
+		obj, err := src.Object(ctx, key)
+		if err != nil {
+			return probe, fmt.Errorf("failed to retrieve the object %s: %w", key, err)
+		}
+		probe.Looked++
+		if _, ok := parseTag(obj.Metadata()); ok {
+			probe.Tagged++
+		}
+	}
+
+	return probe, nil
 }
 
 // DescribeAccount walks an indexd account's object log and describes what it

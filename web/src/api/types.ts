@@ -143,6 +143,17 @@ export interface AppKeyHolder {
 
 export type ImportState = 'idle' | 'running' | 'done' | 'failed' | 'cancelled'
 
+// What a source holds, from a look at it before anything is taken over. For an
+// indexd account, objects is what it has pinned and tagged how many of the ones
+// looked at say which files they hold.
+export interface ImportProbeResponse {
+  source: string
+  objects?: number
+  looked?: number
+  tagged?: number
+  warning?: string
+}
+
 // What an import of another server's data is to read, and who the files it
 // brings over belong to here.
 export interface ImportRequest {

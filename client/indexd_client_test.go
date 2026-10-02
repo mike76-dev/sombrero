@@ -42,6 +42,11 @@ type fakeBackend struct {
 	retags   map[types.Hash256]json.RawMessage
 	retagErr error
 
+	// pinned holds the objects taken over from somewhere else, which is what an
+	// import of another account's data does rather than uploading it again.
+	pinned map[types.Hash256]sdk.Object
+	pinErr error
+
 	downloadErrs []error // returned by the next downloads, one each
 	downloads    int
 
@@ -273,6 +278,23 @@ func (fb *fakeBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, lim
 	}
 
 	return page, nil
+}
+
+// Pin takes over an object the account does not hold yet, the way pinning one
+// does: the slabs come to be this account's and the data stays where it is.
+func (fb *fakeBackend) Pin(ctx context.Context, obj sdk.Object) error {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+
+	if fb.pinErr != nil {
+		return fb.pinErr
+	}
+	if fb.pinned == nil {
+		fb.pinned = make(map[types.Hash256]sdk.Object)
+	}
+	fb.pinned[obj.ID()] = obj
+
+	return nil
 }
 
 // Retag records what the object was told to say about itself, the way the real

@@ -4,9 +4,10 @@ import {
   importStatus,
   listAccounts,
   listShares,
+  probeImportSource,
   startImport,
 } from '../api/endpoints'
-import { ImportRequest, ImportStatusResponse } from '../api/types'
+import { ImportProbeResponse, ImportRequest, ImportStatusResponse } from '../api/types'
 import {
   Card,
   ErrorBanner,
@@ -42,6 +43,7 @@ export function ImportPage() {
   const [username, setUsername] = useState('')
   const [status, setStatus] = useState<ImportStatusResponse | null>(null)
   const [pollError, setPollError] = useState<string | null>(null)
+  const [probe, setProbe] = useState<ImportProbeResponse | null>(null)
 
   const { data: accounts } = useApiData(
     () => (workgroup ? listAccounts(workgroup) : Promise.resolve(null)),
@@ -95,6 +97,22 @@ export function ImportPage() {
       clearTimeout(timer.current)
     }
   }, [workgroup, share, poll])
+
+  // An answer about one source says nothing about another, so it is dropped as
+  // soon as the fields that name it change.
+  useEffect(() => setProbe(null), [source, address, bucket, appKey])
+
+  // request is what the source is named by, for both starting an import of it
+  // and looking at it first.
+  const request = (): ImportRequest => ({
+    source,
+    address: address.trim(),
+    username: username.trim(),
+    copy: copying,
+    ...(source === 'renterd'
+      ? { password, bucket: bucket.trim() }
+      : { appKey: appKey.trim(), prefix: prefix.trim() || undefined }),
+  })
 
   // follow takes over from a call that started or called off an import: what it
   // answered is the first status, and the poll carries it from there.
@@ -235,20 +253,23 @@ export function ImportPage() {
             disabled={busy || !ready || running(status)}
             onClick={() =>
               run(async () => {
-                const body: ImportRequest = {
-                  source,
-                  address: address.trim(),
-                  username: username.trim(),
-                  copy: copying,
-                  ...(source === 'renterd'
-                    ? { password, bucket: bucket.trim() }
-                    : { appKey: appKey.trim(), prefix: prefix.trim() || undefined }),
-                }
-                follow(await startImport(workgroup.trim(), share.trim(), body))
+                follow(await startImport(workgroup.trim(), share.trim(), request()))
               })
             }
           >
             Start
+          </button>
+          <button
+            className="btn"
+            disabled={busy || !ready || running(status)}
+            onClick={() =>
+              run(async () => {
+                setProbe(await probeImportSource(workgroup.trim(), share.trim(), request()))
+              })
+            }
+            title="Look at the source without taking anything from it"
+          >
+            Check the source
           </button>
           <button
             className="btn btn-danger"
@@ -263,6 +284,8 @@ export function ImportPage() {
           </button>
         </div>
 
+        <SourceProbe probe={probe} />
+
         {ready && backend !== 'indexd' && (
           <p className="muted">
             Only an indexd share can import data. A renterd share keeps its own file list.
@@ -273,6 +296,35 @@ export function ImportPage() {
         <ErrorBanner error={pollError} />
         <ErrorBanner error={error} />
       </Card>
+    </div>
+  )
+}
+
+// SourceProbe is what a look at the source found: how much is there, and whether
+// an import of it would come over as files or as objects.
+function SourceProbe({ probe }: { probe: ImportProbeResponse | null }) {
+  if (!probe) return null
+
+  if (probe.source !== 'indexd') {
+    return (
+      <div className="banner banner-success">
+        The source answered. A renterd server knows its file names, so they come over with the
+        files.
+      </div>
+    )
+  }
+
+  const objects = probe.objects ?? 0
+  if (objects === 0) {
+    return <div className="banner banner-success">That account holds nothing to import.</div>
+  }
+
+  return (
+    <div className={probe.warning ? 'banner banner-error' : 'banner banner-success'}>
+      That account holds {objects} object{objects === 1 ? '' : 's'}.{' '}
+      {probe.warning ||
+        `All ${probe.looked ?? 0} looked at say which files they hold, so they` +
+          ' come over under their own names.'}
     </div>
   )
 }

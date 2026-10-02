@@ -480,6 +480,10 @@ func (api *API) buildHTTPRoutes() {
 		api.importHandlerDELETE(w, req, ps)
 	})
 
+	router.POST("/import/:workgroup/:share/probe", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.importProbeHandlerPOST(w, req, ps)
+	})
+
 	api.router = *router
 }
 

@@ -352,6 +352,63 @@ func TestDescribeAccountMixesTaggedAndNot(t *testing.T) {
 	}
 }
 
+// TestProbeAccount verifies what a look at a source reports, which is what
+// decides whether an import of it is worth running at all.
+func TestProbeAccount(t *testing.T) {
+	at := time.Now().UTC().Truncate(time.Second)
+
+	t.Run("an account whose objects say nothing", func(t *testing.T) {
+		fa := &fakeAccount{}
+		for i := range 3 {
+			fa.pin(at.Add(time.Duration(i)*time.Second), nil, uint32(1024*(i+1)))
+		}
+
+		probe, err := ProbeAccount(context.Background(), fa)
+		if err != nil {
+			t.Fatalf("ProbeAccount: %v", err)
+		}
+		if probe.Objects != 3 || probe.Looked != 3 || probe.Tagged != 0 {
+			t.Errorf("the probe: got %+v, want 3 objects of which none are tagged", probe)
+		}
+	})
+
+	t.Run("an account whose objects name their files", func(t *testing.T) {
+		fa := &fakeAccount{}
+		fa.pin(at, tagOf(t, objectPiece{Share: "s", Path: "/x.bin", Length: 512, Size: 512}), 512)
+		fa.pin(at.Add(time.Second), nil, 1024)
+
+		probe, err := ProbeAccount(context.Background(), fa)
+		if err != nil {
+			t.Fatalf("ProbeAccount: %v", err)
+		}
+		if probe.Objects != 2 || probe.Looked != 2 || probe.Tagged != 1 {
+			t.Errorf("the probe: got %+v, want one of the two tagged", probe)
+		}
+	})
+
+	t.Run("an account of more objects than are looked at", func(t *testing.T) {
+		fa := &fakeAccount{}
+		for i := range probeSample + 7 {
+			fa.pin(at.Add(time.Duration(i)*time.Second), nil, uint32(512*(i+1)))
+		}
+
+		probe, err := ProbeAccount(context.Background(), fa)
+		if err != nil {
+			t.Fatalf("ProbeAccount: %v", err)
+		}
+		if probe.Objects != probeSample+7 || probe.Looked != probeSample {
+			t.Errorf("the probe: got %+v, want all counted and %d looked at", probe, probeSample)
+		}
+	})
+
+	t.Run("an account that cannot be reached", func(t *testing.T) {
+		fa := &fakeAccount{err: errors.New("the indexer is not answering")}
+		if _, err := ProbeAccount(context.Background(), fa); err == nil {
+			t.Error("an account that could not be listed was reported on anyway")
+		}
+	})
+}
+
 // TestDescribeAccountFailures verifies that a walk which cannot be finished is
 // reported rather than written as a description of less than there is.
 func TestDescribeAccountFailures(t *testing.T) {

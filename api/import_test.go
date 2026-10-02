@@ -222,6 +222,44 @@ func TestImportStampsAndReports(t *testing.T) {
 	}
 }
 
+// TestImportProbe verifies what a look at a source reports before anything is
+// taken from it.
+func TestImportProbe(t *testing.T) {
+	path := "/import/" + testUUID.String() + "/myshare/probe"
+
+	t.Run("a renterd source needs no warning", func(t *testing.T) {
+		srv := emptyRenterd(t)
+		w := doRequest(newTestAPI(importingStore("myshare")), http.MethodPost, path, ImportRequest{
+			Source: "renterd", Address: srv.URL, Bucket: "default",
+		})
+		checkStatus(t, w, http.StatusOK)
+
+		res := decodeJSON[ImportProbeResponse](t, w)
+		if res.Source != "renterd" || res.Warning != "" {
+			t.Errorf("the probe of a renterd source: got %+v", res)
+		}
+	})
+
+	t.Run("a source it cannot read returns 400", func(t *testing.T) {
+		for _, body := range []ImportRequest{
+			{Source: "renterd"},                             // no address
+			{Source: "somewhere-else", Address: "http://x"}, // no such kind
+			{Source: "indexd", Address: "http://x"},         // no key to read it with
+			{Source: "indexd", Address: "http://x", AppKey: "not-hex"},
+		} {
+			w := doRequest(newTestAPI(importingStore("myshare")), http.MethodPost, path, body)
+			checkStatus(t, w, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("unknown workgroup returns 404", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodPost, "/import/unknown-name/myshare/probe", ImportRequest{
+			Source: "renterd", Address: "http://127.0.0.1:9980",
+		})
+		checkStatus(t, w, http.StatusNotFound)
+	})
+}
+
 // TestImportReportsTheFileInHand verifies what the status says while a large file
 // is being copied, which is one record of the description for a long time.
 func TestImportReportsTheFileInHand(t *testing.T) {

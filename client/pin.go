@@ -22,8 +22,18 @@ type TransferStore interface {
 // ObjectPinner takes over an object that is already on the network by pinning the
 // sectors it is made of into this account. The bytes are not moved: the host
 // keeps them and the indexer takes on paying for them.
+//
+// The account is the one the objects are to end up in, which is the destination
+// of an import rather than the source it is reading: pinning into the account
+// that already holds them would do nothing at all.
 type ObjectPinner interface {
 	PinObject(ctx context.Context, obj sdk.Object) error
+}
+
+// PinObject takes over an object for this connection's account, which is what
+// makes an IndexdClient the pinner of an import into its share.
+func (ic *IndexdClient) PinObject(ctx context.Context, obj sdk.Object) error {
+	return ic.backend.Pin(ctx, obj)
 }
 
 // PinFile pins what every part of a file is made of and returns the file with

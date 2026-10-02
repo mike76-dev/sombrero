@@ -115,6 +115,10 @@ type storageBackend interface {
 	// Retag replaces what the object of the slab says about its own contents,
 	// which is a request of its own: the data stays where it is.
 	Retag(ctx context.Context, key types.Hash256, meta json.RawMessage) error
+
+	// Pin takes over an object that is already on the network, pinning what it
+	// is made of into this account without moving any of it.
+	Pin(ctx context.Context, obj sdk.Object) error
 	DeleteObject(ctx context.Context, key types.Hash256) error
 	PruneSlabs(ctx context.Context) error
 	ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error)
@@ -258,6 +262,11 @@ func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, le
 			return readErr
 		}
 	}
+}
+
+// Pin calls sdk.PinObject, which takes over the object's slabs for this account.
+func (b *sdkBackend) Pin(ctx context.Context, obj sdk.Object) error {
+	return b.sdk.PinObject(ctx, obj)
 }
 
 // Retag replaces what the object says about its contents. Pinning an object the

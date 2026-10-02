@@ -42,9 +42,12 @@ const (
 // importRetention is how long a finished import is kept for its outcome to be
 // read, and maxImportFailures how many failed paths it holds on to.
 const (
-	importRetention    = 30 * time.Minute
-	maxImportFailures  = 20
-	importProgressStep = 64 << 20
+	importRetention   = 30 * time.Minute
+	maxImportFailures = 20
+
+	// sourceProbeTimeout bounds the look at a source, which is made while
+	// whoever asked for it waits.
+	sourceProbeTimeout = 30 * time.Second
 )
 
 // ImportRequest is the body of POST /import/:workgroup/:share: where the data is
@@ -97,6 +100,18 @@ type ImportStatusResponse struct {
 
 	Failures []string `json:"failures,omitempty"`
 	Error    string   `json:"error,omitempty"`
+}
+
+// ImportProbeResponse says what a source holds before anything is taken from
+// it. For an indexd account, Objects is what it has pinned and Tagged how many
+// of the Looked at say which files they are of; Warning is what an import of it
+// would come to where they say nothing.
+type ImportProbeResponse struct {
+	Source  string `json:"source"`
+	Objects int    `json:"objects,omitempty"`
+	Looked  int    `json:"looked,omitempty"`
+	Tagged  int    `json:"tagged,omitempty"`
+	Warning string `json:"warning,omitempty"`
 }
 
 // Transfers is the part of a store an import needs: the rows of what it pinned,
@@ -293,6 +308,65 @@ func (api *API) importHandlerDELETE(w http.ResponseWriter, _ *http.Request, ps h
 	writeJSON(w, run.status())
 }
 
+// importProbeHandlerPOST handles the POST /import/:workgroup/:share/probe calls.
+// It looks at a source without taking anything from it, so that what an import
+// of it would come to is known before one is run.
+// :workgroup may be a UUID or a workgroup name.
+func (api *API) importProbeHandlerPOST(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	if _, _, ok := api.resolveConnection(w, ps); !ok {
+		return
+	}
+
+	var body ImportRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.Address == "" {
+		writeError(w, "the address of the source cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	res := ImportProbeResponse{Source: body.Source}
+	switch body.Source {
+	case "renterd":
+		// A renterd server knows what it calls its objects, so an import of one
+		// brings the files over as themselves whatever else is true of it.
+		if _, ok := api.renterdSource(w, body); !ok {
+			return
+		}
+
+	case "indexd":
+		account, ok := api.indexdSource(w, body)
+		if !ok {
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(req.Context(), sourceProbeTimeout)
+		defer cancel()
+
+		probe, err := client.ProbeAccount(ctx, account)
+		if err != nil {
+			writeError(w, "the account could not be looked at: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		res.Objects, res.Looked, res.Tagged = probe.Objects, probe.Looked, probe.Tagged
+		switch {
+		case probe.Looked > 0 && probe.Tagged == 0:
+			res.Warning = fmt.Sprintf("None of the %d objects looked at say which files they hold. They would come over one file per object, each named after the object and holding whatever runs of whichever files were packed into it.", probe.Looked)
+		case probe.Tagged < probe.Looked:
+			res.Warning = fmt.Sprintf("Only %d of the %d objects looked at say which files they hold. The rest would come over one file per object.", probe.Tagged, probe.Looked)
+		}
+
+	default:
+		writeError(w, `the source of an import is "renterd" or "indexd"`, http.StatusBadRequest)
+		return
+	}
+
+	writeJSON(w, res)
+}
+
 // importHandlerPOST handles the POST /import/:workgroup/:share calls. It starts
 // an import of what another server holds into this share, which then runs on its
 // own: the response is the state it starts in, and GET /import/:workgroup/:share
@@ -340,10 +414,15 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 		return
 	}
 
-	src, pinner, describe, ok := api.source(w, body, share)
+	src, _, describe, ok := api.source(w, body, share)
 	if !ok {
 		return
 	}
+
+	// What is taken over is pinned into the account behind the destination's own
+	// connection. Pinning it into the account it is read from would leave the
+	// rows naming objects this share does not hold.
+	pinner, _ := dst.(client.ObjectPinner)
 
 	ctx, cancel := context.WithCancel(api.ctx)
 	run, started := api.imports.begin(connectKey(wg, share), body.Source, cancel)
@@ -451,9 +530,8 @@ func (api *API) destination(w http.ResponseWriter, wg stores.Workgroup, share st
 func (api *API) source(w http.ResponseWriter, body ImportRequest, share stores.Share) (client.PartReader, client.ObjectPinner, describer, bool) {
 	switch body.Source {
 	case "renterd":
-		rc, ok := client.NewRenterdClient(body.Address, body.Password, body.Bucket).(*client.RenterdClient)
+		rc, ok := api.renterdSource(w, body)
 		if !ok {
-			writeError(w, "internal error", http.StatusInternalServerError)
 			return nil, nil, describer{}, false
 		}
 
@@ -467,22 +545,14 @@ func (api *API) source(w http.ResponseWriter, body ImportRequest, share stores.S
 		}, true
 
 	case "indexd":
-		key, err := hex.DecodeString(body.AppKey)
-		if err != nil || len(key) != 64 {
-			writeError(w, "an indexd source is read with the 64-byte app key of its account", http.StatusBadRequest)
+		account, ok := api.indexdSource(w, body)
+		if !ok {
 			return nil, nil, describer{}, false
 		}
 
-		sdkClient, err := sdk.NewBuilder(body.Address, api.appMetadata()).SDK(types.PrivateKey(key))
-		if err != nil {
-			writeError(w, "the app key is not authorized by that indexer: "+err.Error(), http.StatusBadRequest)
-			return nil, nil, describer{}, false
-		}
-
-		account := client.NewIndexdAccount(sdkClient)
 		prefix := body.Prefix
 
-		return client.IndexdSource{Objects: account}, sdkClient, describer{
+		return client.IndexdSource{Objects: account}, nil, describer{
 			origin: body.Address,
 			walk: func(ctx context.Context, tw *transfer.Writer) (client.DescribeStats, error) {
 				return client.DescribeAccount(ctx, account, tw, body.Address, prefix)
@@ -493,6 +563,35 @@ func (api *API) source(w http.ResponseWriter, body ImportRequest, share stores.S
 		writeError(w, `the source of an import is "renterd" or "indexd"`, http.StatusBadRequest)
 		return nil, nil, describer{}, false
 	}
+}
+
+// renterdSource builds the client a renterd source is read with.
+func (api *API) renterdSource(w http.ResponseWriter, body ImportRequest) (*client.RenterdClient, bool) {
+	rc, ok := client.NewRenterdClient(body.Address, body.Password, body.Bucket).(*client.RenterdClient)
+	if !ok {
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return nil, false
+	}
+
+	return rc, true
+}
+
+// indexdSource builds the account an indexd source is read with, which takes the
+// app key of that account: it is what its objects are sealed to.
+func (api *API) indexdSource(w http.ResponseWriter, body ImportRequest) (*client.IndexdAccount, bool) {
+	key, err := hex.DecodeString(body.AppKey)
+	if err != nil || len(key) != 64 {
+		writeError(w, "an indexd source is read with the 64-byte app key of its account", http.StatusBadRequest)
+		return nil, false
+	}
+
+	sdkClient, err := sdk.NewBuilder(body.Address, api.appMetadata()).SDK(types.PrivateKey(key))
+	if err != nil {
+		writeError(w, "the app key is not authorized by that indexer: "+err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+
+	return client.NewIndexdAccount(sdkClient), true
 }
 
 // appMetadata is how this server names itself to an indexer, which is what its
