@@ -840,9 +840,16 @@ func (ic *IndexdClient) FinishUpload(ctx context.Context, path string, uploadID 
 		return nil
 	}
 
+	// A file written over the one that was there leaves the slabs of the old one
+	// holding runs of a file that no longer has them, so they are noted while
+	// they still say what they held. Truncating a file is a rewrite of it too.
+	replaced := ic.slabsOf(path, false)
+
 	if err := ic.db.FinalizeUpload(uploadID); err != nil {
 		return fmt.Errorf("couldn't finalize upload: %v", err)
 	}
+
+	ic.retag(replaced)
 
 	// Finalizing is what makes a piece that is left buffered eligible for
 	// packing, so this is the point at which the packer has new work.
@@ -1656,6 +1663,11 @@ func (ic *IndexdClient) defragmentSlab(ctx context.Context, key types.Hash256) (
 	if _, err := ic.db.RebufferSlab(ic.share, ic.workgroup, key, pieces); err != nil {
 		return 0, err
 	}
+
+	// The runs are buffered again, to be uploaded into slabs of their own. What
+	// is left of this one is less than it says it holds, and a round that moved
+	// only some of the runs leaves it holding the rest.
+	ic.retag([]types.Hash256{key})
 
 	return moved, nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -154,9 +155,8 @@ func TestRetagFollowsADelete(t *testing.T) {
 
 	// Nothing packs on age here, so two halves of a slab are packed when the
 	// second of them makes a slab's worth: one object, two files.
-	half := int(proto.SectorSize / 2)
 	for _, name := range []string{"/one.txt", "/two.txt"} {
-		content := bytes.Repeat([]byte(name), half/len(name))
+		content := halfSlab(name)
 		uploadID, err := c.StartUpload(ctx, acc, name)
 		if err != nil {
 			t.Fatalf("StartUpload(%s): %v", name, err)
@@ -186,6 +186,152 @@ func TestRetagFollowsADelete(t *testing.T) {
 	if tag.Pieces[0].Path != "/two.txt" {
 		t.Errorf("the run left in the object: got %+v", tag.Pieces[0])
 	}
+}
+
+// TestRetagFollowsAnOverwrite verifies that a file written over the one that was
+// there leaves no object claiming to hold what the old one had.
+func TestRetagFollowsAnOverwrite(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newFakeBackend()
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Two halves of a slab from two files, so the slab outlives either of them.
+	for _, name := range []string{"/kept.txt", "/replaced.txt"} {
+		content := halfSlab(name)
+		uploadID, err := c.StartUpload(ctx, acc, name)
+		if err != nil {
+			t.Fatalf("StartUpload(%s): %v", name, err)
+		}
+		if _, err := c.Write(ctx, bytes.NewReader(content), name, uploadID, 1, 0, uint64(len(content))); err != nil {
+			t.Fatalf("Write(%s): %v", name, err)
+		}
+		if err := c.FinishUpload(ctx, name, uploadID, nil); err != nil {
+			t.Fatalf("FinishUpload(%s): %v", name, err)
+		}
+		waitForRead(t, ctx, c, acc, name, content)
+	}
+
+	key := awaitSlab(t, db, acc, c, "/kept.txt")
+	if other := awaitSlab(t, db, acc, c, "/replaced.txt"); other != key {
+		t.Fatalf("the two files went into different slabs, %s and %s", key, other)
+	}
+
+	// The second file is written again, which is a new object of its own and
+	// leaves the old slab holding one run fewer.
+	again := []byte("a shorter file altogether")
+	uploadID, err := c.StartUpload(ctx, acc, "/replaced.txt")
+	if err != nil {
+		t.Fatalf("StartUpload again: %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(again), "/replaced.txt", uploadID, 1, 0, uint64(len(again))); err != nil {
+		t.Fatalf("Write again: %v", err)
+	}
+	if err := c.FinishUpload(ctx, "/replaced.txt", uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload again: %v", err)
+	}
+	waitForRead(t, ctx, c, acc, "/replaced.txt", again)
+
+	tag := awaitRetag(t, backend, key, func(tag objectTag) bool {
+		return len(tag.Pieces) == 1
+	})
+	if tag.Pieces[0].Path != "/kept.txt" {
+		t.Errorf("the run left in the object: got %+v", tag.Pieces[0])
+	}
+}
+
+// TestRetagIsTriedAgain verifies that a backend which would not take a tag is
+// waited out, rather than leaving the object saying the wrong thing for good.
+func TestRetagIsTriedAgain(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newFakeBackend()
+	backend.mu.Lock()
+	backend.retagErr = errors.New("the indexer is not answering")
+	backend.mu.Unlock()
+
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	ic := c.(*IndexdClient)
+	ic.slabRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { _ = c.Close() })
+
+	content := bytes.Repeat([]byte("s"), int(proto.SectorSize))
+	uploadID, err := c.StartUpload(ctx, acc, "/before.bin")
+	if err != nil {
+		t.Fatalf("StartUpload: %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), "/before.bin", uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := c.FinishUpload(ctx, "/before.bin", uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload: %v", err)
+	}
+	waitForRead(t, ctx, c, acc, "/before.bin", content)
+
+	key := awaitSlab(t, db, acc, c, "/before.bin")
+	if err := c.Rename(ctx, acc, "/before.bin", "/after.bin", false, false); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+
+	// The slab stays on the list for as long as the backend refuses it.
+	waitFor(t, 5*time.Second, func() bool {
+		ic.mu.Lock()
+		defer ic.mu.Unlock()
+		_, waiting := ic.retagging[key]
+
+		return waiting
+	}, "the slab that could not be retagged was dropped")
+
+	// Once it answers, the tag is written without anything else happening.
+	backend.mu.Lock()
+	backend.retagErr = nil
+	backend.mu.Unlock()
+
+	awaitRetag(t, backend, key, func(tag objectTag) bool {
+		return len(tag.Pieces) == 1 && tag.Pieces[0].Path == "/after.bin"
+	})
+}
+
+// halfSlab is exactly half a slab of the name's own bytes. Two of them fill one
+// slab, which is what has the packer put both files in one object; a pair that
+// came to a byte less than a slab would never be packed at all.
+func halfSlab(name string) []byte {
+	content := make([]byte, proto.SectorSize/2)
+	for i := range content {
+		content[i] = name[i%len(name)]
+	}
+
+	return content
+}
+
+// waitFor waits for the condition to hold, failing with the given complaint if
+// it does not.
+func waitFor(t *testing.T, within time.Duration, cond func() bool, complaint string) {
+	t.Helper()
+
+	for deadline := time.Now().Add(within); time.Now().Before(deadline); {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatal(complaint)
 }
 
 // awaitSlab waits until the file is made of one slab on the network, rather than

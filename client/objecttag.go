@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"time"
 
 	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
@@ -161,6 +162,7 @@ func (ic *IndexdClient) retag(keys []types.Hash256) {
 // is not worth holding a shutdown up for: what is left unwritten is a name a
 // rescue would have got right, and the data is not waiting on it.
 func (ic *IndexdClient) retagObjects(ctx context.Context) {
+	var retry <-chan time.Time
 	for {
 		select {
 		case <-ic.drainChan:
@@ -168,46 +170,70 @@ func (ic *IndexdClient) retagObjects(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ic.retagChan:
+		case <-retry:
 		}
 
-		for {
-			key, ok := ic.nextRetag()
-			if !ok {
-				break
-			}
-
-			select {
-			case <-ic.drainChan:
-				return
-			default:
-			}
-
-			if err := ctx.Err(); err != nil {
-				return
-			}
-
-			meta, owed := ic.tagOfSlab(key)
-			if !owed {
-				continue
-			}
-			if err := ic.backend.Retag(ctx, key, meta); err != nil {
-				log.Printf("failed to tell slab %s what it holds: %v", key, err)
-			}
+		// A backend that would not take the tags is waited out rather than
+		// taken for an answer: the slabs stay on the list until it does.
+		retry = nil
+		if ic.writeTags(ctx) {
+			retry = time.After(retryDelay)
 		}
 	}
 }
 
-// nextRetag takes one slab off the set that is waiting to be retagged.
-func (ic *IndexdClient) nextRetag() (types.Hash256, bool) {
+// writeTags tells the objects of the waiting slabs what they hold, and reports
+// whether any of them is still owed a tag.
+func (ic *IndexdClient) writeTags(ctx context.Context) (owing bool) {
+	for _, key := range ic.takeRetags() {
+		select {
+		case <-ic.drainChan:
+			return false
+		default:
+		}
+
+		if err := ctx.Err(); err != nil {
+			return false
+		}
+
+		meta, owed := ic.tagOfSlab(key)
+		if !owed {
+			continue
+		}
+		if err := ic.backend.Retag(ctx, key, meta); err != nil {
+			log.Printf("failed to tell slab %s what it holds, leaving it for a retry: %v", key, err)
+			ic.retagLater(key)
+			owing = true
+		}
+	}
+
+	return owing
+}
+
+// takeRetags takes the slabs that are waiting off the list, so that one that is
+// put back is tried in the next round rather than again in this one.
+func (ic *IndexdClient) takeRetags() []types.Hash256 {
 	ic.mu.Lock()
 	defer ic.mu.Unlock()
 
+	keys := make([]types.Hash256, 0, len(ic.retagging))
 	for key := range ic.retagging {
-		delete(ic.retagging, key)
-		return key, true
+		keys = append(keys, key)
 	}
+	ic.retagging = nil
 
-	return types.Hash256{}, false
+	return keys
+}
+
+// retagLater puts a slab back on the list, for the round after this one.
+func (ic *IndexdClient) retagLater(key types.Hash256) {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
+
+	if ic.retagging == nil {
+		ic.retagging = make(map[types.Hash256]struct{})
+	}
+	ic.retagging[key] = struct{}{}
 }
 
 // parseTag reads what an object says about its contents, and reports whether it
