@@ -435,7 +435,8 @@ function SourceProbe({ probe }: { probe: ImportProbeResponse | null }) {
 
   return (
     <div className={probe.warning ? 'banner banner-error' : 'banner banner-success'}>
-      That account holds {objects} object{objects === 1 ? '' : 's'}.{' '}
+      That account holds {probe.more ? 'at least ' : ''}
+      {objects} object{objects === 1 ? '' : 's'}.{' '}
       {probe.warning ||
         `All ${probe.looked ?? 0} looked at say which files they hold, so they` +
           ' come over under their own names.'}

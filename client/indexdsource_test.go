@@ -86,6 +86,13 @@ func (fa *fakeAccount) ListObjects(ctx context.Context, cursor slabs.Cursor, lim
 		if !after {
 			continue
 		}
+
+		// The real log hands over the object along with the event, which is
+		// what saves asking after each of them.
+		if obj, ok := fa.objects[ev.Key]; ok && !ev.Deleted {
+			ev.Object = &obj
+		}
+
 		page = append(page, ev)
 		if len(page) >= limit {
 			break
@@ -398,6 +405,27 @@ func TestProbeAccount(t *testing.T) {
 		}
 		if probe.Objects != probeSample+7 || probe.Looked != probeSample {
 			t.Errorf("the probe: got %+v, want all counted and %d looked at", probe, probeSample)
+		}
+	})
+
+	t.Run("an account of a longer log than is read", func(t *testing.T) {
+		fa := &fakeAccount{}
+		for i := range probePages*objectPageSize + 50 {
+			fa.pin(at.Add(time.Duration(i)*time.Second), nil, uint32(512+i))
+		}
+
+		probe, err := ProbeAccount(context.Background(), fa)
+		if err != nil {
+			t.Fatalf("ProbeAccount: %v", err)
+		}
+		if !probe.More {
+			t.Error("a log that went on past the look was not reported as such")
+		}
+		if probe.Objects != probePages*objectPageSize {
+			t.Errorf("the probe counted %d objects, want the %d it read", probe.Objects, probePages*objectPageSize)
+		}
+		if probe.Looked != probeSample {
+			t.Errorf("the probe looked at %d objects, want %d", probe.Looked, probeSample)
 		}
 	})
 

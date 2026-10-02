@@ -151,6 +151,10 @@ export interface ImportProbeResponse {
   objects?: number
   looked?: number
   tagged?: number
+
+  // more says the account holds at least that many: the look stops a few pages
+  // into the object log rather than counting all of a long one.
+  more?: boolean
   warning?: string
 }
 

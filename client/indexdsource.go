@@ -31,49 +31,81 @@ type AccountObjects interface {
 // what an import of it would come to.
 const probeSample = 20
 
-// AccountProbe is what an account looks like before anything is taken over:
-// how many objects it holds, how many of them were looked at, and how many of
-// those say which files they are of.
+// probePages is how far into the object log a look at an account reads. An
+// account of more objects than that is reported as holding at least what was
+// counted, since whoever asked is waiting and an exact count of a long log is
+// one request per hundred of it.
+const probePages = 5
+
+// AccountProbe is what an account looks like before anything is taken over: how
+// many objects it holds, how many of them were looked at, and how many of those
+// say which files they are of. More says the log went on past where the look
+// stopped, so the count is what was seen rather than all there is.
 type AccountProbe struct {
 	Objects int
 	Looked  int
 	Tagged  int
+	More    bool
 }
 
 // ProbeAccount reports what an import of the account would find, so that nobody
 // has to run one to learn that its objects cannot be named.
+//
+// Nothing is asked after twice: the log hands over the objects along with the
+// events, so a page of it says both how much is there and whether any of it can
+// name its files.
 func ProbeAccount(ctx context.Context, src AccountObjects) (probe AccountProbe, err error) {
-	pinned, err := listPinned(ctx, src)
-	if err != nil {
-		return probe, err
-	}
-	probe.Objects = len(pinned)
+	held := make(map[types.Hash256]struct{})
 
-	keys := make([]types.Hash256, 0, len(pinned))
-	for key := range pinned {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
-
-	for _, key := range keys {
-		if probe.Looked >= probeSample {
-			break
-		}
+	var cursor slabs.Cursor
+	for page := 0; page < probePages; page++ {
 		if err := ctx.Err(); err != nil {
 			return probe, err
 		}
 
-		obj, err := src.Object(ctx, key)
+		events, err := src.ListObjects(ctx, cursor, objectPageSize)
 		if err != nil {
-			return probe, fmt.Errorf("failed to retrieve the object %s: %w", key, err)
+			return probe, fmt.Errorf("failed to list the objects of the account: %w", err)
 		}
-		probe.Looked++
-		if _, ok := parseTag(obj.Metadata()); ok {
-			probe.Tagged++
+		if len(events) == 0 {
+			return finishProbe(probe, held, false), nil
+		}
+
+		for _, ev := range events {
+			if ev.Deleted {
+				delete(held, ev.Key)
+				continue
+			}
+			held[ev.Key] = struct{}{}
+
+			if probe.Looked < probeSample && ev.Object != nil {
+				probe.Looked++
+				if _, ok := parseTag(ev.Object.Metadata()); ok {
+					probe.Tagged++
+				}
+			}
+		}
+
+		last := events[len(events)-1]
+		if !last.UpdatedAt.After(cursor.After) && last.Key == cursor.Key {
+			return finishProbe(probe, held, false), nil
+		}
+		cursor = slabs.Cursor{After: last.UpdatedAt, Key: last.Key}
+
+		if len(events) < objectPageSize {
+			return finishProbe(probe, held, false), nil
 		}
 	}
 
-	return probe, nil
+	return finishProbe(probe, held, true), nil
+}
+
+// finishProbe counts what was seen and says whether there was more of it.
+func finishProbe(probe AccountProbe, held map[types.Hash256]struct{}, more bool) AccountProbe {
+	probe.Objects = len(held)
+	probe.More = more
+
+	return probe
 }
 
 // DescribeAccount walks an indexd account's object log and describes what it
@@ -112,14 +144,20 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 			return stats, err
 		}
 
-		obj, err := src.Object(ctx, key)
-		if err != nil {
-			return stats, fmt.Errorf("failed to retrieve the object %s: %w", key, err)
+		// The log hands over the objects it names, so one is only asked after
+		// where the event came without it.
+		obj := pinned[key].Object
+		if obj == nil {
+			fetched, err := src.Object(ctx, key)
+			if err != nil {
+				return stats, fmt.Errorf("failed to retrieve the object %s: %w", key, err)
+			}
+			obj = &fetched
 		}
 
 		tag, ok := parseTag(obj.Metadata())
 		if !ok {
-			untagged = append(untagged, obj)
+			untagged = append(untagged, *obj)
 			continue
 		}
 
@@ -127,7 +165,7 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 			if !slices.Contains(shares, piece.Share) {
 				shares = append(shares, piece.Share)
 			}
-			collectPiece(files, piece, obj, origin)
+			collectPiece(files, piece, *obj, origin)
 		}
 	}
 

@@ -106,11 +106,15 @@ type ImportStatusResponse struct {
 // it. For an indexd account, Objects is what it has pinned and Tagged how many
 // of the Looked at say which files they are of; Warning is what an import of it
 // would come to where they say nothing.
+// More says the account holds at least what was counted: the look stops a few
+// pages into the log, since an exact count of a long one is a request per
+// hundred objects and whoever asked is waiting.
 type ImportProbeResponse struct {
 	Source  string `json:"source"`
 	Objects int    `json:"objects,omitempty"`
 	Looked  int    `json:"looked,omitempty"`
 	Tagged  int    `json:"tagged,omitempty"`
+	More    bool   `json:"more,omitempty"`
 	Warning string `json:"warning,omitempty"`
 }
 
@@ -382,7 +386,7 @@ func (api *API) importProbeHandlerPOST(w http.ResponseWriter, req *http.Request,
 			return
 		}
 
-		res.Objects, res.Looked, res.Tagged = probe.Objects, probe.Looked, probe.Tagged
+		res.Objects, res.Looked, res.Tagged, res.More = probe.Objects, probe.Looked, probe.Tagged, probe.More
 		switch {
 		case probe.Looked > 0 && probe.Tagged == 0:
 			res.Warning = fmt.Sprintf("None of the %d objects looked at say which files they hold. They would come over one file per object, each named after the object and holding whatever runs of whichever files were packed into it.", probe.Looked)

@@ -136,6 +136,10 @@ type PinnedObject struct {
 	Size      uint64
 	UpdatedAt time.Time
 	Deleted   bool
+
+	// Object is what the event carried, which is the object itself: the log hands
+	// it over, so nothing has to ask after it a second time.
+	Object *sdk.Object
 }
 
 // objectPageSize is how many object events are fetched per request when the
@@ -322,6 +326,7 @@ func (b *sdkBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, limit
 		}
 		if ev.Object != nil {
 			obj.Size = ev.Object.Size()
+			obj.Object = ev.Object
 		}
 		objs = append(objs, obj)
 	}
