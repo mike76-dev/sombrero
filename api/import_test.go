@@ -55,7 +55,7 @@ func awaitImport(t *testing.T, api *API, path string) ImportStatusResponse {
 		w := doRequest(api, http.MethodGet, path, nil)
 		checkStatus(t, w, http.StatusOK)
 		res := decodeJSON[ImportStatusResponse](t, w)
-		if res.State != ImportRunning {
+		if res.State != ImportRunning && res.State != ImportCounting {
 			return res
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -90,8 +90,10 @@ func TestImport(t *testing.T) {
 			Source: "renterd", Address: srv.URL, Bucket: "default", Username: "alice",
 		})
 		checkStatus(t, w, http.StatusAccepted)
-		if res := decodeJSON[ImportStatusResponse](t, w); res.State != ImportRunning {
-			t.Fatalf("state: want %q, got %q", ImportRunning, res.State)
+
+		// An import starts by working out how much there is to bring over.
+		if res := decodeJSON[ImportStatusResponse](t, w); res.State != ImportCounting {
+			t.Fatalf("state: want %q, got %q", ImportCounting, res.State)
 		}
 
 		res := awaitImport(t, api, path)

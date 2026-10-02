@@ -21,6 +21,42 @@ func (rc *RenterdClient) Source() transfer.Source {
 	return transfer.Source{Kind: "renterd", Origin: rc.baseURL, Bucket: rc.bucket}
 }
 
+// Count walks the bucket and counts the files in it, which is what an import of
+// it has to get through. It lists and downloads nothing, so it costs a request
+// per folder and no data.
+func (rc *RenterdClient) Count(ctx context.Context) (int, error) {
+	var files int
+
+	queue := []string{"/"}
+	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return files, err
+		}
+
+		dir := queue[0]
+		queue = queue[1:]
+
+		entries, err := rc.List(ctx, stores.Account{}, dir)
+		if err != nil {
+			return files, fmt.Errorf("failed to list %q: %w", dir, err)
+		}
+
+		for _, entry := range entries {
+			path := describedPath(entry.Key)
+			if path == "/" {
+				continue
+			}
+			if strings.HasSuffix(entry.Key, "/") {
+				queue = append(queue, path+"/")
+				continue
+			}
+			files++
+		}
+	}
+
+	return files, nil
+}
+
 // Describe walks the bucket and writes a description of what it holds.
 //
 // The parts it writes say where the bytes are to be fetched from, never how to

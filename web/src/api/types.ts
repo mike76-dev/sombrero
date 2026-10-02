@@ -141,7 +141,7 @@ export interface AppKeyHolder {
   name?: string
 }
 
-export type ImportState = 'idle' | 'running' | 'done' | 'failed' | 'cancelled'
+export type ImportState = 'idle' | 'counting' | 'running' | 'done' | 'failed' | 'cancelled'
 
 // What a source holds, from a look at it before anything is taken over. For an
 // indexd account, objects is what it has pinned and tagged how many of the ones
@@ -211,6 +211,11 @@ export interface ImportStatusResponse {
   failed: number
   bytes: number
   waits: number
+
+  // total is how many files the source turned out to hold, counted before any
+  // of them were moved, and done how many of them are behind us.
+  total?: number
+  done: number
   failures?: string[]
   error?: string
 }

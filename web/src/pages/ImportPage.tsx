@@ -31,7 +31,7 @@ const pollInterval = 1000
 // running says whether an import is still going, which is what the poll and the
 // disabled buttons hang off.
 function running(status: ImportStatusResponse | null): boolean {
-  return status?.state === 'running'
+  return status?.state === 'running' || status?.state === 'counting'
 }
 
 export function ImportPage() {
@@ -85,7 +85,7 @@ export function ImportPage() {
       if (stopped.current) return
       setPollError(null)
       setStatus(res)
-      if (res.state === 'running') {
+      if (running(res)) {
         timer.current = setTimeout(() => poll(wg, sh), pollInterval)
       }
     } catch (e) {
@@ -163,7 +163,7 @@ export function ImportPage() {
   const follow = (res: ImportStatusResponse) => {
     setStatus(res)
     clearTimeout(timer.current)
-    if (res.state === 'running') {
+    if (running(res)) {
       timer.current = setTimeout(() => poll(workgroup.trim(), share.trim()), pollInterval)
     }
   }
@@ -444,6 +444,27 @@ function SourceProbe({ probe }: { probe: ImportProbeResponse | null }) {
   )
 }
 
+// Overall is how far through the import is: how many of the files the source
+// turned out to hold are behind it. Nothing is shown while the counting is still
+// going, since there is nothing yet to measure against.
+function Overall({ status }: { status: ImportStatusResponse }) {
+  const total = status.total ?? 0
+  if (total === 0) return null
+
+  const share = Math.min(100, Math.round((status.done / total) * 100))
+
+  return (
+    <div className="stack">
+      <div className="bar">
+        <div className="bar-fill" style={{ width: `${share}%` }} />
+      </div>
+      <div className="muted">
+        {status.done} of {total} file{total === 1 ? '' : 's'} ({share}%)
+      </div>
+    </div>
+  )
+}
+
 // CurrentFile is the file the import has in hand. A large one is copied a chunk
 // at a time, so how much of it has moved is worth showing.
 function CurrentFile({ status }: { status: ImportStatusResponse }) {
@@ -474,6 +495,7 @@ function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
   if (!status || status.state === 'idle') return null
 
   const label: Record<string, string> = {
+    counting: 'Working out how much there is',
     running: 'Running',
     done: 'Finished',
     failed: 'Failed',
@@ -488,6 +510,7 @@ function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
         {label[status.state] || status.state}
         {status.source ? ` — from ${status.source}` : ''}
       </div>
+      <Overall status={status} />
       {status.path && <CurrentFile status={status} />}
       <table className="table table-kv">
         <tbody>

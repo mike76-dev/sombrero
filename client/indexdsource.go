@@ -108,6 +108,40 @@ func finishProbe(probe AccountProbe, held map[types.Hash256]struct{}, more bool)
 	return probe
 }
 
+// CountAccount counts the files an import of the account would bring over, which
+// is not the same as the number of objects it holds: an object that says which
+// files it is of may hold runs of several of them, and a large file is held in
+// several objects.
+//
+// It costs the walk of the object log and nothing else, the log handing over the
+// objects along with the events.
+func CountAccount(ctx context.Context, src AccountObjects) (int, error) {
+	pinned, err := listPinned(ctx, src)
+	if err != nil {
+		return 0, err
+	}
+
+	files := make(map[string]struct{})
+	var untagged int
+	for _, obj := range pinned {
+		if obj.Object == nil {
+			untagged++
+			continue
+		}
+
+		tag, ok := parseTag(obj.Object.Metadata())
+		if !ok {
+			untagged++
+			continue
+		}
+		for _, piece := range tag.Pieces {
+			files[piece.Share+piece.Path] = struct{}{}
+		}
+	}
+
+	return len(files) + untagged, nil
+}
+
 // DescribeAccount walks an indexd account's object log and describes what it
 // holds.
 //

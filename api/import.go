@@ -29,6 +29,11 @@ const (
 	// ImportIdle is reported for a workgroup and share with no import tracked.
 	ImportIdle ImportState = "idle"
 
+	// ImportCounting is an import working out how much there is to bring over,
+	// which it does before it moves any of it so that what follows can be
+	// measured against something.
+	ImportCounting ImportState = "counting"
+
 	// ImportRunning is an import in flight, ImportDone one that reached the end
 	// of what it was given, and ImportFailed one that could not.
 	ImportRunning ImportState = "running"
@@ -97,6 +102,11 @@ type ImportStatusResponse struct {
 	Failed      int    `json:"failed"`
 	Bytes       uint64 `json:"bytes"`
 	Waits       int    `json:"waits"`
+
+	// Total is how many files the source turned out to hold, counted before any
+	// of them were moved, and Done how many of them are behind us.
+	Total int `json:"total,omitempty"`
+	Done  int `json:"done"`
 
 	Failures []string `json:"failures,omitempty"`
 	Error    string   `json:"error,omitempty"`
@@ -175,8 +185,18 @@ type importRun struct {
 	path     string
 	copied   uint64
 	size     uint64
+	total    int
 	failures []string
 	err      string
+}
+
+// counted records how much there turned out to be, and starts the import on it.
+func (r *importRun) counted(total int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.total = total
+	r.state = ImportRunning
+	r.since = time.Now()
 }
 
 // working records the file the import has in hand and how much of it has moved.
@@ -222,12 +242,13 @@ func (r *importRun) finish(state ImportState, stats client.ImportStats, err erro
 	}
 }
 
-// done reports whether the import has ended.
+// done reports whether the import has ended, counting what it is to move being
+// part of it rather than a thing before it.
 func (r *importRun) done() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.state != ImportRunning
+	return r.state != ImportRunning && r.state != ImportCounting
 }
 
 // status reports the import as it stands.
@@ -252,8 +273,13 @@ func (r *importRun) status() ImportStatusResponse {
 
 		// What has moved of the file in hand is not in the totals yet, and is
 		// counted here so that the bytes do not stand still through a large one.
-		Bytes:    r.stats.Bytes + r.copied,
-		Waits:    r.stats.Waits,
+		Bytes: r.stats.Bytes + r.copied,
+		Waits: r.stats.Waits,
+		Total: r.total,
+
+		// What is behind us is every file the import is done with, however it
+		// came to be done with it.
+		Done:     r.stats.Pinned + r.stats.Copied + r.stats.Skipped + r.stats.Failed + r.stats.Unresolved,
 		Failures: append([]string(nil), r.failures...),
 		Error:    r.err,
 	}
@@ -275,7 +301,7 @@ func (t *importTracker) begin(key, source string, cancel context.CancelFunc) (*i
 	}
 
 	now := time.Now()
-	r := &importRun{source: source, cancel: cancel, state: ImportRunning, started: now, since: now}
+	r := &importRun{source: source, cancel: cancel, state: ImportCounting, started: now, since: now}
 	if t.runs == nil {
 		t.runs = make(map[string]*importRun)
 	}
@@ -554,6 +580,26 @@ func (api *API) runImport(ctx context.Context, cancel context.CancelFunc, run *i
 	defer cancel()
 	defer func() { go api.imports.forget(api.ctx, key, run) }()
 
+	// How much there is to bring over is worked out first, so that what follows
+	// can be measured against it. It costs the listing of the source and none of
+	// its data.
+	var total int
+	if describe.count != nil {
+		counted, err := describe.count(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				run.finish(ImportCancelled, client.ImportStats{}, nil)
+				return
+			}
+			log.Printf("failed to count what is in %s: %v", describe.origin, err)
+			run.finish(ImportFailed, client.ImportStats{}, err)
+
+			return
+		}
+		total = counted
+	}
+	run.counted(total)
+
 	pr, pw := io.Pipe()
 	go func() {
 		w, err := transfer.NewWriter(pw, transfer.Header{
@@ -591,10 +637,12 @@ func (api *API) runImport(ctx context.Context, cancel context.CancelFunc, run *i
 	}
 }
 
-// describer walks a source into a description, and says where that source is.
+// describer walks a source into a description, says where that source is, and
+// counts what is in it before any of it is moved.
 type describer struct {
 	origin string
 	walk   func(ctx context.Context, w *transfer.Writer) (client.DescribeStats, error)
+	count  func(ctx context.Context) (int, error)
 }
 
 // destination returns the client of the workgroup's connection to the share,
@@ -637,6 +685,7 @@ func (api *API) source(w http.ResponseWriter, body ImportRequest, share stores.S
 			walk: func(ctx context.Context, tw *transfer.Writer) (client.DescribeStats, error) {
 				return rc.Describe(ctx, tw)
 			},
+			count: rc.Count,
 		}, true
 
 	case "indexd":
@@ -651,6 +700,9 @@ func (api *API) source(w http.ResponseWriter, body ImportRequest, share stores.S
 			origin: body.Address,
 			walk: func(ctx context.Context, tw *transfer.Writer) (client.DescribeStats, error) {
 				return client.DescribeAccount(ctx, account, tw, body.Address, prefix)
+			},
+			count: func(ctx context.Context) (int, error) {
+				return client.CountAccount(ctx, account)
 			},
 		}, true
 
