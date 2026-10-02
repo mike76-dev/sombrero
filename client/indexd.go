@@ -119,6 +119,10 @@ type storageBackend interface {
 	// Pin takes over an object that is already on the network, pinning what it
 	// is made of into this account without moving any of it.
 	Pin(ctx context.Context, obj sdk.Object) error
+
+	// Object returns one object of this account, which is also how to find out
+	// whether it has it at all.
+	Object(ctx context.Context, key types.Hash256) (sdk.Object, error)
 	DeleteObject(ctx context.Context, key types.Hash256) error
 	PruneSlabs(ctx context.Context) error
 	ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error)

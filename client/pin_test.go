@@ -179,6 +179,64 @@ func TestImportCopiesWhatItCannotPin(t *testing.T) {
 	waitForRead(t, ctx, c, acc, "/taken/over.bin", content)
 }
 
+// absentPinner answers a pin without the account coming to hold anything, the
+// way one does whose indexer is not the destination's: a source and a
+// destination on different networks, or one and the same account.
+type absentPinner struct {
+	fakePinner
+	asked int
+}
+
+// HasObject implements ObjectChecker.
+func (ap *absentPinner) HasObject(ctx context.Context, key types.Hash256) (bool, error) {
+	ap.asked++
+
+	return false, nil
+}
+
+// TestImportCopiesWhatThePinDidNotTake verifies that an answered pin is not taken
+// for a pinned object: the rows would name an object this share cannot read.
+func TestImportCopiesWhatThePinDidNotTake(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	content := []byte("the pin was answered but took nothing")
+	file := foreignFile("/over.bin", uint32(len(content)))
+	src := &fakeSource{content: map[string][]byte{file.Parts[0].Source.Key: content}}
+	pinner := &absentPinner{}
+
+	var reported []string
+	stats, err := Import(ctx, db, c, src, pinner, describeFiles(t, []transfer.File{file}),
+		ImportOptions{
+			CopyOptions: CopyOptions{Account: acc, OnError: func(path string, err error) { reported = append(reported, path) }},
+			Target:      importTarget(t, db, acc, share.Name),
+		})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if stats.Pinned != 0 || stats.Copied != 1 {
+		t.Fatalf("stats: want the file copied rather than taken for pinned, got %+v", stats)
+	}
+	if pinner.asked == 0 {
+		t.Error("the pin was not confirmed at all")
+	}
+	if len(reported) != 1 {
+		t.Errorf("the pin that took nothing was reported %d time(s), want once", len(reported))
+	}
+
+	// What the share holds is the copy, which it can read.
+	waitForRead(t, ctx, c, acc, "/over.bin", content)
+}
+
 // TestImportCopiesWhenAsked verifies that an import told to copy leaves the
 // source's slabs alone even where they could have been taken over.
 func TestImportCopiesWhenAsked(t *testing.T) {

@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path"
 
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
+	"go.sia.tech/core/types"
+	"go.sia.tech/indexd/api/app"
 	sdk "go.sia.tech/siastorage"
 )
 
@@ -30,10 +33,33 @@ type ObjectPinner interface {
 	PinObject(ctx context.Context, obj sdk.Object) error
 }
 
+// ObjectChecker says whether the account holds an object. A pinner that is one
+// is asked to confirm that a pin took, since a request that was answered is not
+// the same as an account that came to hold what it asked for.
+type ObjectChecker interface {
+	HasObject(ctx context.Context, key types.Hash256) (bool, error)
+}
+
 // PinObject takes over an object for this connection's account, which is what
 // makes an IndexdClient the pinner of an import into its share.
 func (ic *IndexdClient) PinObject(ctx context.Context, obj sdk.Object) error {
 	return ic.backend.Pin(ctx, obj)
+}
+
+// HasObject reports whether this connection's account holds the object. An
+// account that does not is told apart from an indexer that could not say.
+func (ic *IndexdClient) HasObject(ctx context.Context, key types.Hash256) (bool, error) {
+	_, err := ic.backend.Object(ctx, key)
+	if err == nil {
+		return true, nil
+	}
+
+	var httpErr *app.HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+
+	return false, err
 }
 
 // PinFile pins what every part of a file is made of and returns the file with
@@ -161,6 +187,18 @@ func importFile(ctx context.Context, store TransferStore, dst Client, src PartRe
 	if !opts.Copy && pinner != nil && pinnable(file) {
 		pinned, err := PinFile(ctx, pinner, file)
 		if err == nil {
+			// A pin that was answered is not a pin that took: a source and a
+			// destination on different networks, or on the same account, both
+			// answer without this account coming to hold anything.
+			took, cerr := pinTook(ctx, pinner, pinned)
+			if cerr != nil {
+				return cerr
+			}
+			if !took {
+				err = errPinDidNotTake
+			}
+		}
+		if err == nil {
 			res, err := store.ApplyFile(opts.Target, pinned)
 			if err != nil {
 				return err
@@ -207,6 +245,33 @@ func importFile(ctx context.Context, store TransferStore, dst Client, src PartRe
 	}
 
 	return nil
+}
+
+// errPinDidNotTake is what a file is copied over after a pin the indexer
+// answered without this account coming to hold anything.
+var errPinDidNotTake = errors.New("the objects were not pinned into this share's account, so the file is copied instead")
+
+// pinTook reports whether the account the objects were pinned into holds them.
+// A pinner that cannot say is taken at its word.
+//
+// One object is asked after, not all of them: they were pinned into one account
+// by one call apiece, so what became of the first is what became of the rest, and
+// a file of thousands of runs is not worth thousands of questions.
+func pinTook(ctx context.Context, pinner ObjectPinner, file transfer.File) (bool, error) {
+	checker, ok := pinner.(ObjectChecker)
+	if !ok {
+		return true, nil
+	}
+
+	for _, part := range file.Parts {
+		if part.Object == (types.Hash256{}) {
+			continue
+		}
+
+		return checker.HasObject(ctx, part.Object)
+	}
+
+	return true, nil
 }
 
 // pinnable reports whether a file says what it takes to pin any of it.

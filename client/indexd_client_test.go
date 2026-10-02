@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -278,6 +279,23 @@ func (fb *fakeBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, lim
 	}
 
 	return page, nil
+}
+
+// Object answers for the objects this account holds, which is what confirms that
+// a pin took. One it does not hold is answered the way the indexer answers for
+// it, so that the two are told apart.
+func (fb *fakeBackend) Object(ctx context.Context, key types.Hash256) (sdk.Object, error) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+
+	if _, uploaded := fb.objects[key]; uploaded {
+		return sdk.NewUnsafeObject([32]byte{}, nil), nil
+	}
+	if obj, pinned := fb.pinned[key]; pinned {
+		return obj, nil
+	}
+
+	return sdk.Object{}, &app.HTTPError{StatusCode: http.StatusNotFound, Body: "object not found"}
 }
 
 // Pin takes over an object the account does not hold yet, the way pinning one
