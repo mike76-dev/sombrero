@@ -111,6 +111,10 @@ type storageBackend interface {
 	// about its own contents, and may be nil for an object that says nothing.
 	Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8, meta json.RawMessage) (types.Hash256, error)
 	Download(ctx context.Context, key types.Hash256, offset, length uint64, w io.Writer) error
+
+	// Retag replaces what the object of the slab says about its own contents,
+	// which is a request of its own: the data stays where it is.
+	Retag(ctx context.Context, key types.Hash256, meta json.RawMessage) error
 	DeleteObject(ctx context.Context, key types.Hash256) error
 	PruneSlabs(ctx context.Context) error
 	ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error)
@@ -256,6 +260,26 @@ func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, le
 	}
 }
 
+// Retag replaces what the object says about its contents. Pinning an object the
+// account already holds writes the metadata and nothing else, so this costs one
+// request and moves no data.
+func (b *sdkBackend) Retag(ctx context.Context, key types.Hash256, meta json.RawMessage) error {
+	obj, err := b.object(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	obj.UpdateMetadata(meta)
+	if err := b.sdk.PinObject(ctx, obj); err != nil {
+		return err
+	}
+
+	// The cached copy would otherwise go on saying what the object used to.
+	b.forgetObject(key)
+
+	return nil
+}
+
 // DeleteObject calls sdk.DeleteObject.
 func (b *sdkBackend) DeleteObject(ctx context.Context, key types.Hash256) error {
 	b.forgetObject(key)
@@ -330,7 +354,14 @@ type IndexdClient struct {
 	closeOnce    sync.Once
 	jobsChan     chan struct{}
 	packChan     chan struct{}
+	retagChan    chan struct{}
 	wg           sync.WaitGroup
+
+	// retagging holds the slabs whose objects are to be told what they hold,
+	// which a rename or a delete leaves them owing. Keeping them in a set has
+	// one object retagged once however many changes touched it.
+	mu        sync.Mutex
+	retagging map[types.Hash256]struct{}
 
 	// claimed holds the metadata IDs of the pieces this client has claimed
 	// and not yet completed or requeued, so that the janitor for stranded
@@ -454,6 +485,7 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		drainTimeout: shutdownDrainTimeout,
 		jobsChan:     make(chan struct{}, uploadWorkers),
 		packChan:     make(chan struct{}, 1),
+		retagChan:    make(chan struct{}, 1),
 		claimed:      make(map[uint64]struct{}),
 
 		slabRetryDelays: defaultSlabRetryDelays,
@@ -509,6 +541,14 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 	go func() {
 		defer ic.wg.Done()
 		ic.cleanupUploadJobs(ic.ctx)
+	}()
+
+	// Start the worker that tells the objects what they hold after a change has
+	// left them saying something else.
+	ic.wg.Add(1)
+	go func() {
+		defer ic.wg.Done()
+		ic.retagObjects(ic.ctx)
 	}()
 
 	// Repacking is driven by the check, so turning the check off leaves it to
@@ -858,6 +898,12 @@ func (ic *IndexdClient) Write(ctx context.Context, r io.Reader, path string, upl
 // unreferenced by the deletion are unpinned; a slab shared with a surviving
 // file stays in place.
 func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path string, batch bool) (err error) {
+	// What the deleted files were made of is noted before they are gone. The
+	// slabs that nothing references afterwards are unpinned below; the ones that
+	// other files still hold runs in are left saying one run too many, and are
+	// told what they hold now.
+	touched := ic.slabsOf(path, batch)
+
 	var slabs []types.Hash256
 	if batch {
 		slabs, err = ic.db.DeleteDirectory(acc, ic.share, path)
@@ -867,6 +913,8 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 	if err != nil {
 		return err
 	}
+
+	ic.retag(touched)
 
 	if len(slabs) == 0 {
 		return nil
@@ -903,9 +951,29 @@ func (ic *IndexdClient) MakeDirectory(ctx context.Context, acc stores.Account, p
 // Rename renames a file or a directory.
 func (ic *IndexdClient) Rename(ctx context.Context, acc stores.Account, oldName, newName string, isDir, force bool) error {
 	if isDir {
-		return ic.db.RenameDirectory(acc, ic.share, oldName, newName, force)
+		if err := ic.db.RenameDirectory(acc, ic.share, oldName, newName, force); err != nil {
+			return err
+		}
+	} else if err := ic.db.RenameFile(acc, ic.share, oldName, newName, force); err != nil {
+		return err
 	}
-	return ic.db.RenameFile(acc, ic.share, oldName, newName, force)
+
+	// The objects are still of the same bytes, under names they no longer go by.
+	ic.retag(ic.slabsOf(newName, isDir))
+
+	return nil
+}
+
+// slabsOf returns the slabs the path is made of, for the changes that leave the
+// objects saying something other than what is so.
+func (ic *IndexdClient) slabsOf(path string, batch bool) []types.Hash256 {
+	keys, err := ic.db.SlabsOfPath(ic.share, ic.workgroup, path, batch)
+	if err != nil {
+		log.Printf("failed to look up the slabs of %s: %v", path, err)
+		return nil
+	}
+
+	return keys
 }
 
 // pinnedObjects walks the whole object event log of this connection's app

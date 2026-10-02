@@ -1,10 +1,12 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 
 	"github.com/mike76-dev/sombrero/stores"
+	"go.sia.tech/core/types"
 )
 
 // objectTagVersion is the version of the tag this server writes. A reader takes
@@ -92,6 +94,120 @@ func tagPieces(jobs []stores.UploadJob, owners map[uint64]stores.PieceOwner) jso
 	}
 
 	return meta
+}
+
+// tagOfSlab returns what the object of the slab is to say about itself, worked
+// out from the files that reference it now. It is nil for a slab no file does,
+// which is one on its way to being unpinned rather than retagged.
+func (ic *IndexdClient) tagOfSlab(key types.Hash256) (json.RawMessage, bool) {
+	runs, err := ic.db.SlabRuns(ic.share, ic.workgroup, key)
+	if err != nil {
+		log.Printf("failed to look up the runs of slab %s: %v", key, err)
+		return nil, false
+	}
+	if len(runs) == 0 {
+		return nil, false
+	}
+
+	tag := objectTag{Version: objectTagVersion, Pieces: make([]objectPiece, 0, len(runs))}
+	for _, run := range runs {
+		tag.Pieces = append(tag.Pieces, objectPiece{
+			Share:  run.Share,
+			Path:   run.Path,
+			Offset: run.ObjOffset,
+			At:     run.DataOffset,
+			Length: run.DataLength,
+			Size:   run.Size,
+		})
+	}
+
+	meta, err := json.Marshal(tag)
+	if err != nil {
+		log.Printf("failed to encode the tag of slab %s: %v", key, err)
+		return nil, false
+	}
+
+	return meta, true
+}
+
+// retag has the objects of these slabs say what they hold now. It is for the
+// changes that leave the data where it is and the names of it elsewhere: a file
+// that was renamed or deleted out of a slab it shares with others.
+//
+// The work is handed to a worker, since a client waiting on a rename is not to
+// wait on the indexer as well. A tag that is not written is a tag that is out of
+// date, which costs a rescue the right name and nothing else.
+func (ic *IndexdClient) retag(keys []types.Hash256) {
+	if len(keys) == 0 {
+		return
+	}
+
+	ic.mu.Lock()
+	if ic.retagging == nil {
+		ic.retagging = make(map[types.Hash256]struct{})
+	}
+	for _, key := range keys {
+		ic.retagging[key] = struct{}{}
+	}
+	ic.mu.Unlock()
+
+	select {
+	case ic.retagChan <- struct{}{}:
+	default:
+	}
+}
+
+// retagObjects is the worker that writes the tags the changes left owing. A tag
+// is not worth holding a shutdown up for: what is left unwritten is a name a
+// rescue would have got right, and the data is not waiting on it.
+func (ic *IndexdClient) retagObjects(ctx context.Context) {
+	for {
+		select {
+		case <-ic.drainChan:
+			return
+		case <-ctx.Done():
+			return
+		case <-ic.retagChan:
+		}
+
+		for {
+			key, ok := ic.nextRetag()
+			if !ok {
+				break
+			}
+
+			select {
+			case <-ic.drainChan:
+				return
+			default:
+			}
+
+			if err := ctx.Err(); err != nil {
+				return
+			}
+
+			meta, owed := ic.tagOfSlab(key)
+			if !owed {
+				continue
+			}
+			if err := ic.backend.Retag(ctx, key, meta); err != nil {
+				log.Printf("failed to tell slab %s what it holds: %v", key, err)
+			}
+		}
+	}
+}
+
+// nextRetag takes one slab off the set that is waiting to be retagged.
+func (ic *IndexdClient) nextRetag() (types.Hash256, bool) {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
+
+	for key := range ic.retagging {
+		delete(ic.retagging, key)
+		return key, true
+	}
+
+	return types.Hash256{}, false
 }
 
 // parseTag reads what an object says about its contents, and reports whether it

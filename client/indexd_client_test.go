@@ -36,8 +36,11 @@ type fakeBackend struct {
 	deletes    int
 
 	// tags keeps what each uploaded object was told to say about its contents,
-	// in the order the uploads were made.
-	tags []json.RawMessage
+	// in the order the uploads were made, and retags what the objects were told
+	// afterwards, by key.
+	tags     []json.RawMessage
+	retags   map[types.Hash256]json.RawMessage
+	retagErr error
 
 	downloadErrs []error // returned by the next downloads, one each
 	downloads    int
@@ -270,6 +273,36 @@ func (fb *fakeBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, lim
 	}
 
 	return page, nil
+}
+
+// Retag records what the object was told to say about itself, the way the real
+// backend pins it again with the new metadata and no new data.
+func (fb *fakeBackend) Retag(ctx context.Context, key types.Hash256, meta json.RawMessage) error {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+
+	if fb.retagErr != nil {
+		return fb.retagErr
+	}
+	if _, ok := fb.objects[key]; !ok {
+		return errors.New("no such object")
+	}
+	if fb.retags == nil {
+		fb.retags = make(map[types.Hash256]json.RawMessage)
+	}
+	fb.retags[key] = meta
+
+	return nil
+}
+
+// retagged returns what the object of the key was last told to say about itself.
+func (fb *fakeBackend) retagged(key types.Hash256) (json.RawMessage, bool) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+
+	meta, ok := fb.retags[key]
+
+	return meta, ok
 }
 
 func (fb *fakeBackend) Close() error {
