@@ -171,6 +171,15 @@ export interface ImportRequest {
   copy?: boolean
 }
 
+// One import the server has in hand: which workgroup is importing into which
+// share, and how it is getting on. It is what a page that does not know where to
+// look goes by.
+export interface ImportSummary {
+  workgroup: string
+  share: string
+  status: ImportStatusResponse
+}
+
 // What to sort out of the objects whose names are gone: whose the recovered
 // files are, where to look, and where the round before this one stopped.
 export interface ImportSortRequest {

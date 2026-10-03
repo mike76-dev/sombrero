@@ -468,6 +468,10 @@ func (api *API) buildHTTPRoutes() {
 		api.connectHandlerDELETE(w, req, ps)
 	})
 
+	router.GET("/imports", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.importsHandlerGET(w, req, ps)
+	})
+
 	router.GET("/import/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.importHandlerGET(w, req, ps)
 	})

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -165,6 +166,15 @@ type LostAndFound interface {
 	SortLostAndFound(ctx context.Context, acc stores.Account, prefix, after string, limit int) (client.SortReport, error)
 }
 
+// ImportSummary is one import the server has in hand: which workgroup is
+// importing into which share, and how it is getting on. It is what a page that
+// does not know where to look goes by.
+type ImportSummary struct {
+	Workgroup string               `json:"workgroup"`
+	Share     string               `json:"share"`
+	Status    ImportStatusResponse `json:"status"`
+}
+
 // Transfers is the part of a store an import needs: the rows of what it pinned,
 // and the times an upload stamps over. Only the database-backed store has it.
 type Transfers interface {
@@ -178,6 +188,12 @@ type Transfers interface {
 type importRun struct {
 	source string
 	cancel context.CancelFunc
+
+	// Where it is running, so that whoever asks what the server has in hand is
+	// told where to look for it: a page that was left and come back to knows
+	// neither the workgroup nor the share any more.
+	workgroup string
+	share     string
 
 	mu      sync.Mutex
 	state   ImportState
@@ -312,7 +328,7 @@ type importTracker struct {
 
 // begin starts an import. A workgroup imports into a share one at a time, so one
 // that is still running is returned as it is, with false to say so.
-func (t *importTracker) begin(key, source string, cancel context.CancelFunc) (*importRun, bool) {
+func (t *importTracker) begin(key, source, workgroup, share string, cancel context.CancelFunc) (*importRun, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if r, running := t.runs[key]; running && !r.done() {
@@ -320,7 +336,15 @@ func (t *importTracker) begin(key, source string, cancel context.CancelFunc) (*i
 	}
 
 	now := time.Now()
-	r := &importRun{source: source, cancel: cancel, state: ImportCounting, started: now, since: now}
+	r := &importRun{
+		source:    source,
+		cancel:    cancel,
+		workgroup: workgroup,
+		share:     share,
+		state:     ImportCounting,
+		started:   now,
+		since:     now,
+	}
 	if t.runs == nil {
 		t.runs = make(map[string]*importRun)
 	}
@@ -335,6 +359,37 @@ func (t *importTracker) get(key string) *importRun {
 	defer t.mu.Unlock()
 
 	return t.runs[key]
+}
+
+// summaries returns the imports the server has in hand, the newest first: the
+// ones running, and the ones whose outcome is still there to be read.
+func (t *importTracker) summaries() []ImportSummary {
+	t.mu.Lock()
+	runs := make([]*importRun, 0, len(t.runs))
+	for _, r := range t.runs {
+		runs = append(runs, r)
+	}
+	t.mu.Unlock()
+
+	summaries := make([]ImportSummary, 0, len(runs))
+	for _, r := range runs {
+		summaries = append(summaries, ImportSummary{
+			Workgroup: r.workgroup,
+			Share:     r.share,
+			Status:    r.status(),
+		})
+	}
+
+	sort.Slice(summaries, func(i, j int) bool {
+		left, right := summaries[i].Status.Started, summaries[j].Status.Started
+		if left == nil || right == nil {
+			return right == nil
+		}
+
+		return left.After(*right)
+	})
+
+	return summaries
 }
 
 // forget drops the import once its outcome has had the time to be read, unless a
@@ -367,6 +422,13 @@ func (api *API) importHandlerGET(w http.ResponseWriter, _ *http.Request, ps http
 	}
 
 	writeJSON(w, ImportStatusResponse{State: ImportIdle})
+}
+
+// importsHandlerGET handles the GET /imports calls. It says what imports the
+// server has in hand, so that one can be followed and called off by whoever did
+// not start it, or by the page that started it and has been reloaded since.
+func (api *API) importsHandlerGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	writeJSON(w, api.imports.summaries())
 }
 
 // importHandlerDELETE handles the DELETE /import/:workgroup/:share calls, which
@@ -565,7 +627,7 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 	pinner, _ := dst.(client.ObjectPinner)
 
 	ctx, cancel := context.WithCancel(api.ctx)
-	run, started := api.imports.begin(connectKey(wg, share), body.Source, cancel)
+	run, started := api.imports.begin(connectKey(wg, share), body.Source, wg.UUID.String(), share.Name, cancel)
 	if !started {
 		cancel()
 		writeError(w, "this workgroup is already importing into this share", http.StatusConflict)

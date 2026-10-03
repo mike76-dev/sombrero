@@ -148,7 +148,7 @@ func TestImport(t *testing.T) {
 	t.Run("POST refuses a second import of the same share", func(t *testing.T) {
 		api := newTestAPIWithServer(importingStore("myshare"), connectedServer())
 		key := connectKey(stores.Workgroup{UUID: testUUID}, stores.Share{Name: "myshare"})
-		if _, started := api.imports.begin(key, "renterd", func() {}); !started {
+		if _, started := api.imports.begin(key, "renterd", testUUID.String(), "myshare", func() {}); !started {
 			t.Fatal("the import did not start")
 		}
 
@@ -163,7 +163,7 @@ func TestImport(t *testing.T) {
 		key := connectKey(stores.Workgroup{UUID: testUUID}, stores.Share{Name: "myshare"})
 
 		called := make(chan struct{})
-		run, started := api.imports.begin(key, "renterd", func() { close(called) })
+		run, started := api.imports.begin(key, "renterd", testUUID.String(), "myshare", func() { close(called) })
 		if !started {
 			t.Fatal("the import did not start")
 		}
@@ -187,6 +187,41 @@ func TestImport(t *testing.T) {
 	t.Run("DELETE without an import returns 404", func(t *testing.T) {
 		w := doRequest(newTestAPI(importingStore("myshare")), http.MethodDelete, path, nil)
 		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	// A page that has been reloaded, or left and come back to, knows neither the
+	// workgroup nor the share any more, and would otherwise be unable to follow
+	// an import or to call it off.
+	t.Run("GET /imports says what the server has in hand", func(t *testing.T) {
+		api := newTestAPI(importingStore("myshare"))
+		if res := decodeJSON[[]ImportSummary](t, doRequest(api, http.MethodGet, "/imports", nil)); len(res) != 0 {
+			t.Fatalf("want nothing in hand, got %+v", res)
+		}
+
+		key := connectKey(stores.Workgroup{UUID: testUUID}, stores.Share{Name: "myshare"})
+		run, started := api.imports.begin(key, "renterd", testUUID.String(), "myshare", func() {})
+		if !started {
+			t.Fatal("the import did not start")
+		}
+		run.counted(7)
+
+		res := decodeJSON[[]ImportSummary](t, doRequest(api, http.MethodGet, "/imports", nil))
+		if len(res) != 1 {
+			t.Fatalf("want the one import, got %+v", res)
+		}
+		if res[0].Workgroup != testUUID.String() || res[0].Share != "myshare" {
+			t.Errorf("the import is reported as %s of %s", res[0].Share, res[0].Workgroup)
+		}
+		if res[0].Status.State != ImportRunning || res[0].Status.Total != 7 {
+			t.Errorf("the import is getting on as %+v", res[0].Status)
+		}
+
+		// One that has finished is still in hand for its outcome to be read.
+		run.finish(ImportDone, client.ImportStats{Copied: 7}, nil)
+		res = decodeJSON[[]ImportSummary](t, doRequest(api, http.MethodGet, "/imports", nil))
+		if len(res) != 1 || res[0].Status.State != ImportDone {
+			t.Errorf("the finished import: got %+v", res)
+		}
 	})
 }
 

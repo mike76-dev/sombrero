@@ -10,6 +10,7 @@ import type {
   ImportSortRequest,
   ImportSortResponse,
   ImportStatusResponse,
+  ImportSummary,
   IsBannedResponse,
   OrphansResponse,
   ProbeResponse,
@@ -206,6 +207,8 @@ export const sortLostAndFound = (workgroup: string, share: string, body: ImportS
     `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}/sort`,
     { method: 'POST', body },
   )
+
+export const listImports = () => request<ImportSummary[] | null>('/imports')
 
 export const importStatus = (workgroup: string, share: string) =>
   request<ImportStatusResponse>(

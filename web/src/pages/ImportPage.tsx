@@ -3,6 +3,7 @@ import {
   cancelImport,
   importStatus,
   listAccounts,
+  listImports,
   listShares,
   probeImportSource,
   sortLostAndFound,
@@ -105,6 +106,33 @@ export function ImportPage() {
       clearTimeout(timer.current)
     }
   }, [workgroup, share, poll])
+
+  // A page that was left and come back to, or reloaded, knows neither the
+  // workgroup nor the share, so it asks the server what it has in hand and
+  // takes that up: an import nobody can see is one nobody can call off either.
+  useEffect(() => {
+    if (workgroup || share) return
+
+    let cancelled = false
+    listImports()
+      .then((imports) => {
+        if (cancelled || !imports?.length) return
+
+        // Naming the pair is enough: the poll that follows it answers with the
+        // status of its own accord.
+        const adopt = imports.find((i) => running(i.status)) ?? imports[0]
+        setWorkgroup(adopt.workgroup)
+        setShare(adopt.share)
+      })
+      .catch(() => {
+        // Nothing is lost by not finding an import to take up.
+      })
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on arrival
+  }, [])
 
   // An answer about one source says nothing about another, so it is dropped as
   // soon as the fields that name it change.
