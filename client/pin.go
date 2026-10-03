@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"slices"
 
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
@@ -216,6 +217,12 @@ func importFile(ctx context.Context, store TransferStore, dst Client, src PartRe
 			switch res {
 			case stores.Applied:
 				stats.Pinned++
+
+				// The objects still say what they were files of at the source;
+				// now that the rows are in, they can be told what they are here.
+				if tagger, ok := pinner.(slabTagger); ok {
+					tagger.retag(objectsOf(pinned))
+				}
 			case stores.AlreadyThere:
 				stats.Skipped++
 			default:
@@ -258,6 +265,24 @@ func importFile(ctx context.Context, store TransferStore, dst Client, src PartRe
 	}
 
 	return nil
+}
+
+// slabTagger is a pinner that tells its slabs what they hold, which the objects
+// of a pinned file are owed once the rows naming them are in.
+type slabTagger interface {
+	retag(keys []types.Hash256)
+}
+
+// objectsOf returns the objects a file is made of, each once.
+func objectsOf(file transfer.File) []types.Hash256 {
+	var keys []types.Hash256
+	for _, part := range file.Parts {
+		if part.Object != (types.Hash256{}) && !slices.Contains(keys, part.Object) {
+			keys = append(keys, part.Object)
+		}
+	}
+
+	return keys
 }
 
 // errPinDidNotTake is what a file is copied over after a pin the indexer

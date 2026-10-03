@@ -327,7 +327,9 @@ func (fb *fakeBackend) Retag(ctx context.Context, key types.Hash256, meta json.R
 	if fb.retagErr != nil {
 		return fb.retagErr
 	}
-	if _, ok := fb.objects[key]; !ok {
+	_, uploaded := fb.objects[key]
+	_, pinned := fb.pinned[key]
+	if !uploaded && !pinned {
 		return errors.New("no such object")
 	}
 	if fb.retags == nil {

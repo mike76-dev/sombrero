@@ -361,6 +361,11 @@ func TestTheDestinationPinsWhatIsImported(t *testing.T) {
 	if !held {
 		t.Errorf("the destination did not take over the object %s", want.ID())
 	}
+
+	// And it is told what it is a file of here, rather than at the source.
+	awaitRetag(t, backend, want.ID(), func(tag objectTag) bool {
+		return len(tag.Pieces) == 1 && tag.Pieces[0].Share == share.Name && tag.Pieces[0].Path == "/taken/over.bin"
+	})
 }
 
 // TestImportReportsAsItGoes verifies that an import says how far it has got
