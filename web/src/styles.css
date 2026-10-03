@@ -185,6 +185,13 @@ body {
   align-items: flex-end;
 }
 
+/* A row that is a field's control rather than a band of its own: the field
+   already spaces it from its label, so the row's own margin would push it below
+   the plain inputs beside it. */
+.field > .row {
+  margin-top: 0;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
