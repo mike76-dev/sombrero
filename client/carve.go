@@ -23,9 +23,16 @@ type format struct {
 	ext   string
 	magic []byte
 
+	// lead is how many bytes of the file come before its magic.
+	lead int
+
 	// length walks the file that begins at the start of the data and returns how
 	// long it is, or false where the data is not a whole file of this kind.
 	length func(data []byte) (int, bool)
+
+	// name, where there is one, reads the extension off the file itself, for a
+	// family of formats that open the same way.
+	name func(data []byte) string
 }
 
 // formats are the kinds of file the carver knows. Each one both opens with
@@ -38,6 +45,17 @@ var formats = []format{
 	{ext: "gif", magic: []byte("GIF87a"), length: gifLength},
 	{ext: "zip", magic: []byte{'P', 'K', 0x03, 0x04}, length: zipLength},
 	{ext: "pdf", magic: []byte("%PDF-"), length: pdfLength},
+	{ext: "mp4", magic: []byte("ftyp"), lead: 4, length: isoLength, name: isoName},
+	{ext: "avi", magic: []byte("RIFF"), length: riffLength, name: riffName},
+}
+
+// extension returns what the file found at the start of the data is called.
+func (f *format) extension(data []byte) string {
+	if f.name != nil {
+		return f.name(data)
+	}
+
+	return f.ext
 }
 
 // A Find is a file found inside an object: where it begins and ends in it, and
@@ -71,7 +89,7 @@ func carve(data []byte) (finds []Find, leftover uint64) {
 			continue
 		}
 
-		finds = append(finds, Find{Offset: uint64(start), Length: uint64(length), Ext: f.ext})
+		finds = append(finds, Find{Offset: uint64(start), Length: uint64(length), Ext: f.extension(data[start:])})
 		at = start + length
 	}
 
@@ -83,8 +101,8 @@ func carve(data []byte) (finds []Find, leftover uint64) {
 	return finds, uint64(len(data)) - taken
 }
 
-// nextMagic returns the format whose magic appears first at or after from, and
-// where it appears. The format is nil where none does.
+// nextMagic returns the format whose file begins first at or after from, and
+// where it begins. The format is nil where none does.
 func nextMagic(data []byte, from int) (*format, int) {
 	if from >= len(data) {
 		return nil, -1
@@ -93,13 +111,22 @@ func nextMagic(data []byte, from int) (*format, int) {
 	var found *format
 	at := -1
 	for i := range formats {
-		offset := bytes.Index(data[from:], formats[i].magic)
+		f := &formats[i]
+
+		// The file begins lead bytes before its magic, so a magic closer to from
+		// than that belongs to no file that begins here.
+		search := from + f.lead
+		if search >= len(data) {
+			continue
+		}
+		offset := bytes.Index(data[search:], f.magic)
 		if offset < 0 {
 			continue
 		}
-		if at < 0 || from+offset < at {
-			found = &formats[i]
-			at = from + offset
+		start := search + offset - f.lead
+		if at < 0 || start < at {
+			found = f
+			at = start
 		}
 	}
 
@@ -406,4 +433,158 @@ func pdfLength(data []byte) (int, bool) {
 	}
 
 	return end, end > 0
+}
+
+// topLevelAtoms are the atoms an ISO base media file has at its top level. The
+// file has no trailer, so it ends where its atoms stop being ones of these.
+var topLevelAtoms = map[string]bool{
+	"ftyp": true, "moov": true, "mdat": true, "free": true, "skip": true, "wide": true,
+	"meta": true, "moof": true, "mfra": true, "uuid": true, "pdin": true, "styp": true,
+	"sidx": true, "ssix": true, "prft": true, "udta": true, "junk": true, "pnot": true,
+	"emsg": true, "PICT": true,
+}
+
+// isoLength walks the top-level atoms of an ISO base media file, which MP4, MOV,
+// M4A and HEIC all are. Each atom states its size, so the walk goes from one to
+// the next until something is there that is not an atom of the top level, or no
+// longer fits. The file is taken only with both its data and the index of it,
+// without which it is neither whole nor playable.
+func isoLength(data []byte) (int, bool) {
+	var i int
+	var mdat, index bool
+	for i+8 <= len(data) {
+		size := uint64(binary.BigEndian.Uint32(data[i:]))
+		kind := string(data[i+4 : i+8])
+		if !topLevelAtoms[kind] || (kind == "ftyp" && i > 0) {
+			// Nothing but an atom of the top level goes on from here, and a
+			// second file type is the next file's.
+			break
+		}
+
+		header := uint64(8)
+		if size == 1 {
+			// A large atom carries its size in the 8 bytes after its type.
+			if i+16 > len(data) {
+				break
+			}
+			size = binary.BigEndian.Uint64(data[i+8:])
+			header = 16
+		}
+		if size < header || size > uint64(len(data)-i) {
+			// An atom that runs to the end of the file, or past the end of the
+			// data, is not one this file can be said to end with.
+			break
+		}
+
+		switch kind {
+		case "mdat":
+			mdat = true
+		case "moov", "meta":
+			index = true
+		}
+		i += int(size)
+	}
+
+	if !mdat || !index {
+		return 0, false
+	}
+
+	return i, true
+}
+
+// isoName reads the kind of ISO base media file off its major brand.
+func isoName(data []byte) string {
+	if len(data) < 12 {
+		return "mp4"
+	}
+
+	switch brand := string(data[8:12]); brand {
+	case "qt  ":
+		return "mov"
+	case "M4A ":
+		return "m4a"
+	case "heic", "heix", "hevc", "hevx", "mif1", "msf1":
+		return "heic"
+	case "avif", "avis":
+		return "avif"
+	default:
+		return "mp4"
+	}
+}
+
+// riffForms are the kinds of RIFF file the carver knows, by the form type that
+// follows the RIFF header.
+var riffForms = map[string]string{"AVI ": "avi", "WAVE": "wav", "WEBP": "webp"}
+
+// riffLength walks a RIFF file, which states its own length and is made of chunks
+// that state theirs, to its end. An AVI past a gigabyte goes on in further RIFF
+// chunks of the AVIX form, which belong to it.
+func riffLength(data []byte) (int, bool) {
+	end, ok := riffChunk(data, 0)
+	if !ok {
+		return 0, false
+	}
+
+	for end+12 <= len(data) && string(data[end:end+4]) == "RIFF" && string(data[end+8:end+12]) == "AVIX" {
+		next, ok := riffChunk(data, end)
+		if !ok {
+			break
+		}
+		end = next
+	}
+
+	return end, true
+}
+
+// riffChunk walks the chunks inside the RIFF chunk at the offset, which have to
+// come to exactly the length it states, and reports where it ends.
+func riffChunk(data []byte, at int) (int, bool) {
+	if at+12 > len(data) {
+		return 0, false
+	}
+	size := int(binary.LittleEndian.Uint32(data[at+4:]))
+	end := at + 8 + size
+	if size < 4 || end > len(data) {
+		return 0, false
+	}
+	form := string(data[at+8 : at+12])
+	if _, ok := riffForms[form]; !ok && form != "AVIX" {
+		return 0, false
+	}
+
+	for i := at + 12; i < end; {
+		if i+8 > end || !printable(data[i:i+4]) {
+			return 0, false
+		}
+		n := int(binary.LittleEndian.Uint32(data[i+4:]))
+		i += 8 + n + n&1
+		// A writer may leave the pad byte off the last chunk, and the header's
+		// word on the length is then what counts.
+		if i > end+1 {
+			return 0, false
+		}
+	}
+
+	return end, true
+}
+
+// riffName reads the kind of RIFF file off its form type.
+func riffName(data []byte) string {
+	if len(data) < 12 {
+		return "avi"
+	}
+
+	return riffForms[string(data[8:12])]
+}
+
+// printable reports whether the bytes are all printable ASCII, as a chunk's name
+// is.
+func printable(b []byte) bool {
+	for _, c := range b {
+		if c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+
+	return true
 }

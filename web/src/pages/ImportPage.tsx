@@ -379,8 +379,9 @@ export function ImportPage() {
         <p className="muted">
           Slabs imported without file names land in <span className="mono">/lost+found</span>,
           and each one holds whatever files happened to be packed into it. Sorting reads through
-          them and picks out the files it can recognise from their contents: PDFs, JPEGs, PNGs,
-          GIFs and ZIPs, which covers Office documents too. Each one it finds becomes a file in{' '}
+          them and picks out the files it can recognise from their contents: pictures (JPEG,
+          PNG, GIF, HEIC, WebP), video and audio (MP4, MOV, M4A, AVI, WAV), PDFs and ZIP
+          archives, which covers Office documents too. Each one it finds becomes a file in{' '}
           <span className="mono">/lost+found/recovered</span>. The contents will be correct, but
           the original names are gone for good, so the files are named after where they were
           found.
@@ -389,14 +390,18 @@ export function ImportPage() {
           This costs nothing in storage: a recovered file points at data the share already has.
           What is found is cut out of the slab it was found in, so what remains in{' '}
           <span className="mono">/lost+found</span> is exactly the data nothing could recognise,
-          and a slab that was all files disappears from it. Files bigger than one slab are left
-          there, since only part of them is in the slab being read. Sorting does download each
-          slab to read it, so it takes a while on a large share.
+          and a slab that was all files disappears from it. Sorting does download each slab to
+          read it, so it takes a while on a large share.
         </p>
         <p className="muted">
-          Deleting a recovered file deletes those bytes for good; they are not in the slab's
-          remainder any more. The remainder itself can be downloaded and given to a recovery
-          tool that knows more formats.
+          What remains is mostly pieces of files bigger than a slab — long videos, archives,
+          disk images — spread over many slabs with nothing left to say which belong together.
+          They cannot be put back together from here. A general recovery tool such as PhotoRec,
+          run over a downloaded remainder, knows a few hundred more formats but has the same
+          limit; untrunc can make the opening piece of a video playable given a healthy video
+          from the same camera. Deleting a recovered file deletes those bytes for good, and once
+          nothing more is wanted from the remainders, deleting them unpins the slabs so they
+          stop costing anything.
         </p>
         <div className="row">
           <button

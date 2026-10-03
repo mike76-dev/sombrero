@@ -120,6 +120,74 @@ func pdfFile(stream []byte, revisions int) []byte {
 	return b.Bytes()
 }
 
+// atom is one ISO base media atom: its size, its type and its contents.
+func atom(kind string, body []byte) []byte {
+	b := make([]byte, 8, 8+len(body))
+	binary.BigEndian.PutUint32(b, uint32(8+len(body)))
+	copy(b[4:], kind)
+
+	return append(b, body...)
+}
+
+// isoFile is an MP4, MOV or HEIC of the given brand, with this much data and its
+// index either side of it: a camera writes the index last, a web encoder first.
+func isoFile(brand string, payload int, indexFirst bool) []byte {
+	ftyp := atom("ftyp", append([]byte(brand+"\x00\x00\x02\x00isom"), brand...))
+	index := atom("moov", atom("mvhd", make([]byte, 100)))
+	if brand == "heic" {
+		index = atom("meta", atom("hdlr", make([]byte, 32)))
+	}
+	mdat := atom("mdat", bytes.Repeat([]byte{0x7f}, payload))
+
+	b := append([]byte{}, ftyp...)
+	if indexFirst {
+		return append(append(b, index...), mdat...)
+	}
+
+	return append(append(b, mdat...), index...)
+}
+
+// riffFile is a RIFF file of the given form, made of the given chunks.
+func riffFile(form string, chunks ...[]byte) []byte {
+	var body []byte
+	for _, c := range chunks {
+		body = append(body, c...)
+	}
+	b := make([]byte, 12, 12+len(body))
+	copy(b, "RIFF")
+	binary.LittleEndian.PutUint32(b[4:], uint32(4+len(body)))
+	copy(b[8:], form)
+
+	return append(b, body...)
+}
+
+// chunk is one RIFF chunk, padded to an even length as they are.
+func chunk(id string, body []byte) []byte {
+	b := make([]byte, 8, 8+len(body)+1)
+	copy(b, id)
+	binary.LittleEndian.PutUint32(b[4:], uint32(len(body)))
+	b = append(b, body...)
+	if len(body)%2 == 1 {
+		b = append(b, 0)
+	}
+
+	return b
+}
+
+// wavFile is a WAV of this many bytes of samples.
+func wavFile(samples int) []byte {
+	return riffFile("WAVE", chunk("fmt ", make([]byte, 16)), chunk("data", bytes.Repeat([]byte{1}, samples)))
+}
+
+// aviFile is an AVI: its header list, its frames, and its index.
+func aviFile() []byte {
+	return riffFile("AVI ",
+		chunk("LIST", append([]byte("hdrl"), make([]byte, 56)...)),
+		chunk("LIST", append([]byte("movi"), bytes.Repeat([]byte{2}, 3001)...)),
+		chunk("idx1", make([]byte, 16)),
+	)
+}
+
 // TestCarveFindsWholeFiles verifies what is taken out of an object that holds
 // several files end to end, which is what a packed slab is.
 func TestCarveFindsWholeFiles(t *testing.T) {
@@ -132,6 +200,11 @@ func TestCarveFindsWholeFiles(t *testing.T) {
 		{"gif", gifFile()},
 		{"zip", zipFile(t, map[string][]byte{"notes.txt": []byte("hello there")})},
 		{"pdf", pdfFile([]byte("plain text in a stream"), 0)},
+		{"mp4", isoFile("isom", 5000, false)},
+		{"mov", isoFile("qt  ", 2000, true)},
+		{"heic", isoFile("heic", 1500, false)},
+		{"wav", wavFile(1001)},
+		{"avi", aviFile()},
 	}
 
 	var object bytes.Buffer
@@ -210,12 +283,17 @@ func TestCarveIgnoresChanceHeaders(t *testing.T) {
 	video := make([]byte, 4<<20)
 	r.Read(video)
 
-	// A start of image every so often, and ends of image everywhere.
+	// A start of image every so often, and ends of image everywhere, with the
+	// odd atom and chunk name thrown in.
 	for i := 1000; i < len(video)-4; i += 65536 {
 		copy(video[i:], []byte{0xff, 0xd8, 0xff, 0xe0})
 	}
 	for i := 3000; i < len(video)-2; i += 4096 {
 		copy(video[i:], []byte{0xff, 0xd9})
+	}
+	for i := 5000; i < len(video)-4; i += 100000 {
+		copy(video[i:], "ftyp")
+		copy(video[i+50000:], "RIFF")
 	}
 
 	finds, leftover := carve(video)
@@ -250,6 +328,45 @@ func TestCarveLeavesBrokenFilesAlone(t *testing.T) {
 	pdf := pdfFile([]byte("x"), 0)
 	if finds, _ := carve(pdf[:len(pdf)-20]); len(finds) != 0 {
 		t.Errorf("a PDF cut before its %%%%EOF was taken: %+v", finds)
+	}
+
+	// A video is whole only with both its data and its index, whichever came
+	// last.
+	camera := isoFile("isom", 4000, false)
+	if finds, _ := carve(camera[:len(camera)-50]); len(finds) != 0 {
+		t.Errorf("an MP4 cut before its index was taken: %+v", finds)
+	}
+	web := isoFile("isom", 4000, true)
+	if finds, _ := carve(web[:len(web)-50]); len(finds) != 0 {
+		t.Errorf("an MP4 cut inside its data was taken: %+v", finds)
+	}
+
+	wav := wavFile(1000)
+	if finds, _ := carve(wav[:len(wav)-1]); len(finds) != 0 {
+		t.Errorf("a WAV a byte short of what it says was taken: %+v", finds)
+	}
+	wav[4]++ // a RIFF that claims more than there is
+	if finds, _ := carve(wav); len(finds) != 0 {
+		t.Errorf("a RIFF claiming more than there is was taken: %+v", finds)
+	}
+}
+
+// TestCarveEndsAnAtomFileWithoutATrailer verifies that an MP4, which has nothing
+// to mark its end, ends where its atoms do and not a byte into whatever follows,
+// even where that happens to read like an atom.
+func TestCarveEndsAnAtomFileWithoutATrailer(t *testing.T) {
+	video := isoFile("isom", 3000, false)
+
+	for _, trailing := range [][]byte{
+		bytes.Repeat([]byte{0}, 100),
+		[]byte("some other file's bytes"),
+		append([]byte{0xff, 0xff, 0xff, 0xff}, "free"...), // an atom too large to be here
+		isoFile("isom", 500, false),                       // the next video
+	} {
+		finds, _ := carve(append(append([]byte{}, video...), trailing...))
+		if len(finds) == 0 || finds[0].Ext != "mp4" || finds[0].Length != uint64(len(video)) {
+			t.Errorf("followed by %q: got %+v, want the video of %d bytes", trailing[:min(8, len(trailing))], finds, len(video))
+		}
 	}
 }
 
