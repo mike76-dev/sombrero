@@ -111,6 +111,11 @@ type ImportOptions struct {
 	// Report is called with the running totals as each folder and file is done
 	// with, for a caller that says how far an import has got.
 	Report func(stats ImportStats)
+
+	// OnRefusal is called for a file the indexer would not take over, which is
+	// then copied instead. It is not a failure, and is kept apart from the
+	// failures so that one of those is not lost among hundreds of these.
+	OnRefusal func(path string, err error)
 }
 
 // ImportStats is what taking over a description came to.
@@ -123,6 +128,10 @@ type ImportStats struct {
 	Unresolved  int
 	Bytes       uint64
 	Waits       int
+
+	// Refused counts the files the indexer would not take over, which were
+	// copied instead. A source on another indexer is every file of it.
+	Refused int
 }
 
 // Import takes over what a description names: what can be pinned is pinned, and
@@ -219,8 +228,12 @@ func importFile(ctx context.Context, store TransferStore, dst Client, src PartRe
 			return err
 		}
 
-		// What the indexer will not take over is still to be had the long way.
-		report(opts.CopyOptions, file.Path, err)
+		// What the indexer will not take over is still to be had the long way,
+		// which is worth saying but is not a file that could not be imported.
+		stats.Refused++
+		if opts.OnRefusal != nil {
+			opts.OnRefusal(file.Path, err)
+		}
 	}
 
 	// A copy goes through the destination's upload path, which puts a file only

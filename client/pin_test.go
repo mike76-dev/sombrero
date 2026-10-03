@@ -156,12 +156,13 @@ func TestImportCopiesWhatItCannotPin(t *testing.T) {
 	// too old to pin.
 	pinner := &fakePinner{err: errors.New("not enough redundancy: the slab is too old")}
 
-	var refused []string
+	var refused, failed []string
 	stats, err := Import(ctx, db, c, src, pinner,
 		describeFiles(t, []transfer.File{file}),
 		ImportOptions{
-			CopyOptions: CopyOptions{Account: acc, OnError: func(path string, err error) { refused = append(refused, path) }},
+			CopyOptions: CopyOptions{Account: acc, OnError: func(path string, err error) { failed = append(failed, path) }},
 			Target:      importTarget(t, db, acc, share.Name),
+			OnRefusal:   func(path string, err error) { refused = append(refused, path) },
 		})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -169,11 +170,20 @@ func TestImportCopiesWhatItCannotPin(t *testing.T) {
 	if stats.Copied != 1 || stats.Pinned != 0 || stats.Failed != 0 {
 		t.Fatalf("stats: want the file copied after the refusal, got %+v", stats)
 	}
+	if stats.Refused != 1 {
+		t.Errorf("refused: want the one the indexer would not take, got %d", stats.Refused)
+	}
 	if stats.Bytes != uint64(len(content)) {
 		t.Errorf("bytes copied: want %d, got %d", len(content), stats.Bytes)
 	}
 	if len(refused) != 1 || refused[0] != "/taken/over.bin" {
 		t.Errorf("the refusal reported: got %v", refused)
+	}
+
+	// A refusal is not a failure: a file that was copied after one is not a file
+	// that could not be imported.
+	if len(failed) != 0 {
+		t.Errorf("the refusal was reported as a failure as well: %v", failed)
 	}
 
 	waitForRead(t, ctx, c, acc, "/taken/over.bin", content)
@@ -217,8 +227,9 @@ func TestImportCopiesWhatThePinDidNotTake(t *testing.T) {
 	var reported []string
 	stats, err := Import(ctx, db, c, src, pinner, describeFiles(t, []transfer.File{file}),
 		ImportOptions{
-			CopyOptions: CopyOptions{Account: acc, OnError: func(path string, err error) { reported = append(reported, path) }},
+			CopyOptions: CopyOptions{Account: acc},
 			Target:      importTarget(t, db, acc, share.Name),
+			OnRefusal:   func(path string, err error) { reported = append(reported, path) },
 		})
 	if err != nil {
 		t.Fatalf("Import: %v", err)

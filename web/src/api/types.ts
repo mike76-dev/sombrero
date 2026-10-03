@@ -216,6 +216,12 @@ export interface ImportStatusResponse {
   // of them were moved, and done how many of them are behind us.
   total?: number
   done: number
+
+  // refused counts the files the indexer would not take over, which were copied
+  // instead, and refusal is what it said about the first of them. They are not
+  // failures.
+  refused: number
+  refusal?: string
   failures?: string[]
   error?: string
 }

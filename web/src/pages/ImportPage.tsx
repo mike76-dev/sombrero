@@ -536,6 +536,12 @@ function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
             <th>Failed</th>
             <td>{status.failed}</td>
           </tr>
+          {status.refused > 0 && (
+            <tr>
+              <th>Copied, not pinned</th>
+              <td>{status.refused}</td>
+            </tr>
+          )}
           {status.waits > 0 && (
             <tr>
               <th>Waited for space</th>
@@ -546,6 +552,12 @@ function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
           )}
         </tbody>
       </table>
+      {status.refusal && (
+        <div className="muted">
+          The indexer would not take the data over where it lies, so it was copied. It said:{' '}
+          <span className="mono">{status.refusal}</span>
+        </div>
+      )}
       {(status.failures?.length ?? 0) > 0 && (
         <div className="stack">
           <div className="muted">Could not be imported:</div>

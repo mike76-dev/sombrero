@@ -108,6 +108,12 @@ type ImportStatusResponse struct {
 	Total int `json:"total,omitempty"`
 	Done  int `json:"done"`
 
+	// Refused counts the files the indexer would not take over, which were
+	// copied instead, and Refusal is what it said about the first of them. They
+	// are not failures: a source on another indexer is refused in full.
+	Refused int    `json:"refused"`
+	Refusal string `json:"refusal,omitempty"`
+
 	Failures []string `json:"failures,omitempty"`
 	Error    string   `json:"error,omitempty"`
 }
@@ -187,6 +193,7 @@ type importRun struct {
 	size     uint64
 	total    int
 	failures []string
+	refusal  string
 	err      string
 }
 
@@ -225,6 +232,16 @@ func (r *importRun) failure(path string, err error) {
 	defer r.mu.Unlock()
 	if len(r.failures) < maxImportFailures {
 		r.failures = append(r.failures, fmt.Sprintf("%s: %v", path, err))
+	}
+}
+
+// refused keeps what the indexer said about the first file it would not take
+// over. The rest say the same thing, and are counted rather than repeated.
+func (r *importRun) refused(path string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.refusal == "" {
+		r.refusal = err.Error()
 	}
 }
 
@@ -280,6 +297,8 @@ func (r *importRun) status() ImportStatusResponse {
 		// What is behind us is every file the import is done with, however it
 		// came to be done with it.
 		Done:     r.stats.Pinned + r.stats.Copied + r.stats.Skipped + r.stats.Failed + r.stats.Unresolved,
+		Refused:  r.stats.Refused,
+		Refusal:  r.refusal,
 		Failures: append([]string(nil), r.failures...),
 		Error:    r.err,
 	}
@@ -563,9 +582,10 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 			Progress: run.working,
 			OnError:  run.failure,
 		},
-		Target: stores.TransferTarget{Share: share.Name, Workgroup: wg.ID, Owner: acc},
-		Copy:   body.Copy,
-		Report: run.count,
+		Target:    stores.TransferTarget{Share: share.Name, Workgroup: wg.ID, Owner: acc},
+		Copy:      body.Copy,
+		Report:    run.count,
+		OnRefusal: run.refused,
 	}
 
 	go api.runImport(ctx, cancel, run, connectKey(wg, share), store, dst, src, pinner, describe, opts)
