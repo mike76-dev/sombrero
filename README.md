@@ -201,18 +201,7 @@ curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/
 ```
 
 ## Web UI
-The server ships with a web UI covering the same ground as the API: workgroups, accounts, shares, access policies, bans, and the server statistics. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` on the Settings page.
-
-The **Setup wizard** page walks through the workflow above — workgroup, account, share, connection, access policy — one step at a time, making each thing or letting you pick one that is already there. It is a way through the same pages, not a separate one: everything it does can be done on the pages themselves, which is also where anything is changed afterwards.
-
-### Building the UI
-The UI is not built as part of `go build`. Release binaries are built by building the UI first and then the server:
-```Bash
-npm --prefix web install
-npm --prefix web run build
-go build .
-```
-A server built without this step runs normally and serves the API as usual; only the UI is missing, and it says so if you open it in a browser.
+The server ships with a web UI covering the same ground as the API. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` on the Settings page. The pages, the setup wizard, and how to build the UI are described in [web/README.md](web/README.md).
 
 ## Running in Docker
 The server can also run in a container. The image is published for `amd64` and `arm64` as `ghcr.io/mike76-dev/sombrero`, tagged with the version and with `latest`. It is the same for both modes, since the mode is read from `sombrero.yml` at startup, and it has the web UI built in. To build it from the source instead, run in the repository root:
