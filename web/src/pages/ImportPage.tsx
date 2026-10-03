@@ -150,8 +150,8 @@ export function ImportPage() {
       : { appKey: appKey.trim(), prefix: prefix.trim() || undefined }),
   })
 
-  // sortOut looks inside the objects whose names are gone, a round at a time,
-  // adding up what the rounds found: each object is downloaded whole, so one
+  // sortOut reads the slabs whose file names are gone, a round at a time,
+  // adding up what the rounds found: each slab is downloaded whole, so one
   // call of its own would take as long as all of them.
   const sortOut = async () => {
     setSorting(true)
@@ -200,13 +200,13 @@ export function ImportPage() {
     <div className="page">
       <Card title="Import from another server">
         <p className="muted">
-          An import brings files from a renterd server or from another indexd account into this
-          share. Where the indexer can pin the data, it is taken over as it is: nothing is
-          transferred, and this account starts paying for it. Everything else, including all
-          renterd data, is downloaded from the source and uploaded again, so the same data is
-          paid for twice until you delete it at the source.
+          Copy the files of a <code>renterd</code> server, or of another <code>indexd</code>{' '}
+          account, into this share. If the indexer can pin the data where it already is, nothing
+          is transferred and this account simply starts paying for it. Otherwise the files are
+          downloaded from the source and uploaded again, so you pay for two copies until you
+          delete the original. All <code>renterd</code> data has to be copied this way.
         </p>
-        <div className="group-label">Where the files are imported to</div>
+        <div className="group-label">Import into</div>
         <div className="grid">
           <Field label="Workgroup">
             <WorkgroupSelect value={workgroup} onChange={setWorkgroup} />
@@ -214,7 +214,7 @@ export function ImportPage() {
           <Field label="Share">
             <ShareSelect value={share} onChange={setShare} />
           </Field>
-          <Field label="Owner of the imported files">
+          <Field label="Files will belong to">
             <select value={username} onChange={(e) => setUsername(e.target.value)}>
               <option value="">
                 {!workgroup
@@ -232,7 +232,7 @@ export function ImportPage() {
           </Field>
         </div>
 
-        <div className="group-label">Where the files come from</div>
+        <div className="group-label">Import from</div>
         <div className="row">
           {(
             [
@@ -303,9 +303,10 @@ export function ImportPage() {
 
         {source === 'indexd' && (
           <p className="muted">
-            An indexd account stores objects, not file names — the names live in the database
-            of the server that uploaded them. The data therefore arrives as one file per
-            object under the folder above, for you to sort out.
+            An <code>indexd</code> account stores slabs, not file names. The names are kept in
+            the database of the server that uploaded the data, so unless those slabs were
+            written by a sombrero that labelled them, the import creates one file per slab in
+            the folder above and you have to sort them out afterwards.
           </p>
         )}
 
@@ -339,7 +340,7 @@ export function ImportPage() {
                 setProbe(await probeImportSource(workgroup.trim(), share.trim(), request()))
               })
             }
-            title="Look at the source without taking anything from it"
+            title="See what the source holds without importing anything"
           >
             Check the source
           </button>
@@ -360,7 +361,8 @@ export function ImportPage() {
 
         {ready && backend !== 'indexd' && (
           <p className="muted">
-            Only an indexd share can import data. A renterd share keeps its own file list.
+            Only an <code>indexd</code> share can import data. A <code>renterd</code> share keeps
+            its own file list.
           </p>
         )}
 
@@ -369,20 +371,21 @@ export function ImportPage() {
         <ErrorBanner error={error} />
       </Card>
 
-      <Card title="Sort out what came over without names">
+      <Card title="Recover files from unlabelled slabs">
         <p className="muted">
-          Objects imported from an account that could not name its files arrive under{' '}
-          <span className="mono">/lost+found</span>, each holding whatever was packed into it.
-          Sorting looks inside them for files it can recognize by what they begin and end
-          with — PDFs, JPEGs, PNGs, GIFs and ZIPs, including Office documents — and makes each
-          one a file of its own under <span className="mono">/lost+found/recovered</span>. The
-          contents are right; the names are not the ones they had, since nothing on the network
-          remembers those.
+          Slabs imported without file names land in <span className="mono">/lost+found</span>,
+          and each one holds whatever files happened to be packed into it. Sorting reads through
+          them and picks out the files it can recognise from their contents: PDFs, JPEGs, PNGs,
+          GIFs and ZIPs, which covers Office documents too. Each one it finds becomes a file in{' '}
+          <span className="mono">/lost+found/recovered</span>. The contents will be correct, but
+          the original names are gone for good, so the files are named after where they were
+          found.
         </p>
         <p className="muted">
-          Nothing is uploaded and nothing is paid for twice: a recovered file points at the
-          bytes that are already there. A file larger than one object is left alone, because
-          only part of it is in here.
+          This costs nothing in storage: a recovered file points at data the share already has.
+          Files bigger than one slab are skipped, since only part of them is in the slab being
+          read. Sorting does download each slab to read it, so it takes a while on a large
+          share.
         </p>
         <div className="row">
           <button
@@ -390,7 +393,7 @@ export function ImportPage() {
             disabled={busy || sorting || !workgroup.trim() || !share.trim() || !username.trim()}
             onClick={() => run(sortOut)}
           >
-            {sorting ? 'Sorting…' : 'Sort out /lost+found'}
+            {sorting ? 'Sorting…' : 'Sort /lost+found'}
           </button>
         </div>
         <SortResult sorted={sorted} sorting={sorting} />
@@ -412,19 +415,19 @@ function SortResult({
   return (
     <div className="stack">
       <div className="banner banner-success">
-        {sorting ? 'Sorting' : 'Sorted'} {sorted.objects} object
-        {sorted.objects === 1 ? '' : 's'}: {sorted.recovered} file
-        {sorted.recovered === 1 ? '' : 's'} recovered ({formatBytes(sorted.bytes)}).
+        {sorting ? 'Reading' : 'Read'} {sorted.objects} slab
+        {sorted.objects === 1 ? '' : 's'} and recovered {sorted.recovered} file
+        {sorted.recovered === 1 ? '' : 's'} ({formatBytes(sorted.bytes)}).
       </div>
       <table className="table table-kv">
         <tbody>
           <tr>
-            <th>Belonged to no file</th>
+            <th>Unrecognised data</th>
             <td>{formatBytes(sorted.leftover)}</td>
           </tr>
           {sorted.skipped > 0 && (
             <tr>
-              <th>Left alone</th>
+              <th>Skipped</th>
               <td>
                 {sorted.skipped} file{sorted.skipped === 1 ? '' : 's'}
               </td>
@@ -432,7 +435,7 @@ function SortResult({
           )}
           {sorting && sorted.last && (
             <tr>
-              <th>Up to</th>
+              <th>Currently at</th>
               <td className="mono">{sorted.last}</td>
             </tr>
           )}
@@ -442,32 +445,32 @@ function SortResult({
   )
 }
 
-// SourceProbe is what a look at the source found: how much is there, and whether
-// an import of it would come over as files or as objects.
+// SourceProbe is what the check found: how much is in the source, and whether
+// its files will arrive with their names.
 function SourceProbe({ probe }: { probe: ImportProbeResponse | null }) {
   if (!probe) return null
 
   if (probe.source !== 'indexd') {
     return (
       <div className="banner banner-success">
-        The source answered. A renterd server knows its file names, so they come over with the
-        files.
+        The server answered. <code>renterd</code> knows its own file names, so the files keep
+        them.
       </div>
     )
   }
 
-  const objects = probe.objects ?? 0
-  if (objects === 0) {
-    return <div className="banner banner-success">That account holds nothing to import.</div>
+  const slabs = probe.objects ?? 0
+  if (slabs === 0) {
+    return <div className="banner banner-success">There is nothing in that account.</div>
   }
 
   return (
     <div className={probe.warning ? 'banner banner-error' : 'banner banner-success'}>
       That account holds {probe.more ? 'at least ' : ''}
-      {objects} object{objects === 1 ? '' : 's'}.{' '}
+      {slabs} slab{slabs === 1 ? '' : 's'}.{' '}
       {probe.warning ||
-        `All ${probe.looked ?? 0} looked at say which files they hold, so they` +
-          ' come over under their own names.'}
+        `All ${probe.looked ?? 0} that were checked are labelled with their file names, so` +
+          ' the files keep them.'}
     </div>
   )
 }
@@ -523,8 +526,8 @@ function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
   if (!status || status.state === 'idle') return null
 
   const label: Record<string, string> = {
-    counting: 'Working out how much there is',
-    running: 'Running',
+    counting: 'Counting the files to import',
+    running: 'Importing',
     done: 'Finished',
     failed: 'Failed',
     cancelled: 'Cancelled',
@@ -582,13 +585,13 @@ function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
       </table>
       {status.refusal && (
         <div className="muted">
-          The indexer would not take the data over where it lies, so it was copied. It said:{' '}
+          The indexer could not pin this data, so it was copied instead. It replied:{' '}
           <span className="mono">{status.refusal}</span>
         </div>
       )}
       {(status.failures?.length ?? 0) > 0 && (
         <div className="stack">
-          <div className="muted">Could not be imported:</div>
+          <div className="muted">These files could not be imported:</div>
           {(status.failures || []).map((failure) => (
             <div key={failure} className="mono">
               {failure}

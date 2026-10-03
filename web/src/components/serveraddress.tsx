@@ -27,7 +27,13 @@ export function ServerAddressField({
   return (
     <div className="field">
       <span className="field-label">
-        {backend === 'indexd' ? 'Indexer address' : 'renterd address'}
+        {backend === 'indexd' ? (
+          'Indexer address'
+        ) : (
+          <>
+            <code>renterd</code> address
+          </>
+        )}
       </span>
       <div className="row row-form">
         <input

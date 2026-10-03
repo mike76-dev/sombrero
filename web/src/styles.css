@@ -185,9 +185,6 @@ body {
   align-items: flex-end;
 }
 
-/* A row that is a field's control rather than a band of its own: the field
-   already spaces it from its label, so the row's own margin would push it below
-   the plain inputs beside it. */
 .field > .row {
   margin-top: 0;
 }
@@ -269,14 +266,11 @@ textarea {
   height: 16px;
 }
 
-/* A checkbox nobody can toggle does not invite the pointer. */
 .checkbox:has(input:disabled) {
   cursor: default;
   color: var(--text-muted);
 }
 
-/* How much of something has been done, for the work that takes long enough to
-   be worth watching. */
 .bar {
   height: 6px;
   border-radius: 999px;
@@ -291,7 +285,6 @@ textarea {
   transition: width 0.3s linear;
 }
 
-/* A heading over a group of fields, for a form that does more than one thing. */
 .group-label {
   margin: 16px 0 8px;
   font-size: 13px;
@@ -424,7 +417,8 @@ textarea {
   color: var(--success);
 }
 
-.mono {
+.mono,
+code {
   font-family: ui-monospace, 'Cascadia Mono', 'JetBrains Mono', Menlo, monospace;
   font-size: 13px;
 }

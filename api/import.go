@@ -489,16 +489,16 @@ func (api *API) importProbeHandlerPOST(w http.ResponseWriter, req *http.Request,
 
 		probe, err := client.ProbeAccount(ctx, account)
 		if err != nil {
-			writeError(w, "the account could not be looked at: "+err.Error(), http.StatusBadGateway)
+			writeError(w, "the account could not be read: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 
 		res.Objects, res.Looked, res.Tagged, res.More = probe.Objects, probe.Looked, probe.Tagged, probe.More
 		switch {
 		case probe.Looked > 0 && probe.Tagged == 0:
-			res.Warning = fmt.Sprintf("None of the %d objects looked at say which files they hold. They would come over one file per object, each named after the object and holding whatever runs of whichever files were packed into it.", probe.Looked)
+			res.Warning = fmt.Sprintf("None of the %d slabs that were checked are labelled with their file names, so the import will create one file per slab. Each will hold whatever files were packed into that slab, and you can sort them out afterwards.", probe.Looked)
 		case probe.Tagged < probe.Looked:
-			res.Warning = fmt.Sprintf("Only %d of the %d objects looked at say which files they hold. The rest would come over one file per object.", probe.Tagged, probe.Looked)
+			res.Warning = fmt.Sprintf("Only %d of the %d slabs that were checked are labelled with their file names. The rest will arrive as one file per slab.", probe.Tagged, probe.Looked)
 		}
 
 	default:
@@ -520,7 +520,7 @@ func (api *API) importSortHandlerPOST(w http.ResponseWriter, req *http.Request, 
 		return
 	}
 	if share.Type != "indexd" {
-		writeError(w, "only an indexd share keeps the objects this sorts out", http.StatusBadRequest)
+		writeError(w, "only an indexd share stores the slabs this reads", http.StatusBadRequest)
 		return
 	}
 
@@ -537,7 +537,7 @@ func (api *API) importSortHandlerPOST(w http.ResponseWriter, req *http.Request, 
 		return
 	}
 	if acc.ID == 0 {
-		writeError(w, "the recovered files belong to an account of this workgroup, and there is no such account", http.StatusBadRequest)
+		writeError(w, "the recovered files need an owner, and this workgroup has no such account", http.StatusBadRequest)
 		return
 	}
 
@@ -547,14 +547,14 @@ func (api *API) importSortHandlerPOST(w http.ResponseWriter, req *http.Request, 
 	}
 	sorter, ok := dst.(LostAndFound)
 	if !ok {
-		writeError(w, "this share does not keep the objects this sorts out", http.StatusBadRequest)
+		writeError(w, "this share does not store the slabs this reads", http.StatusBadRequest)
 		return
 	}
 
 	report, err := sorter.SortLostAndFound(req.Context(), acc, body.Prefix, body.After, body.Limit)
 	if err != nil {
 		log.Printf("failed to sort out the lost and found of %s: %v", share.Name, err)
-		writeError(w, "the objects could not be sorted out: "+err.Error(), http.StatusBadGateway)
+		writeError(w, "the slabs could not be read: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 
@@ -580,7 +580,7 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 		return
 	}
 	if share.Type != "indexd" {
-		writeError(w, "only an indexd share takes over what another server holds", http.StatusBadRequest)
+		writeError(w, "only an indexd share can import from another server", http.StatusBadRequest)
 		return
 	}
 
@@ -596,7 +596,7 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 
 	store, ok := api.store.(Transfers)
 	if !ok {
-		writeError(w, "an import needs the database-backed store", http.StatusBadRequest)
+		writeError(w, "importing needs the database-backed store, which the Lite mode does not use", http.StatusBadRequest)
 		return
 	}
 
@@ -607,7 +607,7 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 		return
 	}
 	if acc.ID == 0 {
-		writeError(w, "the imported files belong to an account of this workgroup, and there is no such account", http.StatusBadRequest)
+		writeError(w, "the imported files need an owner, and this workgroup has no such account", http.StatusBadRequest)
 		return
 	}
 
@@ -731,7 +731,7 @@ type describer struct {
 // which is what an import writes through.
 func (api *API) destination(w http.ResponseWriter, wg stores.Workgroup, share stores.Share) (client.Client, bool) {
 	if api.server == nil {
-		writeError(w, "the server is not serving this share", http.StatusBadRequest)
+		writeError(w, "this server is not serving that share", http.StatusBadRequest)
 		return nil, false
 	}
 
@@ -810,13 +810,13 @@ func (api *API) renterdSource(w http.ResponseWriter, body ImportRequest) (*clien
 func (api *API) indexdSource(w http.ResponseWriter, body ImportRequest) (*client.IndexdAccount, bool) {
 	key, err := hex.DecodeString(body.AppKey)
 	if err != nil || len(key) != 64 {
-		writeError(w, "an indexd source is read with the 64-byte app key of its account", http.StatusBadRequest)
+		writeError(w, "reading an indexd account needs its 64-byte app key, as 128 hex characters", http.StatusBadRequest)
 		return nil, false
 	}
 
 	sdkClient, err := sdk.NewBuilder(body.Address, api.appMetadata()).SDK(types.PrivateKey(key))
 	if err != nil {
-		writeError(w, "the app key is not authorized by that indexer: "+err.Error(), http.StatusBadRequest)
+		writeError(w, "that indexer did not accept the app key: "+err.Error(), http.StatusBadRequest)
 		return nil, false
 	}
 
