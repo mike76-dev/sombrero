@@ -22,15 +22,15 @@ func (rc *RenterdClient) Source() transfer.Source {
 }
 
 // Count walks the bucket and counts the files in it, which is what an import of
-// it has to get through. It lists and downloads nothing, so it costs a request
-// per folder and no data.
-func (rc *RenterdClient) Count(ctx context.Context) (int, error) {
-	var files int
+// it has to get through: renterd names everything it holds, so there are no slabs
+// to count. It downloads nothing, so it costs a request per folder and no data.
+func (rc *RenterdClient) Count(ctx context.Context) (Count, error) {
+	var count Count
 
 	queue := []string{"/"}
 	for len(queue) > 0 {
 		if err := ctx.Err(); err != nil {
-			return files, err
+			return count, err
 		}
 
 		dir := queue[0]
@@ -38,7 +38,7 @@ func (rc *RenterdClient) Count(ctx context.Context) (int, error) {
 
 		entries, err := rc.List(ctx, stores.Account{}, dir)
 		if err != nil {
-			return files, fmt.Errorf("failed to list %q: %w", dir, err)
+			return count, fmt.Errorf("failed to list %q: %w", dir, err)
 		}
 
 		for _, entry := range entries {
@@ -50,11 +50,11 @@ func (rc *RenterdClient) Count(ctx context.Context) (int, error) {
 				queue = append(queue, path+"/")
 				continue
 			}
-			files++
+			count.Files++
 		}
 	}
 
-	return files, nil
+	return count, nil
 }
 
 // Describe walks the bucket and writes a description of what it holds.

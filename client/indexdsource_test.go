@@ -359,6 +359,35 @@ func TestDescribeAccountMixesTaggedAndNot(t *testing.T) {
 	}
 }
 
+// TestCountAccount verifies that what an import has to get through is counted
+// for what it is: a file for every one the tags name, however many objects hold
+// it, and a slab for every object that names nothing.
+func TestCountAccount(t *testing.T) {
+	at := time.Now().UTC()
+	fa := &fakeAccount{}
+
+	// One tagged object of two files, a second object of one of the same files,
+	// and two that say nothing.
+	fa.pin(at, tagOf(t,
+		objectPiece{Share: "s", Path: "/a.bin", Length: 32, Size: 32},
+		objectPiece{Share: "s", Path: "/b.bin", Length: 32, Size: 96},
+	), 64)
+	fa.pin(at.Add(time.Second), tagOf(t, objectPiece{Share: "s", Path: "/b.bin", Offset: 32, Length: 64, Size: 96}), 64)
+	fa.pin(at.Add(2*time.Second), nil, 128)
+	fa.pin(at.Add(3*time.Second), nil, 128)
+
+	count, err := CountAccount(context.Background(), fa)
+	if err != nil {
+		t.Fatalf("CountAccount: %v", err)
+	}
+	if count != (Count{Files: 2, Slabs: 2}) {
+		t.Errorf("want 2 files and 2 slabs, got %+v", count)
+	}
+	if count.Total() != 4 {
+		t.Errorf("total: want 4, got %d", count.Total())
+	}
+}
+
 // TestProbeAccount verifies what a look at a source reports, which is what
 // decides whether an import of it is worth running at all.
 func TestProbeAccount(t *testing.T) {

@@ -104,9 +104,11 @@ type ImportStatusResponse struct {
 	Bytes       uint64 `json:"bytes"`
 	Waits       int    `json:"waits"`
 
-	// Total is how many files the source turned out to hold, counted before any
-	// of them were moved, and Done how many of them are behind us.
+	// Total is how much the source turned out to hold, counted before any of it
+	// was moved, and Done how much of it is behind us. Slabs says how many of the
+	// Total are nameless slabs, which come over as lost+found entries, not files.
 	Total int `json:"total,omitempty"`
+	Slabs int `json:"slabs,omitempty"`
 	Done  int `json:"done"`
 
 	// Refused counts the files the indexer would not take over, which were
@@ -207,14 +209,14 @@ type importRun struct {
 	path     string
 	copied   uint64
 	size     uint64
-	total    int
+	total    client.Count
 	failures []string
 	refusal  string
 	err      string
 }
 
 // counted records how much there turned out to be, and starts the import on it.
-func (r *importRun) counted(total int) {
+func (r *importRun) counted(total client.Count) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.total = total
@@ -308,7 +310,8 @@ func (r *importRun) status() ImportStatusResponse {
 		// counted here so that the bytes do not stand still through a large one.
 		Bytes: r.stats.Bytes + r.copied,
 		Waits: r.stats.Waits,
-		Total: r.total,
+		Total: r.total.Total(),
+		Slabs: r.total.Slabs,
 
 		// What is behind us is every file the import is done with, however it
 		// came to be done with it.
@@ -665,7 +668,7 @@ func (api *API) runImport(ctx context.Context, cancel context.CancelFunc, run *i
 	// How much there is to bring over is worked out first, so that what follows
 	// can be measured against it. It costs the listing of the source and none of
 	// its data.
-	var total int
+	var total client.Count
 	if describe.count != nil {
 		counted, err := describe.count(ctx)
 		if err != nil {
@@ -724,7 +727,7 @@ func (api *API) runImport(ctx context.Context, cancel context.CancelFunc, run *i
 type describer struct {
 	origin string
 	walk   func(ctx context.Context, w *transfer.Writer) (client.DescribeStats, error)
-	count  func(ctx context.Context) (int, error)
+	count  func(ctx context.Context) (client.Count, error)
 }
 
 // destination returns the client of the workgroup's connection to the share,
@@ -783,7 +786,7 @@ func (api *API) source(w http.ResponseWriter, body ImportRequest, share stores.S
 			walk: func(ctx context.Context, tw *transfer.Writer) (client.DescribeStats, error) {
 				return client.DescribeAccount(ctx, account, tw, body.Address, prefix)
 			},
-			count: func(ctx context.Context) (int, error) {
+			count: func(ctx context.Context) (client.Count, error) {
 				return client.CountAccount(ctx, account)
 			},
 		}, true

@@ -221,9 +221,11 @@ export interface ImportStatusResponse {
   bytes: number
   waits: number
 
-  // total is how many files the source turned out to hold, counted before any
-  // of them were moved, and done how many of them are behind us.
+  // total is how much the source turned out to hold, counted before any of it
+  // was moved, and done how much of it is behind us. slabs says how many of the
+  // total are nameless slabs, which come over as lost+found entries, not files.
   total?: number
+  slabs?: number
   done: number
 
   // refused counts the files the indexer would not take over, which were copied

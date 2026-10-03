@@ -1,131 +1,255 @@
 package client
 
 import (
+	"archive/zip"
 	"bytes"
+	"encoding/binary"
+	"fmt"
+	"hash/crc32"
+	"math/rand"
 	"testing"
 )
 
-// pdf is a PDF of the given size, as the carver recognizes one.
-func pdf(size int) []byte {
-	body := bytes.Repeat([]byte("p"), size-len("%PDF-")-len("%%EOF"))
+// The files the tests carve are built the way real ones are, since the carver
+// walks their structure rather than looking for a header and a trailer.
 
-	return append(append([]byte("%PDF-"), body...), []byte("%%EOF")...)
+// jpegFile is a JPEG with the given amount of entropy-coded data, with the byte
+// stuffing and a restart marker that real scan data has.
+func jpegFile(payload int) []byte {
+	var b bytes.Buffer
+	segment := func(marker byte, body []byte) {
+		b.Write([]byte{0xff, marker})
+		_ = binary.Write(&b, binary.BigEndian, uint16(len(body)+2))
+		b.Write(body)
+	}
+
+	b.Write([]byte{0xff, 0xd8})
+	segment(0xe0, append([]byte("JFIF\x00\x01\x01"), make([]byte, 7)...))
+	segment(0xdb, make([]byte, 65))
+	segment(0xc0, make([]byte, 15))
+	segment(0xc4, make([]byte, 20))
+	segment(0xda, make([]byte, 10))
+
+	// Scan data: a 0xff inside it is stuffed with 0x00, and a restart marker is
+	// not the end.
+	data := bytes.Repeat([]byte{0x5a, 0xff, 0x00}, payload/3)
+	data = append(data, 0xff, 0xd0)
+	b.Write(data)
+
+	b.Write([]byte{0xff, 0xd9})
+
+	return b.Bytes()
 }
 
-// png is a PNG of the given size, closing with the IEND chunk and its checksum.
-func png(size int) []byte {
-	head := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
-	tail := append([]byte("IEND"), 0xae, 0x42, 0x60, 0x82)
-	body := bytes.Repeat([]byte{'i'}, size-len(head)-len(tail))
+// pngFile is a PNG of one IDAT chunk of the given size, every chunk with its
+// checksum.
+func pngFile(payload int) []byte {
+	var b bytes.Buffer
+	chunk := func(kind string, body []byte) {
+		_ = binary.Write(&b, binary.BigEndian, uint32(len(body)))
+		b.WriteString(kind)
+		b.Write(body)
+		_ = binary.Write(&b, binary.BigEndian, crc32.ChecksumIEEE(append([]byte(kind), body...)))
+	}
 
-	return append(append(head, body...), tail...)
+	b.Write([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	chunk("IHDR", make([]byte, 13))
+	chunk("IDAT", bytes.Repeat([]byte{'i'}, payload))
+	chunk("IEND", nil)
+
+	return b.Bytes()
 }
 
-// jpg is a JPEG of the given size.
-func jpg(size int) []byte {
-	head := []byte{0xff, 0xd8, 0xff}
-	body := bytes.Repeat([]byte{'j'}, size-len(head)-2)
+// gifFile is a GIF with a global color table, one extension and one image.
+func gifFile() []byte {
+	var b bytes.Buffer
+	b.WriteString("GIF89a")
+	b.Write([]byte{0x10, 0x00, 0x10, 0x00, 0x80 | 0x01, 0x00, 0x00}) // 16x16, a 4-entry table
+	b.Write(make([]byte, 3*4))
+	b.Write([]byte{0x21, 0xf9, 0x04, 0, 0, 0, 0, 0x00})                   // a graphic control extension
+	b.Write([]byte{0x2c, 0, 0, 0, 0, 0x10, 0x00, 0x10, 0x00, 0x00, 0x02}) // the image descriptor and LZW size
+	b.Write([]byte{0x05, 1, 2, 3, 4, 5, 0x03, 6, 7, 8, 0x00})             // two sub-blocks and the end of them
+	b.WriteByte(0x3b)
 
-	return append(append(head, body...), 0xff, 0xd9)
+	return b.Bytes()
+}
+
+// zipFile is a real archive of the given entries.
+func zipFile(t *testing.T, entries map[string][]byte) []byte {
+	t.Helper()
+
+	var b bytes.Buffer
+	w := zip.NewWriter(&b)
+	for name, content := range entries {
+		f, err := w.Create(name)
+		if err != nil {
+			t.Fatalf("zip.Create(%s): %v", name, err)
+		}
+		if _, err := f.Write(content); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("zip.Close: %v", err)
+	}
+
+	return b.Bytes()
+}
+
+// pdfFile is a PDF whose cross-reference table is where startxref says, holding
+// the given bytes in a stream, with as many revisions appended as asked for.
+func pdfFile(stream []byte, revisions int) []byte {
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.4\n")
+	b.WriteString("1 0 obj\n<< /Type /Catalog >>\nendobj\n")
+	fmt.Fprintf(&b, "2 0 obj\n<< /Length %d >>\nstream\n", len(stream))
+	b.Write(stream)
+	b.WriteString("\nendstream\nendobj\n")
+
+	xref := b.Len()
+	b.WriteString("xref\n0 3\n0000000000 65535 f \n0000000009 00000 n \n0000000050 00000 n \n")
+	fmt.Fprintf(&b, "trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xref)
+
+	for i := 0; i < revisions; i++ {
+		b.WriteString("3 0 obj\n<< /Type /Annot >>\nendobj\n")
+		xref := b.Len()
+		b.WriteString("xref\n3 1\n0000000000 00000 n \n")
+		fmt.Fprintf(&b, "trailer\n<< /Size 4 >>\nstartxref\n%d\n%%%%EOF\n", xref)
+	}
+
+	return b.Bytes()
 }
 
 // TestCarveFindsWholeFiles verifies what is taken out of an object that holds
-// several small files end to end, which is what a packed slab is.
+// several files end to end, which is what a packed slab is.
 func TestCarveFindsWholeFiles(t *testing.T) {
-	one, two, three := pdf(200), png(300), jpg(400)
+	files := []struct {
+		ext  string
+		data []byte
+	}{
+		{"jpg", jpegFile(3000)},
+		{"png", pngFile(2000)},
+		{"gif", gifFile()},
+		{"zip", zipFile(t, map[string][]byte{"notes.txt": []byte("hello there")})},
+		{"pdf", pdfFile([]byte("plain text in a stream"), 0)},
+	}
 
 	var object bytes.Buffer
 	object.Write(bytes.Repeat([]byte{0}, 16)) // bytes of nobody's file
-	object.Write(one)
-	object.Write(two)
-	object.Write(three)
+	for _, f := range files {
+		object.Write(f.data)
+	}
 
 	finds, leftover := carve(object.Bytes())
-	if len(finds) != 3 {
-		t.Fatalf("want the 3 files that were packed, got %d: %+v", len(finds), finds)
+	if len(finds) != len(files) {
+		t.Fatalf("want the %d files that were packed, got %d: %+v", len(files), len(finds), finds)
 	}
 
-	for i, want := range []struct {
-		ext    string
-		offset uint64
-		length uint64
-	}{
-		{"pdf", 16, uint64(len(one))},
-		{"png", 16 + uint64(len(one)), uint64(len(two))},
-		{"jpg", 16 + uint64(len(one)+len(two)), uint64(len(three))},
-	} {
-		if finds[i].Ext != want.ext || finds[i].Offset != want.offset || finds[i].Length != want.length {
-			t.Errorf("find %d: got %+v, want %s of %d at %d", i, finds[i], want.ext, want.length, want.offset)
+	at := uint64(16)
+	for i, f := range files {
+		if finds[i].Ext != f.ext || finds[i].Offset != at || finds[i].Length != uint64(len(f.data)) {
+			t.Errorf("find %d: got %+v, want %s of %d at %d", i, finds[i], f.ext, len(f.data), at)
 		}
+		got := object.Bytes()[finds[i].Offset:finds[i].End()]
+		if !bytes.Equal(got, f.data) {
+			t.Errorf("the %s does not read back as itself", f.ext)
+		}
+		at += uint64(len(f.data))
 	}
 
-	// The bytes of no file are reported rather than passed off as part of one.
 	if leftover != 16 {
 		t.Errorf("leftover bytes: want the 16 of nobody's file, got %d", leftover)
 	}
+}
 
-	// What was found reads back as what went in.
-	data := object.Bytes()
-	if got := data[finds[0].Offset:finds[0].End()]; !bytes.Equal(got, one) {
-		t.Error("the first file does not read back as itself")
+// TestCarveSkipsEmbeddedPictures verifies that a file holding pictures is taken
+// whole, rather than cut off at the first picture inside it.
+func TestCarveSkipsEmbeddedPictures(t *testing.T) {
+	picture := jpegFile(600)
+
+	pdf := pdfFile(picture, 0)
+	finds, _ := carve(pdf)
+	if len(finds) != 1 || finds[0].Ext != "pdf" || finds[0].Length != uint64(len(pdf)) {
+		t.Errorf("a PDF with a picture in it: want the whole PDF, got %+v", finds)
+	}
+
+	archive := zipFile(t, map[string][]byte{"photo.jpg": picture, "logo.png": pngFile(300)})
+	finds, _ = carve(archive)
+	if len(finds) != 1 || finds[0].Ext != "zip" || finds[0].Length != uint64(len(archive)) {
+		t.Errorf("an archive with pictures in it: want the whole archive, got %+v", finds)
 	}
 }
 
-// TestCarveLeavesPiecesAlone verifies that a piece of a file larger than the
-// object is not handed back as a file: a header with no ending is a fifth of
-// something, not a fifth of a file.
-func TestCarveLeavesPiecesAlone(t *testing.T) {
-	// A PDF that was cut off at the end of the object it began in.
-	head := append([]byte("%PDF-"), bytes.Repeat([]byte("p"), 4096)...)
+// TestCarveTakesEveryRevision verifies that a PDF revised in place, which has one
+// %%EOF per revision, ends at the last of its own and not at the first — and not
+// at the next PDF's either.
+func TestCarveTakesEveryRevision(t *testing.T) {
+	revised := pdfFile([]byte("first"), 2)
+	next := pdfFile([]byte("second"), 0)
 
-	finds, leftover := carve(head)
-	if len(finds) != 0 {
-		t.Errorf("a file that does not end in here was taken: %+v", finds)
+	finds, leftover := carve(append(append([]byte{}, revised...), next...))
+	if len(finds) != 2 {
+		t.Fatalf("want the two PDFs, got %+v", finds)
 	}
-	if leftover != uint64(len(head)) {
-		t.Errorf("leftover bytes: want all %d of them, got %d", len(head), leftover)
+	if finds[0].Length != uint64(len(revised)) {
+		t.Errorf("the revised PDF is %d bytes, want all %d", finds[0].Length, len(revised))
 	}
-
-	// The tail of one, which begins with nothing recognizable at all.
-	tail := append(bytes.Repeat([]byte("p"), 4096), []byte("%%EOF")...)
-	if finds, _ := carve(tail); len(finds) != 0 {
-		t.Errorf("the tail of a file was taken for one: %+v", finds)
-	}
-}
-
-// TestCarveStopsAtTheNextFile verifies that a file with no ending does not
-// swallow the one after it.
-func TestCarveStopsAtTheNextFile(t *testing.T) {
-	cut := append([]byte("%PDF-"), bytes.Repeat([]byte("p"), 500)...) // no %%EOF
-	whole := png(300)
-
-	finds, _ := carve(append(cut, whole...))
-	if len(finds) != 1 {
-		t.Fatalf("want the one whole file, got %+v", finds)
-	}
-	if finds[0].Ext != "png" || finds[0].Offset != uint64(len(cut)) {
-		t.Errorf("the find: got %+v, want the png at %d", finds[0], len(cut))
-	}
-}
-
-// TestCarveTakesTheLastEnding verifies that a file holding what looks like its
-// own ending is taken whole, up to the last of them.
-func TestCarveTakesTheLastEnding(t *testing.T) {
-	// A PDF whose body quotes its own trailer, as one holding an attachment may.
-	inner := append([]byte("%PDF-"), bytes.Repeat([]byte("p"), 100)...)
-	inner = append(inner, []byte("%%EOF")...)
-	whole := append(inner, bytes.Repeat([]byte("q"), 100)...)
-	whole = append(whole, []byte("%%EOF")...)
-
-	finds, leftover := carve(whole)
-	if len(finds) != 1 {
-		t.Fatalf("want one file, got %+v", finds)
-	}
-	if finds[0].Length != uint64(len(whole)) {
-		t.Errorf("the find is %d of the %d bytes, want all of them", finds[0].Length, len(whole))
+	if finds[1].Offset != uint64(len(revised)) || finds[1].Length != uint64(len(next)) {
+		t.Errorf("the next PDF: got %+v", finds[1])
 	}
 	if leftover != 0 {
 		t.Errorf("leftover bytes: want none, got %d", leftover)
+	}
+}
+
+// TestCarveIgnoresChanceHeaders verifies that the bytes of a video, which hold
+// what looks like the start and the end of a JPEG every so often, are not taken
+// for thousands of JPEGs.
+func TestCarveIgnoresChanceHeaders(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	video := make([]byte, 4<<20)
+	r.Read(video)
+
+	// A start of image every so often, and ends of image everywhere.
+	for i := 1000; i < len(video)-4; i += 65536 {
+		copy(video[i:], []byte{0xff, 0xd8, 0xff, 0xe0})
+	}
+	for i := 3000; i < len(video)-2; i += 4096 {
+		copy(video[i:], []byte{0xff, 0xd9})
+	}
+
+	finds, leftover := carve(video)
+	if len(finds) != 0 {
+		t.Errorf("%d file(s) were found in noise: %+v", len(finds), finds[:min(3, len(finds))])
+	}
+	if leftover != uint64(len(video)) {
+		t.Errorf("leftover bytes: want all %d, got %d", len(video), leftover)
+	}
+}
+
+// TestCarveLeavesBrokenFilesAlone verifies that a file whose structure does not
+// reach its end is not handed back as whole: a piece of one is not a file.
+func TestCarveLeavesBrokenFilesAlone(t *testing.T) {
+	jpeg := jpegFile(3000)
+	cut := jpeg[:len(jpeg)-100]
+	if finds, _ := carve(cut); len(finds) != 0 {
+		t.Errorf("a JPEG cut before its end was taken: %+v", finds)
+	}
+
+	png := pngFile(2000)
+	png[len(png)-1] ^= 0xff // the IEND checksum
+	if finds, _ := carve(png); len(finds) != 0 {
+		t.Errorf("a PNG with a wrong checksum was taken: %+v", finds)
+	}
+
+	archive := zipFile(t, map[string][]byte{"a": []byte("b")})
+	if finds, _ := carve(archive[:len(archive)-10]); len(finds) != 0 {
+		t.Errorf("an archive without its directory record was taken: %+v", finds)
+	}
+
+	pdf := pdfFile([]byte("x"), 0)
+	if finds, _ := carve(pdf[:len(pdf)-20]); len(finds) != 0 {
+		t.Errorf("a PDF cut before its %%%%EOF was taken: %+v", finds)
 	}
 }
 
@@ -136,9 +260,10 @@ func TestCarveFindsNothingInNothing(t *testing.T) {
 		nil,
 		bytes.Repeat([]byte{0}, 1024),
 		[]byte("just some text, which is a file nobody can recognize"),
-
-		// A header followed at once by its trailer is too small to be a file.
-		append([]byte("%PDF-"), []byte("%%EOF")...),
+		[]byte("%PDF-1.4\n%%EOF"), // a header and a trailer with no file between them
+		{0xff, 0xd8, 0xff, 0xd9},  // a start and an end of image with no picture between them
+		{0xff, 0xd8, 0xff, 0xd0, 0xff, 0xff, 0xd9},
+		{0xff, 0xd8, 0xff, 0xc0, 0x00, 0x04, 0, 0, 0xff, 0xd9}, // a frame header, but no scan
 	} {
 		finds, leftover := carve(data)
 		if len(finds) != 0 {

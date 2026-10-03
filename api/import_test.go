@@ -203,7 +203,7 @@ func TestImport(t *testing.T) {
 		if !started {
 			t.Fatal("the import did not start")
 		}
-		run.counted(7)
+		run.counted(client.Count{Files: 7})
 
 		res := decodeJSON[[]ImportSummary](t, doRequest(api, http.MethodGet, "/imports", nil))
 		if len(res) != 1 {

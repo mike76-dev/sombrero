@@ -28,7 +28,7 @@ func TestSortLostAndFound(t *testing.T) {
 
 	// An object as an import of an untagged account leaves one: a slab's worth
 	// of whatever was packed into it, with two files in the middle of it.
-	one, two := pdf(4096), png(8192)
+	one, two := pdfFile(bytes.Repeat([]byte("p"), 4000), 0), pngFile(8000)
 	object := make([]byte, proto.SectorSize)
 	copy(object[1000:], one)
 	copy(object[1000+len(one):], two)
@@ -135,7 +135,7 @@ func TestSortLostAndFoundGoesInRounds(t *testing.T) {
 	// Three objects, each holding one file of its own.
 	for i := range 3 {
 		object := make([]byte, proto.SectorSize)
-		copy(object[16:], pdf(2048))
+		copy(object[16:], pdfFile(bytes.Repeat([]byte("p"), 2000), 0))
 
 		name := fmt.Sprintf("/lost+found/%02d.bin", i)
 		uploadID, err := c.StartUpload(ctx, acc, name)
@@ -203,7 +203,8 @@ func TestSortLostAndFoundLeavesWhatItCannotRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartUpload: %v", err)
 	}
-	if _, err := c.Write(ctx, bytes.NewReader(pdf(2048)), waiting, uploadID, 1, 0, 2048); err != nil {
+	small := pdfFile(bytes.Repeat([]byte("p"), 2000), 0)
+	if _, err := c.Write(ctx, bytes.NewReader(small), waiting, uploadID, 1, 0, uint64(len(small))); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if err := c.FinishUpload(ctx, waiting, uploadID, nil); err != nil {

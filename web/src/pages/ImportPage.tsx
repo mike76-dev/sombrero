@@ -415,7 +415,7 @@ function SortResult({
   return (
     <div className="stack">
       <div className="banner banner-success">
-        {sorting ? 'Reading' : 'Read'} {sorted.objects} slab
+        Read {sorted.objects} slab
         {sorted.objects === 1 ? '' : 's'} and recovered {sorted.recovered} file
         {sorted.recovered === 1 ? '' : 's'} ({formatBytes(sorted.bytes)}).
       </div>
@@ -475,9 +475,9 @@ function SourceProbe({ probe }: { probe: ImportProbeResponse | null }) {
   )
 }
 
-// Overall is how far through the import is: how many of the files the source
-// turned out to hold are behind it. Nothing is shown while the counting is still
-// going, since there is nothing yet to measure against.
+// Overall is how far through the import is: how much of what the source turned
+// out to hold is behind it. Nothing is shown while the counting is still going,
+// since there is nothing yet to measure against.
 function Overall({ status }: { status: ImportStatusResponse }) {
   const total = status.total ?? 0
   if (total === 0) return null
@@ -490,10 +490,19 @@ function Overall({ status }: { status: ImportStatusResponse }) {
         <div className="bar-fill" style={{ width: `${share}%` }} />
       </div>
       <div className="muted">
-        {status.done} of {total} file{total === 1 ? '' : 's'} ({share}%)
+        {status.done} of {total} {countedAs(total, status.slabs ?? 0)} ({share}%)
       </div>
     </div>
   )
+}
+
+// countedAs names what an import counts: the files its source names, or the
+// nameless slabs it holds, which come over as lost+found entries.
+function countedAs(total: number, slabs: number): string {
+  const plural = total === 1 ? '' : 's'
+  if (slabs === 0) return `file${plural}`
+  if (slabs === total) return `slab${plural}`
+  return 'files and slabs'
 }
 
 // CurrentFile is the file the import has in hand. A large one is copied a chunk
@@ -526,7 +535,7 @@ function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
   if (!status || status.state === 'idle') return null
 
   const label: Record<string, string> = {
-    counting: 'Counting the files to import',
+    counting: 'Counting what there is to import',
     running: 'Importing',
     done: 'Finished',
     failed: 'Failed',

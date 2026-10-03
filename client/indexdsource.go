@@ -108,38 +108,51 @@ func finishProbe(probe AccountProbe, held map[types.Hash256]struct{}, more bool)
 	return probe
 }
 
-// CountAccount counts the files an import of the account would bring over, which
-// is not the same as the number of objects it holds: an object that says which
-// files it is of may hold runs of several of them, and a large file is held in
-// several objects.
+// A Count is what an import of a source brings over: the files the source names,
+// and the slabs it does not, each of which comes over as one lost+found entry.
+type Count struct {
+	Files int
+	Slabs int
+}
+
+// Total is everything the import has to get through.
+func (c Count) Total() int {
+	return c.Files + c.Slabs
+}
+
+// CountAccount counts what an import of the account would bring over, which is
+// not the same as the number of objects it holds: an object that says which files
+// it is of may hold runs of several of them, and a large file is held in several
+// objects. An object that says nothing counts as a slab.
 //
 // It costs the walk of the object log and nothing else, the log handing over the
 // objects along with the events.
-func CountAccount(ctx context.Context, src AccountObjects) (int, error) {
+func CountAccount(ctx context.Context, src AccountObjects) (Count, error) {
 	pinned, err := listPinned(ctx, src)
 	if err != nil {
-		return 0, err
+		return Count{}, err
 	}
 
 	files := make(map[string]struct{})
-	var untagged int
+	var count Count
 	for _, obj := range pinned {
 		if obj.Object == nil {
-			untagged++
+			count.Slabs++
 			continue
 		}
 
 		tag, ok := parseTag(obj.Object.Metadata())
 		if !ok {
-			untagged++
+			count.Slabs++
 			continue
 		}
 		for _, piece := range tag.Pieces {
 			files[piece.Share+piece.Path] = struct{}{}
 		}
 	}
+	count.Files = len(files)
 
-	return len(files) + untagged, nil
+	return count, nil
 }
 
 // DescribeAccount walks an indexd account's object log and describes what it
