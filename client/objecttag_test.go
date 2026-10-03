@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/mike76-dev/sombrero/stores"
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
+	"go.sia.tech/indexd/api/app"
 )
 
 // lastTag returns what the object uploaded last was told to say about itself.
@@ -305,6 +308,116 @@ func TestRetagIsTriedAgain(t *testing.T) {
 	awaitRetag(t, backend, key, func(tag objectTag) bool {
 		return len(tag.Pieces) == 1 && tag.Pieces[0].Path == "/after.bin"
 	})
+}
+
+// TestRetagIsNotForcedOnTheIndexer verifies that a tag the indexer turns down is
+// not asked about again and again: an answer is not a failure to answer.
+func TestRetagIsNotForcedOnTheIndexer(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newFakeBackend()
+	backend.mu.Lock()
+	backend.retagErr = &app.HTTPError{StatusCode: http.StatusBadRequest, Body: "object metadata size limit (1024) exceeded"}
+	backend.mu.Unlock()
+
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	ic := c.(*IndexdClient)
+	t.Cleanup(func() { _ = c.Close() })
+
+	content := bytes.Repeat([]byte("s"), int(proto.SectorSize))
+	uploadID, err := c.StartUpload(ctx, acc, "/before.bin")
+	if err != nil {
+		t.Fatalf("StartUpload: %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(content), "/before.bin", uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := c.FinishUpload(ctx, "/before.bin", uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload: %v", err)
+	}
+	waitForRead(t, ctx, c, acc, "/before.bin", content)
+
+	key := awaitSlab(t, db, acc, c, "/before.bin")
+	if err := c.Rename(ctx, acc, "/before.bin", "/after.bin", false, false); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+
+	// The indexer is asked once, and the slab is then off the list for good.
+	waitFor(t, 5*time.Second, func() bool {
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+
+		return backend.retagAttempts >= 1
+	}, "the indexer was never asked")
+	waitFor(t, 5*time.Second, func() bool {
+		ic.mu.Lock()
+		defer ic.mu.Unlock()
+		_, waiting := ic.retagging[key]
+
+		return !waiting
+	}, "the slab the indexer refused is still waiting to be retagged")
+
+	time.Sleep(3 * retryDelay)
+	backend.mu.Lock()
+	attempts := backend.retagAttempts
+	backend.mu.Unlock()
+	if attempts != 1 {
+		t.Errorf("the indexer was asked %d times, want once", attempts)
+	}
+}
+
+// TestTagFitsTheIndexer verifies that an object packed with more files than its
+// metadata has room for names the first of them and counts the rest, since the
+// indexer takes a tag of a kilobyte or nothing.
+func TestTagFitsTheIndexer(t *testing.T) {
+	const many = 300
+	jobs := make([]stores.UploadJob, 0, many)
+	owners := make(map[uint64]stores.PieceOwner, many)
+	for i := range many {
+		id := uint64(i + 1)
+		jobs = append(jobs, stores.UploadJob{MetadataID: id, Data: bytes.Repeat([]byte{'x'}, 1000)})
+		owners[id] = stores.PieceOwner{Share: "shared", Path: fmt.Sprintf("/photos/holiday/IMG_%04d.jpg", i), Size: 1000}
+	}
+
+	meta := tagPieces(jobs, owners)
+	if len(meta) > maxTagSize {
+		t.Fatalf("the tag encodes to %d bytes, more than the %d the indexer takes", len(meta), maxTagSize)
+	}
+
+	tag, ok := parseTag(meta)
+	if !ok {
+		t.Fatal("the tag says nothing this server understands")
+	}
+	if len(tag.Pieces) == 0 || tag.Omitted == 0 || len(tag.Pieces)+tag.Omitted != many {
+		t.Fatalf("the tag names %d piece(s) and counts %d left out, want %d between them", len(tag.Pieces), tag.Omitted, many)
+	}
+	for i, piece := range tag.Pieces {
+		if piece.Path != owners[uint64(i+1)].Path || piece.At != uint64(i*1000) {
+			t.Errorf("piece %d is %+v, want the %dth file in object order", i, piece, i)
+		}
+	}
+
+	// One piece more would not have fit.
+	full := objectTag{Version: objectTagVersion, Pieces: make([]objectPiece, 0, len(tag.Pieces)+1)}
+	for i := range len(tag.Pieces) + 1 {
+		full.Pieces = append(full.Pieces, objectPiece{Share: "shared", Path: owners[uint64(i+1)].Path, At: uint64(i * 1000), Length: 1000, Size: 1000})
+	}
+	if whole, err := json.Marshal(full); err != nil || len(whole) <= maxTagSize {
+		t.Errorf("a tag of %d pieces encodes to %d bytes and would have fit", len(full.Pieces), len(whole))
+	}
+
+	// A tag that fits is left whole, and says nothing was left out.
+	few, ok := parseTag(tagPieces(jobs[:3], owners))
+	if !ok || len(few.Pieces) != 3 || few.Omitted != 0 {
+		t.Errorf("a tag of 3 pieces reads as %+v", few)
+	}
 }
 
 // halfSlab is exactly half a slab of the name's own bytes. Two of them fill one

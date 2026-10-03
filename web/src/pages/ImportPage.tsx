@@ -53,6 +53,7 @@ export function ImportPage() {
   const [probe, setProbe] = useState<ImportProbeResponse | null>(null)
   const [sorted, setSorted] = useState<ImportSortResponse | null>(null)
   const [sorting, setSorting] = useState(false)
+  const [sortError, setSortError] = useState<string | null>(null)
 
   const { data: accounts } = useApiData(
     () => (workgroup ? listAccounts(workgroup) : Promise.resolve(null)),
@@ -152,18 +153,17 @@ export function ImportPage() {
 
   // sortOut reads the slabs whose file names are gone, a round at a time,
   // adding up what the rounds found: each slab is downloaded whole, so one
-  // call of its own would take as long as all of them.
+  // call of its own would take as long as all of them. A sort that was broken
+  // off is taken up where it stopped rather than from the start.
   const sortOut = async () => {
     setSorting(true)
-    const total: ImportSortResponse = {
-      objects: 0,
-      recovered: 0,
-      skipped: 0,
-      bytes: 0,
-      leftover: 0,
-    }
+    setSortError(null)
+    const resuming = sorted?.more && sorted.last
+    const total: ImportSortResponse = resuming
+      ? { ...sorted }
+      : { objects: 0, recovered: 0, skipped: 0, unread: 0, bytes: 0, leftover: 0 }
     try {
-      let after: string | undefined
+      let after: string | undefined = resuming ? sorted.last : undefined
       for (;;) {
         const round = await sortLostAndFound(workgroup.trim(), share.trim(), {
           username: username.trim(),
@@ -173,6 +173,8 @@ export function ImportPage() {
         total.objects += round.objects
         total.recovered += round.recovered
         total.skipped += round.skipped
+        total.unread += round.unread
+        total.failure = total.failure || round.failure
         total.bytes += round.bytes
         total.leftover += round.leftover
         total.last = round.last
@@ -181,6 +183,8 @@ export function ImportPage() {
         after = round.last
       }
       setSorted({ ...total, more: false })
+    } catch (e) {
+      setSortError(e instanceof Error ? e.message : String(e))
     } finally {
       setSorting(false)
     }
@@ -383,9 +387,16 @@ export function ImportPage() {
         </p>
         <p className="muted">
           This costs nothing in storage: a recovered file points at data the share already has.
-          Files bigger than one slab are skipped, since only part of them is in the slab being
-          read. Sorting does download each slab to read it, so it takes a while on a large
-          share.
+          What is found is cut out of the slab it was found in, so what remains in{' '}
+          <span className="mono">/lost+found</span> is exactly the data nothing could recognise,
+          and a slab that was all files disappears from it. Files bigger than one slab are left
+          there, since only part of them is in the slab being read. Sorting does download each
+          slab to read it, so it takes a while on a large share.
+        </p>
+        <p className="muted">
+          Deleting a recovered file deletes those bytes for good; they are not in the slab's
+          remainder any more. The remainder itself can be downloaded and given to a recovery
+          tool that knows more formats.
         </p>
         <div className="row">
           <button
@@ -393,10 +404,11 @@ export function ImportPage() {
             disabled={busy || sorting || !workgroup.trim() || !share.trim() || !username.trim()}
             onClick={() => run(sortOut)}
           >
-            {sorting ? 'Sorting…' : 'Sort /lost+found'}
+            {sorting ? 'Sorting…' : sorted?.more ? 'Continue sorting' : 'Sort /lost+found'}
           </button>
         </div>
         <SortResult sorted={sorted} sorting={sorting} />
+        <ErrorBanner error={sortError} />
       </Card>
     </div>
   )
@@ -431,6 +443,20 @@ function SortResult({
               <td>
                 {sorted.skipped} file{sorted.skipped === 1 ? '' : 's'}
               </td>
+            </tr>
+          )}
+          {sorted.unread > 0 && (
+            <tr>
+              <th>Could not be read</th>
+              <td>
+                {sorted.unread} slab{sorted.unread === 1 ? '' : 's'}
+              </td>
+            </tr>
+          )}
+          {sorted.failure && (
+            <tr>
+              <th>First failure</th>
+              <td className="mono">{sorted.failure}</td>
             </tr>
           )}
           {sorting && sorted.last && (

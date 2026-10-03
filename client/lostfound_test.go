@@ -3,8 +3,12 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"path"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/stores"
 	proto "go.sia.tech/core/rhp/v4"
@@ -94,14 +98,42 @@ func TestSortLostAndFound(t *testing.T) {
 		}
 	}
 
-	// Sorting the same objects again comes to the same files, and leaves them
-	// as they are.
+	// What was found is no longer in the file it was found in, which is down to
+	// the bytes before, between and after the finds.
+	rest := append(append([]byte{}, object[:1000]...), object[1000+len(one)+len(two):]...)
+	info, err := c.Object(ctx, acc, lost)
+	if err != nil {
+		t.Fatalf("the lost+found file: %v", err)
+	}
+	if info.Size != uint64(len(rest)) {
+		t.Errorf("the lost+found file measures %d, want the %d bytes nothing recognized", info.Size, len(rest))
+	}
+	var got bytes.Buffer
+	if err := c.Read(ctx, acc, lost, 0, info.Size, &got); err != nil {
+		t.Fatalf("reading the lost+found file: %v", err)
+	}
+	if !bytes.Equal(got.Bytes(), rest) {
+		t.Error("the lost+found file does not read back as what nothing recognized")
+	}
+
+	// The object is told about the files it now holds.
+	awaitRetag(t, backend, key, func(tag objectTag) bool {
+		var named int
+		for _, piece := range tag.Pieces {
+			if path.Dir(piece.Path) == "/lost+found/"+RecoveredFolder {
+				named++
+			}
+		}
+		return named == 2
+	})
+
+	// Sorting again looks only at what is left, and finds nothing more in it.
 	again, err := ic.SortLostAndFound(ctx, acc, LostAndFound, "", 0)
 	if err != nil {
 		t.Fatalf("the second sort: %v", err)
 	}
-	if again.Recovered != 2 {
-		t.Errorf("the second sort found %d file(s), want the same 2", again.Recovered)
+	if again.Objects != 1 || again.Recovered != 0 || again.Leftover != uint64(len(rest)) {
+		t.Errorf("the second sort: want the leftovers looked at and nothing found, got %+v", again)
 	}
 
 	entries, err := db.ListObjects(acc, share.Name, "/lost+found/"+RecoveredFolder)
@@ -110,6 +142,72 @@ func TestSortLostAndFound(t *testing.T) {
 	}
 	if len(entries) != 2 {
 		t.Errorf("the recovered folder holds %d file(s), want 2", len(entries))
+	}
+}
+
+// TestSortLostAndFoundTakesTheWholeObject verifies that an object made of nothing
+// but files leaves lost+found altogether once they are found: there is nothing
+// left to look at.
+func TestSortLostAndFoundTakesTheWholeObject(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// A picture and a document that fill the slab between them exactly.
+	picture := pngFile(100000)
+	want := proto.SectorSize - len(picture)
+	stream := want
+	document := pdfFile(bytes.Repeat([]byte("p"), stream), 0)
+	for len(document) != want {
+		stream -= len(document) - want
+		document = pdfFile(bytes.Repeat([]byte("p"), stream), 0)
+	}
+	object := append(append([]byte{}, picture...), document...)
+
+	const lost = "/lost+found/full.bin"
+	if err := c.MakeDirectory(ctx, acc, LostAndFound); err != nil {
+		t.Fatalf("MakeDirectory: %v", err)
+	}
+	uploadID, err := c.StartUpload(ctx, acc, lost)
+	if err != nil {
+		t.Fatalf("StartUpload: %v", err)
+	}
+	if _, err := c.Write(ctx, bytes.NewReader(object), lost, uploadID, 1, 0, uint64(len(object))); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := c.FinishUpload(ctx, lost, uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload: %v", err)
+	}
+	waitForRead(t, ctx, c, acc, lost, object)
+	awaitSlab(t, db, acc, c, lost)
+
+	report, err := c.(*IndexdClient).SortLostAndFound(ctx, acc, LostAndFound, "", 0)
+	if err != nil {
+		t.Fatalf("SortLostAndFound: %v", err)
+	}
+	if report.Recovered != 2 || report.Leftover != 0 {
+		t.Fatalf("the report: want both files and nothing left over, got %+v", report)
+	}
+
+	if _, err := c.Object(ctx, acc, lost); err == nil {
+		t.Error("the object is still in lost+found with nothing left in it")
+	}
+	entries, err := db.ListObjects(acc, share.Name, LostAndFound)
+	if err != nil {
+		t.Fatalf("ListObjects: %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir {
+			t.Errorf("lost+found still holds %s", entry.Path)
+		}
 	}
 }
 
@@ -172,6 +270,71 @@ func TestSortLostAndFoundGoesInRounds(t *testing.T) {
 	}
 	if second.Objects != 1 || second.Recovered != 1 || second.More {
 		t.Errorf("the second round: want the last object and nothing after it, got %+v", second)
+	}
+}
+
+// TestSortLostAndFoundGoesOnPastASlabItCannotRead verifies that a slab no host
+// hands over costs the round that slab and nothing else: it is counted and the
+// reason kept, and the sort goes on to the next one.
+func TestSortLostAndFoundGoesOnPastASlabItCannotRead(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	backend := newFakeBackend()
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	if err := c.MakeDirectory(ctx, acc, LostAndFound); err != nil {
+		t.Fatalf("MakeDirectory: %v", err)
+	}
+	for i := range 2 {
+		object := make([]byte, proto.SectorSize)
+		copy(object[16:], pdfFile(bytes.Repeat([]byte("p"), 2000), 0))
+
+		name := fmt.Sprintf("/lost+found/%02d.bin", i)
+		uploadID, err := c.StartUpload(ctx, acc, name)
+		if err != nil {
+			t.Fatalf("StartUpload(%s): %v", name, err)
+		}
+		if _, err := c.Write(ctx, bytes.NewReader(object), name, uploadID, 1, 0, uint64(len(object))); err != nil {
+			t.Fatalf("Write(%s): %v", name, err)
+		}
+		if err := c.FinishUpload(ctx, name, uploadID, nil); err != nil {
+			t.Fatalf("FinishUpload(%s): %v", name, err)
+		}
+		waitForRead(t, ctx, c, acc, name, object)
+		awaitSlab(t, db, acc, c, name)
+	}
+
+	// The first slab's host is gone; the second is there.
+	backend.failDownloads(errors.New("the host is gone"))
+
+	report, err := c.(*IndexdClient).SortLostAndFound(ctx, acc, LostAndFound, "", 0)
+	if err != nil {
+		t.Fatalf("SortLostAndFound: %v", err)
+	}
+	if report.Objects != 1 || report.Recovered != 1 || report.Unread != 1 || report.More {
+		t.Errorf("the report: want one slab read and one not, got %+v", report)
+	}
+	if !strings.Contains(report.Failure, "the host is gone") {
+		t.Errorf("the failure does not say why: %q", report.Failure)
+	}
+
+	// A round that is out of time stops after the file in hand and says so.
+	sortRoundBudget = 0
+	t.Cleanup(func() { sortRoundBudget = 20 * time.Second })
+	short, err := c.(*IndexdClient).SortLostAndFound(ctx, acc, LostAndFound, "", 0)
+	if err != nil {
+		t.Fatalf("the short round: %v", err)
+	}
+	if short.Objects != 1 || !short.More || short.Last != "/lost+found/00.bin" {
+		t.Errorf("the short round: want one slab and more to come, got %+v", short)
 	}
 }
 

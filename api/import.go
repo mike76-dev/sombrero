@@ -156,6 +156,8 @@ type ImportSortResponse struct {
 	Objects   int    `json:"objects"`
 	Recovered int    `json:"recovered"`
 	Skipped   int    `json:"skipped"`
+	Unread    int    `json:"unread"`
+	Failure   string `json:"failure,omitempty"`
 	Bytes     uint64 `json:"bytes"`
 	Leftover  uint64 `json:"leftover"`
 	Last      string `json:"last,omitempty"`
@@ -565,6 +567,8 @@ func (api *API) importSortHandlerPOST(w http.ResponseWriter, req *http.Request, 
 		Objects:   report.Objects,
 		Recovered: report.Recovered,
 		Skipped:   report.Skipped,
+		Unread:    report.Unread,
+		Failure:   report.Failure,
 		Bytes:     report.Bytes,
 		Leftover:  report.Leftover,
 		Last:      report.Last,

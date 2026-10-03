@@ -123,7 +123,8 @@ func (c Count) Total() int {
 // CountAccount counts what an import of the account would bring over, which is
 // not the same as the number of objects it holds: an object that says which files
 // it is of may hold runs of several of them, and a large file is held in several
-// objects. An object that says nothing counts as a slab.
+// objects. An object that says nothing counts as a slab, and so does what is left
+// of one whose tag could not name everything in it.
 //
 // It costs the walk of the object log and nothing else, the log handing over the
 // objects along with the events.
@@ -149,6 +150,9 @@ func CountAccount(ctx context.Context, src AccountObjects) (Count, error) {
 		for _, piece := range tag.Pieces {
 			files[piece.Share+piece.Path] = struct{}{}
 		}
+		if tag.Omitted > 0 {
+			count.Slabs++
+		}
 	}
 	count.Files = len(files)
 
@@ -161,9 +165,10 @@ func CountAccount(ctx context.Context, src AccountObjects) (Count, error) {
 // An object written by a server that tagged it says which runs of which files
 // are in it, so those files are described as themselves, under the names they
 // went by. An object that says nothing about itself can only be described as
-// itself, under prefix, since an account keeps objects rather than paths. Each
-// part carries what it takes to pin the object as well as where to fetch its
-// bytes, so whoever applies the description can do either.
+// itself, under prefix, since an account keeps objects rather than paths; so are
+// the runs of an object its tag had no room to name. Each part carries what it
+// takes to pin the object as well as where to fetch its bytes, so whoever applies
+// the description can do either.
 func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer, origin, prefix string) (stats DescribeStats, err error) {
 	if prefix == "" {
 		prefix = LostAndFound
@@ -184,7 +189,7 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 
 	files := make(map[string]*transfer.File)
 	var shares []string
-	var untagged []sdk.Object
+	var nameless []transfer.File
 
 	for _, key := range keys {
 		if err := ctx.Err(); err != nil {
@@ -204,7 +209,7 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 
 		tag, ok := parseTag(obj.Metadata())
 		if !ok {
-			untagged = append(untagged, *obj)
+			nameless = append(nameless, describeObject(*obj, prefix, origin))
 			continue
 		}
 
@@ -214,22 +219,27 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 			}
 			collectPiece(files, piece, *obj, origin)
 		}
+		if tag.Omitted > 0 {
+			if rest := describeGaps(*obj, tag.Pieces, prefix, origin); rest.Size > 0 {
+				nameless = append(nameless, rest)
+			}
+		}
 	}
 
 	if err := writeNamedFiles(w, files, shares, &stats); err != nil {
 		return stats, err
 	}
 
-	// What said nothing about itself goes under the prefix, one file per object,
-	// which is the most that can be said of it.
-	if len(untagged) > 0 {
+	// What nothing named goes under the prefix, one file per object, which is the
+	// most that can be said of it.
+	if len(nameless) > 0 {
 		if err := w.Directory(transfer.Directory{Path: prefix}); err != nil {
 			return stats, err
 		}
 		stats.Directories++
 
-		for _, obj := range untagged {
-			if err := describeObject(w, obj, prefix, origin); err != nil {
+		for _, file := range nameless {
+			if err := w.File(file); err != nil {
 				return stats, err
 			}
 			stats.Files++
@@ -309,29 +319,63 @@ func writeNamedFiles(w *transfer.Writer, files map[string]*transfer.File, shares
 	return nil
 }
 
-// describeObject writes an object as a file of its own, which is what an object
-// that says nothing about itself amounts to.
-func describeObject(w *transfer.Writer, obj sdk.Object, prefix, origin string) error {
-	size := obj.Size()
+// describeObject describes an object as a file of its own, which is what an
+// object that says nothing about itself amounts to.
+func describeObject(obj sdk.Object, prefix, origin string) transfer.File {
 	file := transfer.File{
 		Path:       path.Join(prefix, obj.ID().String()),
-		Size:       size,
 		CreatedAt:  obj.CreatedAt(),
 		ModifiedAt: obj.UpdatedAt(),
 	}
 
 	// An object of no bytes is made of no parts, the same as an empty file.
-	if size > 0 {
-		dataKey := obj.UnsafeDataKey()
-		file.Parts = []transfer.Part{{
-			Offset: 0,
-			Length: size,
-			Pin:    &transfer.Pin{DataKey: dataKey, Slabs: obj.Slabs()},
-			Source: &transfer.Source{Kind: "indexd", Origin: origin, Key: obj.ID().String()},
-		}}
+	if obj.Size() > 0 {
+		leaveRun(&file, obj, 0, obj.Size(), origin)
 	}
 
-	return w.File(file)
+	return file
+}
+
+// describeGaps describes the runs of an object its tag did not name as one file of
+// its own, the way an object that says nothing is described: the runs lie in it
+// one after the other, each where the tag leaves off.
+func describeGaps(obj sdk.Object, pieces []objectPiece, prefix, origin string) transfer.File {
+	named := slices.Clone(pieces)
+	sort.Slice(named, func(i, j int) bool { return named[i].At < named[j].At })
+
+	file := transfer.File{
+		Path:       path.Join(prefix, obj.ID().String()),
+		CreatedAt:  obj.CreatedAt(),
+		ModifiedAt: obj.UpdatedAt(),
+	}
+
+	var at uint64
+	for _, piece := range named {
+		if piece.At > at {
+			leaveRun(&file, obj, at, piece.At, origin)
+		}
+		if end := piece.At + piece.Length; end > at {
+			at = end
+		}
+	}
+	if at < obj.Size() {
+		leaveRun(&file, obj, at, obj.Size(), origin)
+	}
+
+	return file
+}
+
+// leaveRun adds the run of the object from one offset to another to the end of the
+// file, with what it takes to pin the object or fetch the bytes.
+func leaveRun(file *transfer.File, obj sdk.Object, from, to uint64, origin string) {
+	file.Parts = append(file.Parts, transfer.Part{
+		Offset:     file.Size,
+		DataOffset: from,
+		Length:     to - from,
+		Pin:        &transfer.Pin{DataKey: obj.UnsafeDataKey(), Slabs: obj.Slabs()},
+		Source:     &transfer.Source{Kind: "indexd", Origin: origin, Key: obj.ID().String()},
+	})
+	file.Size += to - from
 }
 
 // listPinned folds an account's object log into what it holds now, which is the

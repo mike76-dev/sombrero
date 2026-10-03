@@ -195,6 +195,11 @@ export interface ImportSortResponse {
   objects: number
   recovered: number
   skipped: number
+
+  // unread counts the slabs that could not be downloaded, and failure says why
+  // the first of them could not.
+  unread: number
+  failure?: string
   bytes: number
   leftover: number
   last?: string

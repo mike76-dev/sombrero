@@ -232,6 +232,100 @@ func TestApplyFileResults(t *testing.T) {
 	}
 }
 
+// TestRecover verifies what comes of cutting the files found inside a file out of
+// it: the finds are files, the file is what lies between them, and a file with
+// nothing left is gone.
+func TestRecover(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	target, acc := applyTarget(t, db)
+	key := types.Hash256{7}
+	lost := transfer.File{
+		Path: "/lost+found/x.bin", Size: 100,
+		Parts: []transfer.Part{{Length: 100, Object: key}},
+	}
+	if _, err := db.ApplyFile(target, lost); err != nil {
+		t.Fatalf("ApplyFile: %v", err)
+	}
+
+	// Two files found at 10 and 60, leaving the bytes before, between and after.
+	found := []transfer.File{
+		{Path: "/lost+found/recovered/a.pdf", Size: 30, Parts: []transfer.Part{{DataOffset: 10, Length: 30, Object: key}}},
+		{Path: "/lost+found/recovered/b.png", Size: 20, Parts: []transfer.Part{{DataOffset: 60, Length: 20, Object: key}}},
+	}
+	remainder := []transfer.Part{
+		{DataOffset: 0, Length: 10, Object: key},
+		{DataOffset: 40, Length: 20, Object: key},
+		{DataOffset: 80, Length: 20, Object: key},
+	}
+	if err := db.Recover(target, lost.Path, found, remainder); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	runs, err := db.GetMetadata(acc, "idx", lost.Path, 0, 100)
+	if err != nil {
+		t.Fatalf("GetMetadata: %v", err)
+	}
+	if len(runs) != 3 {
+		t.Fatalf("the file is made of %d run(s), want the 3 left over", len(runs))
+	}
+	for i, want := range remainder {
+		if runs[i].Key != key || runs[i].Offset != want.DataOffset || runs[i].Length != want.Length {
+			t.Errorf("run %d: got %+v, want %+v", i, runs[i], want)
+		}
+	}
+	if runs[1].At != 10 || runs[2].At != 30 {
+		t.Errorf("the runs do not follow one another in the file: at %d and %d", runs[1].At, runs[2].At)
+	}
+	if size := fileSize(t, db, acc, lost.Path); size != 50 {
+		t.Errorf("the file measures %d, want the 50 left over", size)
+	}
+
+	// Found again, the files are left alone; found in full, the file goes.
+	rest := transfer.File{Path: "/lost+found/recovered/c.gif", Size: 50, Parts: []transfer.Part{{Length: 50, Object: key}}}
+	if err := db.Recover(target, lost.Path, append(found, rest), nil); err != nil {
+		t.Fatalf("Recover in full: %v", err)
+	}
+	entries, err := db.ListObjects(acc, "idx", "/lost+found")
+	if err != nil {
+		t.Fatalf("ListObjects: %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir {
+			t.Errorf("%s is still there with nothing left in it", entry.Path)
+		}
+	}
+	if recovered, _ := db.ListObjects(acc, "idx", "/lost+found/recovered"); len(recovered) != 3 {
+		t.Errorf("the recovered folder holds %d file(s), want 3", len(recovered))
+	}
+
+	// Nothing found and nothing left would lose the slab; it is refused.
+	if err := db.Recover(target, rest.Path, nil, nil); err == nil {
+		t.Error("a file was cut to nothing with nothing found in it")
+	}
+}
+
+// fileSize is what the file is said to measure.
+func fileSize(t *testing.T, db *Database, acc Account, path string) uint64 {
+	t.Helper()
+
+	dir, _ := splitPath(path)
+	entries, err := db.ListObjects(acc, "idx", dir)
+	if err != nil {
+		t.Fatalf("ListObjects(%s): %v", dir, err)
+	}
+	for _, entry := range entries {
+		if entry.Path == path {
+			return entry.Size
+		}
+	}
+	t.Fatalf("%s is not there", path)
+
+	return 0
+}
+
 // TestApplyToTheWrongShare verifies that a description goes only where its rows
 // would be read: a renterd share is listed by renterd, not from here.
 func TestApplyToTheWrongShare(t *testing.T) {

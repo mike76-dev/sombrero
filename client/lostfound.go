@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"path"
+	"time"
 
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
@@ -25,9 +27,18 @@ const maxCarveSize = 256 << 20
 // waited for.
 const defaultSortBatch = 8
 
+// sortRoundBudget is how long a round goes on taking up new files for. Slabs come
+// slowly from some hosts, and whoever asked is holding a connection open: a round
+// that has taken this long stops after the file in hand and says there is more.
+var sortRoundBudget = 20 * time.Second
+
 // SortReport is what one round of sorting out the lost and found came to: how
-// many objects were looked inside, what was found in them, and how much belonged
-// to no file anything could recognize.
+// many objects were looked inside, what was found in them, and how much of them
+// is still there, belonging to no file anything could recognize.
+//
+// Unread counts the objects that could not be downloaded, and Failure says why
+// the first of them could not: one slab a host will not hand over is no reason
+// to leave the rest unsorted.
 //
 // Last is the path of the file the round stopped at, which the next round is
 // given to take up where this one left off, and More says there was one.
@@ -35,6 +46,8 @@ type SortReport struct {
 	Objects   int
 	Recovered int
 	Skipped   int
+	Unread    int
+	Failure   string
 	Bytes     uint64
 	Leftover  uint64
 	Last      string
@@ -42,12 +55,14 @@ type SortReport struct {
 }
 
 // SortLostAndFound looks inside the files under the prefix for files that can be
-// recognized by what they begin and end with, and makes each one a file of its
-// own under the recovered folder.
+// recognized by their structure, and makes each one a file of its own under the
+// recovered folder.
 //
 // Nothing is uploaded and nothing is paid for twice: a found file is a run of the
-// object that is already there, named after where it was found so that sorting
-// the same objects again finds the same files and leaves them alone.
+// object that is already there, named after where it was found. What was found is
+// cut out of the file it was found in, which comes to hold only what nothing
+// recognized and goes away once nothing is left: the lost and found is what is
+// still unaccounted for, and sorting it again looks only at that.
 //
 // One round looks at no more than limit of the files that come after the given
 // path, since each of them is downloaded whole. What it reports is where it got
@@ -71,6 +86,7 @@ func (ic *IndexdClient) SortLostAndFound(ctx context.Context, acc stores.Account
 	}
 
 	target := stores.TransferTarget{Share: ic.share, Workgroup: ic.workgroup, Owner: acc}
+	start := time.Now()
 	var looked int
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
@@ -79,7 +95,7 @@ func (ic *IndexdClient) SortLostAndFound(ctx context.Context, acc stores.Account
 		if entry.IsDir || entry.Path <= after {
 			continue
 		}
-		if looked >= limit {
+		if looked >= limit || (looked > 0 && time.Since(start) > sortRoundBudget) {
 			// There is more to look at, which the caller asks for in a round of
 			// its own rather than waiting for all of it in this one.
 			report.More = true
@@ -89,18 +105,26 @@ func (ic *IndexdClient) SortLostAndFound(ctx context.Context, acc stores.Account
 		looked++
 		report.Last = entry.Path
 
-		key, at, ok := wholeObject(ic.db, acc, ic.share, entry)
+		key, runs, ok := objectRuns(ic.db, acc, ic.share, entry)
 		if !ok {
 			report.Skipped++
 			continue
 		}
 
-		report.Objects++
-		found, leftover, err := ic.sortObject(ctx, target, entry, key, at, prefix)
+		found, leftover, err := ic.sortObject(ctx, target, entry, key, runs, prefix)
 		if err != nil {
-			return report, err
+			if ctx.Err() != nil {
+				return report, err
+			}
+			log.Printf("failed to sort out %s: %v", entry.Path, err)
+			report.Unread++
+			if report.Failure == "" {
+				report.Failure = err.Error()
+			}
+			continue
 		}
 
+		report.Objects++
 		report.Leftover += leftover
 		for _, find := range found {
 			report.Recovered++
@@ -111,56 +135,92 @@ func (ic *IndexdClient) SortLostAndFound(ctx context.Context, acc stores.Account
 	return report, nil
 }
 
-// sortObject looks inside one object and makes a file of everything it finds.
-func (ic *IndexdClient) sortObject(ctx context.Context, target stores.TransferTarget, entry stores.ObjectMeta, key types.Hash256, at uint64, prefix string) ([]Find, uint64, error) {
-	var buf bytes.Buffer
-	buf.Grow(int(entry.Size))
-	if err := ic.backend.Download(ctx, key, at, entry.Size, &buf); err != nil {
-		return nil, 0, fmt.Errorf("couldn't read %s: %w", entry.Path, err)
+// sortObject looks inside one object, run by run, makes a file of everything it
+// finds and cuts it out of the file it was found in. A file cannot span two runs:
+// what lies between them was found before. The finds are returned at their
+// offsets in the object, and with them what is left of the file.
+func (ic *IndexdClient) sortObject(ctx context.Context, target stores.TransferTarget, entry stores.ObjectMeta, key types.Hash256, runs []stores.SlabSlice, prefix string) ([]Find, uint64, error) {
+	var (
+		finds     []Find
+		found     []transfer.File
+		remainder []transfer.Part
+		leftover  uint64
+	)
+	leave := func(at, length uint64) {
+		remainder = append(remainder, transfer.Part{DataOffset: at, Length: length, Object: key})
+		leftover += length
 	}
 
-	finds, leftover := carve(buf.Bytes())
-	for _, find := range finds {
-		file := transfer.File{
-			Path:       recoveredPath(prefix, key, at+find.Offset, find.Ext),
-			Size:       find.Length,
-			CreatedAt:  entry.CreatedAt,
-			ModifiedAt: entry.ModifiedAt,
-			Parts: []transfer.Part{{
-				Offset:     0,
-				DataOffset: at + find.Offset,
-				Length:     find.Length,
-				Object:     key,
-			}},
+	for _, run := range runs {
+		var buf bytes.Buffer
+		buf.Grow(int(run.Length))
+		if err := ic.backend.Download(ctx, key, run.Offset, run.Length, &buf); err != nil {
+			return nil, 0, fmt.Errorf("couldn't read %s: %w", entry.Path, err)
 		}
 
-		if _, err := ic.db.ApplyFile(target, file); err != nil {
-			return nil, 0, fmt.Errorf("couldn't make a file of what was found at %d in %s: %w", find.Offset, entry.Path, err)
+		carved, _ := carve(buf.Bytes())
+		var done uint64
+		for _, find := range carved {
+			if find.Offset > done {
+				leave(run.Offset+done, find.Offset-done)
+			}
+			at := run.Offset + find.Offset
+			finds = append(finds, Find{Offset: at, Length: find.Length, Ext: find.Ext})
+			found = append(found, transfer.File{
+				Path:       recoveredPath(prefix, key, at, find.Ext),
+				Size:       find.Length,
+				CreatedAt:  entry.CreatedAt,
+				ModifiedAt: entry.ModifiedAt,
+				Parts:      []transfer.Part{{DataOffset: at, Length: find.Length, Object: key}},
+			})
+			done = find.End()
+		}
+		if done < run.Length {
+			leave(run.Offset+done, run.Length-done)
 		}
 	}
+
+	if len(found) == 0 {
+		return nil, leftover, nil
+	}
+	if err := ic.db.Recover(target, entry.Path, found, remainder); err != nil {
+		return nil, 0, fmt.Errorf("couldn't make files of what was found in %s: %w", entry.Path, err)
+	}
+
+	// The object now holds files with names, which the indexer is told about so
+	// that a rescue of this account comes to them rather than to lost+found again.
+	ic.retag([]types.Hash256{key})
 
 	return finds, leftover, nil
 }
 
-// wholeObject reports whether the file is one whole object of this account's and
-// nothing else, which is what the objects of an account arrive as and all that
-// is worth looking inside. It returns the object and where in it the file sits.
-func wholeObject(db *stores.Database, acc stores.Account, share string, entry stores.ObjectMeta) (types.Hash256, uint64, bool) {
+// objectRuns reports whether the file is made of one object of this account's and
+// nothing else, which is what the objects of an account arrive as and all that is
+// worth looking inside, and returns the object and the runs of it the file is made
+// of. A file that was sorted before is made of what was left of it.
+func objectRuns(db *stores.Database, acc stores.Account, share string, entry stores.ObjectMeta) (types.Hash256, []stores.SlabSlice, bool) {
 	if entry.Size == 0 || entry.Size > maxCarveSize {
-		return types.Hash256{}, 0, false
+		return types.Hash256{}, nil, false
 	}
 
-	slices, err := db.GetMetadata(acc, share, entry.Path, 0, entry.Size)
-	if err != nil || len(slices) != 1 {
-		return types.Hash256{}, 0, false
+	runs, err := db.GetMetadata(acc, share, entry.Path, 0, entry.Size)
+	if err != nil || len(runs) == 0 {
+		return types.Hash256{}, nil, false
 	}
 
-	slice := slices[0]
-	if slice.Key == (types.Hash256{}) || slice.At != 0 || slice.Length != entry.Size {
-		return types.Hash256{}, 0, false
+	key := runs[0].Key
+	var covered uint64
+	for _, run := range runs {
+		if run.Key != key || key == (types.Hash256{}) || run.At != covered {
+			return types.Hash256{}, nil, false
+		}
+		covered += run.Length
+	}
+	if covered != entry.Size {
+		return types.Hash256{}, nil, false
 	}
 
-	return slice.Key, slice.Offset, true
+	return key, runs, true
 }
 
 // recoveredPath names a found file after where it was found, so that sorting the

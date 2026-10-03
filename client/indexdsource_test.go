@@ -388,6 +388,73 @@ func TestCountAccount(t *testing.T) {
 	}
 }
 
+// TestDescribeAccountKeepsWhatTheTagLeftOut verifies that the runs of an object
+// its tag had no room to name are not lost: they go under lost+found as one file
+// of the object, the named files around them being described as themselves.
+func TestDescribeAccountKeepsWhatTheTagLeftOut(t *testing.T) {
+	at := time.Now().UTC().Truncate(time.Second)
+	fa := &fakeAccount{}
+
+	// An object of 50 bytes whose tag names a file at 0 and one at 30, and says
+	// it left one out: the bytes at 10 and at 40 belong to nobody it can name.
+	tag := objectTag{Version: objectTagVersion, Omitted: 1, Pieces: []objectPiece{
+		{Share: "s", Path: "/a.bin", At: 0, Length: 10, Size: 10},
+		{Share: "s", Path: "/b.bin", At: 30, Length: 10, Size: 10},
+	}}
+	meta, err := json.Marshal(tag)
+	if err != nil {
+		t.Fatalf("the tag would not encode: %v", err)
+	}
+	key := fa.pin(at, meta, 50)
+
+	count, err := CountAccount(context.Background(), fa)
+	if err != nil {
+		t.Fatalf("CountAccount: %v", err)
+	}
+	if count != (Count{Files: 2, Slabs: 1}) {
+		t.Errorf("the count: want 2 files and the slab of what was left out, got %+v", count)
+	}
+
+	var buf bytes.Buffer
+	w, err := transfer.NewWriter(&buf, transfer.Header{Source: "indexd"})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	stats, err := DescribeAccount(context.Background(), fa, w, "http://indexer", "")
+	if err != nil {
+		t.Fatalf("DescribeAccount: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if stats.Files != 3 || stats.Directories != 1 {
+		t.Fatalf("stats: want the 2 named files, the leftovers and lost+found, got %+v", stats)
+	}
+
+	_, files := described(t, buf.Bytes())
+	var rest *transfer.File
+	for i := range files {
+		if files[i].Path == path.Join(LostAndFound, key.String()) {
+			rest = &files[i]
+		}
+	}
+	if rest == nil {
+		t.Fatalf("what the tag left out was not described: %+v", files)
+	}
+	if rest.Size != 30 || len(rest.Parts) != 2 {
+		t.Fatalf("the leftovers: got size %d in %d part(s), want the 30 bytes in 2 runs", rest.Size, len(rest.Parts))
+	}
+	if p := rest.Parts[0]; p.Offset != 0 || p.DataOffset != 10 || p.Length != 20 || p.Pin == nil {
+		t.Errorf("the first run: got %+v", p)
+	}
+	if p := rest.Parts[1]; p.Offset != 20 || p.DataOffset != 40 || p.Length != 10 || p.Pin == nil {
+		t.Errorf("the second run: got %+v", p)
+	}
+	if err := rest.Validate(); err != nil {
+		t.Errorf("the leftovers would not apply: %v", err)
+	}
+}
+
 // TestProbeAccount verifies what a look at a source reports, which is what
 // decides whether an import of it is worth running at all.
 func TestProbeAccount(t *testing.T) {

@@ -43,6 +43,8 @@ type fakeBackend struct {
 	retags   map[types.Hash256]json.RawMessage
 	retagErr error
 
+	retagAttempts int
+
 	// pinned holds the objects taken over from somewhere else, which is what an
 	// import of another account's data does rather than uploading it again.
 	pinned map[types.Hash256]sdk.Object
@@ -321,6 +323,7 @@ func (fb *fakeBackend) Retag(ctx context.Context, key types.Hash256, meta json.R
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 
+	fb.retagAttempts++
 	if fb.retagErr != nil {
 		return fb.retagErr
 	}

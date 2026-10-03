@@ -3,16 +3,29 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
+	"net/http"
+	"sort"
 	"time"
 
 	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
+	"go.sia.tech/indexd/api/app"
+	"go.sia.tech/indexd/slabs"
 )
 
 // objectTagVersion is the version of the tag this server writes. A reader takes
 // what it knows and leaves the rest for whoever wrote it.
 const objectTagVersion = 1
+
+// sealedOverhead is what sealing adds to a tag: the nonce and the authentication
+// tag of the XChaCha20-Poly1305 the SDK seals metadata with.
+const sealedOverhead = 24 + 16
+
+// maxTagSize is the most a tag may encode to. The indexer caps an object's sealed
+// metadata, so a tag names what fits and counts the rest.
+const maxTagSize = slabs.MaxMetadataSize - sealedOverhead
 
 // objectTag is what an object carries about its own contents: the runs of the
 // files whose bytes are in it, and where in it they are.
@@ -20,9 +33,43 @@ const objectTagVersion = 1
 // The indexer stores it sealed with the account's app key, so it is of no use to
 // anyone else and of every use to whoever holds the account: an account that was
 // all an object store becomes one that can say what its objects were files of.
+//
+// It is also small: an object packed with many small files cannot name them all,
+// so it names the first of them and says how many it left out.
 type objectTag struct {
 	Version int           `json:"sombrero"`
 	Pieces  []objectPiece `json:"pieces"`
+	Omitted int           `json:"omitted,omitempty"`
+}
+
+// encode returns the tag as the indexer will take it: all of its pieces where
+// they fit, else the first of them, the rest counted in Omitted. It is nil for a
+// tag that could name nothing, which leaves the object saying nothing about
+// itself.
+func (tag objectTag) encode() json.RawMessage {
+	fits := func(n int) (json.RawMessage, bool) {
+		cut := objectTag{Version: tag.Version, Pieces: tag.Pieces[:n], Omitted: len(tag.Pieces) - n}
+		meta, err := json.Marshal(cut)
+
+		return meta, err == nil && len(meta) <= maxTagSize
+	}
+
+	if meta, ok := fits(len(tag.Pieces)); ok {
+		return meta
+	}
+
+	// The pieces lie in object order, so the ones that fit are the first ones,
+	// and the encoding only grows with their number.
+	n := sort.Search(len(tag.Pieces), func(n int) bool {
+		_, ok := fits(n + 1)
+		return !ok
+	})
+	if n == 0 {
+		return nil
+	}
+	meta, _ := fits(n)
+
+	return meta
 }
 
 // objectPiece is one run of a file's bytes inside an object.
@@ -82,19 +129,10 @@ func tagPieces(jobs []stores.UploadJob, owners map[uint64]stores.PieceOwner) jso
 		at += length
 	}
 
-	if len(tag.Pieces) == 0 {
-		return nil
-	}
-
 	// A tag that cannot be encoded is no reason to leave the data unuploaded:
 	// the object is then one that says nothing about itself, as every object
 	// written before tagging does.
-	meta, err := json.Marshal(tag)
-	if err != nil {
-		return nil
-	}
-
-	return meta
+	return tag.encode()
 }
 
 // tagOfSlab returns what the object of the slab is to say about itself, worked
@@ -122,9 +160,9 @@ func (ic *IndexdClient) tagOfSlab(key types.Hash256) (json.RawMessage, bool) {
 		})
 	}
 
-	meta, err := json.Marshal(tag)
-	if err != nil {
-		log.Printf("failed to encode the tag of slab %s: %v", key, err)
+	meta := tag.encode()
+	if meta == nil {
+		log.Printf("the tag of slab %s cannot name even one of its files", key)
 		return nil, false
 	}
 
@@ -201,6 +239,12 @@ func (ic *IndexdClient) writeTags(ctx context.Context) (owing bool) {
 			continue
 		}
 		if err := ic.backend.Retag(ctx, key, meta); err != nil {
+			if refused(err) {
+				// The indexer has made up its mind; asking again would only fill
+				// the log. The object goes on saying what it said before.
+				log.Printf("the indexer would not take the tag of slab %s: %v", key, err)
+				continue
+			}
 			log.Printf("failed to tell slab %s what it holds, leaving it for a retry: %v", key, err)
 			ic.retagLater(key)
 			owing = true
@@ -208,6 +252,17 @@ func (ic *IndexdClient) writeTags(ctx context.Context) (owing bool) {
 	}
 
 	return owing
+}
+
+// refused reports whether the indexer turned a request down for what it was,
+// rather than failing to answer it: an answer that waiting will not change.
+func refused(err error) bool {
+	var httpErr *app.HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+
+	return httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 && httpErr.StatusCode != http.StatusTooManyRequests
 }
 
 // takeRetags takes the slabs that are waiting off the list, so that one that is

@@ -221,6 +221,97 @@ func (db *Database) SetFileTimes(share, path string, createdAt, modifiedAt time.
 	})
 }
 
+// Recover makes files of the runs found inside a file nobody could name, and cuts
+// those runs out of it, in one transaction: the file comes to hold what nothing
+// recognized, back to back, and goes away once nothing is left. A found file that
+// is there already is left as it is.
+//
+// The slab the runs are of stays referenced by the files made of what was cut
+// out, so nothing is staged for unpinning: a file is cut to nothing only where
+// files were found in all of it.
+func (db *Database) Recover(target TransferTarget, from string, found []transfer.File, remainder []transfer.Part) error {
+	if len(found) == 0 && len(remainder) == 0 {
+		return fmt.Errorf("nothing was found in %q, so there is nothing to cut it down to", from)
+	}
+	for _, file := range found {
+		if err := file.Validate(); err != nil {
+			return err
+		}
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		if err := indexdShare(ctx, tx, target.Share); err != nil {
+			return err
+		}
+
+		for _, file := range found {
+			path := normalizePath(file.Path)
+			taken, err := pathTaken(ctx, tx, target.Share, path)
+			if err != nil {
+				return err
+			}
+			if taken {
+				continue
+			}
+
+			dirPath, name := splitPath(path)
+			dirID, _, err := ensureDirectory(ctx, tx, target, dirPath, false, false, file.CreatedAt, file.ModifiedAt)
+			if err != nil {
+				return err
+			}
+			objectID, err := insertObject(ctx, tx, target, dirID, name, path, file)
+			if err != nil {
+				return err
+			}
+			for _, part := range file.Parts {
+				if err := insertPart(ctx, tx, target.Share, objectID, part); err != nil {
+					return err
+				}
+			}
+		}
+
+		return cutFile(ctx, tx, target.Share, normalizePath(from), remainder)
+	})
+}
+
+// cutFile replaces what the file is made of with the given runs, which it comes
+// to hold one after the other, or deletes the file where there are none.
+func cutFile(ctx context.Context, tx pgx.Tx, share, path string, remainder []transfer.Part) error {
+	const lookup = `SELECT id FROM objects WHERE share_name = $1 AND full_path = $2 AND temporary = FALSE`
+	var id uint64
+	if err := tx.QueryRow(ctx, lookup, share, path).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: the file %q", ErrNotFound, path)
+		}
+		return fmt.Errorf("failed to look up the file %q: %w", path, err)
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM metadata WHERE object_id = $1`, id); err != nil {
+		return fmt.Errorf("failed to cut %q: %w", path, err)
+	}
+	if len(remainder) == 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM objects WHERE id = $1`, id); err != nil {
+			return fmt.Errorf("failed to delete %q: %w", path, err)
+		}
+
+		return nil
+	}
+
+	var size uint64
+	for _, part := range remainder {
+		part.Offset = size
+		if err := insertPart(ctx, tx, share, id, part); err != nil {
+			return err
+		}
+		size += part.Length
+	}
+	if _, err := tx.Exec(ctx, `UPDATE objects SET size = $2 WHERE id = $1`, id, size); err != nil {
+		return fmt.Errorf("failed to resize %q: %w", path, err)
+	}
+
+	return nil
+}
+
 // ensureDirectory returns the id of the folder at the path, creating it and the
 // folders above it where they are not there yet.
 func ensureDirectory(ctx context.Context, tx pgx.Tx, target TransferTarget, path string, private, readOnly bool, createdAt, modifiedAt time.Time) (id *uint64, created bool, err error) {
