@@ -1,7 +1,14 @@
-import { useState } from 'react'
-import { connect, disconnect, listShares, requestConnection } from '../api/endpoints'
+import { useEffect, useState } from 'react'
+import {
+  connect,
+  connectionKey,
+  disconnect,
+  listShares,
+  requestConnection,
+} from '../api/endpoints'
 import {
   Card,
+  CopyButton,
   ErrorBanner,
   Field,
   SuccessBanner,
@@ -18,8 +25,12 @@ export function ConnectionsPage() {
   const [share, setShare] = useState('')
   const [appKey, setAppKey] = useState('')
   const [keyFrom, setKeyFrom] = useState('')
+  const [shownKey, setShownKey] = useState<string | null>(null)
   const ready = Boolean(workgroup.trim() && share.trim())
   const attempt = useConnectAttempt(workgroup.trim(), share.trim())
+
+  // A key on show belongs to the pair it was asked for.
+  useEffect(() => setShownKey(null), [workgroup, share])
 
   // What the selected share is backed by decides how it is connected: an indexd
   // share is connected for the first time by approving a request, and only a
@@ -96,6 +107,17 @@ export function ConnectionsPage() {
             Connect
           </button>
           <button
+            className="btn"
+            disabled={busy || running || !ready || backend !== 'indexd' || !attempt.connected}
+            onClick={() =>
+              run(async () => {
+                setShownKey((await connectionKey(workgroup.trim(), share.trim())).appKey)
+              })
+            }
+          >
+            Show app key
+          </button>
+          <button
             className="btn btn-danger"
             disabled={busy || running || !ready}
             onClick={() => {
@@ -103,12 +125,24 @@ export function ConnectionsPage() {
               run(async () => {
                 await disconnect(workgroup.trim(), share.trim())
                 attempt.idle()
+                setShownKey(null)
               }, 'Disconnected.')
             }}
           >
             Disconnect
           </button>
         </div>
+        {shownKey && (
+          <div className="banner banner-success stack">
+            <div>
+              The app key of this connection. Keep a copy somewhere safe: it is the only thing
+              that can read the account's data.
+            </div>
+            <div className="mono appkey">
+              {shownKey} <CopyButton value={shownKey} />
+            </div>
+          </div>
+        )}
         {ready && backend === 'indexd' && !reconnecting && !running && !attempt.connected && (
           <p className="muted">
             {reusable ? (

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +127,44 @@ func TestImport(t *testing.T) {
 		} {
 			w := doRequest(newTestAPIWithServer(importingStore("myshare"), connectedServer()), http.MethodPost, path, body)
 			checkStatus(t, w, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("POST reads an indexd source with a connection's key", func(t *testing.T) {
+		key := types.GeneratePrivateKey()
+		ms := importingStore("myshare")
+		ms.findWorkgroup = foundWorkgroup()
+		ms.getShare = func(n string) (stores.Share, error) {
+			switch n {
+			case "myshare":
+				return stores.Share{Name: "myshare", Type: "indexd"}, nil
+			case "other":
+				return stores.Share{Name: "other", Type: "indexd", ServerName: "http://x"}, nil
+			case "rent":
+				return stores.Share{Name: "rent", Type: "renterd", ServerName: "http://y"}, nil
+			}
+			return stores.Share{}, nil
+		}
+		ms.isConnected = func(_ stores.Workgroup, s stores.Share) (bool, types.PrivateKey, error) {
+			return s.Name == "other", key, nil
+		}
+		from := func(share string) ImportRequest {
+			return ImportRequest{Source: "indexd", Username: "alice", KeyFrom: &ConnectionRef{Workgroup: testUUID.String(), Share: share}}
+		}
+
+		// A renterd share has no key, and neither has a share nobody is connected to.
+		for _, share := range []string{"rent", "nowhere"} {
+			w := doRequest(newTestAPIWithServer(ms, connectedServer()), http.MethodPost, path, from(share))
+			checkStatus(t, w, http.StatusBadRequest)
+		}
+
+		// The key of a connection reads the source, and its share says where that
+		// is: the refusal, with no indexer at the address, comes from there and
+		// names it.
+		w := doRequest(newTestAPIWithServer(ms, connectedServer()), http.MethodPost, path, from("other"))
+		checkStatus(t, w, http.StatusBadRequest)
+		if body := w.Body.String(); !strings.Contains(body, "did not accept") || !strings.Contains(body, "http://x") {
+			t.Errorf("the key or the address of the connection was not used: %s", body)
 		}
 	})
 

@@ -163,6 +163,54 @@ func (db *Database) AppKeyForServer(wg Workgroup, serverName string) (types.Priv
 	return appKey, nil
 }
 
+// KeyedConnection is a connection that holds an app key: which workgroup is on
+// which indexd share, and where that share's indexer is.
+type KeyedConnection struct {
+	Workgroup Workgroup
+	Share     string
+	Server    string
+}
+
+// KeyedConnections returns every connection that holds an app key, which is what
+// an import of an indexd account can be read with instead of a pasted key.
+func (db *Database) KeyedConnections() (conns []KeyedConnection, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT w.id, w.uuid, w.name, c.share_name, s.server_name
+			FROM connections c
+			JOIN shares s ON s.share_name = c.share_name
+			JOIN workgroups w ON w.id = c.workgroup
+			WHERE s.share_type = 'indexd'
+			AND c.app_key IS NOT NULL
+			ORDER BY c.share_name, w.id
+		`
+		rows, err := tx.Query(ctx, query)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve the keyed connections: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var conn KeyedConnection
+			var name *string
+			if err := rows.Scan(&conn.Workgroup.ID, &conn.Workgroup.UUID, &name, &conn.Share, &conn.Server); err != nil {
+				return fmt.Errorf("failed to scan a keyed connection: %w", err)
+			}
+			if name != nil {
+				conn.Workgroup.Name = *name
+			}
+			conns = append(conns, conn)
+		}
+
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return conns, nil
+}
+
 // AppKeyHolders returns the workgroups that hold an app key for the given server,
 // for the connections that are made from another workgroup's key.
 func (db *Database) AppKeyHolders(serverName string) (wgs []Workgroup, err error) {

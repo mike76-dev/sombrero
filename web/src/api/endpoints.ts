@@ -2,6 +2,8 @@ import { request } from './client'
 import type {
   Account,
   AccessRights,
+  AppKeyResponse,
+  Connection,
   ConnectStatusResponse,
   DefragmentResponse,
   FragmentationResponse,
@@ -187,6 +189,14 @@ export const disconnect = (workgroup: string, share: string) =>
   request(`/connect/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`, {
     method: 'DELETE',
   })
+
+// The app key a connection was made with, for whoever did not keep it.
+export const connectionKey = (workgroup: string, share: string) =>
+  request<AppKeyResponse>(
+    `/connect/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}/key`,
+  )
+
+export const listConnections = () => request<Connection[] | null>('/connections')
 
 // Imports
 

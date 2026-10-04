@@ -72,6 +72,11 @@ type ImportRequest struct {
 	Bucket   string `json:"bucket,omitempty"`
 	AppKey   string `json:"appKey,omitempty"`
 
+	// KeyFrom names a connection of this server whose app key reads the source
+	// instead, for an account this server is connected to. The address may be
+	// left out then, since the share says where its indexer is.
+	KeyFrom *ConnectionRef `json:"keyFrom,omitempty"`
+
 	// Prefix is where the objects of an indexd account are put, an account
 	// keeping objects rather than the names anything went by.
 	Prefix string `json:"prefix,omitempty"`
@@ -79,6 +84,13 @@ type ImportRequest struct {
 	// Copy has the data copied even where it could have been pinned, for a
 	// source whose slabs are to be left where they are.
 	Copy bool `json:"copy,omitempty"`
+}
+
+// ConnectionRef names a connection of this server: a workgroup, by UUID or name,
+// and the share it is connected to.
+type ConnectionRef struct {
+	Workgroup string `json:"workgroup"`
+	Share     string `json:"share"`
 }
 
 // ImportStatusResponse is the response type of every /import/:workgroup/:share
@@ -469,7 +481,7 @@ func (api *API) importProbeHandlerPOST(w http.ResponseWriter, req *http.Request,
 		writeError(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	if body.Address == "" {
+	if body.Address == "" && body.KeyFrom == nil {
 		writeError(w, "the address of the source cannot be empty", http.StatusBadRequest)
 		return
 	}
@@ -596,7 +608,7 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 		writeError(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	if body.Address == "" {
+	if body.Address == "" && body.KeyFrom == nil {
 		writeError(w, "the address of the source cannot be empty", http.StatusBadRequest)
 		return
 	}
@@ -813,21 +825,69 @@ func (api *API) renterdSource(w http.ResponseWriter, body ImportRequest) (*clien
 }
 
 // indexdSource builds the account an indexd source is read with, which takes the
-// app key of that account: it is what its objects are sealed to.
+// app key of that account: it is what its objects are sealed to. The key is
+// pasted, or taken from a connection this server holds.
 func (api *API) indexdSource(w http.ResponseWriter, body ImportRequest) (*client.IndexdAccount, bool) {
-	key, err := hex.DecodeString(body.AppKey)
-	if err != nil || len(key) != 64 {
-		writeError(w, "reading an indexd account needs its 64-byte app key, as 128 hex characters", http.StatusBadRequest)
-		return nil, false
+	var key types.PrivateKey
+	address := body.Address
+	if body.KeyFrom != nil {
+		var server string
+		var ok bool
+		if key, server, ok = api.connectionKey(w, *body.KeyFrom); !ok {
+			return nil, false
+		}
+		if address == "" {
+			address = server
+		}
+	} else {
+		decoded, err := hex.DecodeString(body.AppKey)
+		if err != nil || len(decoded) != 64 {
+			writeError(w, "reading an indexd account needs its 64-byte app key, as 128 hex characters", http.StatusBadRequest)
+			return nil, false
+		}
+		key = decoded
 	}
 
-	sdkClient, err := sdk.NewBuilder(body.Address, api.appMetadata()).SDK(types.PrivateKey(key))
+	sdkClient, err := sdk.NewBuilder(address, api.appMetadata()).SDK(key)
 	if err != nil {
 		writeError(w, "that indexer did not accept the app key: "+err.Error(), http.StatusBadRequest)
 		return nil, false
 	}
 
 	return client.NewIndexdAccount(sdkClient), true
+}
+
+// connectionKey returns the app key of the named connection and where its indexer
+// is, and writes the refusal where there is no such key to read with.
+func (api *API) connectionKey(w http.ResponseWriter, ref ConnectionRef) (types.PrivateKey, string, bool) {
+	wg, ok := api.resolveWorkgroup(w, ref.Workgroup)
+	if !ok {
+		return nil, "", false
+	}
+
+	share, err := api.store.GetShare(strings.ToLower(ref.Share))
+	if err != nil {
+		log.Printf("failed to find share: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return nil, "", false
+	}
+	if share.Name == "" || share.Type != "indexd" {
+		writeError(w, "the app key has to come from a connection to an indexd share", http.StatusBadRequest)
+		return nil, "", false
+	}
+
+	connected, key, err := api.store.IsConnected(wg, share)
+	if err != nil {
+		log.Printf("failed to check the connection: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return nil, "", false
+	}
+	if !connected || len(key) == 0 {
+		writeError(w, "that workgroup has no app key for that share", http.StatusBadRequest)
+		return nil, "", false
+	}
+
+	return key, share.ServerName, true
 }
 
 // appMetadata is how this server names itself to an indexer, which is what its

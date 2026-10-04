@@ -77,6 +77,9 @@ type Connections interface {
 
 	// AppKeyHolders returns the workgroups that hold an app key for the server.
 	AppKeyHolders(serverName string) ([]stores.Workgroup, error)
+
+	// KeyedConnections returns every connection that holds an app key.
+	KeyedConnections() ([]stores.KeyedConnection, error)
 }
 
 // Server is as much of the running SMB server as the API needs: the statistics
@@ -250,6 +253,20 @@ type ConnectStatusResponse struct {
 type AppKeyHolder struct {
 	Workgroup uuid.UUID `json:"workgroup"`
 	Name      string    `json:"name,omitempty"`
+}
+
+// AppKeyResponse is the response type of GET /connect/:workgroup/:share/key.
+type AppKeyResponse struct {
+	AppKey string `json:"appKey"`
+}
+
+// ConnectionResponse is one entry of GET /connections: a workgroup's connection
+// to an indexd share, holding the app key of an account at Server.
+type ConnectionResponse struct {
+	Workgroup uuid.UUID `json:"workgroup"`
+	Name      string    `json:"name,omitempty"`
+	Share     string    `json:"share"`
+	Server    string    `json:"server"`
 }
 
 // ProbeResponse is the response type for POST /probe. Reachable says whether
@@ -454,6 +471,14 @@ func (api *API) buildHTTPRoutes() {
 
 	router.GET("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.connectHandlerGET(w, req, ps)
+	})
+
+	router.GET("/connect/:workgroup/:share/key", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.connectKeyHandlerGET(w, req, ps)
+	})
+
+	router.GET("/connections", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.connectionsHandlerGET(w, req, ps)
 	})
 
 	router.POST("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -1830,6 +1855,52 @@ func (api *API) connectHandlerGET(w http.ResponseWriter, _ *http.Request, ps htt
 			}
 		}
 	}
+	writeJSON(w, res)
+}
+
+// connectKeyHandlerGET handles GET /connect/:workgroup/:share/key. The key was
+// shown once when the connection was made; this is for whoever did not keep it.
+// The API is the admin's, and the key sits in the admin's database either way.
+func (api *API) connectKeyHandlerGET(w http.ResponseWriter, _ *http.Request, ps httprouter.Params) {
+	wg, share, ok := api.resolveConnection(w, ps)
+	if !ok {
+		return
+	}
+
+	connected, appKey, err := api.store.IsConnected(wg, share)
+	if err != nil {
+		log.Printf("failed to check the connection: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !connected {
+		writeError(w, "this workgroup is not connected to this share", http.StatusNotFound)
+		return
+	}
+	if len(appKey) == 0 {
+		writeError(w, "this connection has no app key", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, AppKeyResponse{AppKey: hex.EncodeToString(appKey)})
+}
+
+// connectionsHandlerGET handles GET /connections: the connections that hold an
+// app key, which an import of an indexd account can be read with.
+func (api *API) connectionsHandlerGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	res := []ConnectionResponse{}
+	if conns, ok := api.store.(Connections); ok {
+		list, err := conns.KeyedConnections()
+		if err != nil {
+			log.Printf("failed to list the connections: %v", err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		for _, c := range list {
+			res = append(res, ConnectionResponse{Workgroup: c.Workgroup.UUID, Name: c.Workgroup.Name, Share: c.Share, Server: c.Server})
+		}
+	}
+
 	writeJSON(w, res)
 }
 

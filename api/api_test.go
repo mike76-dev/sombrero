@@ -71,6 +71,7 @@ type mockStore struct {
 	hasConnections      func(string) (bool, error)
 	appKeyForServer     func(stores.Workgroup, string) (types.PrivateKey, error)
 	appKeyHolders       func(string) ([]stores.Workgroup, error)
+	keyedConnections    func() ([]stores.KeyedConnection, error)
 	applyDirectory      func(stores.TransferTarget, transfer.Directory) (stores.ApplyResult, error)
 	applyFile           func(stores.TransferTarget, transfer.File) (stores.ApplyResult, error)
 	setFileTimes        func(share, path string, createdAt, modifiedAt time.Time) error
@@ -283,6 +284,13 @@ func (m *mockStore) AppKeyForServer(wg stores.Workgroup, serverName string) (typ
 func (m *mockStore) AppKeyHolders(serverName string) ([]stores.Workgroup, error) {
 	if m.appKeyHolders != nil {
 		return m.appKeyHolders(serverName)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) KeyedConnections() ([]stores.KeyedConnection, error) {
+	if m.keyedConnections != nil {
+		return m.keyedConnections()
 	}
 	return nil, nil
 }
@@ -2206,6 +2214,58 @@ func TestConnect(t *testing.T) {
 		w := doRequest(newTestAPI(ms), http.MethodDelete, path, nil)
 		checkStatus(t, w, http.StatusInternalServerError)
 	})
+}
+
+// TestConnectKey tests GET /connect/:workgroup/:share/key.
+func TestConnectKey(t *testing.T) {
+	path := "/connect/" + testUUID.String() + "/myshare/key"
+	key := types.GeneratePrivateKey()
+	store := func(connected bool, key types.PrivateKey) *mockStore {
+		return &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+			isConnected: func(stores.Workgroup, stores.Share) (bool, types.PrivateKey, error) {
+				return connected, key, nil
+			},
+		}
+	}
+
+	t.Run("GET hands over the key of a connection", func(t *testing.T) {
+		w := doRequest(newTestAPI(store(true, key)), http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusOK)
+		if res := decodeJSON[AppKeyResponse](t, w); res.AppKey != hex.EncodeToString(key) {
+			t.Errorf("the key: want %x, got %q", key, res.AppKey)
+		}
+	})
+
+	t.Run("GET has none for a share that is not connected", func(t *testing.T) {
+		w := doRequest(newTestAPI(store(false, nil)), http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
+	t.Run("GET has none for a connection without a key", func(t *testing.T) {
+		w := doRequest(newTestAPI(store(true, nil)), http.MethodGet, path, nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+}
+
+// TestConnections tests GET /connections.
+func TestConnections(t *testing.T) {
+	ms := &mockStore{
+		keyedConnections: func() ([]stores.KeyedConnection, error) {
+			return []stores.KeyedConnection{{
+				Workgroup: stores.Workgroup{UUID: testUUID, Name: "acme"},
+				Share:     "myshare",
+				Server:    "https://indexer",
+			}}, nil
+		},
+	}
+	w := doRequest(newTestAPI(ms), http.MethodGet, "/connections", nil)
+	checkStatus(t, w, http.StatusOK)
+	res := decodeJSON[[]ConnectionResponse](t, w)
+	if len(res) != 1 || res[0].Workgroup != testUUID || res[0].Name != "acme" || res[0].Share != "myshare" || res[0].Server != "https://indexer" {
+		t.Errorf("the connections: got %+v", res)
+	}
 }
 
 // TestConnectStatus tests GET /connect/:workgroup/:share.

@@ -3,6 +3,7 @@ import {
   cancelImport,
   importStatus,
   listAccounts,
+  listConnections,
   listImports,
   listShares,
   probeImportSource,
@@ -38,6 +39,7 @@ function running(status: ImportStatusResponse | null): boolean {
 export function ImportPage() {
   const { run, busy, error } = useApiAction()
   const { data: shares } = useApiData(() => listShares())
+  const { data: connections } = useApiData(() => listConnections())
   const [workgroup, setWorkgroup] = useState('')
   const [share, setShare] = useState('')
   const [source, setSource] = useState<'renterd' | 'indexd'>('renterd')
@@ -45,6 +47,7 @@ export function ImportPage() {
   const [password, setPassword] = useState('')
   const [bucket, setBucket] = useState('default')
   const [appKey, setAppKey] = useState('')
+  const [keyFrom, setKeyFrom] = useState('')
   const [prefix, setPrefix] = useState('')
   const [copy, setCopy] = useState(false)
   const [username, setUsername] = useState('')
@@ -67,13 +70,19 @@ export function ImportPage() {
   // Nothing of renterd's can be pinned, so an import from one copies whether it
   // is asked to or not.
   const copying = source === 'renterd' || copy
+
+  // The app key of an indexd source is pasted, or borrowed from a connection this
+  // server holds, named by its workgroup and share.
+  const connectionOf = (id: string) =>
+    (connections || []).find((c) => `${c.workgroup}/${c.share}` === id)
+  const borrowed = connectionOf(keyFrom)
   const ready = Boolean(
     workgroup.trim() &&
       share.trim() &&
       backend === 'indexd' &&
       username.trim() &&
       address.trim() &&
-      (source === 'renterd' || appKey.trim()),
+      (source === 'renterd' || appKey.trim() || borrowed),
   )
 
   // One poll follows an import to its end, whether it was started here or was
@@ -148,7 +157,11 @@ export function ImportPage() {
     copy: copying,
     ...(source === 'renterd'
       ? { password, bucket: bucket.trim() }
-      : { appKey: appKey.trim(), prefix: prefix.trim() || undefined }),
+      : {
+          appKey: borrowed ? undefined : appKey.trim(),
+          keyFrom: borrowed ? { workgroup: borrowed.workgroup, share: borrowed.share } : undefined,
+          prefix: prefix.trim() || undefined,
+        }),
   })
 
   // sortOut reads the slabs whose file names are gone, a round at a time,
@@ -284,11 +297,33 @@ export function ImportPage() {
             </>
           ) : (
             <>
+              {(connections?.length ?? 0) > 0 && (
+                <Field label="Use the app key of">
+                  <select
+                    value={keyFrom}
+                    disabled={running(status)}
+                    onChange={(e) => {
+                      setKeyFrom(e.target.value)
+                      const c = connectionOf(e.target.value)
+                      if (c) setAddress(c.server)
+                    }}
+                  >
+                    <option value="">the key pasted below</option>
+                    {(connections || []).map((c) => (
+                      <option key={`${c.workgroup}/${c.share}`} value={`${c.workgroup}/${c.share}`}>
+                        {c.name || c.workgroup} on {c.share} ({c.server})
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
               <Field label="App key (hex)">
                 <input
                   type="text"
-                  value={appKey}
+                  value={borrowed ? '' : appKey}
                   onChange={(e) => setAppKey(e.target.value)}
+                  disabled={Boolean(borrowed) || running(status)}
+                  placeholder={borrowed ? 'taken from the connection' : ''}
                   autoComplete="off"
                 />
               </Field>

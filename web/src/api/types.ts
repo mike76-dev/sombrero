@@ -141,6 +141,19 @@ export interface AppKeyHolder {
   name?: string
 }
 
+export interface AppKeyResponse {
+  appKey: string
+}
+
+// A workgroup's connection to an indexd share, holding the app key of an account
+// at server.
+export interface Connection {
+  workgroup: string
+  name?: string
+  share: string
+  server: string
+}
+
 export type ImportState = 'idle' | 'counting' | 'running' | 'done' | 'failed' | 'cancelled'
 
 // What a source holds, from a look at it before anything is taken over. For an
@@ -169,6 +182,10 @@ export interface ImportRequest {
   appKey?: string
   prefix?: string
   copy?: boolean
+
+  // keyFrom names a connection of this server whose app key reads the source
+  // instead of a pasted one.
+  keyFrom?: { workgroup: string; share: string }
 }
 
 // One import the server has in hand: which workgroup is importing into which
