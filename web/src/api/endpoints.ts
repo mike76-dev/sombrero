@@ -3,6 +3,7 @@ import type {
   Account,
   AccessRights,
   AppKeyResponse,
+  BackupResponse,
   Connection,
   ConnectStatusResponse,
   DefragmentResponse,
@@ -19,6 +20,7 @@ import type {
   PublicDir,
   ServerSettings,
   ServerStats,
+  RestoreResponse,
   ShareSettings,
   Share,
   UnpinOrphansResponse,
@@ -197,6 +199,19 @@ export const connectionKey = (workgroup: string, share: string) =>
   )
 
 export const listConnections = () => request<Connection[] | null>('/connections')
+
+// Backups
+
+export const backupStatus = () => request<BackupResponse>('/backup')
+
+// A catalog is restored by sending the file as it is; force applies it over a
+// connection the server has already.
+export const restoreCatalog = (file: Blob, force: boolean) =>
+  request<RestoreResponse>('/restore', {
+    method: 'POST',
+    query: { force: force || undefined },
+    rawBody: file,
+  })
 
 // Imports
 

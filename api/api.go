@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/julienschmidt/httprouter"
+	"github.com/mike76-dev/sombrero/backup"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
@@ -100,6 +101,10 @@ type Server interface {
 	// building a second one. DiscardSDK closes an offer that was not taken up.
 	OfferSDK(wg stores.Workgroup, share stores.Share, sdkClient *sdk.SDK)
 	DiscardSDK(wg stores.Workgroup, share stores.Share)
+
+	// BackupStatus reports what the local backup tier has done, or nil where
+	// it is off.
+	BackupStatus() *backup.Status
 }
 
 // OrphanedSlab is one entry of an orphan scan: a slab that the share's
@@ -495,6 +500,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.POST("/restore", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.restoreHandlerPOST(w, req, ps)
+	})
+
+	router.GET("/backup", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.backupHandlerGET(w, req, ps)
 	})
 
 	router.GET("/imports", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {

@@ -1,0 +1,127 @@
+package backup
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/mike76-dev/sombrero/stores"
+	"github.com/mike76-dev/sombrero/transfer"
+	"go.sia.tech/core/types"
+)
+
+// noShares is a share manager that does nothing, for a store that is not
+// serving anything.
+type noShares struct{}
+
+func (noShares) RegisterShare(stores.Share) error                           { return nil }
+func (noShares) UpdateShare(stores.Share) error                             { return nil }
+func (noShares) RemoveShare(stores.Share) error                             { return nil }
+func (noShares) UpdateAccessRights(stores.Share, stores.AccessRights) error { return nil }
+func (noShares) RemoveAccess(stores.Account)                                {}
+func (noShares) AddConnection(stores.Workgroup, stores.Share, types.PrivateKey) error {
+	return nil
+}
+func (noShares) RemoveConnection(stores.Workgroup, stores.Share) error { return nil }
+
+// connectedStore is a store with one connection to write catalogs of.
+func connectedStore(t *testing.T, ctx context.Context) (*stores.Database, stores.Workgroup, types.PrivateKey) {
+	t.Helper()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+	db.WithShares(noShares{})
+
+	if err := db.RegisterShare(stores.Share{Name: "idx", Type: "indexd", ServerName: "srv"}); err != nil {
+		t.Fatalf("RegisterShare: %v", err)
+	}
+	if err := db.AddWorkgroup(stores.Workgroup{UUID: uuid.New(), Name: "acme"}); err != nil {
+		t.Fatalf("AddWorkgroup: %v", err)
+	}
+	wg, err := db.FindWorkgroupByName("acme")
+	if err != nil {
+		t.Fatalf("FindWorkgroupByName: %v", err)
+	}
+	if err := db.AddAccount(stores.Account{Username: "alice", Password: "pw", Workgroup: wg.UUID.String()}); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	share, err := db.GetShare("idx")
+	if err != nil {
+		t.Fatalf("GetShare: %v", err)
+	}
+	key := make(types.PrivateKey, 64)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	if err := db.AddConnection(wg, share, key); err != nil {
+		t.Fatalf("AddConnection: %v", err)
+	}
+
+	return db, wg, key
+}
+
+// TestLocalWritesAndKeeps verifies that each round leaves a whole catalog of
+// the connection in its folder, for the owner alone, and that only the newest
+// few stay.
+func TestLocalWritesAndKeeps(t *testing.T) {
+	ctx := context.Background()
+	db, wg, key := connectedStore(t, ctx)
+
+	dir := t.TempDir()
+	l := &Local{db: db, dir: dir, keep: 2, inline: 1024, status: Status{Path: dir, Keep: 2}}
+	for range 3 {
+		if err := l.WriteAll(ctx); err != nil {
+			t.Fatalf("WriteAll: %v", err)
+		}
+	}
+
+	folder := filepath.Join(dir, "idx_"+wg.UUID.String())
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("the folder holds %d file(s), want the newest 2", len(entries))
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(entry.Name(), ".catalog") || info.Mode().Perm() != 0o600 {
+			t.Errorf("%s has mode %v", entry.Name(), info.Mode())
+		}
+	}
+
+	status := l.Status()
+	if len(status.Catalogs) != 1 || status.Catalogs[0].Share != "idx" || status.Catalogs[0].Workgroup != wg.UUID || status.Error != "" || status.LastRun.IsZero() {
+		t.Errorf("status: got %+v", status)
+	}
+
+	// The newest catalog reads as one, and says what it belongs to.
+	data, err := os.ReadFile(status.Catalogs[0].Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	r, err := transfer.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	conn := r.Connection()
+	if conn == nil || conn.Share.Name != "idx" || !bytes.Equal(conn.AppKey, key) || len(conn.Accounts) != 1 || conn.Accounts[0].Name != "alice" {
+		t.Errorf("the catalog belongs to %+v", conn)
+	}
+
+	// A folder that cannot be written is reported, not passed over in silence.
+	bad := &Local{db: db, dir: filepath.Join(status.Catalogs[0].Path, "under-a-file"), keep: 2, inline: 1024}
+	if err := bad.WriteAll(ctx); err == nil {
+		t.Error("writing under a file was reported as done")
+	}
+	if bad.Status().Error == "" {
+		t.Error("the failure was not kept in the status")
+	}
+}

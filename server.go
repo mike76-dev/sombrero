@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/api"
+	"github.com/mike76-dev/sombrero/backup"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/rpc"
@@ -86,6 +87,9 @@ type server struct {
 
 	// backlog caps what the indexd shares keep buffered; nil when there is no cap.
 	backlog *client.Backlog
+
+	// backups writes the catalogs to this machine; nil when that tier is off.
+	backups *backup.Local
 }
 
 // newServerState returns a server with its tables in place and nothing running behind it: no
@@ -151,6 +155,7 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, cfg stores.
 	// limit still measures, so that the stats show the backlog before one is settled on.
 	if sdb, ok := db.(*stores.Database); ok && cfg.Mode == stores.ModeNormal {
 		s.backlog = client.NewBacklog(ctx, sdb, cfg.Indexd.MaxBufferedData)
+		s.backups = backup.NewLocal(ctx, sdb, cfg.Backup)
 	}
 
 	go s.reapDurableOpens()
@@ -209,6 +214,16 @@ func (s *server) acceptConnections(l net.Listener) {
 			c.readLoop(host)
 		}()
 	}
+}
+
+// BackupStatus reports what the local backup tier has done, or nil where it is off.
+func (s *server) BackupStatus() *backup.Status {
+	if s.backups == nil {
+		return nil
+	}
+	status := s.backups.Status()
+
+	return &status
 }
 
 // Stats returns a snapshot of the current server statistics.

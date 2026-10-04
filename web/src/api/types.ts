@@ -145,6 +145,53 @@ export interface AppKeyResponse {
   appKey: string
 }
 
+// What the backups are set to, and what the tiers that are on have done.
+export interface BackupResponse {
+  enabled: boolean
+  bufferAge: string
+  local?: LocalBackupStatus
+  network?: NetworkBackupStatus
+}
+
+export interface LocalBackupStatus {
+  path: string
+  interval: string
+  keep: number
+  lastRun?: string
+  error?: string
+  catalogs: CatalogStatus[]
+}
+
+export interface NetworkBackupStatus {
+  interval: string
+  keep: number
+}
+
+// One catalog that was written and what it holds.
+export interface CatalogStatus {
+  share: string
+  workgroup: string
+  path: string
+  size: number
+  writtenAt: string
+  directories: number
+  files: number
+  incomplete: number
+  inlined: number
+}
+
+// What restoring a catalog came to.
+export interface RestoreResponse {
+  share: string
+  workgroup: string
+  accounts: number
+  policies: number
+  directories: number
+  files: number
+  alreadyThere: number
+  incomplete: number
+}
+
 // A workgroup's connection to an indexd share, holding the app key of an account
 // at server.
 export interface Connection {

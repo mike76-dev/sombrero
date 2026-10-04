@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mike76-dev/sombrero/backup"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
@@ -331,9 +332,12 @@ type mockServer struct {
 	stats            ServerStats
 	shareConnections func(string) (map[string]client.Client, map[string]string, error)
 	offered          *sdk.SDK
+	backups          *backup.Status
 }
 
 func (m *mockServer) Stats() ServerStats { return m.stats }
+
+func (m *mockServer) BackupStatus() *backup.Status { return m.backups }
 
 func (m *mockServer) ShareConnections(name string) (map[string]client.Client, map[string]string, error) {
 	if m.shareConnections != nil {

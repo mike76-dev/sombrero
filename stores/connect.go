@@ -173,18 +173,28 @@ type KeyedConnection struct {
 
 // KeyedConnections returns every connection that holds an app key, which is what
 // an import of an indexd account can be read with instead of a pasted key.
-func (db *Database) KeyedConnections() (conns []KeyedConnection, err error) {
+func (db *Database) KeyedConnections() ([]KeyedConnection, error) {
+	return db.connections(true)
+}
+
+// AllConnections returns every connection there is, to shares of either kind,
+// which is what a backup goes through.
+func (db *Database) AllConnections() ([]KeyedConnection, error) {
+	return db.connections(false)
+}
+
+// connections lists the connections, all of them or only those with an app key.
+func (db *Database) connections(keyedOnly bool) (conns []KeyedConnection, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
 			SELECT w.id, w.uuid, w.name, c.share_name, s.server_name
 			FROM connections c
 			JOIN shares s ON s.share_name = c.share_name
 			JOIN workgroups w ON w.id = c.workgroup
-			WHERE s.share_type = 'indexd'
-			AND c.app_key IS NOT NULL
+			WHERE NOT $1::BOOLEAN OR (s.share_type = 'indexd' AND c.app_key IS NOT NULL)
 			ORDER BY c.share_name, w.id
 		`
-		rows, err := tx.Query(ctx, query)
+		rows, err := tx.Query(ctx, query, keyedOnly)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve the keyed connections: %w", err)
 		}
