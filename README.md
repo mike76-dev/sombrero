@@ -113,6 +113,15 @@ indexd:
                                                                                  # them; if omitted, nothing is repacked on its own
   maxBufferedData: 0                                                             # optional: the most data, in bytes, that all shares may keep in the database waiting
                                                                                  # to be uploaded before clients' writes are held back; if omitted, there is no limit
+backup:                                                                          # optional: catalogs of what the shares hold, to restore the server from without its database
+  enabled: false                                                                 # off unless set; with backups on, leftover data is uploaded after 24h unless maxBufferAge says otherwise
+  path: /var/backups/sombrero                                                    # optional: a folder on this machine for the catalogs; if omitted, only the copies on the network are kept.
+                                                                                 # The catalogs hold the app keys, so treat the folder like the database
+  interval: 15m                                                                  # optional: how often the local catalog is written; defaults to 15m
+  networkInterval: 1h                                                            # optional: how often a catalog is written into each share; 'never' turns that off; defaults to 1h
+  keep: 7                                                                        # optional: how many catalogs to keep, per connection and per place; defaults to 7
+  inlineCap: 262144                                                              # optional: the largest piece of a file still waiting in the database that a catalog carries itself,
+                                                                                 # in bytes, so that the file is complete in the backup; defaults to 262144
 ```
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash

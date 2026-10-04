@@ -252,6 +252,74 @@ func (c IndexdConfig) Fragmentation() (threshold float64, interval time.Duration
 }
 
 // Config lists the config fields.
+// The defaults of the backups.
+const (
+	DefaultBackupInterval        = 15 * time.Minute
+	DefaultNetworkBackupInterval = time.Hour
+	DefaultBackupKeep            = 7
+	DefaultBackupInlineCap       = 256 << 10
+	DefaultBackupBufferAge       = 24 * time.Hour
+)
+
+// BackupConfig says whether and where catalogs of what the shares hold are
+// written, for the server to be restored from without its database. It is off
+// unless Enabled is set, since turning it on also has leftover data packed
+// after DefaultBackupBufferAge where no MaxBufferAge says otherwise.
+type BackupConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// Path is a folder on this machine the catalogs are written to, every
+	// Interval. Empty leaves that tier off. A catalog holds the app keys of the
+	// connections, so the folder is as sensitive as the database.
+	Path     string        `yaml:"path,omitempty"`
+	Interval CheckInterval `yaml:"interval,omitempty"`
+
+	// NetworkInterval is how often a catalog is written into each share, as a
+	// file of its own; "never" leaves that tier off.
+	NetworkInterval CheckInterval `yaml:"networkInterval,omitempty"`
+
+	// Keep is how many catalogs are kept, per connection and tier.
+	Keep int `yaml:"keep,omitempty"`
+
+	// InlineCap is the largest piece of a file still waiting in the database
+	// that a catalog carries in itself, in bytes, so that the file is complete.
+	InlineCap uint64 `yaml:"inlineCap,omitempty"`
+}
+
+// Local returns how often a catalog is written to Path, or zero where that
+// tier is off.
+func (b BackupConfig) Local() time.Duration {
+	if !b.Enabled || b.Path == "" {
+		return 0
+	}
+	return b.Interval.Interval(DefaultBackupInterval)
+}
+
+// Network returns how often a catalog is written into each share, or zero where
+// that tier is off.
+func (b BackupConfig) Network() time.Duration {
+	if !b.Enabled {
+		return 0
+	}
+	return b.NetworkInterval.Interval(DefaultNetworkBackupInterval)
+}
+
+// KeepCount returns how many catalogs are kept per connection and tier.
+func (b BackupConfig) KeepCount() int {
+	if b.Keep <= 0 {
+		return DefaultBackupKeep
+	}
+	return b.Keep
+}
+
+// Inline returns the largest buffered piece a catalog carries in itself.
+func (b BackupConfig) Inline() uint64 {
+	if b.InlineCap == 0 {
+		return DefaultBackupInlineCap
+	}
+	return b.InlineCap
+}
+
 type Config struct {
 	Debug          bool       `yaml:"debug"`
 	Mode           ServerMode `yaml:"mode"`
@@ -266,6 +334,17 @@ type Config struct {
 	API      APIConfig      `yaml:"api"`
 	Database DatabaseConfig `yaml:"database,omitempty"`
 	Indexd   IndexdConfig   `yaml:"indexd,omitempty"`
+	Backup   BackupConfig   `yaml:"backup,omitempty"`
+}
+
+// BufferAge is how long leftover data may wait: what MaxBufferAge says, or
+// DefaultBackupBufferAge where backups are on and it says nothing, since a
+// backup can only promise what has reached the network.
+func (c Config) BufferAge() time.Duration {
+	if c.Indexd.MaxBufferAge == 0 && c.Backup.Enabled {
+		return DefaultBackupBufferAge
+	}
+	return c.Indexd.MaxBufferAge.Duration()
 }
 
 // ReadConfig tries to read the config from the specified directory.
@@ -293,6 +372,20 @@ func ReadConfig(dir string) (cfg Config, err error) {
 	if t := cfg.Indexd.FragmentationThreshold; t < 0 || t > 1 {
 		err = fmt.Errorf("fragmentationThreshold must be a fraction between 0 and 1, got %v", t)
 		return
+	}
+
+	if cfg.Backup.Enabled {
+		switch {
+		case cfg.Mode == ModeLite:
+			err = fmt.Errorf("backups need the Normal mode: the Lite mode has no database to back up")
+		case cfg.Backup.Local() == 0 && cfg.Backup.Network() == 0:
+			err = fmt.Errorf("backups are enabled, but neither a path nor a networkInterval is set")
+		case cfg.Backup.Keep < 0:
+			err = fmt.Errorf("keep must be at least 1, got %d", cfg.Backup.Keep)
+		}
+		if err != nil {
+			return
+		}
 	}
 
 	return

@@ -94,6 +94,18 @@ func main() {
 			// and is readable by more than whoever may read the config file.
 			log.Printf("Generated a new seed phrase and saved it to %s; back it up, as the data on indexd shares cannot be recovered without it", filepath.Join(dir, "sombrero.yml"))
 		}
+
+		if cfg.Backup.Enabled {
+			if local := cfg.Backup.Local(); local > 0 {
+				log.Printf("Backups: a catalog is written to %s every %s, keeping %d", cfg.Backup.Path, local, cfg.Backup.KeepCount())
+			}
+			if network := cfg.Backup.Network(); network > 0 {
+				log.Printf("Backups: a catalog is written into each share every %s, keeping %d", network, cfg.Backup.KeepCount())
+			}
+			if cfg.Indexd.MaxBufferAge == 0 {
+				log.Printf("Backups: maxBufferAge is unset, so leftover data is uploaded after %s to be covered by them", cfg.BufferAge())
+			}
+		}
 	} else {
 		log.Println("Running in Lite mode: only renterd shares are supported")
 	}

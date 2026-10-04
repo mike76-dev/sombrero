@@ -168,6 +168,84 @@ func TestReadConfigRejectsBadThreshold(t *testing.T) {
 	}
 }
 
+// TestBackupConfig verifies how the backup section is read: what it defaults to,
+// what turns each tier off, what it does to the buffer age, and what it refuses.
+func TestBackupConfig(t *testing.T) {
+	dir := t.TempDir()
+	read := func(body string) (Config, error) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "sombrero.yml"), []byte(body), 0600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return ReadConfig(dir)
+	}
+
+	// Off unless asked for, and then on with its defaults.
+	cfg, err := read("api:\n  password: x\n")
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if cfg.Backup.Enabled || cfg.Backup.Local() != 0 || cfg.Backup.Network() != 0 || cfg.BufferAge() != 0 {
+		t.Errorf("backups are on without being asked for: %+v", cfg.Backup)
+	}
+
+	cfg, err = read("backup:\n  enabled: true\n")
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	b := cfg.Backup
+	if b.Local() != 0 || b.Network() != DefaultNetworkBackupInterval || b.KeepCount() != DefaultBackupKeep || b.Inline() != DefaultBackupInlineCap {
+		t.Errorf("the defaults: got local %s, network %s, keep %d, inline %d", b.Local(), b.Network(), b.KeepCount(), b.Inline())
+	}
+	if cfg.BufferAge() != DefaultBackupBufferAge {
+		t.Errorf("the buffer age with backups on and none set: got %s", cfg.BufferAge())
+	}
+
+	// Everything set says what it says, and a set buffer age is left alone.
+	cfg, err = read("backup:\n  enabled: true\n  path: /tmp/x\n  interval: 5m\n  networkInterval: never\n  keep: 3\n  inlineCap: 1024\nindexd:\n  maxBufferAge: 1h\n")
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	b = cfg.Backup
+	if b.Local() != 5*time.Minute || b.Network() != 0 || b.KeepCount() != 3 || b.Inline() != 1024 {
+		t.Errorf("the settings: got local %s, network %s, keep %d, inline %d", b.Local(), b.Network(), b.KeepCount(), b.Inline())
+	}
+	if cfg.BufferAge() != time.Hour {
+		t.Errorf("the buffer age that was set: got %s", cfg.BufferAge())
+	}
+
+	for _, body := range []string{
+		"backup:\n  enabled: true\n  networkInterval: never\n", // nothing to write anywhere
+		"mode: lite\nbackup:\n  enabled: true\n",               // nothing to back up
+		"backup:\n  enabled: true\n  keep: -1\n",
+	} {
+		if _, err := read(body); err == nil {
+			t.Errorf("ReadConfig(%q): want an error, got none", body)
+		}
+	}
+
+	// The section survives being written out and read back, and the defaults
+	// stay out of the file.
+	want := Config{API: APIConfig{Address: defaultAPIAddress}, Backup: BackupConfig{Enabled: true, Path: "/tmp/x", Keep: 3}}
+	if err := SaveConfig(want, dir); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	got, err := ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if got != want {
+		t.Errorf("want %+v, got %+v", want, got)
+	}
+	out, err := yaml.Marshal(Config{})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(out), "backup") {
+		t.Errorf("want the backup section left out of a default config, got %q", out)
+	}
+}
+
 // TestIndexdConfigRoundTrip verifies that the packing settings survive being
 // written out and read back, and that the defaults stay out of the file.
 func TestIndexdConfigRoundTrip(t *testing.T) {
