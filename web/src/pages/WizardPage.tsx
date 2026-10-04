@@ -281,12 +281,12 @@ function AccountStep({
       title="2. Add an account"
       intro={
         <>
-          The account is what a client logs in as. It belongs to workgroup{' '}
-          <span className="mono">{setup.workgroupLabel}</span>, and what it may do on a share is
-          decided by the policy in the last step. A guest account has no password, and reaches
-          only the shares that offer guest access. The accounts can also wait: the workgroup is
-          what connects to a share, so <em>Skip</em> goes on to the connection and leaves the
-          accounts for the Accounts page and their access for the Shares page.
+          An account is what a client logs in as. This one belongs to workgroup{' '}
+          <span className="mono">{setup.workgroupLabel}</span>, and the last step decides what it
+          may do on the share. A guest account has no password and can only reach shares that
+          allow guests. Accounts can wait, too: the workgroup is what connects to a share, so{' '}
+          <em>Skip</em> takes you straight to the connection. You can add accounts later on the
+          Accounts page and grant them access on the Shares page.
         </>
       }
       onBack={onBack}
@@ -391,9 +391,9 @@ function ShareStep({ onBack, onDone }: { onBack: () => void; onDone: (patch: Par
       title="3. Register a share"
       intro={
         <>
-          A share is the storage the workgroup will reach: an <span className="mono">indexd</span>{' '}
-          indexer, which spreads the data over hosts with the redundancy set here, or a{' '}
-          <span className="mono">renterd</span> node, which keeps it in a bucket of its own.
+          A share is the storage the workgroup will reach: an <code>indexd</code> indexer, which
+          spreads the data over hosts with the redundancy set here, or a <code>renterd</code>{' '}
+          node, which keeps it in a bucket of its own.
         </>
       }
       onBack={onBack}
@@ -534,23 +534,23 @@ function ConnectStep({
       intro={
         attempt.connected ? (
           <>
-            This workgroup is on the share already, and that connection is the one the rest of
-            the setup works from. It is taken apart on the Connections page, not here.
+            This workgroup is already connected to the share, and the rest of the setup uses
+            that connection. To undo it, use the Connections page.
           </>
         ) : indexd ? (
           <>
-            An indexd share connects for the first time by approving a registration with the
-            indexer: press <em>Request approval</em>, open the link, and approve it. The rest
-            follows on its own, and the app key it derives is shown once, below. Reconnecting a
-            workgroup that was connected before takes that saved key instead, and a workgroup
-            already on another share of this indexer reuses the key it has there. A workgroup
-            with no key of its own can also share another workgroup's, joining its indexer
-            account and quota.
+            An <code>indexd</code> share needs an app key. The first time, press{' '}
+            <em>Request approval</em>,
+            open the link and approve the registration with the indexer. The rest happens by
+            itself, and the new key is shown once, below — keep it. If the workgroup was
+            connected before, paste that key instead. If it is already connected to another
+            share on this indexer, it reuses the key from there, and it can also borrow another
+            workgroup's key, which means sharing one account and quota at the indexer.
           </>
         ) : (
           <>
-            A renterd share connects straight away. It takes a moment: the client warms up a
-            connection to every host before it reports itself ready.
+            A <code>renterd</code> share connects straight away. It takes a moment: the client
+            warms up a connection to every host before it reports itself ready.
           </>
         )
       }
@@ -620,9 +620,8 @@ function ConnectStep({
       <ConnectStatusView attempt={attempt} />
       {!attempt.connected && !attempt.running && (
         <p className="muted">
-          The policy in the next step belongs to this connection and can only be set once it is
-          made — here, or later on the Connections page, with the access granted on the Shares
-          page.
+          Access rights hang off this connection, so the next step needs it to exist. Connect
+          here, or do it later on the Connections page and grant access on the Shares page.
         </p>
       )}
       <ErrorBanner error={error} />
@@ -679,9 +678,9 @@ function PolicyStep({
       intro={
         <>
           What <span className="mono">{setup.username}</span> may do on{' '}
-          <span className="mono">{setup.share}</span>. Read and execute are what it takes to open
-          the share and browse it; write and delete let the account change what is there. An
-          account that has been granted access before is shown what it has now.
+          <span className="mono">{setup.share}</span>. Read and execute are the minimum for
+          opening the share and browsing it. Write and delete let the account change what is
+          there. If this account already had access, what it has now is shown below.
         </>
       }
       onBack={onBack}
@@ -694,7 +693,7 @@ function PolicyStep({
               })
           : onDone
       }
-      nextLabel={connected ? 'Save and finish' : 'Finish without a policy'}
+      nextLabel={connected ? 'Save and finish' : 'Finish without access rights'}
       nextDisabled={busy}
     >
       <div className="row">
@@ -713,9 +712,9 @@ function PolicyStep({
       {!connected && (
         <p className="muted">
           <span className="mono">{setup.workgroupLabel}</span> is not connected to{' '}
-          <span className="mono">{setup.share}</span>, and a policy needs that connection to hang
-          on. Go back a step to make it, or connect later on the Connections page and grant the
-          access on the Shares page.
+          <span className="mono">{setup.share}</span> yet, and access rights need that
+          connection. Go back a step to make it, or connect later on the Connections page and
+          grant access on the Shares page.
         </p>
       )}
       <ErrorBanner error={load.error} />
@@ -731,7 +730,7 @@ function DoneStep({ setup, onRestart }: { setup: Setup; onRestart: () => void })
         message={
           setup.username
             ? `${setup.username} of ${setup.workgroupLabel} may now use ${setup.share}.`
-            : `${setup.workgroupLabel} is now set up on ${setup.share}.`
+            : `${setup.workgroupLabel} is now connected to ${setup.share}.`
         }
       />
       <table className="table table-kv">
@@ -765,10 +764,10 @@ function DoneStep({ setup, onRestart }: { setup: Setup; onRestart: () => void })
             , logging in as <span className="mono">{setup.username}</span>
           </>
         ) : (
-          ', once an account of this workgroup has been granted access to it'
+          ', once an account of this workgroup has been given access to it'
         )}
-        . Everything set up here can be changed from the pages on the left; the wizard only puts
-        the first of each in place.
+        . Anything set up here can be changed from the pages on the left. The wizard only covers
+        the first of each.
       </p>
       <div className="row">
         <button className="btn" onClick={onRestart}>

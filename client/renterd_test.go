@@ -322,6 +322,30 @@ func TestRenterdReadPassesTheBytesBack(t *testing.T) {
 	}
 }
 
+// TestRenterdReadNamesTheObjectOnce verifies the key the read asks for. A path that comes with a
+// leading slash of its own, as a description of what renterd holds carries it, must not end up
+// naming an object under two of them.
+func TestRenterdReadNamesTheObjectOnce(t *testing.T) {
+	f := newFakeRenterd(t)
+	c := f.client("default")
+
+	f.answerWith(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("x"))
+	})
+
+	for _, path := range []string{"MS/[MS-SMB2].pdf", "/MS/[MS-SMB2].pdf"} {
+		var buf bytes.Buffer
+		if err := c.Read(context.Background(), stores.Account{}, path, 0, 1, &buf); err != nil {
+			t.Fatalf("the read of %q would not go out: %v", path, err)
+		}
+
+		const want = "/api/worker/object/MS/%5BMS-SMB2%5D.pdf"
+		if got := f.last(t).rawreq; !strings.HasPrefix(got, want) {
+			t.Errorf("the read of %q asked for %q, want it to start with %q", path, got, want)
+		}
+	}
+}
+
 // TestRenterdSendsItsPassword is what stands between the share and anybody else who can reach the
 // far end. Every request carries it.
 func TestRenterdSendsItsPassword(t *testing.T) {

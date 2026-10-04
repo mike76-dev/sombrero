@@ -468,9 +468,13 @@ function ShareSettingsForm({
         <p className="field-error">
           The share is about to be served from somewhere else, and its files stay on the old
           backend — change this to correct an address, not to move a share that is in use.
-          {share.type === 'indexd' &&
-            ' An indexd share is refused outright while workgroups are connected to it: their' +
-              ' app keys are registered with the indexer at the address it has now.'}
+          {share.type === 'indexd' && (
+            <>
+              {' '}
+              An <code>indexd</code> share is refused outright while workgroups are connected to
+              it: their app keys are registered with the indexer at the address it has now.
+            </>
+          )}
         </p>
       )}
       <p className="muted">

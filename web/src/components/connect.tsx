@@ -252,9 +252,9 @@ export function ShareKeyField({
 }) {
   if (holders.length === 0) return null
   return (
-    <Field label="Share the app key of">
+    <Field label="Borrow the app key of">
       <select value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">— none, approve a new connection —</option>
+        <option value="">— none, request a new one —</option>
         {holders.map((holder) => (
           <option key={holder.workgroup} value={holder.workgroup}>
             {holder.name || holder.workgroup}

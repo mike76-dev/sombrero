@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -105,8 +106,23 @@ func completeWithRetry(complete func() error) (err error) {
 // storageBackend is the minimal interface for `indexd` SDK.
 type storageBackend interface {
 	Account(ctx context.Context) (app.AccountResponse, error)
-	Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8) (types.Hash256, error)
+
+	// Upload stores the data and pins it. meta is what the object comes to say
+	// about its own contents, and may be nil for an object that says nothing.
+	Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8, meta json.RawMessage) (types.Hash256, error)
 	Download(ctx context.Context, key types.Hash256, offset, length uint64, w io.Writer) error
+
+	// Retag replaces what the object of the slab says about its own contents,
+	// which is a request of its own: the data stays where it is.
+	Retag(ctx context.Context, key types.Hash256, meta json.RawMessage) error
+
+	// Pin takes over an object that is already on the network, pinning what it
+	// is made of into this account without moving any of it.
+	Pin(ctx context.Context, obj sdk.Object) error
+
+	// Object returns one object of this account, which is also how to find out
+	// whether it has it at all.
+	Object(ctx context.Context, key types.Hash256) (sdk.Object, error)
 	DeleteObject(ctx context.Context, key types.Hash256) error
 	PruneSlabs(ctx context.Context) error
 	ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error)
@@ -120,6 +136,10 @@ type PinnedObject struct {
 	Size      uint64
 	UpdatedAt time.Time
 	Deleted   bool
+
+	// Object is what the event carried, which is the object itself: the log hands
+	// it over, so nothing has to ask after it a second time.
+	Object *sdk.Object
 }
 
 // objectPageSize is how many object events are fetched per request when the
@@ -192,11 +212,15 @@ func (b *sdkBackend) Account(ctx context.Context) (app.AccountResponse, error) {
 	return b.sdk.Account(ctx)
 }
 
-// Upload uploads the object and directly pins it.
-func (b *sdkBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8) (types.Hash256, error) {
+// Upload uploads the object and directly pins it. The tag goes with it, sealed
+// by the SDK with the app key, so that the object can later say what it holds.
+func (b *sdkBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8, meta json.RawMessage) (types.Hash256, error) {
 	obj := sdk.NewEmptyObject()
 	if err := b.sdk.Upload(ctx, &obj, r, sdk.WithRedundancy(dataShards, parityShards)); err != nil {
 		return types.Hash256{}, err
+	}
+	if len(meta) > 0 {
+		obj.UpdateMetadata(meta)
 	}
 
 	key := obj.ID()
@@ -248,6 +272,31 @@ func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, le
 	}
 }
 
+// Pin calls sdk.PinObject, which takes over the object's slabs for this account.
+func (b *sdkBackend) Pin(ctx context.Context, obj sdk.Object) error {
+	return b.sdk.PinObject(ctx, obj)
+}
+
+// Retag replaces what the object says about its contents. Pinning an object the
+// account already holds writes the metadata and nothing else, so this costs one
+// request and moves no data.
+func (b *sdkBackend) Retag(ctx context.Context, key types.Hash256, meta json.RawMessage) error {
+	obj, err := b.object(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	obj.UpdateMetadata(meta)
+	if err := b.sdk.PinObject(ctx, obj); err != nil {
+		return err
+	}
+
+	// The cached copy would otherwise go on saying what the object used to.
+	b.forgetObject(key)
+
+	return nil
+}
+
 // DeleteObject calls sdk.DeleteObject.
 func (b *sdkBackend) DeleteObject(ctx context.Context, key types.Hash256) error {
 	b.forgetObject(key)
@@ -277,6 +326,7 @@ func (b *sdkBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, limit
 		}
 		if ev.Object != nil {
 			obj.Size = ev.Object.Size()
+			obj.Object = ev.Object
 		}
 		objs = append(objs, obj)
 	}
@@ -322,7 +372,14 @@ type IndexdClient struct {
 	closeOnce    sync.Once
 	jobsChan     chan struct{}
 	packChan     chan struct{}
+	retagChan    chan struct{}
 	wg           sync.WaitGroup
+
+	// retagging holds the slabs whose objects are to be told what they hold,
+	// which a rename or a delete leaves them owing. Keeping them in a set has
+	// one object retagged once however many changes touched it.
+	mu        sync.Mutex
+	retagging map[types.Hash256]struct{}
 
 	// claimed holds the metadata IDs of the pieces this client has claimed
 	// and not yet completed or requeued, so that the janitor for stranded
@@ -446,6 +503,7 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		drainTimeout: shutdownDrainTimeout,
 		jobsChan:     make(chan struct{}, uploadWorkers),
 		packChan:     make(chan struct{}, 1),
+		retagChan:    make(chan struct{}, 1),
 		claimed:      make(map[uint64]struct{}),
 
 		slabRetryDelays: defaultSlabRetryDelays,
@@ -501,6 +559,21 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 	go func() {
 		defer ic.wg.Done()
 		ic.cleanupUploadJobs(ic.ctx)
+	}()
+
+	// Start the worker that tells the objects what they hold after a change has
+	// left them saying something else.
+	ic.wg.Add(1)
+	go func() {
+		defer ic.wg.Done()
+		ic.retagObjects(ic.ctx)
+	}()
+
+	// The slabs an older server left saying nothing are told what they hold.
+	ic.wg.Add(1)
+	go func() {
+		defer ic.wg.Done()
+		ic.tagSilentSlabs(ic.ctx)
 	}()
 
 	// Repacking is driven by the check, so turning the check off leaves it to
@@ -792,9 +865,16 @@ func (ic *IndexdClient) FinishUpload(ctx context.Context, path string, uploadID 
 		return nil
 	}
 
+	// A file written over the one that was there leaves the slabs of the old one
+	// holding runs of a file that no longer has them, so they are noted while
+	// they still say what they held. Truncating a file is a rewrite of it too.
+	replaced := ic.slabsOf(path, false)
+
 	if err := ic.db.FinalizeUpload(uploadID); err != nil {
 		return fmt.Errorf("couldn't finalize upload: %v", err)
 	}
+
+	ic.retag(replaced)
 
 	// Finalizing is what makes a piece that is left buffered eligible for
 	// packing, so this is the point at which the packer has new work.
@@ -850,6 +930,12 @@ func (ic *IndexdClient) Write(ctx context.Context, r io.Reader, path string, upl
 // unreferenced by the deletion are unpinned; a slab shared with a surviving
 // file stays in place.
 func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path string, batch bool) (err error) {
+	// What the deleted files were made of is noted before they are gone. The
+	// slabs that nothing references afterwards are unpinned below; the ones that
+	// other files still hold runs in are left saying one run too many, and are
+	// told what they hold now.
+	touched := ic.slabsOf(path, batch)
+
 	var slabs []types.Hash256
 	if batch {
 		slabs, err = ic.db.DeleteDirectory(acc, ic.share, path)
@@ -859,6 +945,8 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 	if err != nil {
 		return err
 	}
+
+	ic.retag(touched)
 
 	if len(slabs) == 0 {
 		return nil
@@ -895,9 +983,29 @@ func (ic *IndexdClient) MakeDirectory(ctx context.Context, acc stores.Account, p
 // Rename renames a file or a directory.
 func (ic *IndexdClient) Rename(ctx context.Context, acc stores.Account, oldName, newName string, isDir, force bool) error {
 	if isDir {
-		return ic.db.RenameDirectory(acc, ic.share, oldName, newName, force)
+		if err := ic.db.RenameDirectory(acc, ic.share, oldName, newName, force); err != nil {
+			return err
+		}
+	} else if err := ic.db.RenameFile(acc, ic.share, oldName, newName, force); err != nil {
+		return err
 	}
-	return ic.db.RenameFile(acc, ic.share, oldName, newName, force)
+
+	// The objects are still of the same bytes, under names they no longer go by.
+	ic.retag(ic.slabsOf(newName, isDir))
+
+	return nil
+}
+
+// slabsOf returns the slabs the path is made of, for the changes that leave the
+// objects saying something other than what is so.
+func (ic *IndexdClient) slabsOf(path string, batch bool) []types.Hash256 {
+	keys, err := ic.db.SlabsOfPath(ic.share, ic.workgroup, path, batch)
+	if err != nil {
+		log.Printf("failed to look up the slabs of %s: %v", path, err)
+		return nil
+	}
+
+	return keys
 }
 
 // pinnedObjects walks the whole object event log of this connection's app
@@ -1236,7 +1344,7 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 	ic.markClaimed(job.MetadataID)
 	defer ic.unmarkClaimed(job.MetadataID)
 
-	key, err := ic.backend.Upload(ctx, bytes.NewReader(job.Data), ic.dataShards, ic.parityShards)
+	key, err := ic.backend.Upload(ctx, bytes.NewReader(job.Data), ic.dataShards, ic.parityShards, ic.tag([]stores.UploadJob{job}))
 	if err != nil {
 		_ = ic.db.RequeueUploadJob(job.UploadID, job.MetadataID)
 		return fmt.Errorf("couldn't upload slab: %v", err)
@@ -1333,7 +1441,7 @@ func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
 		ic.logPackedSlab(jobs, len(slab))
 	}
 
-	key, err := ic.backend.Upload(ctx, bytes.NewReader(slab), ic.dataShards, ic.parityShards)
+	key, err := ic.backend.Upload(ctx, bytes.NewReader(slab), ic.dataShards, ic.parityShards, ic.tag(jobs))
 	if err != nil {
 		for _, job := range jobs {
 			if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {
@@ -1580,6 +1688,11 @@ func (ic *IndexdClient) defragmentSlab(ctx context.Context, key types.Hash256) (
 	if _, err := ic.db.RebufferSlab(ic.share, ic.workgroup, key, pieces); err != nil {
 		return 0, err
 	}
+
+	// The runs are buffered again, to be uploaded into slabs of their own. What
+	// is left of this one is less than it says it holds, and a round that moved
+	// only some of the runs leaves it holding the rest.
+	ic.retag([]types.Hash256{key})
 
 	return moved, nil
 }

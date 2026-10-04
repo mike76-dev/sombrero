@@ -149,6 +149,16 @@ func TestDatabaseAppKeyForServer(t *testing.T) {
 		t.Errorf("AppKeyHolders of a renterd share: %+v %v", holders, err)
 	}
 
+	// Every connection that holds a key is listed with where its indexer is, for
+	// an import to be read with one of them rather than with a pasted key.
+	keyed, err := db.KeyedConnections()
+	if err != nil {
+		t.Fatalf("KeyedConnections: %v", err)
+	}
+	if len(keyed) != 1 || keyed[0].Workgroup.UUID != wg.UUID || keyed[0].Share != connected.Name || keyed[0].Server != connected.ServerName {
+		t.Errorf("KeyedConnections: want the one connection with a key, got %+v", keyed)
+	}
+
 	if err := db.RemoveConnection(wg, connected); err != nil {
 		t.Fatalf("RemoveConnection: %v", err)
 	}

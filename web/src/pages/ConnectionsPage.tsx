@@ -1,7 +1,14 @@
-import { useState } from 'react'
-import { connect, disconnect, listShares, requestConnection } from '../api/endpoints'
+import { useEffect, useState } from 'react'
+import {
+  connect,
+  connectionKey,
+  disconnect,
+  listShares,
+  requestConnection,
+} from '../api/endpoints'
 import {
   Card,
+  CopyButton,
   ErrorBanner,
   Field,
   SuccessBanner,
@@ -18,8 +25,12 @@ export function ConnectionsPage() {
   const [share, setShare] = useState('')
   const [appKey, setAppKey] = useState('')
   const [keyFrom, setKeyFrom] = useState('')
+  const [shownKey, setShownKey] = useState<string | null>(null)
   const ready = Boolean(workgroup.trim() && share.trim())
   const attempt = useConnectAttempt(workgroup.trim(), share.trim())
+
+  // A key on show belongs to the pair it was asked for.
+  useEffect(() => setShownKey(null), [workgroup, share])
 
   // What the selected share is backed by decides how it is connected: an indexd
   // share is connected for the first time by approving a request, and only a
@@ -41,14 +52,14 @@ export function ConnectionsPage() {
     <div className="page">
       <Card title="Connect a workgroup to a share">
         <p className="muted">
-          renterd shares: just press <em>Connect</em>. indexd shares connecting for the first
-          time: press <em>Request approval</em> and open the approval link — approving the
-          registration with the indexer is what carries the connection through, and the app key
-          it derives is shown here once it has. Reconnecting an indexd share: paste the saved
-          app key and press <em>Connect</em>. A workgroup that is already on another share of
-          the same indexer needs neither — its key for that indexer is reused. A workgroup with
-          no key of its own can instead share another workgroup's, which puts both on that
-          workgroup's indexer account and its quota.
+          For a <code>renterd</code> share, just press <em>Connect</em>. An <code>indexd</code>{' '}
+          share needs an app key.
+          The first time, press <em>Request approval</em>, open the link and approve the
+          registration with the indexer: the connection completes by itself, and the new app key
+          is shown here once. Keep it, because reconnecting later means pasting it back in. If
+          the workgroup is already connected to another share on the same indexer, it reuses the
+          key it has there and needs neither step. It can also borrow another workgroup's key,
+          but then the two share one account at the indexer, including its quota.
         </p>
         <div className="grid">
           <Field label="Workgroup">
@@ -96,6 +107,17 @@ export function ConnectionsPage() {
             Connect
           </button>
           <button
+            className="btn"
+            disabled={busy || running || !ready || backend !== 'indexd' || !attempt.connected}
+            onClick={() =>
+              run(async () => {
+                setShownKey((await connectionKey(workgroup.trim(), share.trim())).appKey)
+              })
+            }
+          >
+            Show app key
+          </button>
+          <button
             className="btn btn-danger"
             disabled={busy || running || !ready}
             onClick={() => {
@@ -103,28 +125,41 @@ export function ConnectionsPage() {
               run(async () => {
                 await disconnect(workgroup.trim(), share.trim())
                 attempt.idle()
+                setShownKey(null)
               }, 'Disconnected.')
             }}
           >
             Disconnect
           </button>
         </div>
+        {shownKey && (
+          <div className="banner banner-success stack">
+            <div>
+              The app key of this connection. Keep a copy somewhere safe: it is the only thing
+              that can read the account's data.
+            </div>
+            <div className="mono appkey">
+              {shownKey} <CopyButton value={shownKey} />
+            </div>
+          </div>
+        )}
         {ready && backend === 'indexd' && !reconnecting && !running && !attempt.connected && (
           <p className="muted">
             {reusable ? (
               <>
-                This workgroup is already connected to another share of this indexer, so{' '}
-                <em>Connect</em> reuses the app key it has there — no approval needed.
+                This workgroup is already connected to another share on this indexer.{' '}
+                <em>Connect</em> will reuse the app key from there, so no approval is needed.
               </>
             ) : sharing ? (
               <>
-                <em>Connect</em> will use that workgroup's app key, which shares its indexer
-                account: one quota for both, and revoking the key at the indexer cuts off both.
+                <em>Connect</em> will use that workgroup's app key. Both workgroups then share
+                one account at the indexer, so they share its quota, and revoking the key there
+                cuts off both.
               </>
             ) : (
               <>
-                This indexd share is connected by approving a request, not by pressing{' '}
-                <em>Connect</em>. Paste the app key of an existing connection to reconnect one.
+                This share has not been connected yet. Either press <em>Request approval</em> to
+                register a new app key, or paste a saved one to reconnect.
               </>
             )}
           </p>

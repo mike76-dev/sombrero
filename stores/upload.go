@@ -39,6 +39,149 @@ type UploadJob struct {
 // ErrNoUploadJobs is returned when there are no pending upload jobs available for processing.
 var ErrNoUploadJobs = errors.New("no upload jobs available")
 
+// PieceOwner is the file a piece of an upload belongs to. Size is what the file
+// measured when the piece was claimed, which is zero while it is still being
+// written.
+type PieceOwner struct {
+	Share string
+	Path  string
+	Size  uint64
+}
+
+// SlabRun is one run of a file that a slab holds: whose it is, where it sits in
+// the file, and where in the slab it is to be found.
+type SlabRun struct {
+	Share      string
+	Path       string
+	ObjOffset  uint64
+	DataOffset uint64
+	DataLength uint64
+	Size       uint64
+}
+
+// SlabRuns returns the runs that the files of this workgroup's connection to the
+// share keep in the slab, which is what its object is to say about itself.
+//
+// A slab nothing references any more has none, which is how a tag that is no
+// longer owed is told apart from one that is. The runs of any other connection
+// are left out: each one pins the slab under an account of its own, and a tag is
+// of the account that carries it.
+func (db *Database) SlabRuns(share string, workgroup int, key types.Hash256) (runs []SlabRun, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT o.share_name, o.full_path, m.obj_offset, m.data_offset, m.data_length, o.size
+			FROM metadata m
+			JOIN objects o ON o.id = m.object_id
+			WHERE m.slab_key = $1
+			AND o.share_name = $2
+			AND o.workgroup = $3
+			AND o.temporary = FALSE
+			ORDER BY m.data_offset, m.id
+		`
+		rows, err := tx.Query(ctx, query, key[:], share, workgroup)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve the runs of slab %s: %w", key, err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var run SlabRun
+			if err := rows.Scan(&run.Share, &run.Path, &run.ObjOffset, &run.DataOffset, &run.DataLength, &run.Size); err != nil {
+				return fmt.Errorf("failed to scan a run of slab %s: %w", key, err)
+			}
+			runs = append(runs, run)
+		}
+
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return runs, nil
+}
+
+// SlabsOfPath returns the slabs the file at the path is made of, or those of
+// everything under it where the path names a folder.
+func (db *Database) SlabsOfPath(share string, workgroup int, path string, batch bool) (keys []types.Hash256, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT DISTINCT m.slab_key
+			FROM metadata m
+			JOIN objects o ON o.id = m.object_id
+			WHERE o.share_name = $1
+			AND o.workgroup = $2
+			AND m.slab_key IS NOT NULL
+			AND (
+				o.full_path = $3
+				OR ($4::BOOLEAN AND o.full_path LIKE $3 || '/%')
+			)
+		`
+		rows, err := tx.Query(ctx, query, share, workgroup, path, batch)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve the slabs of %q: %w", path, err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var raw []byte
+			if err := rows.Scan(&raw); err != nil {
+				return fmt.Errorf("failed to scan a slab of %q: %w", path, err)
+			}
+			var key types.Hash256
+			copy(key[:], raw)
+			keys = append(keys, key)
+		}
+
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return keys, nil
+}
+
+// PieceOwners returns the file each of the given metadata entries belongs to,
+// which is what an object is tagged with so that it can say what it holds.
+func (db *Database) PieceOwners(ids []uint64) (owners map[uint64]PieceOwner, err error) {
+	owners = make(map[uint64]PieceOwner, len(ids))
+	if len(ids) == 0 {
+		return owners, nil
+	}
+
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT m.id, o.share_name, o.full_path, o.size
+			FROM metadata m
+			JOIN objects o ON o.id = m.object_id
+			WHERE m.id = ANY($1)
+		`
+		rows, err := tx.Query(ctx, query, ids)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve the files of the pieces: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var id, size uint64
+			var share, path string
+			if err := rows.Scan(&id, &share, &path, &size); err != nil {
+				return fmt.Errorf("failed to scan the file of a piece: %w", err)
+			}
+			owners[id] = PieceOwner{Share: share, Path: path, Size: size}
+		}
+
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return owners, nil
+}
+
 // collectStorage scans pairs of buffer IDs and slab keys, as returned by the
 // queries that gather the storage referenced by a set of metadata entries.
 // Exactly one of the two is set in any given row.

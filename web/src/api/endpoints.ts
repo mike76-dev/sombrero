@@ -2,9 +2,17 @@ import { request } from './client'
 import type {
   Account,
   AccessRights,
+  AppKeyResponse,
+  Connection,
   ConnectStatusResponse,
   DefragmentResponse,
   FragmentationResponse,
+  ImportProbeResponse,
+  ImportRequest,
+  ImportSortRequest,
+  ImportSortResponse,
+  ImportStatusResponse,
+  ImportSummary,
   IsBannedResponse,
   OrphansResponse,
   ProbeResponse,
@@ -181,3 +189,44 @@ export const disconnect = (workgroup: string, share: string) =>
   request(`/connect/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`, {
     method: 'DELETE',
   })
+
+// The app key a connection was made with, for whoever did not keep it.
+export const connectionKey = (workgroup: string, share: string) =>
+  request<AppKeyResponse>(
+    `/connect/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}/key`,
+  )
+
+export const listConnections = () => request<Connection[] | null>('/connections')
+
+// Imports
+
+export const startImport = (workgroup: string, share: string, body: ImportRequest) =>
+  request<ImportStatusResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
+    { method: 'POST', body },
+  )
+
+export const probeImportSource = (workgroup: string, share: string, body: ImportRequest) =>
+  request<ImportProbeResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}/probe`,
+    { method: 'POST', body },
+  )
+
+export const sortLostAndFound = (workgroup: string, share: string, body: ImportSortRequest) =>
+  request<ImportSortResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}/sort`,
+    { method: 'POST', body },
+  )
+
+export const listImports = () => request<ImportSummary[] | null>('/imports')
+
+export const importStatus = (workgroup: string, share: string) =>
+  request<ImportStatusResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
+  )
+
+export const cancelImport = (workgroup: string, share: string) =>
+  request<ImportStatusResponse>(
+    `/import/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
+    { method: 'DELETE' },
+  )

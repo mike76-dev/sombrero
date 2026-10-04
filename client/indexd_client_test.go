@@ -3,10 +3,12 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -33,6 +35,20 @@ type fakeBackend struct {
 	deleteErr  error
 	uploads    int
 	deletes    int
+
+	// tags keeps what each uploaded object was told to say about its contents,
+	// in the order the uploads were made, and retags what the objects were told
+	// afterwards, by key.
+	tags     []json.RawMessage
+	retags   map[types.Hash256]json.RawMessage
+	retagErr error
+
+	retagAttempts int
+
+	// pinned holds the objects taken over from somewhere else, which is what an
+	// import of another account's data does rather than uploading it again.
+	pinned map[types.Hash256]sdk.Object
+	pinErr error
 
 	downloadErrs []error // returned by the next downloads, one each
 	downloads    int
@@ -145,9 +161,10 @@ func (fb *fakeBackend) Account(ctx context.Context) (app.AccountResponse, error)
 	}, nil
 }
 
-func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8) (types.Hash256, error) {
+func (fb *fakeBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8, meta json.RawMessage) (types.Hash256, error) {
 	fb.mu.Lock()
 	fb.uploads++
+	fb.tags = append(fb.tags, meta)
 	fb.mu.Unlock()
 
 	if fb.uploadGate != nil {
@@ -264,6 +281,73 @@ func (fb *fakeBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, lim
 	}
 
 	return page, nil
+}
+
+// Object answers for the objects this account holds, which is what confirms that
+// a pin took. One it does not hold is answered the way the indexer answers for
+// it, so that the two are told apart.
+func (fb *fakeBackend) Object(ctx context.Context, key types.Hash256) (sdk.Object, error) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+
+	if _, uploaded := fb.objects[key]; uploaded {
+		return sdk.NewUnsafeObject([32]byte{}, nil), nil
+	}
+	if obj, pinned := fb.pinned[key]; pinned {
+		return obj, nil
+	}
+
+	return sdk.Object{}, &app.HTTPError{StatusCode: http.StatusNotFound, Body: "object not found"}
+}
+
+// Pin takes over an object the account does not hold yet, the way pinning one
+// does: the slabs come to be this account's and the data stays where it is.
+func (fb *fakeBackend) Pin(ctx context.Context, obj sdk.Object) error {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+
+	if fb.pinErr != nil {
+		return fb.pinErr
+	}
+	if fb.pinned == nil {
+		fb.pinned = make(map[types.Hash256]sdk.Object)
+	}
+	fb.pinned[obj.ID()] = obj
+
+	return nil
+}
+
+// Retag records what the object was told to say about itself, the way the real
+// backend pins it again with the new metadata and no new data.
+func (fb *fakeBackend) Retag(ctx context.Context, key types.Hash256, meta json.RawMessage) error {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+
+	fb.retagAttempts++
+	if fb.retagErr != nil {
+		return fb.retagErr
+	}
+	_, uploaded := fb.objects[key]
+	_, pinned := fb.pinned[key]
+	if !uploaded && !pinned {
+		return errors.New("no such object")
+	}
+	if fb.retags == nil {
+		fb.retags = make(map[types.Hash256]json.RawMessage)
+	}
+	fb.retags[key] = meta
+
+	return nil
+}
+
+// retagged returns what the object of the key was last told to say about itself.
+func (fb *fakeBackend) retagged(key types.Hash256) (json.RawMessage, bool) {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+
+	meta, ok := fb.retags[key]
+
+	return meta, ok
 }
 
 func (fb *fakeBackend) Close() error {
@@ -2376,7 +2460,7 @@ func TestIndexdClient_LateCompletionSharedSlab(t *testing.T) {
 	mustReadEquals(t, ctx, c, acc, "a.bin", content)
 
 	// A key that no file references is deleted as before.
-	orphan, err := fb.Upload(ctx, bytes.NewReader([]byte("orphaned")), 1, 0)
+	orphan, err := fb.Upload(ctx, bytes.NewReader([]byte("orphaned")), 1, 0, nil)
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
@@ -2523,7 +2607,7 @@ func TestIndexdClient_StrandedPieceRecovery(t *testing.T) {
 // left behind by an upload the database never recorded looks like.
 func pinUnrecorded(t *testing.T, ctx context.Context, backend *fakeBackend, size int) types.Hash256 {
 	t.Helper()
-	key, err := backend.Upload(ctx, bytes.NewReader(frand.Bytes(size)), 1, 0)
+	key, err := backend.Upload(ctx, bytes.NewReader(frand.Bytes(size)), 1, 0, nil)
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
 	}

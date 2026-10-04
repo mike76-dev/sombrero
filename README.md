@@ -201,18 +201,7 @@ curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/
 ```
 
 ## Web UI
-The server ships with a web UI covering the same ground as the API: workgroups, accounts, shares, access policies, bans, and the server statistics. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` on the Settings page.
-
-The **Setup wizard** page walks through the workflow above — workgroup, account, share, connection, access policy — one step at a time, making each thing or letting you pick one that is already there. It is a way through the same pages, not a separate one: everything it does can be done on the pages themselves, which is also where anything is changed afterwards.
-
-### Building the UI
-The UI is not built as part of `go build`. Release binaries are built by building the UI first and then the server:
-```Bash
-npm --prefix web install
-npm --prefix web run build
-go build .
-```
-A server built without this step runs normally and serves the API as usual; only the UI is missing, and it says so if you open it in a browser.
+The server ships with a web UI covering the same ground as the API. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` on the Settings page. The pages, the setup wizard, and how to build the UI are described in [web/README.md](web/README.md).
 
 ## Running in Docker
 The server can also run in a container. The image is published for `amd64` and `arm64` as `ghcr.io/mike76-dev/sombrero`, tagged with the version and with `latest`. It is the same for both modes, since the mode is read from `sombrero.yml` at startup, and it has the web UI built in. To build it from the source instead, run in the repository root:
@@ -285,6 +274,13 @@ Deleting or overwriting a file punches a hole in the slab it was packed into, an
 Setting `defragment: true` has the check repack what it reports instead of only reporting it: what is still referenced in those slabs is downloaded, put back into the upload queue to be packed together with the data of other files, and the slabs it came out of are unpinned once nothing reads from them any more.
 
 Repacking costs what any other upload of the same data costs, and between a round and the packed slab that follows it the moved data sits in the database rather than on the network. Rounds give way to what clients are writing: one only starts while less than a slab's worth of data is waiting to be uploaded, and `maxBufferAge` is what bounds how long the moved data waits there.
+
+## Slab Metadata
+An `indexd` account knows its slabs, but it doesn't know their file names. To make an account recoverable on its own, Sombrero writes the file names and offsets into the metadata of every slab it uploads. The metadata is encrypted with the account's app key, and it is updated whenever a file is renamed, deleted, overwritten or defragmented. An import of such an account restores the files with their original names and paths, without the database (see [Import](web/README.md#import)).
+
+There is one limitation: the indexer allows at most 1 KiB of metadata per slab, which is enough for about ten files. A slab that belongs to one large file, or to a handful of small ones, is described completely. A slab packed with many small files describes only the first ones and records how many were left out.
+
+Slabs that cannot be matched to file names are imported as files in `/lost+found`, one file per slab, named after the slab. This happens to slabs uploaded before the metadata existed, to slabs uploaded by other software, and to the parts of a crowded slab that the metadata could not describe. The Import page can sort these files out to some extent; see [Lost and found](web/README.md#lost-and-found).
 
 ## Shared Folders
 It is possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup. Only working on `indexd` shares.
