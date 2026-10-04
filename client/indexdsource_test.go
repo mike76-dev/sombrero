@@ -230,7 +230,7 @@ func TestDescribeAccountUnderAPrefix(t *testing.T) {
 func tagOf(t *testing.T, pieces ...objectPiece) json.RawMessage {
 	t.Helper()
 
-	meta, err := json.Marshal(objectTag{Version: objectTagVersion, Pieces: pieces})
+	meta, err := json.Marshal(objectTag{Version: tagJSON, Pieces: pieces})
 	if err != nil {
 		t.Fatalf("the tag would not encode: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestDescribeAccountKeepsWhatTheTagLeftOut(t *testing.T) {
 
 	// An object of 50 bytes whose tag names a file at 0 and one at 30, and says
 	// it left one out: the bytes at 10 and at 40 belong to nobody it can name.
-	tag := objectTag{Version: objectTagVersion, Omitted: 1, Pieces: []objectPiece{
+	tag := objectTag{Version: tagJSON, Omitted: 1, Pieces: []objectPiece{
 		{Share: "s", Path: "/a.bin", At: 0, Length: 10, Size: 10},
 		{Share: "s", Path: "/b.bin", At: 30, Length: 10, Size: 10},
 	}}

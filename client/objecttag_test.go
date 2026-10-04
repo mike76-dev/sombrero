@@ -2,11 +2,16 @@ package client
 
 import (
 	"bytes"
+	"compress/flate"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"math/rand"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -420,17 +425,41 @@ func TestSilentSlabsAreTaggedOnStart(t *testing.T) {
 	})
 }
 
+// TestWantsTag verifies which slabs a server tags when it starts: the silent
+// ones and the ones tagged by an older server, not the ones it tagged itself.
+func TestWantsTag(t *testing.T) {
+	old, err := json.Marshal(objectTag{Version: tagJSON, Pieces: manyPieces(2).Pieces})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, meta := range []json.RawMessage{nil, json.RawMessage(`{"theirs":true}`), old} {
+		if !wantsTag(meta) {
+			t.Errorf("%q would be left as it is", meta)
+		}
+	}
+	if wantsTag(manyPieces(2).pack(2)) {
+		t.Error("a tag in the current layout would be rewritten")
+	}
+}
+
 // TestTagFitsTheIndexer verifies that an object packed with more files than its
 // metadata has room for names the first of them and counts the rest, since the
 // indexer takes a tag of a kilobyte or nothing.
 func TestTagFitsTheIndexer(t *testing.T) {
+	// Files named by a camera pack so well that hundreds fit; these are named
+	// by a person, which is what fills a tag.
 	const many = 300
+	r := rand.New(rand.NewSource(1))
 	jobs := make([]stores.UploadJob, 0, many)
 	owners := make(map[uint64]stores.PieceOwner, many)
 	for i := range many {
+		name := make([]byte, 8+r.Intn(16))
+		for j := range name {
+			name[j] = byte('a' + r.Intn(26))
+		}
 		id := uint64(i + 1)
 		jobs = append(jobs, stores.UploadJob{MetadataID: id, Data: bytes.Repeat([]byte{'x'}, 1000)})
-		owners[id] = stores.PieceOwner{Share: "shared", Path: fmt.Sprintf("/photos/holiday/IMG_%04d.jpg", i), Size: 1000}
+		owners[id] = stores.PieceOwner{Share: "shared", Path: fmt.Sprintf("/documents/%s.pdf", name), Size: 1000}
 	}
 
 	meta := tagPieces(jobs, owners)
@@ -452,12 +481,17 @@ func TestTagFitsTheIndexer(t *testing.T) {
 	}
 
 	// One piece more would not have fit.
-	full := objectTag{Version: objectTagVersion, Pieces: make([]objectPiece, 0, len(tag.Pieces)+1)}
-	for i := range len(tag.Pieces) + 1 {
+	full := objectTag{Version: tagBinary, Pieces: make([]objectPiece, 0, many)}
+	for i := range many {
 		full.Pieces = append(full.Pieces, objectPiece{Share: "shared", Path: owners[uint64(i+1)].Path, At: uint64(i * 1000), Length: 1000, Size: 1000})
 	}
-	if whole, err := json.Marshal(full); err != nil || len(whole) <= maxTagSize {
-		t.Errorf("a tag of %d pieces encodes to %d bytes and would have fit", len(full.Pieces), len(whole))
+	if more := full.pack(len(tag.Pieces) + 1); len(more) <= maxTagSize {
+		t.Errorf("a tag of %d pieces encodes to %d bytes and would have fit", len(tag.Pieces)+1, len(more))
+	}
+
+	// Even so, the kilobyte holds a good few of them.
+	if len(tag.Pieces) < 25 {
+		t.Errorf("the tag names %d pieces, want at least 25 in a kilobyte", len(tag.Pieces))
 	}
 
 	// A tag that fits is left whole, and says nothing was left out.
@@ -554,9 +588,83 @@ func TestTagPiecesLaysOutThePackedSlab(t *testing.T) {
 	}
 }
 
+// manyPieces is a tag of this many pieces across two shares, with the odd offsets
+// and sizes a real packed slab has.
+func manyPieces(n int) objectTag {
+	tag := objectTag{Version: tagBinary}
+	var at uint64
+	for i := range n {
+		share := "shared"
+		if i%7 == 0 {
+			share = "other"
+		}
+		length := uint64(1000 + i*37)
+		tag.Pieces = append(tag.Pieces, objectPiece{
+			Share:  share,
+			Path:   fmt.Sprintf("/photos/%d/IMG_%04d.jpg", 2020+i%5, i),
+			Offset: uint64(i%3) << 22,
+			At:     at,
+			Length: length,
+			Size:   length + uint64(i%3)<<22,
+		})
+		at += length
+	}
+
+	return tag
+}
+
+// TestTagRoundTrip verifies that a tag reads back as what was written, in the
+// plain layout and in the compressed one, and that version 1 is still read.
+func TestTagRoundTrip(t *testing.T) {
+	for _, n := range []int{1, 3, 50, 400} {
+		want := manyPieces(n)
+		meta := want.pack(n)
+		got, ok := parseTag(meta)
+		if !ok {
+			t.Fatalf("a tag of %d piece(s) was not taken for one", n)
+		}
+		if got.Omitted != 0 || !slices.Equal(got.Pieces, want.Pieces) {
+			t.Errorf("a tag of %d piece(s) read back as %+v", n, got)
+		}
+		if n < 3 && meta[1] != 0 || n >= 50 && meta[1] != tagCompressed {
+			t.Errorf("a tag of %d piece(s) was written with flags %d", n, meta[1])
+		}
+	}
+
+	// What was cut counts the rest.
+	cut, ok := parseTag(manyPieces(100).pack(40))
+	if !ok || len(cut.Pieces) != 40 || cut.Omitted != 60 {
+		t.Errorf("a tag cut to 40 of 100 reads as %d piece(s) and %d omitted", len(cut.Pieces), cut.Omitted)
+	}
+
+	old, err := json.Marshal(objectTag{Version: tagJSON, Pieces: manyPieces(5).Pieces})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag, ok := parseTag(old); !ok || !slices.Equal(tag.Pieces, manyPieces(5).Pieces) {
+		t.Errorf("a version-1 tag reads as %+v", tag)
+	}
+}
+
 // TestParseTag verifies what is taken for a tag and what is not, since an object
-// may carry anything at all, or nothing.
+// may carry anything at all, or nothing, and a tag from another account may be
+// made to hurt.
 func TestParseTag(t *testing.T) {
+	flipped := manyPieces(20).pack(20)
+	flipped[len(flipped)/2] ^= 0x01
+
+	var bomb bytes.Buffer
+	bomb.Write([]byte{tagBinary, tagCompressed})
+	w, _ := flate.NewWriter(&bomb, flate.BestCompression)
+	_, _ = w.Write(make([]byte, 4<<20))
+	_ = w.Close()
+
+	// A tag claiming more pieces than anyone has, with nothing behind the claim.
+	claim := binary.AppendUvarint([]byte{tagBinary, 0}, 0)
+	claim = binary.AppendUvarint(claim, 0)
+	claim = binary.AppendUvarint(claim, 1<<40)
+	claim = binary.BigEndian.AppendUint32(claim, crc32.ChecksumIEEE(claim[2:]))
+
 	for _, meta := range []json.RawMessage{
 		nil,
 		json.RawMessage(``),
@@ -565,9 +673,15 @@ func TestParseTag(t *testing.T) {
 		json.RawMessage(`{"sombrero":1}`), // nothing in it
 		json.RawMessage(`{"sombrero":99,"pieces":[{"at":0}]}`), // written by a newer server
 		json.RawMessage(`{"pieces":[{"at":0}]}`),               // somebody else's metadata
+		{tagBinary},
+		{tagBinary, 0},
+		{tagBinary, 0, 1, 2, 3, 4},
+		flipped,
+		bomb.Bytes(),
+		claim,
 	} {
 		if _, ok := parseTag(meta); ok {
-			t.Errorf("%q was taken for a tag", meta)
+			t.Errorf("%q was taken for a tag", meta[:min(16, len(meta))])
 		}
 	}
 
@@ -579,4 +693,17 @@ func TestParseTag(t *testing.T) {
 	if len(tag.Pieces) != 1 || tag.Pieces[0].Path != "/x" {
 		t.Errorf("the tag reads as %+v", tag)
 	}
+}
+
+// FuzzParseTag verifies that nothing an object may carry makes the reader fall
+// over: a tag is taken or it is not.
+func FuzzParseTag(f *testing.F) {
+	f.Add([]byte(manyPieces(3).pack(3)))
+	f.Add([]byte(manyPieces(200).pack(200)))
+	f.Add([]byte(`{"sombrero":1,"pieces":[{"share":"s","path":"/x","offset":0,"at":0,"length":4}]}`))
+	f.Fuzz(func(t *testing.T, meta []byte) {
+		if tag, ok := parseTag(meta); ok && len(tag.Pieces) == 0 {
+			t.Error("a tag of nothing was taken")
+		}
+	})
 }
