@@ -373,6 +373,53 @@ func TestRetagIsNotForcedOnTheIndexer(t *testing.T) {
 	}
 }
 
+// TestSilentSlabsAreTaggedOnStart verifies that a slab an older server uploaded
+// without a tag is told what it holds once a server that tags starts up, with
+// nothing having to touch the file.
+func TestSilentSlabsAreTaggedOnStart(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	// The fake's objects carry no metadata when asked after, which is what a
+	// slab written before tagging looks like.
+	backend := newFakeBackend()
+	old := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+
+	content := bytes.Repeat([]byte("o"), int(proto.SectorSize))
+	uploadID, err := old.StartUpload(ctx, acc, "/old.bin")
+	if err != nil {
+		t.Fatalf("StartUpload: %v", err)
+	}
+	if _, err := old.Write(ctx, bytes.NewReader(content), "/old.bin", uploadID, 1, 0, uint64(len(content))); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := old.FinishUpload(ctx, "/old.bin", uploadID, nil); err != nil {
+		t.Fatalf("FinishUpload: %v", err)
+	}
+	waitForRead(t, ctx, old, acc, "/old.bin", content)
+	key := awaitSlab(t, db, acc, old, "/old.bin")
+	if err := old.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, tagged := backend.retagged(key); tagged {
+		t.Fatal("the slab was retagged before the restart")
+	}
+
+	// The next server to start finds the slab saying nothing, and tells it.
+	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	awaitRetag(t, backend, key, func(tag objectTag) bool {
+		return len(tag.Pieces) == 1 && tag.Pieces[0].Path == "/old.bin" && tag.Pieces[0].Share == share.Name
+	})
+}
+
 // TestTagFitsTheIndexer verifies that an object packed with more files than its
 // metadata has room for names the first of them and counts the rest, since the
 // indexer takes a tag of a kilobyte or nothing.

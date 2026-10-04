@@ -196,6 +196,46 @@ func (ic *IndexdClient) retag(keys []types.Hash256) {
 	}
 }
 
+// tagSilentSlabs tells the slabs that say nothing about themselves what they
+// hold: data written before tagging existed, or by an older server. It walks the
+// account's object log once at startup, which costs a request per hundred
+// objects, and queues a tag for every object the indexer does not describe. The
+// worker then passes over what no file of this share references.
+func (ic *IndexdClient) tagSilentSlabs(ctx context.Context) {
+	src, ok := ic.backend.(AccountObjects)
+	if !ok {
+		return
+	}
+
+	pinned, err := listPinned(ctx, src)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("failed to look for untagged slabs in share %s: %v", ic.share, err)
+		}
+		return
+	}
+
+	var silent []types.Hash256
+	for key, obj := range pinned {
+		o := obj.Object
+		if o == nil {
+			fetched, err := src.Object(ctx, key)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				continue
+			}
+			o = &fetched
+		}
+		if _, tagged := parseTag(o.Metadata()); !tagged {
+			silent = append(silent, key)
+		}
+	}
+
+	ic.retag(silent)
+}
+
 // retagObjects is the worker that writes the tags the changes left owing. A tag
 // is not worth holding a shutdown up for: what is left unwritten is a name a
 // rescue would have got right, and the data is not waiting on it.

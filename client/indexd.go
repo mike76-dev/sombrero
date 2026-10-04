@@ -569,6 +569,13 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		ic.retagObjects(ic.ctx)
 	}()
 
+	// The slabs an older server left saying nothing are told what they hold.
+	ic.wg.Add(1)
+	go func() {
+		defer ic.wg.Done()
+		ic.tagSilentSlabs(ic.ctx)
+	}()
+
 	// Repacking is driven by the check, so turning the check off leaves it to
 	// the API to ask for.
 	if ic.defrag && ic.fragInterval == 0 {
