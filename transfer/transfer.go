@@ -31,6 +31,7 @@ const (
 	kindHeader
 	kindDirectory
 	kindFile
+	kindConnection
 )
 
 // Header says where a description came from and what it covers. It opens every
@@ -51,11 +52,75 @@ type Header struct {
 	Workgroup string
 }
 
+// Connection is what a catalog carries besides the folders and files: the share,
+// the workgroup with its accounts, who may do what on the share, and the app key
+// the connection was made with. It comes right after the header, since nothing
+// can be placed before the accounts that own it exist.
+type Connection struct {
+	Share     Share
+	Workgroup Workgroup
+	Accounts  []Account
+	Policies  []Policy
+
+	// AppKey is the key the workgroup's account at the indexer is reached with.
+	// Without it the data is unreadable, which is why a catalog on the network
+	// cannot be the only copy of this record.
+	AppKey []byte
+}
+
+// Share is a share as registered: where it is served from and how.
+type Share struct {
+	Name           string
+	Type           string
+	Server         string
+	Password       string
+	Bucket         string
+	Remark         string
+	CreatedAt      time.Time
+	DataShards     uint8
+	ParityShards   uint8
+	AllowGuest     bool
+	AllowAnonymous bool
+	PublicDir      string
+}
+
+// Workgroup is a workgroup by its identity, with the folders it shares.
+type Workgroup struct {
+	UUID       [16]byte
+	Name       string
+	PublicDirs []PublicDir
+}
+
+// PublicDir is a folder every member of the workgroup sees.
+type PublicDir struct {
+	Path          string
+	ReadOnly      bool
+	CaseSensitive bool
+}
+
+// Account is an account of the workgroup, with the hash it authenticates by.
+type Account struct {
+	Name         string
+	PasswordHash []byte
+	CreatedAt    time.Time
+}
+
+// Policy is what one account may do on the share.
+type Policy struct {
+	Account string
+	Read    bool
+	Write   bool
+	Delete  bool
+	Execute bool
+}
+
 // Directory is a folder of a share, with the flags that decide who sees it.
 // Paths are normalized the way the store keeps them: forward slashes, a leading
-// slash, no trailing one.
+// slash, no trailing one. Owner names the account the folder belongs to; empty,
+// it belongs to whoever applies the description.
 type Directory struct {
 	Path       string
+	Owner      string
 	Private    bool
 	ReadOnly   bool
 	CreatedAt  time.Time
@@ -64,9 +129,11 @@ type Directory struct {
 
 // File is one file of a share and the parts its contents are made of. The parts
 // are ordered and do not overlap, but they need not cover the file: bytes that
-// are still buffered at the source are described by no part at all.
+// are still buffered at the source are described by no part at all. Owner is as
+// for a Directory.
 type File struct {
 	Path       string
+	Owner      string
 	Size       uint64
 	CreatedAt  time.Time
 	ModifiedAt time.Time
@@ -167,6 +234,27 @@ var (
 // Validate checks that the directory is one a reader can act on.
 func (d Directory) Validate() error {
 	return validPath(d.Path)
+}
+
+// Validate checks that the connection is one a reader can act on: a share by
+// name, and keys and hashes of the lengths they have to be.
+func (c Connection) Validate() error {
+	if c.Share.Name == "" {
+		return errors.New("the connection names no share")
+	}
+	if len(c.AppKey) != 0 && len(c.AppKey) != 64 {
+		return fmt.Errorf("the app key is %d byte(s) long, not 64", len(c.AppKey))
+	}
+	for _, acc := range c.Accounts {
+		if acc.Name == "" {
+			return errors.New("an account has no name")
+		}
+		if len(acc.PasswordHash) != 16 {
+			return fmt.Errorf("the password hash of %q is %d byte(s) long, not 16", acc.Name, len(acc.PasswordHash))
+		}
+	}
+
+	return nil
 }
 
 // Validate checks that the file is one a reader can act on: a path it can place,

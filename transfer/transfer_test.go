@@ -78,11 +78,12 @@ func TestRoundTrip(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	header := testHeader()
 
-	dir := Directory{Path: "/holiday", Private: true, CreatedAt: now, ModifiedAt: now}
+	dir := Directory{Path: "/holiday", Owner: "alice", Private: true, CreatedAt: now, ModifiedAt: now}
 	files := []File{
 		{
 			// A file of this server's own: the object key is all it takes.
 			Path:       "/holiday/beach.raw",
+			Owner:      "alice",
 			Size:       3 << 20,
 			CreatedAt:  now,
 			ModifiedAt: now,
@@ -152,6 +153,97 @@ func TestRoundTrip(t *testing.T) {
 	dirs, count := r.Counts()
 	if dirs != 1 || count != uint64(len(files)) {
 		t.Errorf("counts: want 1 folder and %d files, got %d and %d", len(files), dirs, count)
+	}
+	if r.Connection() != nil {
+		t.Error("a plain description claims to be a catalog")
+	}
+}
+
+// testConnection is what a catalog says its folders and files belong to.
+func testConnection(now time.Time) Connection {
+	return Connection{
+		Share: Share{
+			Name: "pictures", Type: "indexd", Server: "https://indexer", Remark: "holiday snaps",
+			CreatedAt: now, DataShards: 10, ParityShards: 20, AllowGuest: true, PublicDir: "Drop",
+		},
+		Workgroup: Workgroup{
+			UUID:       [16]byte{1, 2, 3},
+			Name:       "home",
+			PublicDirs: []PublicDir{{Path: "Public", ReadOnly: true}, {Path: "Shared", CaseSensitive: true}},
+		},
+		Accounts: []Account{
+			{Name: "alice", PasswordHash: bytes.Repeat([]byte{1}, 16), CreatedAt: now},
+			{Name: "bob", PasswordHash: bytes.Repeat([]byte{2}, 16), CreatedAt: now},
+		},
+		Policies: []Policy{{Account: "alice", Read: true, Write: true, Delete: true, Execute: true}, {Account: "bob", Read: true}},
+		AppKey:   bytes.Repeat([]byte{7}, 64),
+	}
+}
+
+// TestCatalogRoundTrip verifies that a catalog comes back with what the folders
+// and files belong to, and that the connection is taken only where it belongs.
+func TestCatalogRoundTrip(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	conn := testConnection(now)
+	dir := Directory{Path: "/holiday", Owner: "bob", CreatedAt: now, ModifiedAt: now}
+
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, testHeader())
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := w.Connection(conn); err != nil {
+		t.Fatalf("Connection: %v", err)
+	}
+	if err := w.Connection(conn); err == nil {
+		t.Error("a second connection was taken")
+	}
+	if err := w.Directory(dir); err != nil {
+		t.Fatalf("Directory: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r, dirs, files := read(t, buf.Bytes())
+	if got := r.Connection(); got == nil || !reflect.DeepEqual(*got, conn) {
+		t.Errorf("connection: want %+v, got %+v", conn, got)
+	}
+	if len(dirs) != 1 || dirs[0].Owner != "bob" || len(files) != 0 {
+		t.Errorf("want the one folder of bob's, got %+v and %+v", dirs, files)
+	}
+
+	// A connection after the folders is refused by the writer, and by the
+	// reader where a writer put it there anyway.
+	buf.Reset()
+	w, _ = NewWriter(&buf, testHeader())
+	_ = w.Directory(dir)
+	if err := w.Connection(conn); err == nil {
+		t.Error("a connection after a folder was taken")
+	}
+	_ = w.record(kindConnection, conn)
+	_ = w.Close()
+	r, err = NewReader(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if _, _, err := r.Next(); err != nil {
+		t.Fatalf("the folder: %v", err)
+	}
+	if _, _, err := r.Next(); err == nil {
+		t.Error("a connection among the folders was read past")
+	}
+
+	// A connection has to be one a reader can act on.
+	for _, bad := range []Connection{
+		{},
+		{Share: Share{Name: "x"}, AppKey: []byte{1, 2, 3}},
+		{Share: Share{Name: "x"}, Accounts: []Account{{Name: "alice", PasswordHash: []byte{1}}}},
+		{Share: Share{Name: "x"}, Accounts: []Account{{PasswordHash: bytes.Repeat([]byte{1}, 16)}}},
+	} {
+		if err := bad.Validate(); err == nil {
+			t.Errorf("%+v passed as a connection", bad)
+		}
 	}
 }
 
