@@ -493,6 +493,10 @@ func (api *API) buildHTTPRoutes() {
 		api.connectHandlerDELETE(w, req, ps)
 	})
 
+	router.POST("/restore", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.restoreHandlerPOST(w, req, ps)
+	})
+
 	router.GET("/imports", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.importsHandlerGET(w, req, ps)
 	})

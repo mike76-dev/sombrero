@@ -41,12 +41,21 @@ func readCatalog(t *testing.T, b []byte) (*transfer.Reader, []transfer.Directory
 	return r, dirs, files
 }
 
-// TestSnapshot verifies what a catalog of a connection carries: everything the
-// database alone knows, read back the way a restore would read it.
-func TestSnapshot(t *testing.T) {
-	ctx := context.Background()
-	db := NewTestStore(t, ctx)
-	defer db.Close()
+// catalogFixture is a connection with everything a catalog has to carry: two
+// accounts, a policy, a public folder, an app key, and rows of every shape.
+type catalogFixture struct {
+	target     TransferTarget
+	alice, bob Account
+	wg         Workgroup
+	share      Share
+	key        types.PrivateKey
+	object     types.Hash256
+	small      []byte
+}
+
+// plantCatalogFixture sets the fixture up in the store.
+func plantCatalogFixture(t *testing.T, db *Database) catalogFixture {
+	t.Helper()
 
 	target, alice := applyTarget(t, db)
 	wg, err := db.GetWorkgroupByID(target.Workgroup)
@@ -58,8 +67,6 @@ func TestSnapshot(t *testing.T) {
 		t.Fatalf("GetShare: %v", err)
 	}
 
-	// The connection and everything hanging off it: a second account with a
-	// policy, a public folder, and the app key.
 	bob := addAccount(t, db, wg, "bob", "pw")
 	wg.PublicDirs = []PublicDir{{Path: "Public", ReadOnly: true}}
 	if err := db.UpdateWorkgroup(wg); err != nil {
@@ -76,9 +83,9 @@ func TestSnapshot(t *testing.T) {
 		t.Fatalf("SetAccessRights: %v", err)
 	}
 
-	// The rows: a private folder of alice's, a file on the network, a small
-	// file still buffered, which the catalog carries, a bigger one it leaves
-	// out, an empty one, and a file of bob's.
+	// A private folder of alice's, a file on the network, a small file still
+	// buffered, which a catalog carries, a bigger one it leaves out, an empty
+	// one, and a file of bob's.
 	now := time.Now().UTC().Truncate(time.Second)
 	object := types.Hash256{9}
 	if _, err := db.ApplyDirectory(target, transfer.Directory{Path: "/holiday", Private: true, CreatedAt: now, ModifiedAt: now}); err != nil {
@@ -103,6 +110,19 @@ func TestSnapshot(t *testing.T) {
 	if _, err := db.ApplyFile(bobs, transfer.File{Path: "/bob.bin", Size: 10, CreatedAt: now, ModifiedAt: now, Parts: []transfer.Part{{Length: 10, Object: object}}}); err != nil {
 		t.Fatalf("ApplyFile(bob): %v", err)
 	}
+
+	return catalogFixture{target: target, alice: alice, bob: bob, wg: wg, share: share, key: key, object: object, small: small}
+}
+
+// TestSnapshot verifies what a catalog of a connection carries: everything the
+// database alone knows, read back the way a restore would read it.
+func TestSnapshot(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	fx := plantCatalogFixture(t, db)
+	target, alice, wg, share, key, object, small := fx.target, fx.alice, fx.wg, fx.share, fx.key, fx.object, fx.small
 
 	var buf bytes.Buffer
 	stats, err := db.Snapshot(&buf, share.Name, target.Workgroup, 1000)

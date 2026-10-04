@@ -78,37 +78,46 @@ func (db *Database) ApplyTransfer(ctx context.Context, r *transfer.Reader, targe
 		if err != nil {
 			return stats, err
 		}
-
-		switch {
-		case dir != nil:
-			res, err := db.ApplyDirectory(target, *dir)
-			if err != nil {
-				return stats, fmt.Errorf("failed to apply the folder %q: %w", dir.Path, err)
-			}
-			if res == Applied {
-				stats.Directories++
-			} else {
-				stats.AlreadyThere++
-			}
-
-		case file != nil:
-			res, err := db.ApplyFile(target, *file)
-			if err != nil {
-				return stats, fmt.Errorf("failed to apply the file %q: %w", file.Path, err)
-			}
-			switch res {
-			case Applied:
-				stats.Files++
-				if !file.Complete() {
-					stats.Incomplete++
-				}
-			case AlreadyThere:
-				stats.AlreadyThere++
-			case Unresolved:
-				stats.Unresolved++
-			}
+		if err := db.applyRecord(target, dir, file, &stats); err != nil {
+			return stats, err
 		}
 	}
+}
+
+// applyRecord applies one folder or file, whichever is set, and counts what came
+// of it.
+func (db *Database) applyRecord(target TransferTarget, dir *transfer.Directory, file *transfer.File, stats *ApplyStats) error {
+	switch {
+	case dir != nil:
+		res, err := db.ApplyDirectory(target, *dir)
+		if err != nil {
+			return fmt.Errorf("failed to apply the folder %q: %w", dir.Path, err)
+		}
+		if res == Applied {
+			stats.Directories++
+		} else {
+			stats.AlreadyThere++
+		}
+
+	case file != nil:
+		res, err := db.ApplyFile(target, *file)
+		if err != nil {
+			return fmt.Errorf("failed to apply the file %q: %w", file.Path, err)
+		}
+		switch res {
+		case Applied:
+			stats.Files++
+			if !file.Complete() {
+				stats.Incomplete++
+			}
+		case AlreadyThere:
+			stats.AlreadyThere++
+		case Unresolved:
+			stats.Unresolved++
+		}
+	}
+
+	return nil
 }
 
 // ApplyDirectory creates the folder the description names, and the folders above

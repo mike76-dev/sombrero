@@ -75,6 +75,7 @@ type mockStore struct {
 	applyDirectory      func(stores.TransferTarget, transfer.Directory) (stores.ApplyResult, error)
 	applyFile           func(stores.TransferTarget, transfer.File) (stores.ApplyResult, error)
 	setFileTimes        func(share, path string, createdAt, modifiedAt time.Time) error
+	restore             func(context.Context, *transfer.Reader, stores.RestoreOptions) (stores.RestoreStats, error)
 }
 
 func (m *mockStore) IsBanned(h string) (bool, string, error) {
@@ -316,6 +317,13 @@ func (m *mockStore) SetFileTimes(share, path string, createdAt, modifiedAt time.
 		return m.setFileTimes(share, path, createdAt, modifiedAt)
 	}
 	return nil
+}
+
+func (m *mockStore) Restore(ctx context.Context, r *transfer.Reader, opts stores.RestoreOptions) (stores.RestoreStats, error) {
+	if m.restore != nil {
+		return m.restore(ctx, r, opts)
+	}
+	return stores.RestoreStats{}, nil
 }
 
 // mockServer stands in for the running SMB server.
