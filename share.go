@@ -470,8 +470,7 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 
 		fragLevel, fragInterval, defragment := s.cfg.Indexd.Fragmentation()
 		c := client.NewIndexdClient(db, sdkClient, share.Name, wg.ID, share.DataShards, share.ParityShards, client.PackingOptions{
-			MinSize: s.cfg.Indexd.MinPackedSlabSize,
-			MaxAge:  s.cfg.Indexd.MaxBufferAge.Duration(),
+			MaxAge: s.cfg.Indexd.MaxBufferAge.Duration(),
 		}, client.FragmentationOptions{
 			Threshold:  fragLevel,
 			Interval:   fragInterval,

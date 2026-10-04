@@ -105,8 +105,6 @@ indexd:
   seedPhrase: ''                                                                 # if omitted, the server will generate a new seed phrase and put it here
   maxBufferAge: never                                                            # optional: how long the data that does not fill a slab may wait to be packed
                                                                                  # with the data of other files; if omitted, it waits indefinitely
-  minPackedSlabSize: 0                                                           # optional: the least amount of leftover data, in bytes, that an incomplete slab
-                                                                                 # is uploaded with once it has reached maxBufferAge; if omitted, any amount is uploaded
   fragmentationThreshold: 0.25                                                   # optional: how much of a slab may be dead space before it is reported, as a fraction
                                                                                  # between 0 and 1; if omitted, defaults to 0.25
   fragmentationCheck: 1h                                                         # optional: how often to look for the dead space; 'never' turns the check off and leaves
@@ -251,7 +249,7 @@ docker compose up -d
 ```
 
 ## Upload Packing
-A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Both config fields are optional: setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, while `minPackedSlabSize` (for example, `1048576`) holds that upload back until the leftover data of a share is worth a slab. On its own, `minPackedSlabSize` has no effect.
+A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, however little has accumulated by then.
 
 ## Upload Backlog
 What clients write to an `indexd` share is stored in the database first and uploaded to the network in the background. If clients write faster than the network takes the data, the backlog grows until the database runs out of disk space. Setting `maxBufferedData` caps the backlog across all shares:

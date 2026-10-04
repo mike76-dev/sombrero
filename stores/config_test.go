@@ -173,7 +173,6 @@ func TestReadConfigRejectsBadThreshold(t *testing.T) {
 func TestIndexdConfigRoundTrip(t *testing.T) {
 	cfg := IndexdConfig{
 		Name:                   "Sombrero",
-		MinPackedSlabSize:      1 << 20,
 		MaxBufferAge:           BufferAge(24 * time.Hour),
 		FragmentationThreshold: 0.4,
 		FragmentationCheck:     CheckInterval(6 * time.Hour),
@@ -197,7 +196,7 @@ func TestIndexdConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal defaults: %v", err)
 	}
-	for _, key := range []string{"minPackedSlabSize", "maxBufferAge", "fragmentationThreshold", "fragmentationCheck"} {
+	for _, key := range []string{"maxBufferAge", "fragmentationThreshold", "fragmentationCheck"} {
 		if strings.Contains(string(out), key) {
 			t.Fatalf("want %q left out of a default config, got %q", key, out)
 		}
@@ -316,7 +315,6 @@ func TestSaveConfigRoundTrip(t *testing.T) {
 		Indexd: IndexdConfig{
 			Name:                   "Sombrero",
 			SeedPhrase:             "seed",
-			MinPackedSlabSize:      1 << 20,
 			MaxBufferAge:           BufferAge(24 * time.Hour),
 			FragmentationThreshold: 0.4,
 			FragmentationCheck:     CheckInterval(6 * time.Hour),

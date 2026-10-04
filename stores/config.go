@@ -217,15 +217,10 @@ type IndexdConfig struct {
 
 	// The data of a file that does not fill a slab is kept in the database
 	// until it can be packed into a full slab together with the data of other
-	// files. These two set the point at which an incomplete slab is uploaded
-	// regardless: once the leftover data of a share has been waiting for
-	// MaxBufferAge and amounts to at least MinPackedSlabSize bytes.
-	//
-	// Unset, MaxBufferAge keeps the leftover data waiting indefinitely, so
-	// that only full slabs are ever uploaded. Unset, MinPackedSlabSize puts
-	// no lower bound on what an aged upload may carry.
-	MinPackedSlabSize uint64    `yaml:"minPackedSlabSize,omitempty"`
-	MaxBufferAge      BufferAge `yaml:"maxBufferAge,omitempty"`
+	// files. MaxBufferAge is how long it may wait: past it, the leftover data
+	// of a share is uploaded as an incomplete slab, however little there is.
+	// Unset, it waits indefinitely, so that only full slabs are ever uploaded.
+	MaxBufferAge BufferAge `yaml:"maxBufferAge,omitempty"`
 
 	// Editing and deleting files leaves dead space behind in the slabs they
 	// were packed into, which keeps being paid for. These govern the check

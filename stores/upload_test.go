@@ -334,14 +334,14 @@ func TestClaimPackedSlabIncomplete(t *testing.T) {
 
 	acc, share, wg := newSlabTestFixture(t, db)
 
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab on an empty share: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
 	plantBufferedFile(t, db, share, acc, "a.txt", 400, false)
 	plantBufferedFile(t, db, share, acc, "b.txt", 400, false)
 
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab below a full slab: want %v, got %v", ErrNoUploadJobs, err)
 	}
 	if n := pendingJobs(t, db); n != 2 {
@@ -364,7 +364,7 @@ func TestClaimPackedSlabFull(t *testing.T) {
 	c := plantBufferedFile(t, db, share, acc, "c.txt", 400, false)
 	plantBufferedFile(t, db, share, acc, "d.txt", 400, false)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestClaimPackedSlabFull(t *testing.T) {
 	}
 
 	// The remaining buffer alone cannot fill a slab.
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("second ClaimPackedSlab: want %v, got %v", ErrNoUploadJobs, err)
 	}
 }
@@ -418,7 +418,7 @@ func TestClaimPackedSlabManySmallPieces(t *testing.T) {
 		plantBufferedFile(t, db, share, acc, fmt.Sprintf("tiny%03d.txt", i), 3, false)
 	}
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestClaimPackedSlabManySmallPieces(t *testing.T) {
 	if n := pendingJobs(t, db); n != pieces-len(jobs) {
 		t.Fatalf("want %d jobs left in the queue, got %d", pieces-len(jobs), n)
 	}
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("second ClaimPackedSlab: want %v, got %v", ErrNoUploadJobs, err)
 	}
 }
@@ -469,7 +469,7 @@ func TestClaimPackedSlabSkipsIneligible(t *testing.T) {
 	plantBufferedFile(t, db, share, acc, "whole.txt", slabSize, false)
 	plantBufferedFile(t, db, other.Name, acc, "elsewhere.txt", 600, false)
 
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab with only ineligible buffers: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
@@ -479,7 +479,7 @@ func TestClaimPackedSlabSkipsIneligible(t *testing.T) {
 	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -635,7 +635,7 @@ func TestClaimPackedSlabWorkgroupScope(t *testing.T) {
 	claim := func(workgroup int, want []byte) {
 		t.Helper()
 
-		jobs, err := db.ClaimPackedSlab(share, workgroup, slabSize, 0, 0)
+		jobs, err := db.ClaimPackedSlab(share, workgroup, slabSize, 0)
 		if err != nil {
 			t.Fatalf("ClaimPackedSlab(workgroup %d): %v", workgroup, err)
 		}
@@ -691,7 +691,7 @@ func TestClaimPackedSlabRequeue(t *testing.T) {
 	plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
 	plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -709,7 +709,7 @@ func TestClaimPackedSlabRequeue(t *testing.T) {
 		t.Fatalf("want %d jobs back in the queue, got %d", len(jobs), n)
 	}
 
-	again, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	again, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab after requeue: %v", err)
 	}
@@ -781,7 +781,7 @@ func TestCompletePackedSlab(t *testing.T) {
 		"c.txt": plantBufferedFile(t, db, share, acc, "c.txt", 400, false),
 	}
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -823,7 +823,7 @@ func TestCompletePackedSlabSplit(t *testing.T) {
 	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -854,7 +854,7 @@ func TestCompletePackedSlabSplit(t *testing.T) {
 	}
 
 	// The remainder alone is not enough for another slab.
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab after the split: want %v, got %v", ErrNoUploadJobs, err)
 	}
 }
@@ -872,7 +872,7 @@ func TestCompletePackedSlabDeletedFile(t *testing.T) {
 	plantBufferedFile(t, db, share, acc, "a.txt", 500, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 500, false)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -896,7 +896,7 @@ func TestCompletePackedSlabDeletedFile(t *testing.T) {
 	plantBufferedFile(t, db, share, acc, "c.txt", 500, false)
 	plantBufferedFile(t, db, share, acc, "d.txt", 500, false)
 
-	jobs, err = db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	jobs, err = db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -927,7 +927,7 @@ func TestCompletePackedSlabRetry(t *testing.T) {
 	a := plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
 	b := plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -989,16 +989,16 @@ func TestClaimPackedSlabAgeTrigger(t *testing.T) {
 	backdateUploads(t, db, 48*time.Hour)
 
 	// However long it has been waiting, without an age it waits on.
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 0); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab without an age: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
 	// Not old enough yet.
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 72*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 72*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab below the age: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab past the age: %v", err)
 	}
@@ -1069,13 +1069,13 @@ func TestClaimPackedSlabAgeWithoutAnUpload(t *testing.T) {
 	dropJobUploads(t, db)
 
 	// The uploads are ancient, but the entries that carry the age are not.
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 24*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab with fresh entries: want %v, got %v", ErrNoUploadJobs, err)
 	}
 
 	backdateJobs(t, db, 48*time.Hour)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab past the age: %v", err)
 	}
@@ -1114,7 +1114,7 @@ func TestClaimPackedSlabAgeSurvivesRequeue(t *testing.T) {
 	plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
 	backdateUploads(t, db, 48*time.Hour)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab past the age: %v", err)
 	}
@@ -1125,7 +1125,7 @@ func TestClaimPackedSlabAgeSurvivesRequeue(t *testing.T) {
 		}
 	}
 
-	jobs, err = db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	jobs, err = db.ClaimPackedSlab(share, wg, slabSize, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab after the requeue: %v", err)
 	}
@@ -1137,31 +1137,25 @@ func TestClaimPackedSlabAgeSurvivesRequeue(t *testing.T) {
 // TestClaimPackedSlabMinSize verifies that the age trigger holds back until the
 // leftover data is worth a slab, since an incomplete slab costs as much as a
 // full one.
-func TestClaimPackedSlabMinSize(t *testing.T) {
+func TestClaimPackedSlabAgeTakesHoweverLittle(t *testing.T) {
 	ctx := context.Background()
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
 	acc, share, wg := newSlabTestFixture(t, db)
 
-	plantBufferedFile(t, db, share, acc, "a.txt", 300, false)
+	// A lone small tail, waiting on its own: once it is past the age it goes,
+	// since a backup that promises the data is on the network cannot wait for
+	// company that may never come.
+	plantBufferedFile(t, db, share, acc, "a.txt", 10, false)
 	backdateUploads(t, db, 48*time.Hour)
 
-	// Old enough, but not yet worth uploading.
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 500, 24*time.Hour); !errors.Is(err, ErrNoUploadJobs) {
-		t.Fatalf("ClaimPackedSlab below the minimum size: want %v, got %v", ErrNoUploadJobs, err)
-	}
-
-	// A second file takes the leftover data past the minimum.
-	plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
-	backdateUploads(t, db, 48*time.Hour)
-
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 500, 24*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 24*time.Hour)
 	if err != nil {
-		t.Fatalf("ClaimPackedSlab past the minimum size: %v", err)
+		t.Fatalf("ClaimPackedSlab past the age: %v", err)
 	}
-	if len(jobs) != 2 {
-		t.Fatalf("want both buffers claimed, got %d", len(jobs))
+	if len(jobs) != 1 || len(jobs[0].Data) != 10 {
+		t.Fatalf("want the one small buffer claimed, got %d job(s)", len(jobs))
 	}
 }
 
@@ -1180,7 +1174,7 @@ func TestClaimPackedSlabAgePrefersFullSlab(t *testing.T) {
 	}
 	backdateUploads(t, db, 48*time.Hour)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
@@ -1334,7 +1328,7 @@ func TestBufferedBytes(t *testing.T) {
 	// A claim takes the queue entry, not the buffer, so what is claimed is
 	// still waiting.
 	backdateUploads(t, db, 48*time.Hour)
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, 24*time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}
