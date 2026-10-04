@@ -275,6 +275,13 @@ Setting `defragment: true` has the check repack what it reports instead of only 
 
 Repacking costs what any other upload of the same data costs, and between a round and the packed slab that follows it the moved data sits in the database rather than on the network. Rounds give way to what clients are writing: one only starts while less than a slab's worth of data is waiting to be uploaded, and `maxBufferAge` is what bounds how long the moved data waits there.
 
+## Slab Metadata
+An `indexd` account knows its slabs, but it doesn't know their file names. To make an account recoverable on its own, Sombrero writes the file names and offsets into the metadata of every slab it uploads. The metadata is encrypted with the account's app key, and it is updated whenever a file is renamed, deleted, overwritten or defragmented. An import of such an account restores the files with their original names and paths, without the database (see [Import](web/README.md#import)).
+
+There is one limitation: the indexer allows at most 1 KiB of metadata per slab, which is enough for about ten files. A slab that belongs to one large file, or to a handful of small ones, is described completely. A slab packed with many small files describes only the first ones and records how many were left out.
+
+Slabs that cannot be matched to file names are imported as files in `/lost+found`, one file per slab, named after the slab. This happens to slabs uploaded before the metadata existed, to slabs uploaded by other software, and to the parts of a crowded slab that the metadata could not describe. The Import page can sort these files out to some extent; see [Lost and found](web/README.md#lost-and-found).
+
 ## Shared Folders
 It is possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup. Only working on `indexd` shares.
 
