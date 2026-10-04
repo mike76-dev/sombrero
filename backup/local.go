@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -32,14 +33,25 @@ type Catalog struct {
 	Stats     stores.SnapshotStats
 }
 
-// Status is what the local tier has done so far: the newest catalog of each
-// connection, and what went wrong the last time, if anything did.
+// ServerCatalog is the catalog of the server itself that was written last: what
+// belongs to no one connection.
+type ServerCatalog struct {
+	Path      string
+	Size      int64
+	WrittenAt time.Time
+	Stats     stores.ServerStats
+}
+
+// Status is what a tier has done so far: the newest catalog of each connection,
+// the catalog of the server where the tier writes one, and what went wrong the
+// last time, if anything did.
 type Status struct {
 	Path     string
 	Interval time.Duration
 	Keep     int
 	LastRun  time.Time
 	Catalogs []Catalog
+	Server   *ServerCatalog
 	Error    string
 }
 
@@ -104,13 +116,13 @@ func (l *Local) Status() Status {
 	return status
 }
 
-// WriteAll writes a catalog of every connection and prunes the old ones. One
-// connection that cannot be written does not keep the others from being, and
-// what went wrong is kept for whoever asks.
+// WriteAll writes a catalog of every connection and one of the server, and prunes
+// the old ones. One that cannot be written does not keep the others from being,
+// and what went wrong is kept for whoever asks.
 func (l *Local) WriteAll(ctx context.Context) error {
 	conns, err := l.db.AllConnections()
 	if err != nil {
-		l.finish(nil, err)
+		l.finish(nil, nil, err)
 		return err
 	}
 
@@ -128,40 +140,74 @@ func (l *Local) WriteAll(ctx context.Context) error {
 		written = append(written, cat)
 	}
 
+	server, err := l.writeServer()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("the catalog of the server: %w", err))
+		server = nil
+	}
+
 	err = errors.Join(errs...)
-	l.finish(written, err)
+	l.finish(written, server, err)
 
 	return err
 }
 
 // finish keeps what a round came to.
-func (l *Local) finish(written []Catalog, err error) {
+func (l *Local) finish(written []Catalog, server *ServerCatalog, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	l.status.LastRun = time.Now()
 	l.status.Catalogs = written
+	l.status.Server = server
 	l.status.Error = ""
 	if err != nil {
 		l.status.Error = err.Error()
 	}
 }
 
-// write writes one catalog, whole or not at all: into a file of its own that
-// takes the catalog's name only once it is complete, so a reader never finds
-// half of one.
+// write writes one connection's catalog into its folder and prunes the folder.
 func (l *Local) write(c stores.KeyedConnection) (Catalog, error) {
-	dir := filepath.Join(l.dir, folderName(c))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	var stats stores.SnapshotStats
+	final, size, now, err := l.writeFile(filepath.Join(l.dir, folderName(c)), func(w io.Writer) (err error) {
+		stats, err = l.db.Snapshot(w, c.Share, c.Workgroup.ID, l.inline)
+		return err
+	})
+	if err != nil {
 		return Catalog{}, err
+	}
+
+	return Catalog{Share: c.Share, Workgroup: c.Workgroup.UUID, Path: final, Size: size, WrittenAt: now, Stats: stats}, nil
+}
+
+// writeServer writes the catalog of the server into its own folder and prunes it.
+func (l *Local) writeServer() (*ServerCatalog, error) {
+	var stats stores.ServerStats
+	final, size, now, err := l.writeFile(filepath.Join(l.dir, "server"), func(w io.Writer) (err error) {
+		stats, err = l.db.SnapshotServer(w)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &ServerCatalog{Path: final, Size: size, WrittenAt: now, Stats: stats}, nil
+}
+
+// writeFile writes one catalog, whole or not at all: into a file of its own that
+// takes the catalog's name only once it is complete, so a reader never finds
+// half of one. The folder is then pruned.
+func (l *Local) writeFile(dir string, snapshot func(io.Writer) error) (final string, size int64, now time.Time, err error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", 0, now, err
 	}
 
 	tmp, err := os.CreateTemp(dir, ".catalog-*")
 	if err != nil {
-		return Catalog{}, err
+		return "", 0, now, err
 	}
 	bw := bufio.NewWriter(tmp)
-	stats, err := l.db.Snapshot(bw, c.Share, c.Workgroup.ID, l.inline)
+	err = snapshot(bw)
 	if err == nil {
 		err = bw.Flush()
 	}
@@ -173,23 +219,23 @@ func (l *Local) write(c stores.KeyedConnection) (Catalog, error) {
 	}
 	if err != nil {
 		_ = os.Remove(tmp.Name())
-		return Catalog{}, err
+		return "", 0, now, err
 	}
 
-	now := time.Now().UTC()
-	final := filepath.Join(dir, now.Format("20060102T150405.000000000Z")+".catalog")
+	now = time.Now().UTC()
+	final = filepath.Join(dir, now.Format("20060102T150405.000000000Z")+".catalog")
 	if err := os.Rename(tmp.Name(), final); err != nil {
 		_ = os.Remove(tmp.Name())
-		return Catalog{}, err
+		return "", 0, now, err
 	}
 	info, err := os.Stat(final)
 	if err != nil {
-		return Catalog{}, err
+		return "", 0, now, err
 	}
 
 	l.prune(dir)
 
-	return Catalog{Share: c.Share, Workgroup: c.Workgroup.UUID, Path: final, Size: info.Size(), WrittenAt: now, Stats: stats}, nil
+	return final, info.Size(), now, nil
 }
 
 // prune leaves the newest keep catalogs in the folder. Their names are their

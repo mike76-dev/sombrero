@@ -67,6 +67,142 @@ func (db *Database) Snapshot(w io.Writer, share string, workgroup int, inlineCap
 	return stats, tw.Close()
 }
 
+// ServerStats is what a catalog of the server came to.
+type ServerStats struct {
+	Shares     int
+	Workgroups int
+	Accounts   int
+	Bans       int
+}
+
+// SnapshotServer writes a catalog of what belongs to no one connection: every
+// share as registered, every workgroup with its public folders and accounts, and
+// the bans. The anonymous identity is left out, since the server makes it anew.
+func (db *Database) SnapshotServer(w io.Writer) (stats ServerStats, err error) {
+	tx, err := db.pool.BeginTx(db.ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return stats, fmt.Errorf("failed to begin the snapshot: %w", err)
+	}
+	defer tx.Rollback(db.ctx)
+	ctx := db.ctx
+
+	var server transfer.Server
+
+	rows, err := tx.Query(ctx, `SELECT `+shareColumns+` FROM shares s ORDER BY s.share_name`)
+	if err != nil {
+		return stats, fmt.Errorf("failed to read the shares: %w", err)
+	}
+	shares, err := scanShares(rows)
+	if err != nil {
+		return stats, err
+	}
+	for _, s := range shares {
+		server.Shares = append(server.Shares, transfer.Share{
+			Name: s.Name, Type: s.Type, Server: s.ServerName, Password: s.Password, Bucket: s.Bucket, Remark: s.Remark,
+			CreatedAt: s.CreatedAt.UTC(), DataShards: s.DataShards, ParityShards: s.ParityShards,
+			AllowGuest: s.AllowGuest, AllowAnonymous: s.AllowAnonymous, PublicDir: s.PublicDir,
+		})
+	}
+
+	const workgroups = `SELECT id, uuid, name FROM workgroups WHERE uuid <> $1 ORDER BY id`
+	rows, err = tx.Query(ctx, workgroups, AnonymousWorkgroup[:])
+	if err != nil {
+		return stats, fmt.Errorf("failed to read the workgroups: %w", err)
+	}
+	type group struct {
+		id int
+		wa *transfer.WorkgroupAccounts
+	}
+	var groups []group
+	byID := make(map[int]*transfer.WorkgroupAccounts)
+	_, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (struct{}, error) {
+		var id int
+		var u []byte
+		var name *string
+		if err := row.Scan(&id, &u, &name); err != nil {
+			return struct{}{}, err
+		}
+		wa := &transfer.WorkgroupAccounts{}
+		copy(wa.Workgroup.UUID[:], u)
+		if name != nil {
+			wa.Workgroup.Name = *name
+		}
+		groups = append(groups, group{id: id, wa: wa})
+		byID[id] = wa
+		return struct{}{}, nil
+	})
+	if err != nil {
+		return stats, fmt.Errorf("failed to read the workgroups: %w", err)
+	}
+
+	rows, err = tx.Query(ctx, `SELECT workgroup, path, read_only, case_sensitive FROM public_dirs ORDER BY workgroup, id`)
+	if err != nil {
+		return stats, fmt.Errorf("failed to read the public folders: %w", err)
+	}
+	_, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (struct{}, error) {
+		var id int
+		var pd transfer.PublicDir
+		if err := row.Scan(&id, &pd.Path, &pd.ReadOnly, &pd.CaseSensitive); err != nil {
+			return struct{}{}, err
+		}
+		if wa, ok := byID[id]; ok {
+			wa.Workgroup.PublicDirs = append(wa.Workgroup.PublicDirs, pd)
+		}
+		return struct{}{}, nil
+	})
+	if err != nil {
+		return stats, fmt.Errorf("failed to read the public folders: %w", err)
+	}
+
+	rows, err = tx.Query(ctx, `SELECT workgroup, account_name, password_hash, created_at FROM accounts ORDER BY workgroup, id`)
+	if err != nil {
+		return stats, fmt.Errorf("failed to read the accounts: %w", err)
+	}
+	_, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (struct{}, error) {
+		var id int
+		var acc transfer.Account
+		if err := row.Scan(&id, &acc.Name, &acc.PasswordHash, &acc.CreatedAt); err != nil {
+			return struct{}{}, err
+		}
+		if wa, ok := byID[id]; ok {
+			acc.CreatedAt = acc.CreatedAt.UTC()
+			wa.Accounts = append(wa.Accounts, acc)
+			stats.Accounts++
+		}
+		return struct{}{}, nil
+	})
+	if err != nil {
+		return stats, fmt.Errorf("failed to read the accounts: %w", err)
+	}
+	for _, g := range groups {
+		server.Workgroups = append(server.Workgroups, *g.wa)
+	}
+
+	rows, err = tx.Query(ctx, `SELECT host, reason FROM bans ORDER BY host`)
+	if err != nil {
+		return stats, fmt.Errorf("failed to read the bans: %w", err)
+	}
+	server.Bans, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (transfer.Ban, error) {
+		var b transfer.Ban
+		return b, row.Scan(&b.Host, &b.Reason)
+	})
+	if err != nil {
+		return stats, fmt.Errorf("failed to read the bans: %w", err)
+	}
+
+	stats.Shares, stats.Workgroups, stats.Bans = len(server.Shares), len(server.Workgroups), len(server.Bans)
+
+	tw, err := transfer.NewWriter(w, transfer.Header{CreatedAt: time.Now().UTC(), Source: "sombrero"})
+	if err != nil {
+		return stats, err
+	}
+	if err := tw.Server(server); err != nil {
+		return stats, err
+	}
+
+	return stats, tw.Close()
+}
+
 // snapshotConnection reads what the folders and files belong to.
 func snapshotConnection(ctx context.Context, tx pgx.Tx, share string, workgroup int) (transfer.Connection, uuid.UUID, error) {
 	const query = `

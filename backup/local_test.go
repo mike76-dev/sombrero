@@ -116,6 +116,22 @@ func TestLocalWritesAndKeeps(t *testing.T) {
 		t.Errorf("the catalog belongs to %+v", conn)
 	}
 
+	// The server itself has a catalog too, kept the same way, and it says what
+	// the connections' catalogs cannot: everything that is nobody's.
+	if status.Server == nil || status.Server.Stats != (stores.ServerStats{Shares: 1, Workgroups: 1, Accounts: 1}) {
+		t.Fatalf("the catalog of the server: got %+v", status.Server)
+	}
+	if entries, err := os.ReadDir(filepath.Join(dir, "server")); err != nil || len(entries) != 2 {
+		t.Errorf("the server folder holds %d file(s), want the newest 2: %v", len(entries), err)
+	}
+	data, err = os.ReadFile(status.Server.Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if r, err := transfer.NewReader(bytes.NewReader(data)); err != nil || r.Server() == nil || len(r.Server().Shares) != 1 {
+		t.Errorf("the catalog of the server does not read as one: %v", err)
+	}
+
 	// A folder that cannot be written is reported, not passed over in silence.
 	bad := &Local{db: db, dir: filepath.Join(status.Catalogs[0].Path, "under-a-file"), keep: 2, inline: 1024}
 	if err := bad.WriteAll(ctx); err == nil {

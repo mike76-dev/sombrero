@@ -20,14 +20,18 @@ func TestBackupStatus(t *testing.T) {
 		}
 	})
 
-	t.Run("GET reports what the local tier has written", func(t *testing.T) {
+	t.Run("GET reports what the tiers have written", func(t *testing.T) {
 		written := time.Now().UTC().Truncate(time.Second)
-		srv := &mockServer{backups: &backup.Status{
-			Path: "/var/backups/sombrero", Interval: 15 * time.Minute, Keep: 7, LastRun: written,
-			Catalogs: []backup.Catalog{{
-				Share: "myshare", Workgroup: testUUID, Path: "/var/backups/sombrero/myshare/x.catalog", Size: 1234, WrittenAt: written,
-				Stats: stores.SnapshotStats{Directories: 2, Files: 5, Inlined: 100, Incomplete: 1},
-			}},
+		catalog := backup.Catalog{
+			Share: "myshare", Workgroup: testUUID, Path: "/var/backups/sombrero/myshare/x.catalog", Size: 1234, WrittenAt: written,
+			Stats: stores.SnapshotStats{Directories: 2, Files: 5, Inlined: 100, Incomplete: 1},
+		}
+		srv := &mockServer{backups: backup.Report{
+			Local: &backup.Status{
+				Path: "/var/backups/sombrero", Interval: 15 * time.Minute, Keep: 7, LastRun: written, Catalogs: []backup.Catalog{catalog},
+				Server: &backup.ServerCatalog{Path: "/var/backups/sombrero/server/x.catalog", Size: 99, WrittenAt: written, Stats: stores.ServerStats{Shares: 2, Workgroups: 1, Accounts: 3, Bans: 1}},
+			},
+			Network: &backup.Status{Path: backup.CatalogFolder, Interval: time.Hour, Keep: 7, Error: "the connection is not running"},
 		}}
 		w := doRequest(newTestAPIWithServer(&mockStore{}, srv), http.MethodGet, "/backup", nil)
 		checkStatus(t, w, http.StatusOK)
@@ -40,6 +44,12 @@ func TestBackupStatus(t *testing.T) {
 		}
 		if c := res.Local.Catalogs[0]; c.Share != "myshare" || c.Workgroup != testUUID.String() || c.Files != 5 || c.Incomplete != 1 || c.Size != 1234 {
 			t.Errorf("the catalog: got %+v", c)
+		}
+		if s := res.Local.Server; s == nil || s.Shares != 2 || s.Accounts != 3 || s.Bans != 1 || s.Size != 99 {
+			t.Errorf("the catalog of the server: got %+v", s)
+		}
+		if res.Network == nil || res.Network.Path != backup.CatalogFolder || res.Network.Error == "" || res.Network.LastRun != nil || res.Network.Server != nil {
+			t.Errorf("the network tier: got %+v", res.Network)
 		}
 	})
 }

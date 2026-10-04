@@ -180,6 +180,54 @@ func testConnection(now time.Time) Connection {
 	}
 }
 
+// TestServerCatalogRoundTrip verifies that a catalog of the server comes back as
+// written, holds nothing else, and is told apart from a catalog of a connection.
+func TestServerCatalogRoundTrip(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	conn := testConnection(now)
+	server := Server{
+		Shares:     []Share{conn.Share, {Name: "docs", Type: "renterd", Server: "http://127.0.0.1:9980", Bucket: "default", CreatedAt: now}},
+		Workgroups: []WorkgroupAccounts{{Workgroup: conn.Workgroup, Accounts: conn.Accounts}, {Workgroup: Workgroup{UUID: [16]byte{9}}}},
+		Bans:       []Ban{{Host: "192.168.1.100", Reason: "too many bad passwords"}},
+	}
+
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, testHeader())
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := w.Server(server); err != nil {
+		t.Fatalf("Server: %v", err)
+	}
+	if err := w.Connection(conn); err == nil {
+		t.Error("a connection was taken into a catalog of the server")
+	}
+	if err := w.Directory(Directory{Path: "/x", CreatedAt: now, ModifiedAt: now}); err == nil {
+		t.Error("a folder was taken into a catalog of the server")
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r, dirs, files := read(t, buf.Bytes())
+	if got := r.Server(); got == nil || !reflect.DeepEqual(*got, server) {
+		t.Errorf("server: want %+v, got %+v", server, got)
+	}
+	if r.Connection() != nil || len(dirs) != 0 || len(files) != 0 {
+		t.Errorf("a catalog of the server came back with more: %+v %+v %+v", r.Connection(), dirs, files)
+	}
+
+	for _, bad := range []Server{
+		{Shares: []Share{{}}},
+		{Workgroups: []WorkgroupAccounts{{Accounts: []Account{{Name: "x", PasswordHash: []byte{1}}}}}},
+		{Bans: []Ban{{}}},
+	} {
+		if err := bad.Validate(); err == nil {
+			t.Errorf("%+v passed as a server record", bad)
+		}
+	}
+}
+
 // TestCatalogRoundTrip verifies that a catalog comes back with what the folders
 // and files belong to, and that the connection is taken only where it belongs.
 func TestCatalogRoundTrip(t *testing.T) {

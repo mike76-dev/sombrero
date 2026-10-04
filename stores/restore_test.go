@@ -117,6 +117,90 @@ func TestRestore(t *testing.T) {
 	}
 }
 
+// TestServerCatalog verifies that what belongs to no connection comes back from a
+// catalog of the server: the shares, the workgroups with their accounts, and the
+// bans, with what is there already left alone.
+func TestServerCatalog(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	fx := plantCatalogFixture(t, db)
+	addShare(t, db, "docs") // a renterd share nobody is connected to
+	lonely := addWorkgroup(t, db, "lonely")
+	if err := db.BanHost("192.168.1.100", "too many bad passwords"); err != nil {
+		t.Fatalf("BanHost: %v", err)
+	}
+
+	var catalog bytes.Buffer
+	stats, err := db.SnapshotServer(&catalog)
+	if err != nil {
+		t.Fatalf("SnapshotServer: %v", err)
+	}
+	if stats != (ServerStats{Shares: 2, Workgroups: 2, Accounts: 2, Bans: 1}) {
+		t.Errorf("stats: got %+v", stats)
+	}
+
+	r, err := transfer.NewReader(bytes.NewReader(catalog.Bytes()))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	server := r.Server()
+	if server == nil || len(server.Shares) != 2 || len(server.Workgroups) != 2 || len(server.Bans) != 1 {
+		t.Fatalf("the catalog: got %+v", server)
+	}
+	if server.Workgroups[0].Workgroup.Name != fx.wg.Name || len(server.Workgroups[0].Accounts) != 2 || len(server.Workgroups[0].Workgroup.PublicDirs) != 1 {
+		t.Errorf("the first workgroup: got %+v", server.Workgroups[0])
+	}
+
+	// Everything goes, and the catalog brings it back, except the connection,
+	// which is the business of the catalog of the connection.
+	for _, name := range []string{fx.share.Name, "docs"} {
+		if err := db.UnregisterShare(name); err != nil {
+			t.Fatalf("UnregisterShare(%s): %v", name, err)
+		}
+	}
+	for _, wg := range []Workgroup{fx.wg, lonely} {
+		if err := db.RemoveWorkgroup(wg); err != nil {
+			t.Fatalf("RemoveWorkgroup: %v", err)
+		}
+	}
+	if err := db.ClearBans(); err != nil {
+		t.Fatalf("ClearBans: %v", err)
+	}
+
+	r, _ = transfer.NewReader(bytes.NewReader(catalog.Bytes()))
+	restored, err := db.RestoreServer(ctx, r)
+	if err != nil {
+		t.Fatalf("RestoreServer: %v", err)
+	}
+	if restored != (ServerRestoreStats{Shares: 2, Workgroups: 2, Accounts: 2, Bans: 1}) {
+		t.Errorf("restored: got %+v", restored)
+	}
+	if share, err := db.GetShare("docs"); err != nil || share.Type != "renterd" {
+		t.Errorf("the renterd share: got %+v, %v", share, err)
+	}
+	wg, err := db.FindWorkgroup(fx.wg.UUID)
+	if err != nil || wg.ID == 0 || len(wg.PublicDirs) != 1 {
+		t.Errorf("the workgroup: got %+v, %v", wg, err)
+	}
+	if bob, err := db.FindAccount("bob", fx.wg.UUID.String()); err != nil || !bytes.Equal(bob.NTHash, ntHash("pw")) {
+		t.Errorf("bob: got %+v, %v", bob, err)
+	}
+	if banned, _, err := db.IsBanned("192.168.1.100"); err != nil || !banned {
+		t.Errorf("the ban: %v %v", banned, err)
+	}
+	if connected, _, err := db.IsConnected(wg, fx.share); err != nil || connected {
+		t.Error("a catalog of the server made a connection")
+	}
+
+	// Again, and nothing is made twice.
+	r, _ = transfer.NewReader(bytes.NewReader(catalog.Bytes()))
+	if again, err := db.RestoreServer(ctx, r); err != nil || again != (ServerRestoreStats{}) {
+		t.Errorf("the second restore: got %+v, %v", again, err)
+	}
+}
+
 // TestRestoreRefusals verifies what a restore will not do: apply a description
 // that is not a catalog, or recreate a share over a different one.
 func TestRestoreRefusals(t *testing.T) {

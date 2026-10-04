@@ -145,26 +145,36 @@ export interface AppKeyResponse {
   appKey: string
 }
 
-// What the backups are set to, and what the tiers that are on have done.
+// What the backups are set to, and what the tiers that are on have done. A tier
+// that is off is left out.
 export interface BackupResponse {
   enabled: boolean
   bufferAge: string
-  local?: LocalBackupStatus
-  network?: NetworkBackupStatus
+  local?: TierStatus
+  network?: TierStatus
 }
 
-export interface LocalBackupStatus {
+export interface TierStatus {
   path: string
   interval: string
   keep: number
   lastRun?: string
   error?: string
   catalogs: CatalogStatus[]
+
+  // server is the catalog of the server itself, where the tier writes one:
+  // the shares, the workgroups with their accounts, and the bans.
+  server?: ServerCatalogStatus
 }
 
-export interface NetworkBackupStatus {
-  interval: string
-  keep: number
+export interface ServerCatalogStatus {
+  path: string
+  size: number
+  writtenAt: string
+  shares: number
+  workgroups: number
+  accounts: number
+  bans: number
 }
 
 // One catalog that was written and what it holds.
@@ -180,16 +190,21 @@ export interface CatalogStatus {
   inlined: number
 }
 
-// What restoring a catalog came to.
+// What restoring a catalog came to. kind says which catalog it was, and the
+// counts of the other kind are left out.
 export interface RestoreResponse {
-  share: string
-  workgroup: string
+  kind: 'connection' | 'server'
+  share?: string
+  workgroup?: string
   accounts: number
-  policies: number
-  directories: number
-  files: number
-  alreadyThere: number
-  incomplete: number
+  policies?: number
+  directories?: number
+  files?: number
+  alreadyThere?: number
+  incomplete?: number
+  shares?: number
+  workgroups?: number
+  bans?: number
 }
 
 // A workgroup's connection to an indexd share, holding the app key of an account

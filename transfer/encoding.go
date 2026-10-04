@@ -64,6 +64,44 @@ func (c *Connection) DecodeFrom(d *types.Decoder) {
 }
 
 // EncodeTo implements types.EncoderTo.
+func (s Server) EncodeTo(e *types.Encoder) {
+	types.EncodeSlice(e, s.Shares)
+	types.EncodeSlice(e, s.Workgroups)
+	types.EncodeSlice(e, s.Bans)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (s *Server) DecodeFrom(d *types.Decoder) {
+	types.DecodeSlice(d, &s.Shares)
+	types.DecodeSlice(d, &s.Workgroups)
+	types.DecodeSlice(d, &s.Bans)
+}
+
+// EncodeTo implements types.EncoderTo.
+func (w WorkgroupAccounts) EncodeTo(e *types.Encoder) {
+	w.Workgroup.EncodeTo(e)
+	types.EncodeSlice(e, w.Accounts)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (w *WorkgroupAccounts) DecodeFrom(d *types.Decoder) {
+	w.Workgroup.DecodeFrom(d)
+	types.DecodeSlice(d, &w.Accounts)
+}
+
+// EncodeTo implements types.EncoderTo.
+func (b Ban) EncodeTo(e *types.Encoder) {
+	e.WriteString(b.Host)
+	e.WriteString(b.Reason)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (b *Ban) DecodeFrom(d *types.Decoder) {
+	b.Host = d.ReadString()
+	b.Reason = d.ReadString()
+}
+
+// EncodeTo implements types.EncoderTo.
 func (s Share) EncodeTo(e *types.Encoder) {
 	e.WriteString(s.Name)
 	e.WriteString(s.Type)
@@ -290,6 +328,7 @@ type Writer struct {
 	dirs      uint64
 	files     uint64
 	connected bool
+	server    bool
 	err       error
 	done      bool
 }
@@ -321,8 +360,8 @@ func (w *Writer) Connection(c Connection) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	if w.connected {
-		return errors.New("the catalog has its connection already")
+	if w.connected || w.server {
+		return errors.New("the catalog says what it is already")
 	}
 	if w.dirs > 0 || w.files > 0 {
 		return errors.New("the connection has to come before the folders and files")
@@ -335,10 +374,34 @@ func (w *Writer) Connection(c Connection) error {
 	return nil
 }
 
+// Server writes what belongs to the server rather than to a connection, which
+// makes the stream a catalog of the server. It comes once, and alone: such a
+// stream holds no folders or files.
+func (w *Writer) Server(s Server) error {
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	if w.connected || w.server {
+		return errors.New("the catalog says what it is already")
+	}
+	if w.dirs > 0 || w.files > 0 {
+		return errors.New("a catalog of the server holds no folders or files")
+	}
+	if err := w.record(kindServer, s); err != nil {
+		return err
+	}
+	w.server = true
+
+	return nil
+}
+
 // Directory writes a folder.
 func (w *Writer) Directory(dir Directory) error {
 	if err := dir.Validate(); err != nil {
 		return err
+	}
+	if w.server {
+		return errors.New("a catalog of the server holds no folders or files")
 	}
 	if err := w.record(kindDirectory, dir); err != nil {
 		return err
@@ -352,6 +415,9 @@ func (w *Writer) Directory(dir Directory) error {
 func (w *Writer) File(f File) error {
 	if err := f.Validate(); err != nil {
 		return err
+	}
+	if w.server {
+		return errors.New("a catalog of the server holds no folders or files")
 	}
 	if err := w.record(kindFile, f); err != nil {
 		return err
@@ -455,6 +521,7 @@ type Reader struct {
 
 	header     Header
 	connection *Connection
+	server     *Server
 	dirs       uint64
 	files      uint64
 	done       bool
@@ -509,16 +576,28 @@ func NewReader(r io.Reader) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	if kind == kindConnection {
+	switch kind {
+	case kindConnection:
 		tr.connection = new(Connection)
 		if err := decode(payload, tr.connection); err != nil {
 			return nil, err
 		}
-	} else {
+	case kindServer:
+		tr.server = new(Server)
+		if err := decode(payload, tr.server); err != nil {
+			return nil, err
+		}
+	default:
 		tr.pending = &record{kind: kind, payload: payload}
 	}
 
 	return tr, nil
+}
+
+// Server returns what belongs to the server, which only a catalog of the server
+// says: it is nil for anything else.
+func (r *Reader) Server() *Server {
+	return r.server
 }
 
 // Header returns what the stream says about where it came from.
@@ -559,8 +638,8 @@ func (r *Reader) Next() (*Directory, *File, error) {
 		}
 
 		switch kind {
-		case kindConnection:
-			return nil, nil, errors.New("the connection comes before the folders and files, not among them")
+		case kindConnection, kindServer:
+			return nil, nil, errors.New("what the catalog belongs to comes before the folders and files, not among them")
 
 		case kindEnd:
 			if err := r.end(payload); err != nil {

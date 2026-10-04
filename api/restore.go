@@ -11,22 +11,29 @@ import (
 	"github.com/mike76-dev/sombrero/transfer"
 )
 
-// Restorer is the part of a store that recreates a connection from its catalog.
-// Only the database-backed store has it.
+// Restorer is the part of a store that recreates a connection, or what belongs
+// to the server, from a catalog. Only the database-backed store has it.
 type Restorer interface {
 	Restore(ctx context.Context, r *transfer.Reader, opts stores.RestoreOptions) (stores.RestoreStats, error)
+	RestoreServer(ctx context.Context, r *transfer.Reader) (stores.ServerRestoreStats, error)
 }
 
-// RestoreResponse is the response type of POST /restore: what came back.
+// RestoreResponse is the response type of POST /restore: what came back. Kind
+// says which catalog it was, "connection" or "server", and the counts that go
+// with the other kind are left out.
 type RestoreResponse struct {
-	Share        string `json:"share"`
-	Workgroup    string `json:"workgroup"`
+	Kind         string `json:"kind"`
+	Share        string `json:"share,omitempty"`
+	Workgroup    string `json:"workgroup,omitempty"`
 	Accounts     int    `json:"accounts"`
-	Policies     int    `json:"policies"`
-	Directories  int    `json:"directories"`
-	Files        int    `json:"files"`
-	AlreadyThere int    `json:"alreadyThere"`
-	Incomplete   int    `json:"incomplete"`
+	Policies     int    `json:"policies,omitempty"`
+	Directories  int    `json:"directories,omitempty"`
+	Files        int    `json:"files,omitempty"`
+	AlreadyThere int    `json:"alreadyThere,omitempty"`
+	Incomplete   int    `json:"incomplete,omitempty"`
+	Shares       int    `json:"shares,omitempty"`
+	Workgroups   int    `json:"workgroups,omitempty"`
+	Bans         int    `json:"bans,omitempty"`
 }
 
 // maxCatalogSize bounds what a restore reads off a request.
@@ -48,6 +55,17 @@ func (api *API) restoreHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 		return
 	}
 
+	if r.Server() != nil {
+		stats, err := store.RestoreServer(req.Context(), r)
+		if err != nil {
+			log.Printf("failed to restore a catalog of the server: %v", err)
+			writeError(w, "the catalog could not be restored: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, RestoreResponse{Kind: "server", Shares: stats.Shares, Workgroups: stats.Workgroups, Accounts: stats.Accounts, Bans: stats.Bans})
+		return
+	}
+
 	force := req.URL.Query().Get("force") == "true"
 	stats, err := store.Restore(req.Context(), r, stores.RestoreOptions{Force: force})
 	switch {
@@ -65,6 +83,7 @@ func (api *API) restoreHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 	}
 
 	writeJSON(w, RestoreResponse{
+		Kind:         "connection",
 		Share:        stats.Share,
 		Workgroup:    stats.Workgroup.String(),
 		Accounts:     stats.Accounts,

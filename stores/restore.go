@@ -154,6 +154,85 @@ func (db *Database) Restore(ctx context.Context, r *transfer.Reader, opts Restor
 	}
 }
 
+// ServerRestoreStats is what restoring a catalog of the server came to: what was
+// made, with what was there already left as it was.
+type ServerRestoreStats struct {
+	Shares     int
+	Workgroups int
+	Accounts   int
+	Bans       int
+}
+
+// RestoreServer recreates what a catalog of the server describes: the shares,
+// the workgroups with their accounts, and the bans. Nothing that is there
+// already is touched, and no connection is made.
+func (db *Database) RestoreServer(ctx context.Context, r *transfer.Reader) (ServerRestoreStats, error) {
+	var stats ServerRestoreStats
+	server := r.Server()
+	if server == nil {
+		return stats, ErrNotACatalog
+	}
+
+	for _, s := range server.Shares {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		existing, err := db.GetShare(s.Name)
+		if err != nil {
+			return stats, err
+		}
+		if existing.Name != "" {
+			continue
+		}
+		if _, err := db.restoreShare(s); err != nil {
+			return stats, err
+		}
+		stats.Shares++
+	}
+
+	for _, wa := range server.Workgroups {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		existing, err := db.FindWorkgroup(uuid.UUID(wa.Workgroup.UUID))
+		if err != nil {
+			return stats, err
+		}
+		wg := existing
+		if existing.ID == 0 {
+			if wg, err = db.restoreWorkgroup(wa.Workgroup); err != nil {
+				return stats, err
+			}
+			stats.Workgroups++
+		}
+		for _, acc := range wa.Accounts {
+			made, err := db.restoreAccount(wg, acc)
+			if err != nil {
+				return stats, err
+			}
+			if made {
+				stats.Accounts++
+			}
+		}
+	}
+
+	for _, ban := range server.Bans {
+		banned, _, err := db.IsBanned(ban.Host)
+		if err != nil {
+			return stats, err
+		}
+		if banned {
+			continue
+		}
+		if err := db.BanHost(ban.Host, ban.Reason); err != nil {
+			return stats, err
+		}
+		stats.Bans++
+	}
+
+	return stats, nil
+}
+
 // restoreShare registers the share the catalog describes, or returns the one of
 // that name that is registered already, provided it serves the same thing.
 func (db *Database) restoreShare(s transfer.Share) (Share, error) {

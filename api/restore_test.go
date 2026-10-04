@@ -60,11 +60,35 @@ func TestRestore(t *testing.T) {
 		w := postBytes(newTestAPI(ms), "/restore?force=true", catalogBody(t))
 		checkStatus(t, w, http.StatusOK)
 		res := decodeJSON[RestoreResponse](t, w)
-		if res.Share != "myshare" || res.Workgroup != testUUID.String() || res.Accounts != 2 || res.Policies != 1 || res.Files != 4 || res.Incomplete != 1 {
+		if res.Kind != "connection" || res.Share != "myshare" || res.Workgroup != testUUID.String() || res.Accounts != 2 || res.Policies != 1 || res.Files != 4 || res.Incomplete != 1 {
 			t.Errorf("the response: got %+v", res)
 		}
 		if !got.Force {
 			t.Error("force was asked for and not passed on")
+		}
+	})
+
+	t.Run("POST restores a catalog of the server", func(t *testing.T) {
+		var buf bytes.Buffer
+		w, _ := transfer.NewWriter(&buf, transfer.Header{Source: "sombrero"})
+		_ = w.Server(transfer.Server{Bans: []transfer.Ban{{Host: "192.168.1.100"}}})
+		_ = w.Close()
+
+		ms := &mockStore{
+			restoreServer: func(_ context.Context, r *transfer.Reader) (stores.ServerRestoreStats, error) {
+				if r.Server() == nil || len(r.Server().Bans) != 1 {
+					t.Error("the store was handed something other than the catalog of the server")
+				}
+				return stores.ServerRestoreStats{Shares: 2, Workgroups: 1, Accounts: 3, Bans: 1}, nil
+			},
+			restore: func(context.Context, *transfer.Reader, stores.RestoreOptions) (stores.RestoreStats, error) {
+				t.Error("a catalog of the server was restored as a connection")
+				return stores.RestoreStats{}, nil
+			},
+		}
+		res := decodeJSON[RestoreResponse](t, postBytes(newTestAPI(ms), "/restore", buf.Bytes()))
+		if res.Kind != "server" || res.Shares != 2 || res.Workgroups != 1 || res.Accounts != 3 || res.Bans != 1 {
+			t.Errorf("the response: got %+v", res)
 		}
 	})
 

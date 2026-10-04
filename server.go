@@ -88,8 +88,10 @@ type server struct {
 	// backlog caps what the indexd shares keep buffered; nil when there is no cap.
 	backlog *client.Backlog
 
-	// backups writes the catalogs to this machine; nil when that tier is off.
+	// backups writes the catalogs to this machine and network into the shares;
+	// each is nil when its tier is off.
 	backups *backup.Local
+	network *backup.Network
 }
 
 // newServerState returns a server with its tables in place and nothing running behind it: no
@@ -156,6 +158,7 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, cfg stores.
 	if sdb, ok := db.(*stores.Database); ok && cfg.Mode == stores.ModeNormal {
 		s.backlog = client.NewBacklog(ctx, sdb, cfg.Indexd.MaxBufferedData)
 		s.backups = backup.NewLocal(ctx, sdb, cfg.Backup)
+		s.network = backup.NewNetwork(ctx, sdb, s.shareFiles, cfg.Backup)
 	}
 
 	go s.reapDurableOpens()
@@ -216,14 +219,34 @@ func (s *server) acceptConnections(l net.Listener) {
 	}
 }
 
-// BackupStatus reports what the local backup tier has done, or nil where it is off.
-func (s *server) BackupStatus() *backup.Status {
-	if s.backups == nil {
-		return nil
+// BackupStatus reports what the backup tiers have done; a tier that is off is nil.
+func (s *server) BackupStatus() backup.Report {
+	var report backup.Report
+	if s.backups != nil {
+		status := s.backups.Status()
+		report.Local = &status
 	}
-	status := s.backups.Status()
+	if s.network != nil {
+		status := s.network.Status()
+		report.Network = &status
+	}
 
-	return &status
+	return report
+}
+
+// shareFiles hands the backup the running connections of a share, as what it
+// takes to put a file into the share.
+func (s *server) shareFiles(share string) (map[string]backup.ShareFiles, error) {
+	conns, _, err := s.ShareConnections(share)
+	if err != nil {
+		return nil, err
+	}
+	files := make(map[string]backup.ShareFiles, len(conns))
+	for wg, c := range conns {
+		files[wg] = c
+	}
+
+	return files, nil
 }
 
 // Stats returns a snapshot of the current server statistics.

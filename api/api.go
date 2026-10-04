@@ -102,9 +102,9 @@ type Server interface {
 	OfferSDK(wg stores.Workgroup, share stores.Share, sdkClient *sdk.SDK)
 	DiscardSDK(wg stores.Workgroup, share stores.Share)
 
-	// BackupStatus reports what the local backup tier has done, or nil where
-	// it is off.
-	BackupStatus() *backup.Status
+	// BackupStatus reports what the backup tiers have done; a tier that is off
+	// is nil.
+	BackupStatus() backup.Report
 }
 
 // OrphanedSlab is one entry of an orphan scan: a slab that the share's

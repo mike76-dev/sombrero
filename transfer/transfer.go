@@ -32,6 +32,7 @@ const (
 	kindDirectory
 	kindFile
 	kindConnection
+	kindServer
 )
 
 // Header says where a description came from and what it covers. It opens every
@@ -66,6 +67,27 @@ type Connection struct {
 	// Without it the data is unreadable, which is why a catalog on the network
 	// cannot be the only copy of this record.
 	AppKey []byte
+}
+
+// Server is what a catalog of the server itself carries: what belongs to no
+// one connection. Every share as registered, every workgroup with its accounts,
+// and the hosts that are banned. A stream carrying it holds no folders or files.
+type Server struct {
+	Shares     []Share
+	Workgroups []WorkgroupAccounts
+	Bans       []Ban
+}
+
+// WorkgroupAccounts is a workgroup with the accounts in it.
+type WorkgroupAccounts struct {
+	Workgroup Workgroup
+	Accounts  []Account
+}
+
+// Ban is a host that is turned away, and why.
+type Ban struct {
+	Host   string
+	Reason string
 }
 
 // Share is a share as registered: where it is served from and how.
@@ -245,7 +267,35 @@ func (c Connection) Validate() error {
 	if len(c.AppKey) != 0 && len(c.AppKey) != 64 {
 		return fmt.Errorf("the app key is %d byte(s) long, not 64", len(c.AppKey))
 	}
-	for _, acc := range c.Accounts {
+
+	return validAccounts(c.Accounts)
+}
+
+// Validate checks that the server record is one a reader can act on.
+func (s Server) Validate() error {
+	for _, share := range s.Shares {
+		if share.Name == "" {
+			return errors.New("a share has no name")
+		}
+	}
+	for _, wg := range s.Workgroups {
+		if err := validAccounts(wg.Accounts); err != nil {
+			return err
+		}
+	}
+	for _, ban := range s.Bans {
+		if ban.Host == "" {
+			return errors.New("a ban names no host")
+		}
+	}
+
+	return nil
+}
+
+// validAccounts checks that the accounts have names and hashes of the length a
+// hash has.
+func validAccounts(accounts []Account) error {
+	for _, acc := range accounts {
 		if acc.Name == "" {
 			return errors.New("an account has no name")
 		}

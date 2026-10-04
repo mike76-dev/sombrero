@@ -77,6 +77,7 @@ type mockStore struct {
 	applyFile           func(stores.TransferTarget, transfer.File) (stores.ApplyResult, error)
 	setFileTimes        func(share, path string, createdAt, modifiedAt time.Time) error
 	restore             func(context.Context, *transfer.Reader, stores.RestoreOptions) (stores.RestoreStats, error)
+	restoreServer       func(context.Context, *transfer.Reader) (stores.ServerRestoreStats, error)
 }
 
 func (m *mockStore) IsBanned(h string) (bool, string, error) {
@@ -327,17 +328,24 @@ func (m *mockStore) Restore(ctx context.Context, r *transfer.Reader, opts stores
 	return stores.RestoreStats{}, nil
 }
 
+func (m *mockStore) RestoreServer(ctx context.Context, r *transfer.Reader) (stores.ServerRestoreStats, error) {
+	if m.restoreServer != nil {
+		return m.restoreServer(ctx, r)
+	}
+	return stores.ServerRestoreStats{}, nil
+}
+
 // mockServer stands in for the running SMB server.
 type mockServer struct {
 	stats            ServerStats
 	shareConnections func(string) (map[string]client.Client, map[string]string, error)
 	offered          *sdk.SDK
-	backups          *backup.Status
+	backups          backup.Report
 }
 
 func (m *mockServer) Stats() ServerStats { return m.stats }
 
-func (m *mockServer) BackupStatus() *backup.Status { return m.backups }
+func (m *mockServer) BackupStatus() backup.Report { return m.backups }
 
 func (m *mockServer) ShareConnections(name string) (map[string]client.Client, map[string]string, error) {
 	if m.shareConnections != nil {
