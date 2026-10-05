@@ -31,7 +31,6 @@ type Report struct {
 // ShareFiles is as much of a connection's client as putting a file into the
 // share, listing a folder of it and taking a file out again take.
 type ShareFiles interface {
-	MakeDirectory(ctx context.Context, acc stores.Account, path string) error
 	StartUpload(ctx context.Context, acc stores.Account, path string) (string, error)
 	Write(ctx context.Context, r io.Reader, path, uploadID string, partNumber int, offset, length uint64) (string, error)
 	FinishUpload(ctx context.Context, path, uploadID string, parts []api.MultipartCompletedPart) error
@@ -215,10 +214,11 @@ func (n *Network) write(ctx context.Context, c stores.KeyedConnection, files Sha
 		return Catalog{}, err
 	}
 
-	for _, dir := range []string{path.Dir(CatalogFolder), CatalogFolder} {
-		if err := files.MakeDirectory(ctx, owner, dir); err != nil && !errors.Is(err, stores.ErrDirectoryExists) {
-			return Catalog{}, fmt.Errorf("failed to make %s: %w", dir, err)
-		}
+	// The folder is the server's, written as the owner: made if it is not
+	// there, and taken over with what is in it if an earlier owner left it.
+	target := stores.TransferTarget{Share: share.Name, Workgroup: wg.ID, Owner: owner}
+	if err := n.db.AdoptFolder(target, CatalogFolder); err != nil {
+		return Catalog{}, fmt.Errorf("failed to make %s: %w", CatalogFolder, err)
 	}
 
 	now := time.Now().UTC()

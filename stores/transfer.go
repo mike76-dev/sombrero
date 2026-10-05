@@ -321,6 +321,49 @@ func cutFile(ctx context.Context, tx pgx.Tx, share, path string, remainder []tra
 	return nil
 }
 
+// AdoptFolder makes the folder at the path, and the folders above it, the owner's
+// own: made where they are not there, private, and handed over with everything
+// in them where they are. It is for the folders the server keeps for itself in a
+// share, which have to belong to whoever the server writes them as now.
+func (db *Database) AdoptFolder(target TransferTarget, path string) error {
+	path = normalizePath(path)
+	if path == "/" {
+		return ErrNameInvalid
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		if err := indexdShare(ctx, tx, target.Share); err != nil {
+			return err
+		}
+		now := time.Now()
+		if _, _, err := ensureDirectory(ctx, tx, target, path, true, false, now, now); err != nil {
+			return err
+		}
+
+		// The path, the folders above it and everything under it, files alike:
+		// a folder is of no use to its owner while one above it is somebody's.
+		const folders = `
+			UPDATE directories
+			SET account = $3, workgroup = $4, private = TRUE
+			WHERE share_name = $1
+			AND (full_path = $2 OR full_path LIKE $2 || '/%' OR $2 LIKE full_path || '/%')
+		`
+		if _, err := tx.Exec(ctx, folders, target.Share, path, target.Owner.ID, target.Workgroup); err != nil {
+			return fmt.Errorf("failed to adopt the folder %q: %w", path, err)
+		}
+		const files = `
+			UPDATE objects
+			SET account = $3, workgroup = $4
+			WHERE share_name = $1 AND full_path LIKE $2 || '/%'
+		`
+		if _, err := tx.Exec(ctx, files, target.Share, path, target.Owner.ID, target.Workgroup); err != nil {
+			return fmt.Errorf("failed to adopt the files in %q: %w", path, err)
+		}
+
+		return nil
+	})
+}
+
 // ensureDirectory returns the id of the folder at the path, creating it and the
 // folders above it where they are not there yet.
 func ensureDirectory(ctx context.Context, tx pgx.Tx, target TransferTarget, path string, private, readOnly bool, createdAt, modifiedAt time.Time) (id *uint64, created bool, err error) {

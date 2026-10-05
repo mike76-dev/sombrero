@@ -22,25 +22,13 @@ import (
 // the share, kept in memory.
 type fakeShare struct {
 	mu      sync.Mutex
-	dirs    map[string]bool
 	files   map[string][]byte
 	uploads map[string]string
 	owners  map[string]string
 }
 
 func newFakeShare() *fakeShare {
-	return &fakeShare{dirs: map[string]bool{}, files: map[string][]byte{}, uploads: map[string]string{}, owners: map[string]string{}}
-}
-
-func (f *fakeShare) MakeDirectory(_ context.Context, acc stores.Account, p string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.dirs[p] {
-		return stores.ErrDirectoryExists
-	}
-	f.dirs[p] = true
-	f.owners[p] = acc.Username
-	return nil
+	return &fakeShare{files: map[string][]byte{}, uploads: map[string]string{}, owners: map[string]string{}}
 }
 
 func (f *fakeShare) StartUpload(_ context.Context, acc stores.Account, p string) (string, error) {
@@ -119,6 +107,20 @@ func (f *fakeShare) catalogs() []string {
 func TestNetworkWritesSealedCatalogs(t *testing.T) {
 	ctx := context.Background()
 	db, wg, key := connectedStore(t, ctx)
+	alice, err := db.FindAccount("alice", wg.UUID.String())
+	if err != nil {
+		t.Fatalf("FindAccount(alice): %v", err)
+	}
+	guest, err := db.FindAccount("guest", wg.UUID.String())
+	if err != nil {
+		t.Fatalf("FindAccount(guest): %v", err)
+	}
+
+	// An earlier server left the folder to the guest, private to it; the owner
+	// of today has to be able to write into it all the same.
+	if _, err := db.ApplyDirectory(stores.TransferTarget{Share: "idx", Workgroup: wg.ID, Owner: guest}, transfer.Directory{Path: path.Dir(CatalogFolder), Private: true}); err != nil {
+		t.Fatalf("ApplyDirectory: %v", err)
+	}
 
 	share := newFakeShare()
 	n := &Network{
@@ -140,8 +142,25 @@ func TestNetworkWritesSealedCatalogs(t *testing.T) {
 	if len(names) != 2 {
 		t.Fatalf("the share holds %d catalog(s), want the newest 2: %v", len(names), names)
 	}
-	if !share.dirs[path.Dir(CatalogFolder)] || !share.dirs[CatalogFolder] || share.owners[CatalogFolder] != "alice" {
-		t.Errorf("the folders: %v, owned by %q", share.dirs, share.owners[CatalogFolder])
+	if share.owners[names[1]] != "alice" {
+		t.Errorf("the catalog was written as %q, want alice", share.owners[names[1]])
+	}
+
+	// The folder is alice's now, and the guest sees nothing of it.
+	seen := func(acc stores.Account) bool {
+		entries, err := db.ListObjects(acc, "idx", "/")
+		if err != nil {
+			t.Fatalf("ListObjects: %v", err)
+		}
+		for _, entry := range entries {
+			if entry.Path == path.Dir(CatalogFolder) {
+				return true
+			}
+		}
+		return false
+	}
+	if !seen(alice) || seen(guest) {
+		t.Errorf("the folder: alice sees it %v, the guest sees it %v", seen(alice), seen(guest))
 	}
 
 	status := n.Status()
