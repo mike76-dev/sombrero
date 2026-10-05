@@ -15,11 +15,12 @@ import (
 
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
+	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/renterd/v2/api"
 )
 
 // CatalogFolder is where a share keeps the catalogs of itself.
-const CatalogFolder = "/.sombrero/catalog"
+const CatalogFolder = transfer.CatalogFolder
 
 // Report is what both tiers have done; a tier that is off is nil.
 type Report struct {

@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { backupStatus, restoreCatalog } from '../api/endpoints'
-import { RestoreResponse, TierStatus } from '../api/types'
+import { backupStatus, recoverFromNetwork, restoreCatalog } from '../api/endpoints'
+import { RecoverResponse, RestoreResponse, TierStatus } from '../api/types'
 import {
   Card,
   ErrorBanner,
@@ -9,10 +9,48 @@ import {
   useApiAction,
   useApiData,
 } from '../components/common'
+import { ServerAddressField } from '../components/serveraddress'
 
 // formatInterval shortens what Go prints for a duration: "15m0s" is "15m".
 function formatInterval(s: string): string {
   return s.replace(/(\d+[hm])0s$/, '$1').replace(/(\d+h)0m$/, '$1')
+}
+
+// RestoredBanner says what restoring a catalog came to, in the words of the
+// kind of catalog it was.
+function RestoredBanner({ restored, from }: { restored: RestoreResponse; from?: string }) {
+  if (restored.kind === 'server') {
+    return (
+      <div className="banner banner-success">
+        Restored the server: {restored.shares ?? 0} share{restored.shares === 1 ? '' : 's'},{' '}
+        {restored.workgroups ?? 0} workgroup{restored.workgroups === 1 ? '' : 's'},{' '}
+        {restored.accounts} account{restored.accounts === 1 ? '' : 's'} and {restored.bans ?? 0} ban
+        {restored.bans === 1 ? '' : 's'} were added; whatever was there already was left as it
+        was.
+      </div>
+    )
+  }
+
+  return (
+    <div className="banner banner-success">
+      Restored <strong>{restored.share}</strong> for workgroup{' '}
+      <span className="mono">{restored.workgroup}</span>
+      {from ? (
+        <>
+          {' '}
+          from <span className="mono">{from}</span>
+        </>
+      ) : null}
+      : {restored.accounts} account{restored.accounts === 1 ? '' : 's'}, {restored.policies ?? 0}{' '}
+      polic{restored.policies === 1 ? 'y' : 'ies'}, {restored.directories ?? 0} folder
+      {restored.directories === 1 ? '' : 's'} and {restored.files ?? 0} file
+      {restored.files === 1 ? '' : 's'}
+      {(restored.alreadyThere ?? 0) > 0 ? `, ${restored.alreadyThere} already there` : ''}
+      {(restored.incomplete ?? 0) > 0
+        ? `. ${restored.incomplete} file${restored.incomplete === 1 ? ' is' : 's are'} incomplete: the catalog was written before all of the data had reached the network.`
+        : '.'}
+    </div>
+  )
 }
 
 // Tier is one place the catalogs go: where, how often, and the newest catalog
@@ -76,6 +114,12 @@ export function BackupPage() {
   const [file, setFile] = useState<File | null>(null)
   const [force, setForce] = useState(false)
   const [restored, setRestored] = useState<RestoreResponse | null>(null)
+
+  const recover = useApiAction()
+  const [address, setAddress] = useState('')
+  const [appKey, setAppKey] = useState('')
+  const [recoverForce, setRecoverForce] = useState(false)
+  const [recovered, setRecovered] = useState<RecoverResponse | null>(null)
 
   return (
     <div className="page">
@@ -158,30 +202,67 @@ export function BackupPage() {
             {restore.busy ? 'Restoring…' : 'Restore'}
           </button>
         </div>
-        {restored && restored.kind === 'server' && (
-          <div className="banner banner-success">
-            Restored the server: {restored.shares ?? 0} share{restored.shares === 1 ? '' : 's'},{' '}
-            {restored.workgroups ?? 0} workgroup{restored.workgroups === 1 ? '' : 's'},{' '}
-            {restored.accounts} account{restored.accounts === 1 ? '' : 's'} and {restored.bans ?? 0}{' '}
-            ban{restored.bans === 1 ? '' : 's'} were added; whatever was there already was left
-            as it was.
-          </div>
-        )}
-        {restored && restored.kind === 'connection' && (
-          <div className="banner banner-success">
-            Restored <strong>{restored.share}</strong> for workgroup{' '}
-            <span className="mono">{restored.workgroup}</span>: {restored.accounts} account
-            {restored.accounts === 1 ? '' : 's'}, {restored.policies ?? 0} polic
-            {restored.policies === 1 ? 'y' : 'ies'}, {restored.directories ?? 0} folder
-            {restored.directories === 1 ? '' : 's'} and {restored.files ?? 0} file
-            {restored.files === 1 ? '' : 's'}
-            {(restored.alreadyThere ?? 0) > 0 ? `, ${restored.alreadyThere} already there` : ''}
-            {(restored.incomplete ?? 0) > 0
-              ? `. ${restored.incomplete} file${restored.incomplete === 1 ? ' is' : 's are'} incomplete: the catalog was written before all of the data had reached the network.`
-              : '.'}
-          </div>
-        )}
+        {restored && <RestoredBanner restored={restored} />}
         <ErrorBanner error={restore.error} />
+      </Card>
+
+      <Card title="Recover from the network">
+        <p className="muted">
+          For a server that has lost everything. Give it the indexer and the app key of the
+          account, and it looks through the account for the newest catalog the old server wrote
+          into the share, opens it with the key, and restores the share from it: the workgroup,
+          the accounts and their rights, and every folder and file. Whatever was written after
+          that catalog is not in it; import the same account into the restored share afterwards
+          to bring it over.
+        </p>
+        <div className="grid">
+          <ServerAddressField
+            value={address}
+            onChange={setAddress}
+            backend="indexd"
+            disabled={recover.busy}
+          />
+          <Field label="App key (hex)">
+            <input
+              type="text"
+              value={appKey}
+              onChange={(e) => setAppKey(e.target.value)}
+              disabled={recover.busy}
+              autoComplete="off"
+            />
+          </Field>
+        </div>
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={recoverForce}
+            onChange={(e) => setRecoverForce(e.target.checked)}
+            disabled={recover.busy}
+          />
+          Apply over a connection the server already has
+        </label>
+        <div className="row">
+          <button
+            className="btn btn-primary"
+            disabled={recover.busy || !address.trim() || !appKey.trim()}
+            onClick={() =>
+              recover.run(async () => {
+                setRecovered(
+                  await recoverFromNetwork({
+                    address: address.trim(),
+                    appKey: appKey.trim(),
+                    force: recoverForce,
+                  }),
+                )
+                reload()
+              })
+            }
+          >
+            {recover.busy ? 'Recovering…' : 'Recover'}
+          </button>
+        </div>
+        {recovered && <RestoredBanner restored={recovered} from={recovered.catalog} />}
+        <ErrorBanner error={recover.error} />
       </Card>
     </div>
   )

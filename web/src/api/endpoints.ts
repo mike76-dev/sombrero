@@ -20,6 +20,8 @@ import type {
   PublicDir,
   ServerSettings,
   ServerStats,
+  RecoverRequest,
+  RecoverResponse,
   RestoreResponse,
   ShareSettings,
   Share,
@@ -212,6 +214,9 @@ export const restoreCatalog = (file: Blob, force: boolean) =>
     query: { force: force || undefined },
     rawBody: file,
   })
+
+export const recoverFromNetwork = (body: RecoverRequest) =>
+  request<RecoverResponse>('/recover', { method: 'POST', body })
 
 // Imports
 

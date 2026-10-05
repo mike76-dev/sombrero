@@ -295,6 +295,9 @@ type API struct {
 	ctx      context.Context
 	connects connectTracker
 	imports  importTracker
+
+	// catalogSource is what a recovery reads an account with.
+	catalogSource catalogSource
 }
 
 // NewAPI returns an initialized API object. srv is the running SMB server and
@@ -309,6 +312,7 @@ func NewAPI(ctx context.Context, s Store, srv Server, cfg stores.Config, version
 		version: version,
 		ctx:     ctx,
 	}
+	api.catalogSource = api.sdkCatalogSource
 	api.buildHTTPRoutes()
 	return api
 }
@@ -504,6 +508,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.GET("/backup", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.backupHandlerGET(w, req, ps)
+	})
+
+	router.POST("/recover", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.recoverHandlerPOST(w, req, ps)
 	})
 
 	router.GET("/imports", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {

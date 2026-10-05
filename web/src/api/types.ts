@@ -190,6 +190,19 @@ export interface CatalogStatus {
   inlined: number
 }
 
+// The account to recover from: the indexer it is at and its app key. force
+// applies the catalog over a connection the server has already.
+export interface RecoverRequest {
+  address: string
+  appKey: string
+  force?: boolean
+}
+
+// What a recovery came to: which catalog was found, and what restoring it did.
+export interface RecoverResponse extends RestoreResponse {
+  catalog: string
+}
+
 // What restoring a catalog came to. kind says which catalog it was, and the
 // counts of the other kind are left out.
 export interface RestoreResponse {

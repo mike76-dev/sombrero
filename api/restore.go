@@ -67,22 +67,33 @@ func (api *API) restoreHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 	}
 
 	force := req.URL.Query().Get("force") == "true"
-	stats, err := store.Restore(req.Context(), r, stores.RestoreOptions{Force: force})
-	switch {
-	case errors.Is(err, stores.ErrConnectionExists):
-		writeError(w, err.Error()+"; add force=true to apply the catalog over it", http.StatusConflict)
-		return
-	case errors.Is(err, stores.ErrNotACatalog), errors.Is(err, stores.ErrShareMismatch),
-		errors.Is(err, transfer.ErrTruncated), errors.Is(err, transfer.ErrCorrupted):
-		writeError(w, err.Error(), http.StatusBadRequest)
-		return
-	case err != nil:
-		log.Printf("failed to restore a catalog: %v", err)
-		writeError(w, "the catalog could not be restored: "+err.Error(), http.StatusInternalServerError)
+	res, ok := restoreConnection(w, req.Context(), store, r, force)
+	if !ok {
 		return
 	}
 
-	writeJSON(w, RestoreResponse{
+	writeJSON(w, res)
+}
+
+// restoreConnection applies a catalog of a connection and says what came of it,
+// or writes why it could not be applied and reports false.
+func restoreConnection(w http.ResponseWriter, ctx context.Context, store Restorer, r *transfer.Reader, force bool) (RestoreResponse, bool) {
+	stats, err := store.Restore(ctx, r, stores.RestoreOptions{Force: force})
+	switch {
+	case errors.Is(err, stores.ErrConnectionExists):
+		writeError(w, err.Error()+"; ask for the catalog to be applied over it", http.StatusConflict)
+		return RestoreResponse{}, false
+	case errors.Is(err, stores.ErrNotACatalog), errors.Is(err, stores.ErrShareMismatch),
+		errors.Is(err, transfer.ErrTruncated), errors.Is(err, transfer.ErrCorrupted):
+		writeError(w, err.Error(), http.StatusBadRequest)
+		return RestoreResponse{}, false
+	case err != nil:
+		log.Printf("failed to restore a catalog: %v", err)
+		writeError(w, "the catalog could not be restored: "+err.Error(), http.StatusInternalServerError)
+		return RestoreResponse{}, false
+	}
+
+	return RestoreResponse{
 		Kind:         "connection",
 		Share:        stats.Share,
 		Workgroup:    stats.Workgroup.String(),
@@ -92,5 +103,5 @@ func (api *API) restoreHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 		Files:        stats.Files,
 		AlreadyThere: stats.AlreadyThere,
 		Incomplete:   stats.Incomplete,
-	})
+	}, true
 }

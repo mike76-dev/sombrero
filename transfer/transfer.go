@@ -24,6 +24,10 @@ const magic = "sombrero/transfer"
 // reader allocates for it. A file's parts have to fit in one.
 const maxRecordSize = 64 << 20
 
+// CatalogFolder is where a share keeps the catalogs of itself, as files like any
+// other. It is named here so that whoever tags a slab knows to keep their names.
+const CatalogFolder = "/.sombrero/catalog"
+
 // The kinds of record a stream is made of. Kinds a reader does not know are
 // skipped, so that a newer writer stays readable.
 const (
