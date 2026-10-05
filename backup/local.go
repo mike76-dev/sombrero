@@ -7,7 +7,6 @@ package backup
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -146,7 +145,7 @@ func (l *Local) WriteAll(ctx context.Context) error {
 		server = nil
 	}
 
-	err = errors.Join(errs...)
+	err = joinLine(errs)
 	l.finish(written, server, err)
 
 	return err

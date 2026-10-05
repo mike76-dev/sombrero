@@ -27,6 +27,11 @@ const CatalogFolder = transfer.CatalogFolder
 // come up one by one, and the catalogs should not be an hour behind them.
 var retryInterval = time.Minute
 
+// errNotRunning is what a round says of a connection that is not up yet. It is
+// the usual state of things at startup, so it is kept for the status and not
+// written to the log.
+var errNotRunning = errors.New("the connection is not running")
+
 // Report is what both tiers have done; a tier that is off is nil.
 type Report struct {
 	Local   *Status
@@ -90,7 +95,9 @@ func (n *Network) run(ctx context.Context) {
 	for {
 		delay := n.interval
 		if err := n.WriteAll(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("backup: %v", err)
+			if !onlyNotRunning(err) {
+				log.Printf("backup: %v", err)
+			}
 			delay = min(delay, retryInterval)
 		}
 
@@ -144,7 +151,7 @@ func (n *Network) WriteAll(ctx context.Context) error {
 		}
 		files, ok := clients[c.Workgroup.UUID.String()]
 		if !ok {
-			errs = append(errs, fmt.Errorf("the catalog of %s for workgroup %s: the connection is not running", c.Share, c.Workgroup.UUID))
+			errs = append(errs, fmt.Errorf("the catalog of %s for workgroup %s: %w", c.Share, c.Workgroup.UUID, errNotRunning))
 			continue
 		}
 
@@ -156,7 +163,7 @@ func (n *Network) WriteAll(ctx context.Context) error {
 		written = append(written, cat)
 	}
 
-	err = errors.Join(errs...)
+	err = joinLine(errs)
 	n.finish(written, err)
 
 	return err
@@ -174,6 +181,45 @@ func (n *Network) finish(written []Catalog, err error) {
 		n.status.Error = err.Error()
 	}
 }
+
+// onlyNotRunning reports whether every failure of a round was a connection that
+// is not up yet.
+func onlyNotRunning(err error) bool {
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return errors.Is(err, errNotRunning)
+	}
+	for _, e := range joined.Unwrap() {
+		if !errors.Is(e, errNotRunning) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// joinLine joins the failures of a round into one error that prints on one line,
+// which is what a log and a status line can take.
+func joinLine(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(errs))
+	for _, err := range errs {
+		parts = append(parts, err.Error())
+	}
+
+	return &roundError{errs: errs, line: strings.Join(parts, "; ")}
+}
+
+// roundError is the failures of one round, as one line.
+type roundError struct {
+	errs []error
+	line string
+}
+
+func (e *roundError) Error() string   { return e.line }
+func (e *roundError) Unwrap() []error { return e.errs }
 
 // write writes one connection's catalog into its share and prunes the folder.
 func (n *Network) write(ctx context.Context, c stores.KeyedConnection, files ShareFiles) (Catalog, error) {

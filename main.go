@@ -53,6 +53,18 @@ func newHTTPHandler(ctx context.Context, a http.Handler, password string, debug 
 	return mux
 }
 
+// plainDuration prints a duration the way a person would: "15m", not "15m0s".
+func plainDuration(d time.Duration) string {
+	switch {
+	case d >= time.Hour && d%time.Hour == 0:
+		return fmt.Sprintf("%dh", d/time.Hour)
+	case d >= time.Minute && d%time.Minute == 0:
+		return fmt.Sprintf("%dm", d/time.Minute)
+	default:
+		return d.String()
+	}
+}
+
 func main() {
 	// Parse command-line args.
 	flag.Parse()
@@ -97,13 +109,13 @@ func main() {
 
 		if cfg.Backup.Enabled {
 			if local := cfg.Backup.Local(); local > 0 {
-				log.Printf("Backups: a catalog is written to %s every %s, keeping %d", cfg.Backup.Path, local, cfg.Backup.KeepCount())
+				log.Printf("Backups: a catalog is written to %s every %s, keeping %d", cfg.Backup.Path, plainDuration(local), cfg.Backup.KeepCount())
 			}
 			if network := cfg.Backup.Network(); network > 0 {
-				log.Printf("Backups: a catalog is written into each share every %s, keeping %d", network, cfg.Backup.KeepCount())
+				log.Printf("Backups: a catalog is written into each share every %s, keeping %d", plainDuration(network), cfg.Backup.KeepCount())
 			}
 			if cfg.Indexd.MaxBufferAge == 0 {
-				log.Printf("Backups: maxBufferAge is unset, so the leftover data of a backed-up share is uploaded after %s to be covered by them", cfg.BufferAge(true))
+				log.Printf("Backups: maxBufferAge is unset, so the leftover data of a backed-up share is uploaded after %s to be covered by them", plainDuration(cfg.BufferAge(true)))
 			}
 		}
 	} else {
