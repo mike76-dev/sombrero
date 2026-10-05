@@ -19,36 +19,50 @@ function formatInterval(s: string): string {
 // RestoredBanner says what restoring a catalog came to, in the words of the
 // kind of catalog it was.
 function RestoredBanner({ restored, from }: { restored: RestoreResponse; from?: string }) {
+  const n = (count: number | undefined, one: string, many: string) =>
+    `${count ?? 0} ${count === 1 ? one : many}`
+
   if (restored.kind === 'server') {
     return (
       <div className="banner banner-success">
-        Restored the server: {restored.shares ?? 0} share{restored.shares === 1 ? '' : 's'},{' '}
-        {restored.workgroups ?? 0} workgroup{restored.workgroups === 1 ? '' : 's'},{' '}
-        {restored.accounts} account{restored.accounts === 1 ? '' : 's'} and {restored.bans ?? 0} ban
-        {restored.bans === 1 ? '' : 's'} were added; whatever was there already was left as it
-        was.
+        The server is restored. Added: {n(restored.shares, 'share', 'shares')},{' '}
+        {n(restored.workgroups, 'workgroup', 'workgroups')},{' '}
+        {n(restored.accounts, 'account', 'accounts')} and {n(restored.bans, 'ban', 'bans')}.
+        Whatever was there already has been left as it was.
       </div>
     )
   }
 
+  const incomplete = restored.incomplete ?? 0
+
   return (
-    <div className="banner banner-success">
-      Restored <strong>{restored.share}</strong> for workgroup{' '}
-      <span className="mono">{restored.workgroup}</span>
-      {from ? (
-        <>
-          {' '}
-          from <span className="mono">{from}</span>
-        </>
-      ) : null}
-      : {restored.accounts} account{restored.accounts === 1 ? '' : 's'}, {restored.policies ?? 0}{' '}
-      polic{restored.policies === 1 ? 'y' : 'ies'}, {restored.directories ?? 0} folder
-      {restored.directories === 1 ? '' : 's'} and {restored.files ?? 0} file
-      {restored.files === 1 ? '' : 's'}
-      {(restored.alreadyThere ?? 0) > 0 ? `, ${restored.alreadyThere} already there` : ''}
-      {(restored.incomplete ?? 0) > 0
-        ? `. ${restored.incomplete} file${restored.incomplete === 1 ? ' is' : 's are'} incomplete: the catalog was written before all of the data had reached the network.`
-        : '.'}
+    <div className="banner banner-success stack">
+      <div>
+        <strong>{restored.share}</strong> is restored for workgroup{' '}
+        <span className="mono">{restored.workgroup}</span>
+        {from ? (
+          <>
+            {' '}
+            from <span className="mono">{from}</span>
+          </>
+        ) : null}
+        : {n(restored.accounts, 'account', 'accounts')}, {n(restored.policies, 'policy', 'policies')}
+        , {n(restored.directories, 'folder', 'folders')} and {n(restored.files, 'file', 'files')}
+        {(restored.alreadyThere ?? 0) > 0 ? `; ${restored.alreadyThere} already there` : ''}.
+      </div>
+      {incomplete > 0 && (
+        <div>
+          {incomplete === 1 ? 'One file is' : `${incomplete} files are`} incomplete: the catalog
+          was written before all of {incomplete === 1 ? 'its' : 'their'} data had reached the
+          network.
+        </div>
+      )}
+      {from && (
+        <div>
+          Files written after this catalog are not in it. Run an import of the same account into
+          the share to pick them up.
+        </div>
+      )}
     </div>
   )
 }
@@ -60,18 +74,19 @@ function Tier({ title, tier }: { title: string; tier: TierStatus }) {
     <div className="stack">
       <h3>{title}</h3>
       <div className="muted">
-        <span className="mono">{tier.path}</span>, every {formatInterval(tier.interval)}, keeping{' '}
-        {tier.keep}
-        {tier.lastRun ? `. Last written ${new Date(tier.lastRun).toLocaleString()}.` : '.'}
+        Written to <span className="mono">{tier.path}</span> every{' '}
+        {formatInterval(tier.interval)}; the newest {tier.keep} are kept.
+        {tier.lastRun ? ` Last run: ${new Date(tier.lastRun).toLocaleString()}.` : ''}
       </div>
       {tier.error && <ErrorBanner error={tier.error} />}
       {tier.server && (
         <div className="muted">
-          The server itself: {tier.server.shares} share{tier.server.shares === 1 ? '' : 's'},{' '}
-          {tier.server.workgroups} workgroup{tier.server.workgroups === 1 ? '' : 's'} with{' '}
-          {tier.server.accounts} account{tier.server.accounts === 1 ? '' : 's'}, and{' '}
-          {tier.server.bans} ban{tier.server.bans === 1 ? '' : 's'} ({formatBytes(tier.server.size)}
-          , written {new Date(tier.server.writtenAt).toLocaleString()}).
+          The catalog of the server itself holds {tier.server.shares} share
+          {tier.server.shares === 1 ? '' : 's'}, {tier.server.workgroups} workgroup
+          {tier.server.workgroups === 1 ? '' : 's'} with {tier.server.accounts} account
+          {tier.server.accounts === 1 ? '' : 's'}, and {tier.server.bans} ban
+          {tier.server.bans === 1 ? '' : 's'}; {formatBytes(tier.server.size)}, written{' '}
+          {new Date(tier.server.writtenAt).toLocaleString()}.
         </div>
       )}
       {tier.catalogs.length > 0 ? (
@@ -102,7 +117,7 @@ function Tier({ title, tier }: { title: string; tier: TierStatus }) {
           </tbody>
         </table>
       ) : (
-        !tier.error && <p className="muted">Nothing has been written yet.</p>
+        !tier.error && <p className="muted">No catalog has been written yet.</p>
       )}
     </div>
   )
@@ -134,26 +149,31 @@ export function BackupPage() {
         }
       >
         <p className="muted">
-          A catalog is a description of everything the database knows about one share and one
-          workgroup: the accounts and their rights, the folders and files, and where on the
-          network the data of every file is. The data itself stays where it is. With a catalog
-          and the app key, a share can be put back on a server that has lost its database.
+          A catalog is a small file that describes one share for one workgroup: the accounts
+          and what they may do, the folders and files, and which objects on the network hold
+          each file's data. The data itself is not copied. If the database is lost, a catalog and
+          the app key are enough to put the share back.
         </p>
         <p className="muted">
-          Catalogs go to two places: a folder on this machine, and the share itself, as a file
-          in <span className="mono">/.sombrero/catalog</span> that only the app key can open. The
-          copy in the share is what a server with nothing left can start from.
+          Catalogs are written to two places: a folder on this machine, and the share itself,
+          where they go into <span className="mono">/.sombrero/catalog</span> as files that only
+          the app key can open. The copy in the share is for the worst case, a server that has
+          nothing left.
         </p>
         <ErrorBanner error={error} />
         {status && !status.enabled && (
           <p className="muted">
-            Backups are off. Turn them on with <code>backup.enabled: true</code> in{' '}
-            <code>sombrero.yml</code>. The server then also uploads leftover data after{' '}
-            {status.bufferAge}, so that the catalogs have something to point at.
+            Backups are off. To turn them on, set <code>backup.enabled: true</code> in{' '}
+            <code>sombrero.yml</code> and restart. The server will then also upload leftover data
+            after {status.bufferAge} instead of waiting for a full slab, so that the catalogs have
+            something to point at.
           </p>
         )}
         {status && status.enabled && (
-          <p className="muted">Leftover data is uploaded after {status.bufferAge}.</p>
+          <p className="muted">
+            Leftover data is uploaded after {status.bufferAge}, so that a catalog can point at
+            it.
+          </p>
         )}
         {status?.local && <Tier title="On this machine" tier={status.local} />}
         {status?.network && <Tier title="In the shares" tier={status.network} />}
@@ -161,13 +181,14 @@ export function BackupPage() {
 
       <Card title="Restore from a catalog">
         <p className="muted">
-          Pick a catalog file and the server recreates what it describes. For a catalog of a
-          connection that is the share, the workgroup with its accounts and their rights, the
-          connection, and every folder and file; the files point at the data on the network, so
-          nothing is downloaded. A connection the server already has is left alone unless you ask
-          for the catalog to be applied over it; then whatever is missing is added and the rest
-          is left as it is. The catalog of the server brings back the shares, the workgroups with
-          their accounts, and the bans, and never touches what is there already.
+          Pick a catalog file. If it describes a share, the server registers the share, creates
+          the workgroup with its accounts and their rights, connects to the indexer with the app
+          key from the catalog, and recreates the folders and files. Nothing is downloaded: the
+          files point at data that is already on the network. If the server already has this
+          connection, nothing happens unless you tick the box below; then what is missing is
+          added and the rest is left alone. If the file is the catalog of the server, it brings
+          back the shares, the workgroups with their accounts, and the bans, and never changes
+          anything that is already there.
         </p>
         <div className="grid">
           <Field label="Catalog">
@@ -185,7 +206,7 @@ export function BackupPage() {
             onChange={(e) => setForce(e.target.checked)}
             disabled={restore.busy}
           />
-          Apply over a connection the server already has
+          Apply over a connection this server already has
         </label>
         <div className="row">
           <button
@@ -208,12 +229,11 @@ export function BackupPage() {
 
       <Card title="Recover from the network">
         <p className="muted">
-          For a server that has lost everything. Give it the indexer and the app key of the
-          account, and it looks through the account for the newest catalog the old server wrote
-          into the share, opens it with the key, and restores the share from it: the workgroup,
-          the accounts and their rights, and every folder and file. Whatever was written after
-          that catalog is not in it; import the same account into the restored share afterwards
-          to bring it over.
+          This is for a server that has lost everything. Enter the indexer and the app key of
+          the account. The server looks through the account for the newest catalog the previous
+          server put into the share, opens it with the key, and restores the share from it.
+          Files written after that catalog are not in it; run an import of the same account into
+          the restored share afterwards to pick them up.
         </p>
         <div className="grid">
           <ServerAddressField
@@ -239,7 +259,7 @@ export function BackupPage() {
             onChange={(e) => setRecoverForce(e.target.checked)}
             disabled={recover.busy}
           />
-          Apply over a connection the server already has
+          Apply over a connection this server already has
         </label>
         <div className="row">
           <button
