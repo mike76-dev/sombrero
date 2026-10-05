@@ -22,6 +22,11 @@ import (
 // CatalogFolder is where a share keeps the catalogs of itself.
 const CatalogFolder = transfer.CatalogFolder
 
+// retryInterval is how soon a round that could not write every catalog is tried
+// again, rather than waiting the whole interval: at startup the connections
+// come up one by one, and the catalogs should not be an hour behind them.
+var retryInterval = time.Minute
+
 // Report is what both tiers have done; a tier that is off is nil.
 type Report struct {
 	Local   *Status
@@ -79,17 +84,20 @@ func NewNetwork(ctx context.Context, db *stores.Database, clients Clients, cfg s
 	return n
 }
 
-// run writes the catalogs on the interval until the context ends.
+// run writes the catalogs on the interval until the context ends, coming back
+// sooner after a round that could not write all of them.
 func (n *Network) run(ctx context.Context) {
 	for {
+		delay := n.interval
 		if err := n.WriteAll(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("backup: %v", err)
+			delay = min(delay, retryInterval)
 		}
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(n.interval):
+		case <-time.After(delay):
 		}
 	}
 }

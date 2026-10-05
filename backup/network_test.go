@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
@@ -99,6 +100,58 @@ func (f *fakeShare) catalogs() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// TestNetworkComesBackForWhatWasNotRunning verifies that a round which found a
+// connection not running is followed by another one soon, rather than after the
+// whole interval: at startup the catalogs should follow the connections up.
+func TestNetworkComesBackForWhatWasNotRunning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, wg, _ := connectedStore(t, ctx)
+
+	share := newFakeShare()
+	var mu sync.Mutex
+	up := false
+	n := &Network{
+		db: db,
+		clients: func(string) (map[string]ShareFiles, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if !up {
+				return nil, nil
+			}
+			return map[string]ShareFiles{wg.UUID.String(): share}, nil
+		},
+		interval: time.Hour,
+		keep:     2,
+		inline:   1024,
+		status:   Status{Path: CatalogFolder, Keep: 2},
+	}
+	retryInterval = 5 * time.Millisecond
+	t.Cleanup(func() { retryInterval = time.Minute })
+	go n.run(ctx)
+
+	await := func(what string, cond func(Status) bool) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			if cond(n.Status()) {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("%s: status %+v", what, n.Status())
+	}
+
+	await("the first round should find the connection not running", func(s Status) bool {
+		return strings.Contains(s.Error, "not running")
+	})
+	mu.Lock()
+	up = true
+	mu.Unlock()
+	await("the catalog should be written soon after the connection comes up", func(s Status) bool {
+		return s.Error == "" && len(s.Catalogs) == 1
+	})
 }
 
 // TestNetworkWritesSealedCatalogs verifies that each round puts a catalog into

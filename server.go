@@ -235,15 +235,22 @@ func (s *server) BackupStatus() backup.Report {
 }
 
 // shareFiles hands the backup the running connections of a share, as what it
-// takes to put a file into the share.
-func (s *server) shareFiles(share string) (map[string]backup.ShareFiles, error) {
-	conns, _, err := s.ShareConnections(share)
-	if err != nil {
-		return nil, err
+// takes to put a file into the share. None is started here: bringing one up
+// takes as long as the hosts take, so a backup round writes into what is up and
+// comes back for the rest.
+func (s *server) shareFiles(name string) (map[string]backup.ShareFiles, error) {
+	s.mu.Lock()
+	sh, found := s.shareList[name]
+	s.mu.Unlock()
+	if !found {
+		return nil, nil
 	}
-	files := make(map[string]backup.ShareFiles, len(conns))
-	for wg, c := range conns {
-		files[wg] = c
+
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	files := make(map[string]backup.ShareFiles, len(sh.indexdConns))
+	for wg, conn := range sh.indexdConns {
+		files[wg] = conn.client
 	}
 
 	return files, nil
