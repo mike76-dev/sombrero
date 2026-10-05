@@ -46,8 +46,15 @@ func connectedStore(t *testing.T, ctx context.Context) (*stores.Database, stores
 	if err != nil {
 		t.Fatalf("FindWorkgroupByName: %v", err)
 	}
-	if err := db.AddAccount(stores.Account{Username: "alice", Password: "pw", Workgroup: wg.UUID.String()}); err != nil {
-		t.Fatalf("AddAccount: %v", err)
+	// A guest comes first, and alice after: it is alice who owns what the
+	// workgroup keeps of itself.
+	for _, acc := range []stores.Account{
+		{Username: "guest", Workgroup: wg.UUID.String()},
+		{Username: "alice", Password: "pw", Workgroup: wg.UUID.String()},
+	} {
+		if err := db.AddAccount(acc); err != nil {
+			t.Fatalf("AddAccount(%s): %v", acc.Username, err)
+		}
 	}
 	share, err := db.GetShare("idx")
 	if err != nil {
@@ -112,13 +119,13 @@ func TestLocalWritesAndKeeps(t *testing.T) {
 		t.Fatalf("NewReader: %v", err)
 	}
 	conn := r.Connection()
-	if conn == nil || conn.Share.Name != "idx" || !bytes.Equal(conn.AppKey, key) || len(conn.Accounts) != 1 || conn.Accounts[0].Name != "alice" {
+	if conn == nil || conn.Share.Name != "idx" || !bytes.Equal(conn.AppKey, key) || len(conn.Accounts) != 2 || conn.Accounts[1].Name != "alice" {
 		t.Errorf("the catalog belongs to %+v", conn)
 	}
 
 	// The server itself has a catalog too, kept the same way, and it says what
 	// the connections' catalogs cannot: everything that is nobody's.
-	if status.Server == nil || status.Server.Stats != (stores.ServerStats{Shares: 1, Workgroups: 1, Accounts: 1}) {
+	if status.Server == nil || status.Server.Stats != (stores.ServerStats{Shares: 1, Workgroups: 1, Accounts: 2}) {
 		t.Fatalf("the catalog of the server: got %+v", status.Server)
 	}
 	if entries, err := os.ReadDir(filepath.Join(dir, "server")); err != nil || len(entries) != 2 {

@@ -183,16 +183,24 @@ func (n *Network) write(ctx context.Context, c stores.KeyedConnection, files Sha
 		return Catalog{}, errors.New("the connection has no app key to seal the catalog with")
 	}
 
-	// The catalog belongs to one account of the workgroup, in a folder of that
-	// account's, which is what keeps the others from reading it.
+	// The catalog belongs to the oldest account of the workgroup that has a
+	// password, in a folder of that account's: the other members do not see it,
+	// and a guest, whom anyone can log in as, never owns it.
 	accounts, err := n.db.FindAccounts(wg.UUID.String())
 	if err != nil {
 		return Catalog{}, err
 	}
-	if len(accounts) == 0 {
-		return Catalog{}, errors.New("the workgroup has no account to own the catalog")
+	sort.Slice(accounts, func(i, j int) bool { return accounts[i].ID < accounts[j].ID })
+	var owner stores.Account
+	for _, acc := range accounts {
+		if !acc.Passwordless() {
+			owner = acc
+			break
+		}
 	}
-	owner := accounts[0]
+	if owner.ID == 0 {
+		return Catalog{}, errors.New("the workgroup has no account with a password to own the catalog")
+	}
 
 	var plain bytes.Buffer
 	stats, err := n.db.Snapshot(&plain, share.Name, wg.ID, n.inline)
