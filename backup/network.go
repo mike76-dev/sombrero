@@ -123,6 +123,9 @@ func (n *Network) WriteAll(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if c.SkipBackup {
+			continue
+		}
 
 		clients, ok := running[c.Share]
 		if !ok {

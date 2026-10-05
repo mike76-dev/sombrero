@@ -1215,6 +1215,7 @@ func TestStoreUpdateShare(t *testing.T) {
 		sh.AllowAnonymous = true
 		sh.PublicDir = "Drop"
 		sh.Remark = "drop box"
+		sh.SkipBackup = true
 		sh.ServerName = "elsewhere"
 		if err := st.UpdateShare(sh); err != nil {
 			t.Fatalf("UpdateShare: %v", err)
@@ -1224,7 +1225,7 @@ func TestStoreUpdateShare(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetShare: %v", err)
 		}
-		if !got.AllowGuest || !got.AllowAnonymous || got.PublicDir != "Drop" || got.Remark != "drop box" {
+		if !got.AllowGuest || !got.AllowAnonymous || got.PublicDir != "Drop" || got.Remark != "drop box" || !got.SkipBackup {
 			t.Fatalf("want the settings stored, got %+v", got)
 		}
 		if got.ServerName != "srv" {

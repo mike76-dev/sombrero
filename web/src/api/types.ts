@@ -24,6 +24,10 @@ export interface Share {
   allowGuest?: boolean
   allowAnonymous?: boolean
   publicDir?: string
+
+  // skipBackup leaves the share out of the backups that cost something: no
+  // catalog in it, and its leftover data waits for a full slab.
+  skipBackup?: boolean
 }
 
 // ShareSettings is what PUT /share/:name changes. serverName is only changed
@@ -36,6 +40,7 @@ export interface ShareSettings {
   allowGuest?: boolean
   allowAnonymous?: boolean
   publicDir?: string
+  skipBackup?: boolean
 }
 
 // ServerSettings is how the server itself is configured, as far as the UI needs

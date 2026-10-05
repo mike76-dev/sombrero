@@ -1021,6 +1021,7 @@ func (api *API) shareHandlerPUT(w http.ResponseWriter, req *http.Request, ps htt
 	share.AllowGuest = settings.AllowGuest
 	share.AllowAnonymous = settings.AllowAnonymous
 	share.PublicDir = settings.PublicDir
+	share.SkipBackup = settings.SkipBackup
 
 	if status, msg := checkShareAccess(share, api.cfg.Anonymous); msg != "" {
 		writeError(w, msg, status)

@@ -337,11 +337,11 @@ type Config struct {
 	Backup   BackupConfig   `yaml:"backup,omitempty"`
 }
 
-// BufferAge is how long leftover data may wait: what MaxBufferAge says, or
-// DefaultBackupBufferAge where backups are on and it says nothing, since a
-// backup can only promise what has reached the network.
-func (c Config) BufferAge() time.Duration {
-	if c.Indexd.MaxBufferAge == 0 && c.Backup.Enabled {
+// BufferAge is how long the leftover data of a share may wait: what MaxBufferAge
+// says, or DefaultBackupBufferAge where it says nothing and the share is backed
+// up, since a backup can only promise what has reached the network.
+func (c Config) BufferAge(backedUp bool) time.Duration {
+	if c.Indexd.MaxBufferAge == 0 && c.Backup.Enabled && backedUp {
 		return DefaultBackupBufferAge
 	}
 	return c.Indexd.MaxBufferAge.Duration()

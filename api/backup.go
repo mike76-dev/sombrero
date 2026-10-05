@@ -58,7 +58,7 @@ type CatalogResponse struct {
 func (api *API) backupHandlerGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
 	res := BackupResponse{
 		Enabled:   api.cfg.Backup.Enabled,
-		BufferAge: stores.BufferAge(api.cfg.BufferAge()).String(),
+		BufferAge: stores.BufferAge(api.cfg.BufferAge(true)).String(),
 	}
 	if api.server != nil {
 		report := api.server.BackupStatus()

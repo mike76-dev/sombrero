@@ -10,7 +10,8 @@ CREATE TABLE shares (
     parity_shards INT NOT NULL DEFAULT 0,
     allow_guest BOOLEAN NOT NULL DEFAULT FALSE,
     allow_anonymous BOOLEAN NOT NULL DEFAULT FALSE,
-    public_dir TEXT NOT NULL DEFAULT ''
+    public_dir TEXT NOT NULL DEFAULT '',
+    skip_backup BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE workgroups (

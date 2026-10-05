@@ -108,6 +108,7 @@ type Share struct {
 	AllowGuest     bool
 	AllowAnonymous bool
 	PublicDir      string
+	SkipBackup     bool
 }
 
 // Workgroup is a workgroup by its identity, with the folders it shares.

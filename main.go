@@ -103,7 +103,7 @@ func main() {
 				log.Printf("Backups: a catalog is written into each share every %s, keeping %d", network, cfg.Backup.KeepCount())
 			}
 			if cfg.Indexd.MaxBufferAge == 0 {
-				log.Printf("Backups: maxBufferAge is unset, so leftover data is uploaded after %s to be covered by them", cfg.BufferAge())
+				log.Printf("Backups: maxBufferAge is unset, so the leftover data of a backed-up share is uploaded after %s to be covered by them", cfg.BufferAge(true))
 			}
 		}
 	} else {

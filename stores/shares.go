@@ -40,6 +40,10 @@ type Share struct {
 	AllowGuest     bool      `json:"allowGuest,omitempty"`
 	AllowAnonymous bool      `json:"allowAnonymous,omitempty"`
 	PublicDir      string    `json:"publicDir,omitempty"`
+
+	// SkipBackup leaves the share out of the backups that cost something: no
+	// catalog is written into it, and its leftover data waits for a full slab.
+	SkipBackup bool `json:"skipBackup,omitempty"`
 }
 
 // RegisterShare registers a new share in the database.
@@ -68,11 +72,12 @@ func (db *Database) RegisterShare(s Share) error {
 				parity_shards,
 				allow_guest,
 				allow_anonymous,
-				public_dir
+				public_dir,
+				skip_backup
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		`
-		_, err := tx.Exec(ctx, query, s.Name, s.Type, s.ServerName, s.Password, s.Bucket, s.Remark, time.Now(), s.DataShards, s.ParityShards, s.AllowGuest, s.AllowAnonymous, s.PublicDir)
+		_, err := tx.Exec(ctx, query, s.Name, s.Type, s.ServerName, s.Password, s.Bucket, s.Remark, time.Now(), s.DataShards, s.ParityShards, s.AllowGuest, s.AllowAnonymous, s.PublicDir, s.SkipBackup)
 		if err != nil {
 			return fmt.Errorf("failed to register share: %w", err)
 		} else if err := db.shares.RegisterShare(s); err != nil {
@@ -132,15 +137,16 @@ func (db *Database) GetShare(name string) (s Share, err error) {
 				parity_shards,
 				allow_guest,
 				allow_anonymous,
-				public_dir
+				public_dir,
+				skip_backup
 			FROM shares
 			WHERE share_name = $1
 		`
 		var backend, server, password, bucket, remark, publicDir string
 		var created time.Time
 		var dataShards, parityShards int
-		var allowGuest, allowAnonymous bool
-		err = tx.QueryRow(ctx, query, name).Scan(&backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards, &allowGuest, &allowAnonymous, &publicDir)
+		var allowGuest, allowAnonymous, skipBackup bool
+		err = tx.QueryRow(ctx, query, name).Scan(&backend, &server, &password, &bucket, &remark, &created, &dataShards, &parityShards, &allowGuest, &allowAnonymous, &publicDir, &skipBackup)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		} else if err != nil {
@@ -159,6 +165,7 @@ func (db *Database) GetShare(name string) (s Share, err error) {
 			AllowGuest:     allowGuest,
 			AllowAnonymous: allowAnonymous,
 			PublicDir:      publicDir,
+			SkipBackup:     skipBackup,
 		}
 		return nil
 	})
@@ -179,7 +186,8 @@ const shareColumns = `
 	s.parity_shards,
 	s.allow_guest,
 	s.allow_anonymous,
-	s.public_dir
+	s.public_dir,
+	s.skip_backup
 `
 
 // scanShares reads the rows of a query that selects shareColumns.
@@ -202,6 +210,7 @@ func scanShares(rows pgx.Rows) (shares []Share, err error) {
 			&s.AllowGuest,
 			&s.AllowAnonymous,
 			&s.PublicDir,
+			&s.SkipBackup,
 		); err != nil {
 			return nil, fmt.Errorf("failed to retrieve share: %w", err)
 		}
@@ -310,11 +319,12 @@ func (db *Database) UpdateShare(s Share) error {
 				remark = $2,
 				allow_guest = $3,
 				allow_anonymous = $4,
-				public_dir = $5
+				public_dir = $5,
+				skip_backup = $6
 			WHERE share_name = $1
 		`
 
-		tag, err := tx.Exec(ctx, query, s.Name, s.Remark, s.AllowGuest, s.AllowAnonymous, s.PublicDir)
+		tag, err := tx.Exec(ctx, query, s.Name, s.Remark, s.AllowGuest, s.AllowAnonymous, s.PublicDir, s.SkipBackup)
 		if err != nil {
 			return fmt.Errorf("failed to update share: %w", err)
 		}

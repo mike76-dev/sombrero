@@ -186,7 +186,7 @@ func TestServerCatalogRoundTrip(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	conn := testConnection(now)
 	server := Server{
-		Shares:     []Share{conn.Share, {Name: "docs", Type: "renterd", Server: "http://127.0.0.1:9980", Bucket: "default", CreatedAt: now}},
+		Shares:     []Share{conn.Share, {Name: "docs", Type: "renterd", Server: "http://127.0.0.1:9980", Bucket: "default", CreatedAt: now, SkipBackup: true}},
 		Workgroups: []WorkgroupAccounts{{Workgroup: conn.Workgroup, Accounts: conn.Accounts}, {Workgroup: Workgroup{UUID: [16]byte{9}}}},
 		Bans:       []Ban{{Host: "192.168.1.100", Reason: "too many bad passwords"}},
 	}

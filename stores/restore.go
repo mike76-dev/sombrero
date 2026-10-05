@@ -250,7 +250,7 @@ func (db *Database) restoreShare(s transfer.Share) (Share, error) {
 	err = db.RegisterShare(Share{
 		Name: s.Name, Type: s.Type, ServerName: s.Server, Password: s.Password, Bucket: s.Bucket, Remark: s.Remark,
 		DataShards: s.DataShards, ParityShards: s.ParityShards,
-		AllowGuest: s.AllowGuest, AllowAnonymous: s.AllowAnonymous, PublicDir: s.PublicDir,
+		AllowGuest: s.AllowGuest, AllowAnonymous: s.AllowAnonymous, PublicDir: s.PublicDir, SkipBackup: s.SkipBackup,
 	})
 	if err != nil {
 		return Share{}, err

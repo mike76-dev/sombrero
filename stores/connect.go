@@ -164,11 +164,13 @@ func (db *Database) AppKeyForServer(wg Workgroup, serverName string) (types.Priv
 }
 
 // KeyedConnection is a connection that holds an app key: which workgroup is on
-// which indexd share, and where that share's indexer is.
+// which indexd share, where that share's indexer is, and whether the share is
+// left out of the backups.
 type KeyedConnection struct {
-	Workgroup Workgroup
-	Share     string
-	Server    string
+	Workgroup  Workgroup
+	Share      string
+	Server     string
+	SkipBackup bool
 }
 
 // KeyedConnections returns every connection that holds an app key, which is what
@@ -187,7 +189,7 @@ func (db *Database) AllConnections() ([]KeyedConnection, error) {
 func (db *Database) connections(keyedOnly bool) (conns []KeyedConnection, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
-			SELECT w.id, w.uuid, w.name, c.share_name, s.server_name
+			SELECT w.id, w.uuid, w.name, c.share_name, s.server_name, s.skip_backup
 			FROM connections c
 			JOIN shares s ON s.share_name = c.share_name
 			JOIN workgroups w ON w.id = c.workgroup
@@ -203,7 +205,7 @@ func (db *Database) connections(keyedOnly bool) (conns []KeyedConnection, err er
 		for rows.Next() {
 			var conn KeyedConnection
 			var name *string
-			if err := rows.Scan(&conn.Workgroup.ID, &conn.Workgroup.UUID, &name, &conn.Share, &conn.Server); err != nil {
+			if err := rows.Scan(&conn.Workgroup.ID, &conn.Workgroup.UUID, &name, &conn.Share, &conn.Server, &conn.SkipBackup); err != nil {
 				return fmt.Errorf("failed to scan a keyed connection: %w", err)
 			}
 			if name != nil {

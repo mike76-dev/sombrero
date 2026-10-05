@@ -166,6 +166,23 @@ func TestNetworkWritesSealedCatalogs(t *testing.T) {
 		t.Errorf("the catalog belongs to %+v", conn)
 	}
 
+	// A share left out of the backups gets no catalog, and that is no error.
+	idx, err := db.GetShare("idx")
+	if err != nil {
+		t.Fatalf("GetShare: %v", err)
+	}
+	idx.SkipBackup = true
+	if err := db.UpdateShare(idx); err != nil {
+		t.Fatalf("UpdateShare: %v", err)
+	}
+	if err := n.WriteAll(ctx); err != nil || len(n.Status().Catalogs) != 0 || len(share.catalogs()) != 2 {
+		t.Errorf("a share left out: %v, %d catalog(s) reported, %d in the share", err, len(n.Status().Catalogs), len(share.catalogs()))
+	}
+	idx.SkipBackup = false
+	if err := db.UpdateShare(idx); err != nil {
+		t.Fatalf("UpdateShare: %v", err)
+	}
+
 	// A connection that is not running is reported and the round goes on.
 	n.clients = func(string) (map[string]ShareFiles, error) { return nil, nil }
 	if err := n.WriteAll(ctx); err == nil || !strings.Contains(n.Status().Error, "not running") {

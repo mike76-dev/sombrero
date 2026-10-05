@@ -100,7 +100,7 @@ func (db *Database) SnapshotServer(w io.Writer) (stats ServerStats, err error) {
 		server.Shares = append(server.Shares, transfer.Share{
 			Name: s.Name, Type: s.Type, Server: s.ServerName, Password: s.Password, Bucket: s.Bucket, Remark: s.Remark,
 			CreatedAt: s.CreatedAt.UTC(), DataShards: s.DataShards, ParityShards: s.ParityShards,
-			AllowGuest: s.AllowGuest, AllowAnonymous: s.AllowAnonymous, PublicDir: s.PublicDir,
+			AllowGuest: s.AllowGuest, AllowAnonymous: s.AllowAnonymous, PublicDir: s.PublicDir, SkipBackup: s.SkipBackup,
 		})
 	}
 
@@ -207,7 +207,7 @@ func (db *Database) SnapshotServer(w io.Writer) (stats ServerStats, err error) {
 func snapshotConnection(ctx context.Context, tx pgx.Tx, share string, workgroup int) (transfer.Connection, uuid.UUID, error) {
 	const query = `
 		SELECT s.share_type, s.server_name, s.api_password, s.bucket, s.remark, s.created_at,
-			s.data_shards, s.parity_shards, s.allow_guest, s.allow_anonymous, s.public_dir,
+			s.data_shards, s.parity_shards, s.allow_guest, s.allow_anonymous, s.public_dir, s.skip_backup,
 			w.uuid, w.name, c.app_key
 		FROM connections c
 		JOIN shares s ON s.share_name = c.share_name
@@ -224,7 +224,7 @@ func snapshotConnection(ctx context.Context, tx pgx.Tx, share string, workgroup 
 	)
 	err := tx.QueryRow(ctx, query, share, workgroup).Scan(
 		&conn.Share.Type, &conn.Share.Server, &conn.Share.Password, &conn.Share.Bucket, &conn.Share.Remark, &shareCreated,
-		&shards[0], &shards[1], &conn.Share.AllowGuest, &conn.Share.AllowAnonymous, &conn.Share.PublicDir,
+		&shards[0], &shards[1], &conn.Share.AllowGuest, &conn.Share.AllowAnonymous, &conn.Share.PublicDir, &conn.Share.SkipBackup,
 		&wgUUID, &wgName, &appKey,
 	)
 	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {

@@ -115,6 +115,7 @@ func (s Share) EncodeTo(e *types.Encoder) {
 	e.WriteBool(s.AllowGuest)
 	e.WriteBool(s.AllowAnonymous)
 	e.WriteString(s.PublicDir)
+	e.WriteBool(s.SkipBackup)
 }
 
 // DecodeFrom implements types.DecoderFrom.
@@ -131,6 +132,7 @@ func (s *Share) DecodeFrom(d *types.Decoder) {
 	s.AllowGuest = d.ReadBool()
 	s.AllowAnonymous = d.ReadBool()
 	s.PublicDir = d.ReadString()
+	s.SkipBackup = d.ReadBool()
 }
 
 // EncodeTo implements types.EncoderTo.
