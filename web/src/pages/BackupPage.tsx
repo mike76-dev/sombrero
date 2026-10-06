@@ -1,5 +1,11 @@
 import { useState } from 'react'
-import { backupStatus, recoverFromNetwork, restoreCatalog } from '../api/endpoints'
+import {
+  backupStatus,
+  listStoredCatalogs,
+  recoverFromNetwork,
+  restoreCatalog,
+  restoreStoredCatalog,
+} from '../api/endpoints'
 import { RecoverResponse, RestoreResponse, TierStatus } from '../api/types'
 import {
   Card,
@@ -125,10 +131,17 @@ function Tier({ title, tier }: { title: string; tier: TierStatus }) {
 
 export function BackupPage() {
   const { data: status, error, busy, reload } = useApiData(() => backupStatus())
+  const stored = useApiData(() => listStoredCatalogs())
   const restore = useApiAction()
   const [file, setFile] = useState<File | null>(null)
   const [force, setForce] = useState(false)
   const [restored, setRestored] = useState<RestoreResponse | null>(null)
+
+  // reloadAll refreshes both what the tiers report and what the folder holds.
+  const reloadAll = () => {
+    reload()
+    stored.reload()
+  }
 
   const recover = useApiAction()
   const [address, setAddress] = useState('')
@@ -181,24 +194,14 @@ export function BackupPage() {
 
       <Card title="Restore from a catalog">
         <p className="muted">
-          Pick a catalog file. If it describes a share, the server registers the share, creates
-          the workgroup with its accounts and their rights, connects to the indexer with the app
-          key from the catalog, and recreates the folders and files. Nothing is downloaded: the
-          files point at data that is already on the network. If the server already has this
-          connection, nothing happens unless you tick the box below; then what is missing is
-          added and the rest is left alone. If the file is the catalog of the server, it brings
-          back the shares, the workgroups with their accounts, and the bans, and never changes
-          anything that is already there.
+          If a catalog describes a share, the server registers the share, creates the workgroup
+          with its accounts and their rights, connects to the indexer with the app key from the
+          catalog, and recreates the folders and files. Nothing is downloaded: the files point at
+          data that is already on the network. If the server already has this connection,
+          nothing happens unless you tick the box below; then what is missing is added and the
+          rest is left alone. The catalog of the server brings back the shares, the workgroups
+          with their accounts, and the bans, and never changes anything that is already there.
         </p>
-        <div className="grid">
-          <Field label="Catalog">
-            <input
-              type="file"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              disabled={restore.busy}
-            />
-          </Field>
-        </div>
         <label className="checkbox">
           <input
             type="checkbox"
@@ -208,7 +211,68 @@ export function BackupPage() {
           />
           Apply over a connection this server already has
         </label>
-        <div className="row">
+        {(stored.data?.length ?? 0) > 0 && (
+          <>
+            <p className="muted">
+              These are the catalogs in the backup folder on this machine. The server reads them
+              itself, so they need not be readable by you.
+            </p>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Catalog</th>
+                  <th>Written</th>
+                  <th>Size</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {(stored.data || []).map((c) => (
+                  <tr key={c.path}>
+                    <td>
+                      {c.kind === 'server' ? (
+                        'The server itself'
+                      ) : (
+                        <>
+                          {c.share} <span className="mono muted">{c.workgroup}</span>
+                        </>
+                      )}
+                    </td>
+                    <td>{new Date(c.writtenAt).toLocaleString()}</td>
+                    <td>{formatBytes(c.size)}</td>
+                    <td>
+                      <button
+                        className="btn btn-small"
+                        disabled={restore.busy}
+                        onClick={() =>
+                          restore.run(async () => {
+                            setRestored(await restoreStoredCatalog(c.path, force))
+                            reloadAll()
+                          })
+                        }
+                      >
+                        Restore
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+        <ErrorBanner error={stored.error} />
+        <p className="muted">
+          A catalog from somewhere else, a copy you kept on another machine for instance, can be
+          picked as a file.
+        </p>
+        <div className="row row-form">
+          <Field label="Catalog file">
+            <input
+              type="file"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              disabled={restore.busy}
+            />
+          </Field>
           <button
             className="btn btn-primary"
             disabled={restore.busy || !file}
@@ -216,7 +280,7 @@ export function BackupPage() {
               restore.run(async () => {
                 if (!file) return
                 setRestored(await restoreCatalog(file, force))
-                reload()
+                reloadAll()
               })
             }
           >
@@ -274,7 +338,7 @@ export function BackupPage() {
                     force: recoverForce,
                   }),
                 )
-                reload()
+                reloadAll()
               })
             }
           >

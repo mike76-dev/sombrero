@@ -23,6 +23,7 @@ import type {
   RecoverRequest,
   RecoverResponse,
   RestoreResponse,
+  StoredCatalog,
   ShareSettings,
   Share,
   UnpinOrphansResponse,
@@ -217,6 +218,13 @@ export const restoreCatalog = (file: Blob, force: boolean) =>
 
 export const recoverFromNetwork = (body: RecoverRequest) =>
   request<RecoverResponse>('/recover', { method: 'POST', body })
+
+// The catalogs in the backup folder on this machine, which the server reads
+// itself: the browser has no business with that folder.
+export const listStoredCatalogs = () => request<StoredCatalog[] | null>('/backup/catalogs')
+
+export const restoreStoredCatalog = (path: string, force: boolean) =>
+  request<RestoreResponse>('/restore', { method: 'POST', body: { path, force } })
 
 // Imports
 

@@ -2,9 +2,13 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/mike76-dev/sombrero/stores"
@@ -39,9 +43,16 @@ type RestoreResponse struct {
 // maxCatalogSize bounds what a restore reads off a request.
 const maxCatalogSize = 1 << 30
 
-// restoreHandlerPOST handles POST /restore. The body is a catalog, and ?force=true
-// has it applied over a connection the server has already, adding what is
-// missing.
+// StoredRestoreRequest is the JSON body of POST /restore for a catalog in the
+// server's own folder, which the browser cannot read but the server can.
+type StoredRestoreRequest struct {
+	Path  string `json:"path"`
+	Force bool   `json:"force,omitempty"`
+}
+
+// restoreHandlerPOST handles POST /restore. The body is the catalog itself, with
+// ?force=true to apply it over a connection the server has already; or, sent as
+// JSON, the path of a catalog in the backup folder on this machine.
 func (api *API) restoreHandlerPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	store, ok := api.store.(Restorer)
 	if !ok {
@@ -49,10 +60,32 @@ func (api *API) restoreHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 		return
 	}
 
-	r, err := transfer.NewReader(http.MaxBytesReader(w, req.Body, maxCatalogSize))
-	if err != nil {
-		writeError(w, "the body is not a catalog: "+err.Error(), http.StatusBadRequest)
-		return
+	var r *transfer.Reader
+	var force bool
+	if strings.HasPrefix(req.Header.Get("Content-Type"), "application/json") {
+		var body StoredRestoreRequest
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeError(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		f, ok := api.openStoredCatalog(w, body.Path)
+		if !ok {
+			return
+		}
+		defer f.Close()
+		var err error
+		if r, err = transfer.NewReader(f); err != nil {
+			writeError(w, body.Path+" is not a catalog: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		force = body.Force
+	} else {
+		var err error
+		if r, err = transfer.NewReader(http.MaxBytesReader(w, req.Body, maxCatalogSize)); err != nil {
+			writeError(w, "the body is not a catalog: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		force = req.URL.Query().Get("force") == "true"
 	}
 
 	if r.Server() != nil {
@@ -66,13 +99,36 @@ func (api *API) restoreHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 		return
 	}
 
-	force := req.URL.Query().Get("force") == "true"
 	res, ok := restoreConnection(w, req.Context(), store, r, force)
 	if !ok {
 		return
 	}
 
 	writeJSON(w, res)
+}
+
+// openStoredCatalog opens a catalog in the backup folder on this machine, and
+// nothing outside it: the API is the admin's, but it is not a way to read files.
+func (api *API) openStoredCatalog(w http.ResponseWriter, path string) (*os.File, bool) {
+	dir := api.cfg.Backup.Path
+	if dir == "" {
+		writeError(w, "no backup folder is configured on this machine", http.StatusBadRequest)
+		return nil, false
+	}
+	dir = filepath.Clean(dir)
+	path = filepath.Clean(path)
+	if !strings.HasPrefix(path, dir+string(os.PathSeparator)) {
+		writeError(w, "the catalog has to be in the backup folder, "+dir, http.StatusBadRequest)
+		return nil, false
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		writeError(w, "the catalog could not be opened: "+err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+
+	return f, true
 }
 
 // restoreConnection applies a catalog of a connection and says what came of it,

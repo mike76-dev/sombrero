@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -52,6 +53,39 @@ type CatalogResponse struct {
 	Files       int       `json:"files"`
 	Incomplete  int       `json:"incomplete"`
 	Inlined     uint64    `json:"inlined"`
+}
+
+// StoredCatalogResponse is one entry of GET /backup/catalogs: a catalog in the
+// backup folder on this machine, by what it says of itself.
+type StoredCatalogResponse struct {
+	Path      string    `json:"path"`
+	Kind      string    `json:"kind"`
+	Share     string    `json:"share,omitempty"`
+	Workgroup string    `json:"workgroup,omitempty"`
+	WrittenAt time.Time `json:"writtenAt"`
+	Size      int64     `json:"size"`
+}
+
+// storedCatalogsHandlerGET handles GET /backup/catalogs: what the backup folder on
+// this machine holds, newest first, for a restore to pick from.
+func (api *API) storedCatalogsHandlerGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	stored, err := backup.ListFolder(api.cfg.Backup.Path)
+	if err != nil {
+		log.Printf("failed to list the backup folder: %v", err)
+		writeError(w, "the backup folder could not be read: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	res := make([]StoredCatalogResponse, 0, len(stored))
+	for _, s := range stored {
+		entry := StoredCatalogResponse{Path: s.Path, Kind: s.Kind, Share: s.Share, WrittenAt: s.WrittenAt, Size: s.Size}
+		if s.Kind == "connection" {
+			entry.Workgroup = s.Workgroup.String()
+		}
+		res = append(res, entry)
+	}
+
+	writeJSON(w, res)
 }
 
 // backupHandlerGET handles GET /backup.

@@ -5,6 +5,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/google/uuid"
@@ -89,6 +91,52 @@ func TestRestore(t *testing.T) {
 		res := decodeJSON[RestoreResponse](t, postBytes(newTestAPI(ms), "/restore", buf.Bytes()))
 		if res.Kind != "server" || res.Shares != 2 || res.Workgroups != 1 || res.Accounts != 3 || res.Bans != 1 {
 			t.Errorf("the response: got %+v", res)
+		}
+	})
+
+	t.Run("POST restores a catalog from the folder on this machine", func(t *testing.T) {
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "myshare_"+testUUID.String())
+		if err := os.MkdirAll(sub, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		stored := filepath.Join(sub, "20261006T000000.000000000Z.catalog")
+		if err := os.WriteFile(stored, catalogBody(t), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var restored bool
+		ms := &mockStore{
+			restore: func(_ context.Context, r *transfer.Reader, opts stores.RestoreOptions) (stores.RestoreStats, error) {
+				restored = r.Connection() != nil && opts.Force
+				return stores.RestoreStats{Share: "myshare", Workgroup: testUUID}, nil
+			},
+		}
+		api := newTestAPI(ms)
+		api.cfg.Backup.Path = dir
+
+		// The folder lists it, and it restores by its path.
+		w := doRequest(api, http.MethodGet, "/backup/catalogs", nil)
+		checkStatus(t, w, http.StatusOK)
+		list := decodeJSON[[]StoredCatalogResponse](t, w)
+		if len(list) != 1 || list[0].Path != stored || list[0].Kind != "connection" || list[0].Share != "myshare" || list[0].Workgroup != testUUID.String() {
+			t.Errorf("the folder: got %+v", list)
+		}
+
+		w = doRequest(api, http.MethodPost, "/restore", StoredRestoreRequest{Path: stored, Force: true})
+		checkStatus(t, w, http.StatusOK)
+		if res := decodeJSON[RestoreResponse](t, w); res.Kind != "connection" || res.Share != "myshare" || !restored {
+			t.Errorf("the response: got %+v, restored %v", res, restored)
+		}
+
+		// Nothing outside the folder is read, however it is spelled.
+		outside := filepath.Join(t.TempDir(), "elsewhere.catalog")
+		if err := os.WriteFile(outside, catalogBody(t), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{outside, filepath.Join(dir, "..", filepath.Base(filepath.Dir(outside)), "elsewhere.catalog"), "/etc/passwd"} {
+			w := doRequest(api, http.MethodPost, "/restore", StoredRestoreRequest{Path: path})
+			checkStatus(t, w, http.StatusBadRequest)
 		}
 	})
 

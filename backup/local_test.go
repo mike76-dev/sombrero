@@ -139,6 +139,39 @@ func TestLocalWritesAndKeeps(t *testing.T) {
 		t.Errorf("the catalog of the server does not read as one: %v", err)
 	}
 
+	// The folder lists what it holds, newest first, each catalog by what it is.
+	stored, err := ListFolder(dir)
+	if err != nil {
+		t.Fatalf("ListFolder: %v", err)
+	}
+	if len(stored) != 4 {
+		t.Fatalf("the folder lists %d catalog(s), want 2 of the connection and 2 of the server: %+v", len(stored), stored)
+	}
+	var connections, servers int
+	for i, s := range stored {
+		if i > 0 && s.WrittenAt.After(stored[i-1].WrittenAt) {
+			t.Errorf("the catalogs are not newest first: %+v", stored)
+		}
+		switch s.Kind {
+		case "connection":
+			connections++
+			if s.Share != "idx" || s.Workgroup != wg.UUID || s.Size == 0 {
+				t.Errorf("a catalog of the connection: got %+v", s)
+			}
+		case "server":
+			servers++
+		}
+	}
+	if connections != 2 || servers != 2 {
+		t.Errorf("want 2 catalogs of the connection and 2 of the server, got %d and %d", connections, servers)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.catalog"), []byte("not one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := ListFolder(dir); err != nil || len(again) != 4 {
+		t.Errorf("a file that is not a catalog was listed: %d, %v", len(again), err)
+	}
+
 	// A folder that cannot be written is reported, not passed over in silence.
 	bad := &Local{db: db, dir: filepath.Join(status.Catalogs[0].Path, "under-a-file"), keep: 2, inline: 1024}
 	if err := bad.WriteAll(ctx); err == nil {

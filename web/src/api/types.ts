@@ -195,6 +195,16 @@ export interface CatalogStatus {
   inlined: number
 }
 
+// A catalog in the backup folder on this machine, by what it says of itself.
+export interface StoredCatalog {
+  path: string
+  kind: 'connection' | 'server'
+  share?: string
+  workgroup?: string
+  writtenAt: string
+  size: number
+}
+
 // The account to recover from: the indexer it is at and its app key. force
 // applies the catalog over a connection the server has already.
 export interface RecoverRequest {

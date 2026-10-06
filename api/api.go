@@ -510,6 +510,10 @@ func (api *API) buildHTTPRoutes() {
 		api.backupHandlerGET(w, req, ps)
 	})
 
+	router.GET("/backup/catalogs", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.storedCatalogsHandlerGET(w, req, ps)
+	})
+
 	router.POST("/recover", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.recoverHandlerPOST(w, req, ps)
 	})
