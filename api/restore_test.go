@@ -129,6 +129,10 @@ func TestRestore(t *testing.T) {
 			t.Errorf("the response: got %+v, restored %v", res, restored)
 		}
 
+		// A catalog that was pruned since the list was made is said to be gone.
+		w = doRequest(api, http.MethodPost, "/restore", StoredRestoreRequest{Path: filepath.Join(sub, "20261001T000000.000000000Z.catalog")})
+		checkStatus(t, w, http.StatusNotFound)
+
 		// Nothing outside the folder is read, however it is spelled.
 		outside := filepath.Join(t.TempDir(), "elsewhere.catalog")
 		if err := os.WriteFile(outside, catalogBody(t), 0o600); err != nil {

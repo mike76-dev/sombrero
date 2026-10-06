@@ -253,8 +253,13 @@ export function BackupPage() {
                         disabled={restore.busy}
                         onClick={() =>
                           restore.run(async () => {
-                            setRestored(await restoreStoredCatalog(c.path, force))
-                            reloadAll()
+                            // The list is refreshed whatever came of it: a row
+                            // may have been pruned since the list was loaded.
+                            try {
+                              setRestored(await restoreStoredCatalog(c.path, force))
+                            } finally {
+                              reloadAll()
+                            }
                           })
                         }
                       >

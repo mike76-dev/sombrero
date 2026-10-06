@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -123,6 +124,12 @@ func (api *API) openStoredCatalog(w http.ResponseWriter, path string) (*os.File,
 	}
 
 	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		// The folder keeps only the newest few, so a catalog on a list that was
+		// loaded a while ago may have made way for a newer one since.
+		writeError(w, "that catalog is not there any more; it has been replaced by newer ones, so reload the list", http.StatusNotFound)
+		return nil, false
+	}
 	if err != nil {
 		writeError(w, "the catalog could not be opened: "+err.Error(), http.StatusBadRequest)
 		return nil, false
