@@ -27,6 +27,7 @@ type fakeShare struct {
 	files   map[string][]byte
 	uploads map[string]string
 	owners  map[string]string
+	cleared []string // who removed which folder
 }
 
 func newFakeShare() *fakeShare {
@@ -79,9 +80,20 @@ func (f *fakeShare) List(_ context.Context, _ stores.Account, dir string) ([]cli
 	return ois, nil
 }
 
-func (f *fakeShare) Delete(_ context.Context, _ stores.Account, p string, _ bool) error {
+func (f *fakeShare) Delete(_ context.Context, acc stores.Account, p string, batch bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	// A batch is a folder with everything in it.
+	if batch {
+		for name := range f.files {
+			if strings.HasPrefix(name, p+"/") {
+				delete(f.files, name)
+			}
+		}
+		f.cleared = append(f.cleared, acc.Username+" "+p)
+		return nil
+	}
 	if _, ok := f.files[p]; !ok {
 		return errors.New("no such file")
 	}
@@ -291,7 +303,8 @@ func TestNetworkWritesSealedCatalogs(t *testing.T) {
 		t.Errorf("the catalog belongs to %+v", conn)
 	}
 
-	// A share left out of the backups gets no catalog, and that is no error.
+	// A share taken out of the backups gets no catalog, and the ones it had are
+	// removed, by the account their folder belongs to. That is no error.
 	idx, err := db.GetShare("idx")
 	if err != nil {
 		t.Fatalf("GetShare: %v", err)
@@ -300,8 +313,11 @@ func TestNetworkWritesSealedCatalogs(t *testing.T) {
 	if err := db.UpdateShare(idx); err != nil {
 		t.Fatalf("UpdateShare: %v", err)
 	}
-	if err := n.WriteAll(ctx); err != nil || len(n.Status().Catalogs) != 0 || len(share.catalogs()) != 2 {
+	if err := n.WriteAll(ctx); err != nil || len(n.Status().Catalogs) != 0 || len(share.catalogs()) != 0 {
 		t.Errorf("a share left out: %v, %d catalog(s) reported, %d in the share", err, len(n.Status().Catalogs), len(share.catalogs()))
+	}
+	if len(share.cleared) != 1 || share.cleared[0] != "alice "+FolderOf(wg.UUID) {
+		t.Errorf("the folder was removed as %v, want once, by alice", share.cleared)
 	}
 	idx.SkipBackup = false
 	if err := db.UpdateShare(idx); err != nil {

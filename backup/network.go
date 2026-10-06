@@ -149,10 +149,6 @@ func (n *Network) WriteAll(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if c.SkipBackup {
-			continue
-		}
-
 		clients, ok := running[c.Share]
 		if !ok {
 			if clients, err = n.clients(c.Share); err != nil {
@@ -163,6 +159,18 @@ func (n *Network) WriteAll(ctx context.Context) error {
 			running[c.Share] = clients
 		}
 		files, ok := clients[c.Workgroup.UUID.String()]
+
+		// A share taken out of the backups keeps no catalogs: left there they
+		// would only grow old, and a recovery would restore the share from them.
+		if c.SkipBackup {
+			if ok {
+				if err := n.clear(ctx, c, files); err != nil {
+					err = fmt.Errorf("the old catalogs of %s for workgroup %s: %w", c.Share, c.Workgroup.UUID, err)
+					errs, failed = append(errs, err), append(failed, err)
+				}
+			}
+			continue
+		}
 		if !ok {
 			errs = append(errs, fmt.Errorf("the catalog of %s for workgroup %s: %w", c.Share, c.Workgroup.UUID, errNotRunning))
 			waiting = append(waiting, Pending{Share: c.Share, Workgroup: c.Workgroup.UUID})
@@ -309,6 +317,26 @@ func (n *Network) write(ctx context.Context, c stores.KeyedConnection, files Sha
 	n.prune(ctx, files, owner, folder)
 
 	return Catalog{Share: share.Name, Workgroup: wg.UUID, Path: name, Size: int64(len(sealed)), WrittenAt: now, Stats: stats}, nil
+}
+
+// clear removes a workgroup's catalogs from a share that is no longer backed up,
+// folder and all, as whoever the folder belongs to. A share that has none is
+// left as it is, which is what every round after the first finds.
+func (n *Network) clear(ctx context.Context, c stores.KeyedConnection, files ShareFiles) error {
+	folder := FolderOf(c.Workgroup.UUID)
+	owner, err := n.db.FolderOwner(c.Share, folder)
+	if err != nil {
+		return err
+	}
+	if owner.ID == 0 {
+		return nil
+	}
+	if err := files.Delete(ctx, owner, folder, true); err != nil {
+		return err
+	}
+	log.Printf("backup: removed the catalogs from %s for workgroup %s, which is no longer backed up", c.Share, c.Workgroup.UUID)
+
+	return nil
 }
 
 // prune leaves the newest keep catalogs in the workgroup's folder. Their names
