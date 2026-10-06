@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/julienschmidt/httprouter"
 	"github.com/mike76-dev/sombrero/backup"
 	"github.com/mike76-dev/sombrero/client"
+	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
 	sdk "go.sia.tech/siastorage"
@@ -27,10 +29,18 @@ type RecoverRequest struct {
 	Force   bool   `json:"force,omitempty"`
 }
 
-// RecoverResponse is the response type of POST /recover: which catalog was found
-// in the account, and what restoring it came to.
+// RecoverResponse is the response type of POST /recover: the catalogs that were
+// found in the account, one per connection it serves, and what restoring each
+// came to.
 type RecoverResponse struct {
+	Catalogs []RecoveredCatalog `json:"catalogs"`
+}
+
+// RecoveredCatalog is one catalog found in the account. Error says why it could
+// not be restored, where it could not; the others are restored all the same.
+type RecoveredCatalog struct {
 	Catalog string `json:"catalog"`
+	Error   string `json:"error,omitempty"`
 	RestoreResponse
 }
 
@@ -87,7 +97,7 @@ func (api *API) recoverHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 	ctx, cancel := context.WithTimeout(req.Context(), recoveryTimeout)
 	defer cancel()
 
-	found, err := client.FindCatalog(ctx, source)
+	found, err := client.FindCatalogs(ctx, source)
 	switch {
 	case errors.Is(err, client.ErrNoCatalog):
 		writeError(w, err.Error(), http.StatusNotFound)
@@ -98,21 +108,34 @@ func (api *API) recoverHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 		return
 	}
 
-	plain, err := backup.Open(key, found.Data)
+	// One connection that cannot be restored does not keep the others from
+	// being: each says for itself what came of it.
+	res := RecoverResponse{Catalogs: make([]RecoveredCatalog, 0, len(found))}
+	for _, catalog := range found {
+		entry := RecoveredCatalog{Catalog: catalog.Path}
+		stats, err := recoverCatalog(ctx, store, key, catalog, body.Force)
+		if err != nil {
+			log.Printf("failed to restore the catalog %s: %v", catalog.Path, err)
+			entry.Error = err.Error()
+		} else {
+			entry.RestoreResponse = connectionResponse(stats)
+		}
+		res.Catalogs = append(res.Catalogs, entry)
+	}
+
+	writeJSON(w, res)
+}
+
+// recoverCatalog opens one catalog found in an account and restores it.
+func recoverCatalog(ctx context.Context, store Restorer, key []byte, catalog client.FoundCatalog, force bool) (stores.RestoreStats, error) {
+	plain, err := backup.Open(key, catalog.Data)
 	if err != nil {
-		writeError(w, "the catalog "+found.Path+" does not open with this key: "+err.Error(), http.StatusBadRequest)
-		return
+		return stores.RestoreStats{}, err
 	}
 	r, err := transfer.NewReader(bytes.NewReader(plain))
 	if err != nil {
-		writeError(w, "the catalog "+found.Path+" does not read as one: "+err.Error(), http.StatusBadRequest)
-		return
+		return stores.RestoreStats{}, fmt.Errorf("it does not read as a catalog: %w", err)
 	}
 
-	res, ok := restoreConnection(w, ctx, store, r, body.Force)
-	if !ok {
-		return
-	}
-
-	writeJSON(w, RecoverResponse{Catalog: found.Path, RestoreResponse: res})
+	return store.Restore(ctx, r, stores.RestoreOptions{Force: force})
 }

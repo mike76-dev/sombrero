@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
@@ -21,6 +22,13 @@ import (
 
 // CatalogFolder is where a share keeps the catalogs of itself.
 const CatalogFolder = transfer.CatalogFolder
+
+// FolderOf is where a share keeps the catalogs of one workgroup's connection to
+// it. A share has one tree for all its workgroups, so each has a folder of its
+// own under CatalogFolder, belonging to an account of its own.
+func FolderOf(workgroup uuid.UUID) string {
+	return path.Join(CatalogFolder, workgroup.String())
+}
 
 // retryInterval is how soon a round that could not write every catalog is tried
 // again, rather than waiting the whole interval: at startup the connections
@@ -280,12 +288,13 @@ func (n *Network) write(ctx context.Context, c stores.KeyedConnection, files Sha
 	// The folder is the server's, written as the owner: made if it is not
 	// there, and taken over with what is in it if an earlier owner left it.
 	target := stores.TransferTarget{Share: share.Name, Workgroup: wg.ID, Owner: owner}
-	if err := n.db.AdoptFolder(target, CatalogFolder); err != nil {
-		return Catalog{}, fmt.Errorf("failed to make %s: %w", CatalogFolder, err)
+	folder := FolderOf(wg.UUID)
+	if err := n.db.AdoptFolder(target, folder); err != nil {
+		return Catalog{}, fmt.Errorf("failed to make %s: %w", folder, err)
 	}
 
 	now := time.Now().UTC()
-	name := path.Join(CatalogFolder, now.Format("20060102T150405.000000000Z")+".catalog")
+	name := path.Join(folder, now.Format("20060102T150405.000000000Z")+".catalog")
 	uploadID, err := files.StartUpload(ctx, owner, name)
 	if err != nil {
 		return Catalog{}, err
@@ -297,17 +306,17 @@ func (n *Network) write(ctx context.Context, c stores.KeyedConnection, files Sha
 		return Catalog{}, err
 	}
 
-	n.prune(ctx, files, owner)
+	n.prune(ctx, files, owner, folder)
 
 	return Catalog{Share: share.Name, Workgroup: wg.UUID, Path: name, Size: int64(len(sealed)), WrittenAt: now, Stats: stats}, nil
 }
 
-// prune leaves the newest keep catalogs in the share's folder. Their names are
-// their times, so the order of the names is the order of the times.
-func (n *Network) prune(ctx context.Context, files ShareFiles, owner stores.Account) {
-	entries, err := files.List(ctx, owner, CatalogFolder)
+// prune leaves the newest keep catalogs in the workgroup's folder. Their names
+// are their times, so the order of the names is the order of the times.
+func (n *Network) prune(ctx context.Context, files ShareFiles, owner stores.Account, folder string) {
+	entries, err := files.List(ctx, owner, folder)
 	if err != nil {
-		log.Printf("backup: failed to list %s: %v", CatalogFolder, err)
+		log.Printf("backup: failed to list %s: %v", folder, err)
 		return
 	}
 
@@ -320,7 +329,7 @@ func (n *Network) prune(ctx context.Context, files ShareFiles, owner stores.Acco
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 
 	for _, name := range names[min(n.keep, len(names)):] {
-		if err := files.Delete(ctx, owner, path.Join(CatalogFolder, name), false); err != nil {
+		if err := files.Delete(ctx, owner, path.Join(folder, name), false); err != nil {
 			log.Printf("backup: failed to remove the old catalog %s: %v", name, err)
 		}
 	}

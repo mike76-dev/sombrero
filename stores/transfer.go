@@ -8,6 +8,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
@@ -321,10 +322,15 @@ func cutFile(ctx context.Context, tx pgx.Tx, share, path string, remainder []tra
 	return nil
 }
 
-// AdoptFolder makes the folder at the path, and the folders above it, the owner's
-// own: made where they are not there, private, and handed over with everything
-// in them where they are. It is for the folders the server keeps for itself in a
-// share, which have to belong to whoever the server writes them as now.
+// AdoptFolder makes the folder at the path the owner's own: made where it is not
+// there, private, and handed over with everything in it where it is. It is for
+// the folders the server keeps for itself in a share, which have to belong to
+// whoever the server writes them as now.
+//
+// The folders above it are made where they are missing and otherwise left as
+// they are: a share has one tree for all its workgroups, and what is above one
+// workgroup's folder may be above another's too. Writing a file asks only for
+// the folder it goes into.
 func (db *Database) AdoptFolder(target TransferTarget, path string) error {
 	path = normalizePath(path)
 	if path == "/" {
@@ -340,13 +346,11 @@ func (db *Database) AdoptFolder(target TransferTarget, path string) error {
 			return err
 		}
 
-		// The path, the folders above it and everything under it, files alike:
-		// a folder is of no use to its owner while one above it is somebody's.
+		// The path and everything under it, folders and files alike.
 		const folders = `
 			UPDATE directories
 			SET account = $3, workgroup = $4, private = TRUE
-			WHERE share_name = $1
-			AND (full_path = $2 OR full_path LIKE $2 || '/%' OR $2 LIKE full_path || '/%')
+			WHERE share_name = $1 AND (full_path = $2 OR full_path LIKE $2 || '/%')
 		`
 		if _, err := tx.Exec(ctx, folders, target.Share, path, target.Owner.ID, target.Workgroup); err != nil {
 			return fmt.Errorf("failed to adopt the folder %q: %w", path, err)
@@ -362,6 +366,37 @@ func (db *Database) AdoptFolder(target TransferTarget, path string) error {
 
 		return nil
 	})
+}
+
+// FolderOwner returns the account the folder at the path belongs to, or an
+// account of no ID where there is no such folder.
+func (db *Database) FolderOwner(share, path string) (acc Account, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT a.id, a.account_name, a.password_hash, w.uuid
+			FROM directories d
+			JOIN accounts a ON a.id = d.account
+			JOIN workgroups w ON w.id = a.workgroup
+			WHERE d.share_name = $1 AND d.full_path = $2
+		`
+		var u []byte
+		err := tx.QueryRow(ctx, query, share, normalizePath(path)).Scan(&acc.ID, &acc.Username, &acc.NTHash, &u)
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to look up the owner of %q: %w", path, err)
+		}
+		id, err := uuid.FromBytes(u)
+		if err != nil {
+			return err
+		}
+		acc.Workgroup = id.String()
+
+		return nil
+	})
+
+	return acc, err
 }
 
 // ensureDirectory returns the id of the folder at the path, creating it and the

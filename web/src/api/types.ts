@@ -217,9 +217,16 @@ export interface RecoverRequest {
   force?: boolean
 }
 
-// What a recovery came to: which catalog was found, and what restoring it did.
-export interface RecoverResponse extends RestoreResponse {
+// What a recovery came to: the catalogs found in the account, one per
+// connection it serves, and what restoring each did.
+export interface RecoverResponse {
+  catalogs: RecoveredCatalog[]
+}
+
+// One catalog found in the account. error says why it could not be restored.
+export interface RecoveredCatalog extends RestoreResponse {
   catalog: string
+  error?: string
 }
 
 // What restoring a catalog came to. kind says which catalog it was, and the

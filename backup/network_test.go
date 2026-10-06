@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
@@ -155,6 +156,65 @@ func TestNetworkComesBackForWhatWasNotRunning(t *testing.T) {
 	})
 }
 
+// TestNetworkKeepsWorkgroupsApart verifies that two workgroups on one share each
+// get their catalogs in a folder of their own, owned by an account of their own,
+// since the share has one tree for both and neither is to take the other's.
+func TestNetworkKeepsWorkgroupsApart(t *testing.T) {
+	ctx := context.Background()
+	db, first, _ := connectedStore(t, ctx)
+
+	if err := db.AddWorkgroup(stores.Workgroup{UUID: uuid.New(), Name: "beta"}); err != nil {
+		t.Fatalf("AddWorkgroup: %v", err)
+	}
+	second, err := db.FindWorkgroupByName("beta")
+	if err != nil {
+		t.Fatalf("FindWorkgroupByName: %v", err)
+	}
+	if err := db.AddAccount(stores.Account{Username: "carol", Password: "pw", Workgroup: second.UUID.String()}); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	idx, err := db.GetShare("idx")
+	if err != nil {
+		t.Fatalf("GetShare: %v", err)
+	}
+	if err := db.AddConnection(second, idx, bytes.Repeat([]byte{9}, 64)); err != nil {
+		t.Fatalf("AddConnection: %v", err)
+	}
+
+	shares := map[string]*fakeShare{first.UUID.String(): newFakeShare(), second.UUID.String(): newFakeShare()}
+	n := &Network{
+		db: db,
+		clients: func(string) (map[string]ShareFiles, error) {
+			return map[string]ShareFiles{first.UUID.String(): shares[first.UUID.String()], second.UUID.String(): shares[second.UUID.String()]}, nil
+		},
+		keep:   2,
+		inline: 1024,
+	}
+	for range 2 {
+		if err := n.WriteAll(ctx); err != nil {
+			t.Fatalf("WriteAll: %v", err)
+		}
+	}
+
+	for _, each := range []struct {
+		wg       stores.Workgroup
+		username string
+	}{{first, "alice"}, {second, "carol"}} {
+		wg, username := each.wg, each.username
+		names := shares[wg.UUID.String()].catalogs()
+		if len(names) != 2 || path.Dir(names[0]) != FolderOf(wg.UUID) {
+			t.Errorf("the catalogs of %s: got %v", wg.Name, names)
+		}
+		owner, err := db.FolderOwner("idx", FolderOf(wg.UUID))
+		if err != nil || owner.Username != username {
+			t.Errorf("the folder of %s belongs to %q, want %s: %v", wg.Name, owner.Username, username, err)
+		}
+	}
+	if got := len(n.Status().Catalogs); got != 2 {
+		t.Errorf("the status lists %d catalog(s), want one per workgroup", got)
+	}
+}
+
 // TestNetworkWritesSealedCatalogs verifies that each round puts a catalog into
 // the share that only the app key opens, owned by an account of the workgroup,
 // and that only the newest few stay.
@@ -172,7 +232,7 @@ func TestNetworkWritesSealedCatalogs(t *testing.T) {
 
 	// An earlier server left the folder to the guest, private to it; the owner
 	// of today has to be able to write into it all the same.
-	if _, err := db.ApplyDirectory(stores.TransferTarget{Share: "idx", Workgroup: wg.ID, Owner: guest}, transfer.Directory{Path: path.Dir(CatalogFolder), Private: true}); err != nil {
+	if _, err := db.ApplyDirectory(stores.TransferTarget{Share: "idx", Workgroup: wg.ID, Owner: guest}, transfer.Directory{Path: FolderOf(wg.UUID), Private: true}); err != nil {
 		t.Fatalf("ApplyDirectory: %v", err)
 	}
 
@@ -200,21 +260,13 @@ func TestNetworkWritesSealedCatalogs(t *testing.T) {
 		t.Errorf("the catalog was written as %q, want alice", share.owners[names[1]])
 	}
 
-	// The folder is alice's now, and the guest sees nothing of it.
-	seen := func(acc stores.Account) bool {
-		entries, err := db.ListObjects(acc, "idx", "/")
-		if err != nil {
-			t.Fatalf("ListObjects: %v", err)
-		}
-		for _, entry := range entries {
-			if entry.Path == path.Dir(CatalogFolder) {
-				return true
-			}
-		}
-		return false
+	// The workgroup's folder is alice's now, and the catalogs are in it.
+	owner, err := db.FolderOwner("idx", FolderOf(wg.UUID))
+	if err != nil || owner.ID != alice.ID {
+		t.Errorf("the folder belongs to %q, want alice: %v", owner.Username, err)
 	}
-	if !seen(alice) || seen(guest) {
-		t.Errorf("the folder: alice sees it %v, the guest sees it %v", seen(alice), seen(guest))
+	if path.Dir(names[1]) != FolderOf(wg.UUID) {
+		t.Errorf("the catalog is at %s, want it in the workgroup's own folder", names[1])
 	}
 
 	status := n.Status()

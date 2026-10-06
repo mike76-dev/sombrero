@@ -352,7 +352,16 @@ export function BackupPage() {
             {recover.busy ? 'Recovering…' : 'Recover'}
           </button>
         </div>
-        {recovered && <RestoredBanner restored={recovered} from={recovered.catalog} />}
+        {(recovered?.catalogs || []).map((c) =>
+          c.error ? (
+            <ErrorBanner
+              key={c.catalog}
+              error={`${c.catalog} could not be restored: ${c.error}`}
+            />
+          ) : (
+            <RestoredBanner key={c.catalog} restored={c} from={c.catalog} />
+          ),
+        )}
         <ErrorBanner error={recover.error} />
       </Card>
     </div>

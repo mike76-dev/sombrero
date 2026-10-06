@@ -149,6 +149,12 @@ func restoreConnection(w http.ResponseWriter, ctx context.Context, store Restore
 		return RestoreResponse{}, false
 	}
 
+	return connectionResponse(stats), true
+}
+
+// connectionResponse is what restoring a catalog of a connection came to, as the
+// API reports it.
+func connectionResponse(stats stores.RestoreStats) RestoreResponse {
 	return RestoreResponse{
 		Kind:         "connection",
 		Share:        stats.Share,
@@ -159,5 +165,5 @@ func restoreConnection(w http.ResponseWriter, ctx context.Context, store Restore
 		Files:        stats.Files,
 		AlreadyThere: stats.AlreadyThere,
 		Incomplete:   stats.Incomplete,
-	}, true
+	}
 }

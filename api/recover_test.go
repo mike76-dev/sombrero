@@ -76,7 +76,7 @@ func TestRecover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	catalog := backup.CatalogFolder + "/20261005T000000.000000000Z.catalog"
+	catalog := backup.FolderOf(testUUID) + "/20261005T000000.000000000Z.catalog"
 
 	// An API whose account is the fake, whatever address it is asked for.
 	recovering := func(ms *mockStore, source client.CatalogSource, sourceErr error) *API {
@@ -97,11 +97,28 @@ func TestRecover(t *testing.T) {
 		w := doRequest(recovering(ms, newFakeCatalogSource(catalog, sealed), nil), http.MethodPost, "/recover", body)
 		checkStatus(t, w, http.StatusOK)
 		res := decodeJSON[RecoverResponse](t, w)
-		if res.Catalog != catalog || res.Kind != "connection" || res.Share != "myshare" || res.Files != 3 {
-			t.Errorf("the response: got %+v", res)
+		if len(res.Catalogs) != 1 {
+			t.Fatalf("the response: got %+v", res)
+		}
+		if got := res.Catalogs[0]; got.Catalog != catalog || got.Error != "" || got.Kind != "connection" || got.Share != "myshare" || got.Files != 3 {
+			t.Errorf("the catalog: got %+v", got)
 		}
 		if !restored {
 			t.Error("the store was not handed the catalog that was found")
+		}
+	})
+
+	t.Run("POST says which catalog could not be restored, and why", func(t *testing.T) {
+		ms := &mockStore{
+			restore: func(context.Context, *transfer.Reader, stores.RestoreOptions) (stores.RestoreStats, error) {
+				return stores.RestoreStats{}, stores.ErrConnectionExists
+			},
+		}
+		w := doRequest(recovering(ms, newFakeCatalogSource(catalog, sealed), nil), http.MethodPost, "/recover", body)
+		checkStatus(t, w, http.StatusOK)
+		res := decodeJSON[RecoverResponse](t, w)
+		if len(res.Catalogs) != 1 || res.Catalogs[0].Catalog != catalog || res.Catalogs[0].Error == "" {
+			t.Errorf("the response: got %+v", res)
 		}
 	})
 
@@ -114,7 +131,11 @@ func TestRecover(t *testing.T) {
 		other := bytes.Repeat([]byte{9}, 64)
 		sealedByOther, _ := backup.Seal(other, catalogBody(t))
 		w := doRequest(recovering(&mockStore{}, newFakeCatalogSource(catalog, sealedByOther), nil), http.MethodPost, "/recover", body)
-		checkStatus(t, w, http.StatusBadRequest)
+		checkStatus(t, w, http.StatusOK)
+		res := decodeJSON[RecoverResponse](t, w)
+		if len(res.Catalogs) != 1 || res.Catalogs[0].Error == "" {
+			t.Errorf("the response: got %+v", res)
+		}
 	})
 
 	t.Run("POST refuses what it cannot read the account with", func(t *testing.T) {
