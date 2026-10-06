@@ -170,6 +170,10 @@ export interface TierStatus {
   // server is the catalog of the server itself, where the tier writes one:
   // the shares, the workgroups with their accounts, and the bans.
   server?: ServerCatalogStatus
+
+  // waiting names the connections whose catalog waits for the connection to
+  // come up, which is no failure: the tier comes back for them.
+  waiting?: { share: string; workgroup: string }[]
 }
 
 export interface ServerCatalogStatus {

@@ -116,6 +116,7 @@ func (n *Network) Status() Status {
 
 	status := n.status
 	status.Catalogs = append([]Catalog(nil), n.status.Catalogs...)
+	status.Waiting = append([]Pending(nil), n.status.Waiting...)
 
 	return status
 }
@@ -126,12 +127,15 @@ func (n *Network) Status() Status {
 func (n *Network) WriteAll(ctx context.Context) error {
 	conns, err := n.db.KeyedConnections()
 	if err != nil {
-		n.finish(nil, err)
+		n.finish(nil, nil, err)
 		return err
 	}
 
+	// What failed and what is only waiting for its connection are kept apart:
+	// the second is the usual state of things for a while after a start.
 	var written []Catalog
-	var errs []error
+	var waiting []Pending
+	var errs, failed []error
 	running := make(map[string]map[string]ShareFiles)
 	for _, c := range conns {
 		if err := ctx.Err(); err != nil {
@@ -144,7 +148,8 @@ func (n *Network) WriteAll(ctx context.Context) error {
 		clients, ok := running[c.Share]
 		if !ok {
 			if clients, err = n.clients(c.Share); err != nil {
-				errs = append(errs, fmt.Errorf("the connections of %s: %w", c.Share, err))
+				err = fmt.Errorf("the connections of %s: %w", c.Share, err)
+				errs, failed = append(errs, err), append(failed, err)
 				continue
 			}
 			running[c.Share] = clients
@@ -152,30 +157,34 @@ func (n *Network) WriteAll(ctx context.Context) error {
 		files, ok := clients[c.Workgroup.UUID.String()]
 		if !ok {
 			errs = append(errs, fmt.Errorf("the catalog of %s for workgroup %s: %w", c.Share, c.Workgroup.UUID, errNotRunning))
+			waiting = append(waiting, Pending{Share: c.Share, Workgroup: c.Workgroup.UUID})
 			continue
 		}
 
 		cat, err := n.write(ctx, c, files)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("the catalog of %s for workgroup %s: %w", c.Share, c.Workgroup.UUID, err))
+			err = fmt.Errorf("the catalog of %s for workgroup %s: %w", c.Share, c.Workgroup.UUID, err)
+			errs, failed = append(errs, err), append(failed, err)
 			continue
 		}
 		written = append(written, cat)
 	}
 
-	err = joinLine(errs)
-	n.finish(written, err)
+	n.finish(written, waiting, joinLine(failed))
 
-	return err
+	// The round is not done while anything is waiting either, which is what
+	// has the caller come back sooner.
+	return joinLine(errs)
 }
 
 // finish keeps what a round came to.
-func (n *Network) finish(written []Catalog, err error) {
+func (n *Network) finish(written []Catalog, waiting []Pending, err error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	n.status.LastRun = time.Now()
 	n.status.Catalogs = written
+	n.status.Waiting = waiting
 	n.status.Error = ""
 	if err != nil {
 		n.status.Error = err.Error()

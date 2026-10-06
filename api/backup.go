@@ -29,6 +29,16 @@ type TierStatus struct {
 	Error    string                 `json:"error,omitempty"`
 	Catalogs []CatalogResponse      `json:"catalogs"`
 	Server   *ServerCatalogResponse `json:"server,omitempty"`
+
+	// Waiting names the connections whose catalog waits for the connection to
+	// come up, which is the usual state for a while after a start.
+	Waiting []PendingResponse `json:"waiting,omitempty"`
+}
+
+// PendingResponse is a connection a tier is waiting for.
+type PendingResponse struct {
+	Share     string `json:"share"`
+	Workgroup string `json:"workgroup"`
 }
 
 // ServerCatalogResponse is the catalog of the server itself and what it holds.
@@ -125,6 +135,9 @@ func tierStatus(status *backup.Status) *TierStatus {
 			Share: c.Share, Workgroup: c.Workgroup.String(), Path: c.Path, Size: c.Size, WrittenAt: c.WrittenAt,
 			Directories: c.Stats.Directories, Files: c.Stats.Files, Incomplete: c.Stats.Incomplete, Inlined: c.Stats.Inlined,
 		})
+	}
+	for _, p := range status.Waiting {
+		tier.Waiting = append(tier.Waiting, PendingResponse{Share: p.Share, Workgroup: p.Workgroup.String()})
 	}
 	if s := status.Server; s != nil {
 		tier.Server = &ServerCatalogResponse{

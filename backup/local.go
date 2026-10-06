@@ -41,9 +41,16 @@ type ServerCatalog struct {
 	Stats     stores.ServerStats
 }
 
+// Pending is a connection whose catalog is waiting for the connection to come
+// up, which is no failure: a round comes back for it.
+type Pending struct {
+	Share     string
+	Workgroup uuid.UUID
+}
+
 // Status is what a tier has done so far: the newest catalog of each connection,
-// the catalog of the server where the tier writes one, and what went wrong the
-// last time, if anything did.
+// the catalog of the server where the tier writes one, the connections it is
+// waiting for, and what went wrong the last time, if anything did.
 type Status struct {
 	Path     string
 	Interval time.Duration
@@ -51,6 +58,7 @@ type Status struct {
 	LastRun  time.Time
 	Catalogs []Catalog
 	Server   *ServerCatalog
+	Waiting  []Pending
 	Error    string
 }
 

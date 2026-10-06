@@ -85,6 +85,12 @@ function Tier({ title, tier }: { title: string; tier: TierStatus }) {
         {tier.lastRun ? ` Last run: ${new Date(tier.lastRun).toLocaleString()}.` : ''}
       </div>
       {tier.error && <ErrorBanner error={tier.error} />}
+      {(tier.waiting || []).map((w) => (
+        <div className="muted" key={`${w.share}/${w.workgroup}`}>
+          Waiting for the connection to <strong>{w.share}</strong> to come up. The catalog is
+          written within a minute of that.
+        </div>
+      ))}
       {tier.server && (
         <div className="muted">
           The catalog of the server itself holds {tier.server.shares} share
@@ -123,7 +129,8 @@ function Tier({ title, tier }: { title: string; tier: TierStatus }) {
           </tbody>
         </table>
       ) : (
-        !tier.error && <p className="muted">No catalog has been written yet.</p>
+        !tier.error &&
+        !(tier.waiting || []).length && <p className="muted">No catalog has been written yet.</p>
       )}
     </div>
   )

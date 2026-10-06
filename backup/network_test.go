@@ -143,14 +143,15 @@ func TestNetworkComesBackForWhatWasNotRunning(t *testing.T) {
 		t.Fatalf("%s: status %+v", what, n.Status())
 	}
 
+	// Waiting for a connection is said as that, and is not a failure.
 	await("the first round should find the connection not running", func(s Status) bool {
-		return strings.Contains(s.Error, "not running")
+		return len(s.Waiting) == 1 && s.Waiting[0].Share == "idx" && s.Waiting[0].Workgroup == wg.UUID && s.Error == ""
 	})
 	mu.Lock()
 	up = true
 	mu.Unlock()
 	await("the catalog should be written soon after the connection comes up", func(s Status) bool {
-		return s.Error == "" && len(s.Catalogs) == 1
+		return s.Error == "" && len(s.Waiting) == 0 && len(s.Catalogs) == 1
 	})
 }
 
@@ -257,7 +258,7 @@ func TestNetworkWritesSealedCatalogs(t *testing.T) {
 
 	// A connection that is not running is reported and the round goes on.
 	n.clients = func(string) (map[string]ShareFiles, error) { return nil, nil }
-	if err := n.WriteAll(ctx); err == nil || !strings.Contains(n.Status().Error, "not running") {
-		t.Errorf("a connection that is not running: got %v, status %q", err, n.Status().Error)
+	if err := n.WriteAll(ctx); err == nil || !onlyNotRunning(err) || len(n.Status().Waiting) != 1 || n.Status().Error != "" {
+		t.Errorf("a connection that is not running: got %v, status %+v", err, n.Status())
 	}
 }

@@ -31,7 +31,10 @@ func TestBackupStatus(t *testing.T) {
 				Path: "/var/backups/sombrero", Interval: 15 * time.Minute, Keep: 7, LastRun: written, Catalogs: []backup.Catalog{catalog},
 				Server: &backup.ServerCatalog{Path: "/var/backups/sombrero/server/x.catalog", Size: 99, WrittenAt: written, Stats: stores.ServerStats{Shares: 2, Workgroups: 1, Accounts: 3, Bans: 1}},
 			},
-			Network: &backup.Status{Path: backup.CatalogFolder, Interval: time.Hour, Keep: 7, Error: "the connection is not running"},
+			Network: &backup.Status{
+				Path: backup.CatalogFolder, Interval: time.Hour, Keep: 7, Error: "the host would not take it",
+				Waiting: []backup.Pending{{Share: "myshare", Workgroup: testUUID}},
+			},
 		}}
 		w := doRequest(newTestAPIWithServer(&mockStore{}, srv), http.MethodGet, "/backup", nil)
 		checkStatus(t, w, http.StatusOK)
@@ -50,6 +53,9 @@ func TestBackupStatus(t *testing.T) {
 		}
 		if res.Network == nil || res.Network.Path != backup.CatalogFolder || res.Network.Error == "" || res.Network.LastRun != nil || res.Network.Server != nil {
 			t.Errorf("the network tier: got %+v", res.Network)
+		}
+		if w := res.Network.Waiting; len(w) != 1 || w[0].Share != "myshare" || w[0].Workgroup != testUUID.String() {
+			t.Errorf("what the network tier waits for: got %+v", w)
 		}
 	})
 }
