@@ -97,7 +97,7 @@ func (api *API) recoverHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 	ctx, cancel := context.WithTimeout(req.Context(), recoveryTimeout)
 	defer cancel()
 
-	found, err := client.FindCatalogs(ctx, source)
+	found, held, err := client.FindCatalogs(ctx, source)
 	switch {
 	case errors.Is(err, client.ErrNoCatalog):
 		writeError(w, err.Error(), http.StatusNotFound)
@@ -113,7 +113,7 @@ func (api *API) recoverHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 	res := RecoverResponse{Catalogs: make([]RecoveredCatalog, 0, len(found))}
 	for _, catalog := range found {
 		entry := RecoveredCatalog{Catalog: catalog.Path}
-		stats, err := recoverCatalog(ctx, store, key, catalog, body.Force)
+		stats, err := recoverCatalog(ctx, store, key, catalog, stores.RestoreOptions{Force: body.Force, Held: held})
 		if err != nil {
 			log.Printf("failed to restore the catalog %s: %v", catalog.Path, err)
 			entry.Error = err.Error()
@@ -127,7 +127,7 @@ func (api *API) recoverHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 }
 
 // recoverCatalog opens one catalog found in an account and restores it.
-func recoverCatalog(ctx context.Context, store Restorer, key []byte, catalog client.FoundCatalog, force bool) (stores.RestoreStats, error) {
+func recoverCatalog(ctx context.Context, store Restorer, key []byte, catalog client.FoundCatalog, opts stores.RestoreOptions) (stores.RestoreStats, error) {
 	plain, err := backup.Open(key, catalog.Data)
 	if err != nil {
 		return stores.RestoreStats{}, err
@@ -137,5 +137,28 @@ func recoverCatalog(ctx context.Context, store Restorer, key []byte, catalog cli
 		return stores.RestoreStats{}, fmt.Errorf("it does not read as a catalog: %w", err)
 	}
 
-	return store.Restore(ctx, r, stores.RestoreOptions{Force: force})
+	return store.Restore(ctx, r, opts)
+}
+
+// heldObjects returns what says whether the account a catalog belongs to still
+// holds an object, read with the app key the catalog carries. A catalog without
+// a key is taken at its word, and an account that cannot be read is refused,
+// since a restore that cannot check would point at whatever is gone.
+func (api *API) heldObjects(w http.ResponseWriter, ctx context.Context, conn *transfer.Connection) (func(types.Hash256) bool, bool) {
+	if len(conn.AppKey) == 0 {
+		return nil, true
+	}
+
+	source, err := api.catalogSource(conn.Share.Server, types.PrivateKey(conn.AppKey))
+	if err != nil {
+		writeError(w, "the indexer did not accept the app key in the catalog, so the catalog cannot be checked against the account: "+err.Error(), http.StatusBadGateway)
+		return nil, false
+	}
+	held, err := client.HeldObjects(ctx, source)
+	if err != nil {
+		writeError(w, "the account could not be read, so the catalog cannot be checked against it: "+err.Error(), http.StatusBadGateway)
+		return nil, false
+	}
+
+	return held, true
 }

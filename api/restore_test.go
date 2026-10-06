@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,8 +11,10 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
+	"go.sia.tech/core/types"
 )
 
 // catalogBody is the smallest catalog there is: a header and a connection.
@@ -68,6 +71,36 @@ func TestRestore(t *testing.T) {
 		if !got.Force {
 			t.Error("force was asked for and not passed on")
 		}
+	})
+
+	t.Run("POST checks the catalog against the account it belongs to", func(t *testing.T) {
+		key := bytes.Repeat([]byte{5}, 64)
+		var buf bytes.Buffer
+		w, _ := transfer.NewWriter(&buf, transfer.Header{Source: "sombrero"})
+		_ = w.Connection(transfer.Connection{Share: transfer.Share{Name: "myshare", Type: "indexd", Server: "https://indexer"}, Workgroup: transfer.Workgroup{UUID: testUUID}, AppKey: key})
+		_ = w.Close()
+
+		// The account holds one object; what the catalog points at besides is
+		// gone, and the restore is told so.
+		source := newFakeCatalogSource("/photo.jpg", []byte("the one object"))
+		var checked bool
+		ms := &mockStore{
+			restore: func(_ context.Context, _ *transfer.Reader, opts stores.RestoreOptions) (stores.RestoreStats, error) {
+				checked = opts.Held != nil && opts.Held(source.obj.ID()) && !opts.Held(types.Hash256{7})
+				return stores.RestoreStats{Share: "myshare", Workgroup: testUUID, Missing: 1, MissingPaths: []string{"/gone.bin"}}, nil
+			},
+		}
+		api := newTestAPI(ms)
+		api.catalogSource = func(string, types.PrivateKey) (client.CatalogSource, error) { return source, nil }
+		res := decodeJSON[RestoreResponse](t, postBytes(api, "/restore", buf.Bytes()))
+		if !checked || res.Missing != 1 || len(res.MissingPaths) != 1 {
+			t.Errorf("checked %v, response %+v", checked, res)
+		}
+
+		// An account that cannot be read refuses the restore, rather than
+		// restoring unchecked.
+		api.catalogSource = func(string, types.PrivateKey) (client.CatalogSource, error) { return nil, errors.New("unauthorized") }
+		checkStatus(t, postBytes(api, "/restore", buf.Bytes()), http.StatusBadGateway)
 	})
 
 	t.Run("POST restores a catalog of the server", func(t *testing.T) {

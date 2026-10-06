@@ -39,6 +39,11 @@ type RestoreResponse struct {
 	Shares       int    `json:"shares,omitempty"`
 	Workgroups   int    `json:"workgroups,omitempty"`
 	Bans         int    `json:"bans,omitempty"`
+
+	// Missing counts the files left out because their data is no longer in
+	// the account, and MissingPaths names the first few of them.
+	Missing      int      `json:"missing,omitempty"`
+	MissingPaths []string `json:"missingPaths,omitempty"`
 }
 
 // maxCatalogSize bounds what a restore reads off a request.
@@ -100,7 +105,13 @@ func (api *API) restoreHandlerPOST(w http.ResponseWriter, req *http.Request, _ h
 		return
 	}
 
-	res, ok := restoreConnection(w, req.Context(), store, r, force)
+	ctx, cancel := context.WithTimeout(req.Context(), recoveryTimeout)
+	defer cancel()
+	held, ok := api.heldObjects(w, ctx, r.Connection())
+	if !ok {
+		return
+	}
+	res, ok := restoreConnection(w, ctx, store, r, stores.RestoreOptions{Force: force, Held: held})
 	if !ok {
 		return
 	}
@@ -140,8 +151,8 @@ func (api *API) openStoredCatalog(w http.ResponseWriter, path string) (*os.File,
 
 // restoreConnection applies a catalog of a connection and says what came of it,
 // or writes why it could not be applied and reports false.
-func restoreConnection(w http.ResponseWriter, ctx context.Context, store Restorer, r *transfer.Reader, force bool) (RestoreResponse, bool) {
-	stats, err := store.Restore(ctx, r, stores.RestoreOptions{Force: force})
+func restoreConnection(w http.ResponseWriter, ctx context.Context, store Restorer, r *transfer.Reader, opts stores.RestoreOptions) (RestoreResponse, bool) {
+	stats, err := store.Restore(ctx, r, opts)
 	switch {
 	case errors.Is(err, stores.ErrConnectionExists):
 		writeError(w, err.Error()+"; ask for the catalog to be applied over it", http.StatusConflict)
@@ -172,5 +183,7 @@ func connectionResponse(stats stores.RestoreStats) RestoreResponse {
 		Files:        stats.Files,
 		AlreadyThere: stats.AlreadyThere,
 		Incomplete:   stats.Incomplete,
+		Missing:      stats.Missing,
+		MissingPaths: stats.MissingPaths,
 	}
 }

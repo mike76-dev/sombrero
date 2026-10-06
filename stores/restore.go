@@ -33,16 +33,28 @@ type RestoreOptions struct {
 	// restore is refused, so that one cannot be run over a live share by
 	// mistake.
 	Force bool
+
+	// Held reports whether the account still holds the object. A catalog can
+	// only point at data, and a file whose data was unpinned since the catalog
+	// was written is left out rather than made as an entry nothing can read.
+	// Nil trusts the catalog.
+	Held func(types.Hash256) bool
 }
 
+// maxMissingPaths is how many of the files left out a restore names.
+const maxMissingPaths = 20
+
 // RestoreStats is what a restore came to, on top of what applying the folders
-// and files did: the accounts and policies that were made.
+// and files did: the accounts and policies that were made, and the files left
+// out because their data is no longer in the account, the first few by name.
 type RestoreStats struct {
 	ApplyStats
-	Share     string
-	Workgroup uuid.UUID
-	Accounts  int
-	Policies  int
+	Share        string
+	Workgroup    uuid.UUID
+	Accounts     int
+	Policies     int
+	Missing      int
+	MissingPaths []string
 }
 
 // Restore recreates a connection from its catalog: the share, the workgroup with
@@ -146,6 +158,13 @@ func (db *Database) Restore(ctx context.Context, r *transfer.Reader, opts Restor
 		if !ok {
 			return stats, fmt.Errorf("%q belongs to %q, an account the catalog does not have", path, owner)
 		}
+		if file != nil && opts.Held != nil && !held(*file, opts.Held) {
+			stats.Missing++
+			if len(stats.MissingPaths) < maxMissingPaths {
+				stats.MissingPaths = append(stats.MissingPaths, file.Path)
+			}
+			continue
+		}
 
 		target := TransferTarget{Share: share.Name, Workgroup: wg.ID, Owner: acc}
 		if err := db.applyRecord(target, dir, file, &stats.ApplyStats); err != nil {
@@ -231,6 +250,18 @@ func (db *Database) RestoreServer(ctx context.Context, r *transfer.Reader) (Serv
 	}
 
 	return stats, nil
+}
+
+// held reports whether every object a file points at is still in the account.
+// Bytes the catalog carries itself need no object.
+func held(file transfer.File, check func(types.Hash256) bool) bool {
+	for _, part := range file.Parts {
+		if part.Object != (types.Hash256{}) && !check(part.Object) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // restoreShare registers the share the catalog describes, or returns the one of

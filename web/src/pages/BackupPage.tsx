@@ -63,6 +63,21 @@ function RestoredBanner({ restored, from }: { restored: RestoreResponse; from?: 
           network.
         </div>
       )}
+      {(restored.missing ?? 0) > 0 && (
+        <div>
+          {restored.missing === 1 ? 'One file was' : `${restored.missing} files were`} left out:
+          the data {restored.missing === 1 ? 'it points' : 'they point'} at is no longer in the
+          account, so {restored.missing === 1 ? 'it' : 'they'} could not have been read.
+          {(restored.missingPaths || []).map((p) => (
+            <div className="mono" key={p}>
+              {p}
+            </div>
+          ))}
+          {(restored.missing ?? 0) > (restored.missingPaths?.length ?? 0) && (
+            <div className="muted">and more</div>
+          )}
+        </div>
+      )}
       {from && (
         <div>
           Files written after this catalog are not in it. Run an import of the same account into

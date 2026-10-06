@@ -117,6 +117,24 @@ func TestRestore(t *testing.T) {
 	if again.Accounts != 0 || again.Directories != 0 || again.Files != 0 || again.AlreadyThere != 6 {
 		t.Errorf("the forced restore: got %+v", again)
 	}
+
+	// A file whose data the account no longer holds is left out and named,
+	// rather than made as an entry nothing can read.
+	if err := db.UnregisterShare(fx.share.Name); err != nil {
+		t.Fatalf("UnregisterShare: %v", err)
+	}
+	r, _ = transfer.NewReader(bytes.NewReader(catalog.Bytes()))
+	unpinned := types.Hash256{8}
+	partial, err := db.Restore(ctx, r, RestoreOptions{Held: func(key types.Hash256) bool { return key != unpinned }})
+	if err != nil {
+		t.Fatalf("the restore with a slab gone: %v", err)
+	}
+	if partial.Files != 4 || partial.Missing != 1 || len(partial.MissingPaths) != 1 || partial.MissingPaths[0] != "/holiday/beach.raw" {
+		t.Errorf("the restore with a slab gone: got %+v", partial)
+	}
+	if _, err := db.GetMetadata(alice, share.Name, "/holiday/beach.raw", 0, 300); err == nil {
+		t.Error("the file whose data is gone was made all the same")
+	}
 }
 
 // TestServerCatalog verifies that what belongs to no connection comes back from a

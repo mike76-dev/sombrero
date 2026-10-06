@@ -244,6 +244,11 @@ export interface RestoreResponse {
   shares?: number
   workgroups?: number
   bans?: number
+
+  // missing counts the files left out because their data is no longer in the
+  // account, and missingPaths names the first few of them.
+  missing?: number
+  missingPaths?: string[]
 }
 
 // A workgroup's connection to an indexd share, holding the app key of an account

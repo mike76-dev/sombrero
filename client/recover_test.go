@@ -54,12 +54,15 @@ func TestFindCatalogs(t *testing.T) {
 	), uint32(len(other)))
 	fa.data[key] = other
 
-	found, err := FindCatalogs(context.Background(), fa)
+	found, held, err := FindCatalogs(context.Background(), fa)
 	if err != nil {
 		t.Fatalf("FindCatalogs: %v", err)
 	}
 	if len(found) != 2 {
 		t.Fatalf("found %d catalog(s), want one per workgroup: %+v", len(found), found)
+	}
+	if !held(key) || held(types.Hash256{99}) {
+		t.Error("what the account holds is not told from what it does not")
 	}
 	if found[0].Share != "s" || found[0].Path != first+"20261002T000000.000000000Z.catalog" || !bytes.Equal(found[0].Data, middle) {
 		t.Errorf("the first workgroup's: %s, %q", found[0].Path, found[0].Data)
@@ -72,7 +75,7 @@ func TestFindCatalogs(t *testing.T) {
 	bare := &fakeAccount{}
 	bare.pin(at, tagOf(t, objectPiece{Share: "s", Path: "/photo.jpg", Length: 100, Size: 100}), 100)
 	bare.pin(at.Add(time.Second), nil, 100)
-	if _, err := FindCatalogs(context.Background(), bare); !errors.Is(err, ErrNoCatalog) {
+	if _, _, err := FindCatalogs(context.Background(), bare); !errors.Is(err, ErrNoCatalog) {
 		t.Errorf("an account without a catalog: got %v", err)
 	}
 }
