@@ -206,8 +206,10 @@ export function BackupPage() {
           catalog, and recreates the folders and files. Nothing is downloaded: the files point at
           data that is already on the network. If the server already has this connection,
           nothing happens unless you tick the box below; then what is missing is added and the
-          rest is left alone. The catalog of the server brings back the shares, the workgroups
-          with their accounts, and the bans, and never changes anything that is already there.
+          rest is left alone. A restore brings back what the database lost, not what was deleted:
+          deleting a file unpins its data, and a catalog can only point at data that is still
+          there. The catalog of the server brings back the shares, the workgroups with their
+          accounts, and the bans, and never changes anything that is already there.
         </p>
         <label className="checkbox">
           <input

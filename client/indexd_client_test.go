@@ -2452,6 +2452,37 @@ func waitForSlabKey(t *testing.T, db *stores.Database, acc stores.Account, share
 // the storage backend stays staged and is unpinned by the periodic retry, and
 // that a staged slab whose key a live file references again is unstaged
 // instead of unpinned.
+// TestIndexdClient_UnpinOfAGoneSlabIsDone verifies that a slab the indexer no
+// longer has counts as unpinned, rather than being asked about forever: a file
+// restored from a catalog after its slabs were unpinned leaves such a slab
+// behind when it is deleted again.
+func TestIndexdClient_UnpinOfAGoneSlabIsDone(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	wgID := workgroupID(t, db, acc)
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+	ic := c.(*IndexdClient)
+
+	fb.failDeletes(&app.HTTPError{StatusCode: http.StatusNotFound, Body: "object not found"})
+	key := types.Hash256{42}
+	if err := db.StageUnpin(share.Name, wgID, key); err != nil {
+		t.Fatalf("StageUnpin: %v", err)
+	}
+	ic.retryPendingUnpins(ctx)
+	if staged, err := db.PendingUnpins(share.Name, wgID); err != nil || len(staged) != 0 {
+		t.Errorf("a slab the indexer does not have is still staged: %v, %v", staged, err)
+	}
+}
+
 func TestIndexdClient_UnpinRetry(t *testing.T) {
 	ctx := context.Background()
 

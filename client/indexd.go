@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -1188,17 +1189,30 @@ func (ic *IndexdClient) Close() error {
 func (ic *IndexdClient) unpinSlabs(ctx context.Context, keys []types.Hash256) bool {
 	var dropped bool
 	for _, key := range keys {
-		if err := ic.backend.DeleteObject(ctx, key); err != nil {
+		err := ic.backend.DeleteObject(ctx, key)
+		switch {
+		case isNotFound(err):
+			// A slab the account no longer holds is as unpinned as it gets:
+			// asking again would only fail the same way.
+			log.Printf("slab %s is not in the account any more, so it counts as unpinned", key)
+		case err != nil:
 			log.Printf("failed to delete slab %s, leaving it staged for retry: %v", key, err)
 			continue
+		default:
+			dropped = true
 		}
-		dropped = true
 		if err := ic.db.UnstageUnpin(ic.share, ic.workgroup, key); err != nil {
 			log.Printf("failed to confirm unpin of slab %s: %v", key, err)
 		}
 	}
 
 	return dropped
+}
+
+// isNotFound reports whether the indexer answered that there is no such object.
+func isNotFound(err error) bool {
+	var httpErr *app.HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound
 }
 
 // retryPendingUnpins retries the unpins that could not be confirmed earlier,
