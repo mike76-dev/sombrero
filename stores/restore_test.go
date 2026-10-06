@@ -6,7 +6,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mike76-dev/sombrero/transfer"
+	"go.sia.tech/core/types"
 )
 
 // TestRestore verifies that a connection comes back from its catalog as it was:
@@ -198,6 +200,66 @@ func TestServerCatalog(t *testing.T) {
 	r, _ = transfer.NewReader(bytes.NewReader(catalog.Bytes()))
 	if again, err := db.RestoreServer(ctx, r); err != nil || again != (ServerRestoreStats{}) {
 		t.Errorf("the second restore: got %+v, %v", again, err)
+	}
+}
+
+// TestRemoveAccountReleasesItsStorage verifies that deleting an account does for
+// its files what deleting them one by one would: the slabs only they referenced
+// are staged for unpinning, the ones another account's file still uses are not,
+// and what was still buffered is dropped.
+func TestRemoveAccountReleasesItsStorage(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	// Alice owns a file on two slabs, one of which bob's file is on too, and two
+	// files still in buffers.
+	fx := plantCatalogFixture(t, db)
+	buffers := func() int {
+		var n int
+		err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT COUNT(*) FROM buffers`).Scan(&n)
+		})
+		if err != nil {
+			t.Fatalf("counting the buffers: %v", err)
+		}
+		return n
+	}
+	if got := buffers(); got != 2 {
+		t.Fatalf("the fixture holds %d buffer(s), want 2", got)
+	}
+
+	if err := db.RemoveAccount(fx.alice.Username, fx.wg.UUID.String()); err != nil {
+		t.Fatalf("RemoveAccount: %v", err)
+	}
+
+	staged, err := db.PendingUnpins(fx.share.Name, fx.wg.ID)
+	if err != nil {
+		t.Fatalf("PendingUnpins: %v", err)
+	}
+	if len(staged) != 1 || staged[0] != (types.Hash256{8}) {
+		t.Errorf("staged for unpinning: got %v, want the one slab only alice's file was on", staged)
+	}
+	if got := buffers(); got != 0 {
+		t.Errorf("%d buffer(s) are left with nothing referring to them", got)
+	}
+
+	// Bob's file is as it was, on the slab the two shared.
+	slices, err := db.GetMetadata(fx.bob, fx.share.Name, "/bob.bin", 0, 10)
+	if err != nil || len(slices) != 1 || slices[0].Key != fx.object {
+		t.Errorf("bob's file: got %+v, %v", slices, err)
+	}
+
+	// Removing every account of the workgroup releases the rest.
+	if err := db.RemoveAccounts(fx.wg.UUID.String()); err != nil {
+		t.Fatalf("RemoveAccounts: %v", err)
+	}
+	staged, err = db.PendingUnpins(fx.share.Name, fx.wg.ID)
+	if err != nil {
+		t.Fatalf("PendingUnpins: %v", err)
+	}
+	if len(staged) != 2 {
+		t.Errorf("staged for unpinning after the last account went: got %v, want both slabs", staged)
 	}
 }
 
