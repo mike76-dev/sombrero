@@ -22,7 +22,7 @@ Pick a workgroup, then add accounts to it with a username and a password. An acc
 
 A share is a `renterd` bucket or an `indexd` account that clients see as a network drive. For `renterd`, enter the server address, its API password and the bucket. For `indexd`, enter the indexer address and the redundancy as data and parity shards; the account at the indexer is created when a workgroup connects. The remark is free text for your own use.
 
-The list of registered shares shows, for each share, which workgroups are connected and which policies are in place. Two things can be switched on per share: guest access, for the passwordless accounts of a workgroup, and anonymous access, for clients that present no credentials at all and reach only the share's public folder. Anonymous access also has to be allowed in the server config. An `indexd` share offers two maintenance tasks on top: a scan for orphaned slabs, which the share pays for while no file uses them, and a check for fragmented slabs, with the option to repack them (see [Slab Fragmentation](../README.md#slab-fragmentation)).
+The list of registered shares shows, for each share, which workgroups are connected and which policies are in place. Two things can be switched on per share: guest access, for the passwordless accounts of a workgroup, and anonymous access, for clients that present no credentials at all and reach only the share's public folder. Anonymous access also has to be allowed in the server config. An `indexd` share can also be left out of the backups that cost something (see [Backups](../README.md#backups)). An `indexd` share offers two maintenance tasks on top: a scan for orphaned slabs, which the share pays for while no file uses them, and a check for fragmented slabs, with the option to repack them (see [Slab Fragmentation](../README.md#slab-fragmentation)).
 
 An access policy grants an account of a workgroup read, write, delete and execute permission on a share.
 
@@ -49,6 +49,16 @@ You can try to sort these files out with the button at the bottom of the page. T
 Sorting takes a while, since every slab has to be downloaded. It goes in short rounds, and if it is interrupted, clicking the button again continues where it stopped.
 
 Files larger than a slab cannot be recovered this way. Their parts are spread over several slabs, and there is no way to tell which parts belong together. Once you don't need anything in `/lost+found` anymore, delete it. The slabs will be unpinned, and you will stop paying for them.
+
+### Backup
+
+This page shows what the backups are doing and is where a server is restored. What a backup is and how to turn it on is explained in [Backups](../README.md#backups) in the main README.
+
+At the top, the page says where the catalogs go and when they were last written: the folder on this machine, with the newest catalog of each connection and the catalog of the server itself, and the shares, with the newest catalog written into each. An error from the last round is shown here too, for example a connection that was not running when the round came.
+
+**Restore from a catalog** takes a catalog file from your disk. For a catalog of a connection, the server registers the share if it is not there, creates the workgroup with its accounts and their rights, connects to the indexer with the app key in the catalog, and recreates every folder and file. The files point at the data on the network, so nothing is downloaded. If the server already has that connection, the restore is refused; tick the box to add what the connection lacks and leave everything else alone. Mind that a file deleted after the catalog was written comes back too, as long as its data is still on the network, which it is while its slab holds other files. The catalog of the server brings back the shares, the workgroups with their accounts, and the bans, and never changes what is there already.
+
+**Recover from the network** is for a server that has lost everything. Enter the indexer and the app key of the account, and the server looks through the account for the newest catalog the old server wrote into the share, opens it with the key, and restores the share from it. Files written after that catalog are not in it; run an import of the same account into the restored share afterwards (see [Import](#import)) to bring them over. Do that before you scan the restored share for orphaned slabs: until the import has run, the slabs of those newer files have no file to belong to and show up as orphans, and unpinning them would lose the data.
 
 ### Bans
 

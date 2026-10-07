@@ -82,7 +82,7 @@ A config file, `sombrero.yml`, needs to be created in the directory where the se
 ```YAML
 debug: false               # indicates whether to display the session ID and key for tools like Wireshark to decrypt the encrypted data
 mode: normal               # the server mode: 'normal' or 'lite' (see below)
-maxConnections: 30         # the maximum number of connections accepted from the same IP within 10 minutes
+maxConnections: 30         # the maximum number of connections open at once from the same IP; one more gets the IP banned
 anonymous: false           # optional: whether clients presenting no credentials at all are admitted; a share
                            # has to offer it as well (see below). If omitted, they are turned away
 api:
@@ -288,6 +288,31 @@ An `indexd` account knows its slabs, but it doesn't know their file names. To ma
 There is one limitation: the indexer allows at most 1 KiB of metadata per slab, which is enough for about ten files. A slab that belongs to one large file, or to a handful of small ones, is described completely. A slab packed with many small files describes only the first ones and records how many were left out.
 
 Slabs that cannot be matched to file names are imported as files in `/lost+found`, one file per slab, named after the slab. This happens to slabs uploaded before the metadata existed, to slabs uploaded by other software, and to the parts of a crowded slab that the metadata could not describe. The Import page can sort these files out to some extent; see [Lost and found](web/README.md#lost-and-found).
+
+## Backups
+The data of an `indexd` share is on the network, but the names of the files, the folders, the accounts and their rights are only in the database. If the database is lost, the slabs are still there and still paid for, but nothing says which file they belong to. Backups are there to close this gap.
+
+A backup is a catalog: a small file that describes one share and one workgroup. It lists the accounts of the workgroup with their password hashes, who may do what on the share, the app key the connection was made with, and every folder and file, with the objects on the network that hold each file's data. The data itself is not copied anywhere, so a catalog is small even for a large share.
+
+Backups are off by default. Turn them on in `sombrero.yml`:
+```yaml
+backup:
+  enabled: true
+  path: /var/backups/sombrero
+```
+The server then writes a catalog of every connection into that folder every 15 minutes, keeps the newest 7 of each, and writes one more file with what belongs to no connection: all shares, all workgroups with their accounts, and the bans. Every hour it also writes a catalog into each `indexd` share itself, as a file under `/.sombrero/catalog`, so that the account on the network carries a description of what it holds. That file is encrypted with a key derived from the app key, and the folder belongs to the oldest account of the workgroup that has a password, so the other members of the workgroup do not see it, and nobody who logs in as a guest can touch it. A workgroup with only guest accounts gets no catalog in its share.
+
+A share can be left out. Untick "Back up" in the share's settings on the Shares page, and the server writes no catalog into that share and lets its leftover data wait for a full slab as if backups were off. The catalogs it had already written into that share are removed, because a catalog that is no longer refreshed gets older every day, and a recovery from the network would restore the share as it was back then. The catalog on this machine is written regardless, since it costs nothing.
+
+Turning backups off for the whole server is different: the server then stops looking at the catalogs altogether, and the ones already in the shares stay where they are. If you do not want a later recovery to use them, delete the `/.sombrero` folder from each share yourself. All of these settings have their own fields in the config, see the listing above.
+
+Two things follow from turning backups on. First, a catalog can only point at data that is on the network, so the server starts uploading leftover data after 24 hours instead of waiting for a full slab, unless `maxBufferAge` says otherwise. Until then, a file whose tail is still in the database is marked incomplete in the catalog, except for small pieces, which the catalog carries itself. Second, the folder the catalogs go to is as sensitive as the database. It holds the app keys and the password hashes; treat it accordingly, and copy it to another machine, because a backup on the disk that fails with the database is no backup.
+
+There are two ways back. If you have a catalog file, use the Backup page of the web UI to restore it: the server registers the share, creates the workgroup, its accounts and policies, connects to the indexer with the stored app key, and recreates the folders and files. Nothing is downloaded or uploaded. If the server has lost everything and you only have the app key, the same page can recover the share from the network: give it the indexer and the key, and it finds the newest catalog in the account, opens it, and restores from that. Files written after that catalog are not in it; import the same account into the restored share afterwards to bring them over. Both ways are described in [web/README.md](web/README.md#backup).
+
+A restore brings back what the database lost, not what was deleted. When a file is deleted, the slabs that held only that file are unpinned right away, and a catalog can only point at data that is still in the account. A restore applied over a working share therefore brings back a file that was renamed or whose row went missing, but not one that was deleted, unless the file was small enough for its bytes to be carried inside the catalog. The server checks for this: before it recreates the files, it reads the account with the app key from the catalog, and a file whose data is no longer there is left out and listed in the result rather than created as an entry nobody can open.
+
+Do that import before you look at the orphaned slabs of a restored share. Until then, every slab that was uploaded after the catalog looks like an orphan to the server, because no file in the restored database refers to it. They are not orphans, and unpinning them would throw the data away. The import gives them their files back, and only what is still listed after that is really unused.
 
 ## Shared Folders
 It is possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup. Only working on `indexd` shares.
