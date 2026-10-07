@@ -34,6 +34,24 @@ var migrations = []migration{
 	{name: "let a share opt out of backups", sql: `
 		ALTER TABLE shares ADD COLUMN skip_backup BOOLEAN NOT NULL DEFAULT FALSE
 	`},
+	{name: "remember how far a slab was filled", sql: `
+		CREATE TABLE slabs (
+			share_name TEXT NOT NULL,
+			workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
+			slab_key BYTEA NOT NULL,
+			filled BIGINT NOT NULL,
+			CONSTRAINT slabs_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
+			CONSTRAINT slabs_unique UNIQUE (share_name, workgroup, slab_key),
+			CONSTRAINT slabs_key_length CHECK (octet_length(slab_key) = 32)
+		);
+		CREATE INDEX idx_slabs_workgroup ON slabs (workgroup);
+		INSERT INTO slabs (share_name, workgroup, slab_key, filled)
+		SELECT o.share_name, o.workgroup, m.slab_key, MAX(m.data_offset + m.data_length)
+		FROM metadata m
+		JOIN objects o ON o.id = m.object_id
+		WHERE m.slab_key IS NOT NULL
+		GROUP BY o.share_name, o.workgroup, m.slab_key
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

@@ -128,6 +128,25 @@ func TestSchema(t *testing.T) {
 		}
 	})
 
+	t.Run("the slab records are filled in from the pieces", func(t *testing.T) {
+		db := NewTestStore(t, ctx)
+		defer db.Close()
+		acc, share, _ := newSlabTestFixture(t, db)
+		key := [32]byte{4}
+		plantPiece(t, db, share, acc, "a.txt", key, 0, 400)
+		plantPiece(t, db, share, acc, "b.txt", key, 400, 300)
+
+		// Back to before the records, then forward again.
+		exec(t, db, "DROP TABLE slabs")
+		exec(t, db, "UPDATE schema_version SET version = 3")
+		if err := db.txn(prepareSchema); err != nil {
+			t.Fatalf("prepareSchema: %v", err)
+		}
+		if got := recordedExtent(t, db, key); got != 700 {
+			t.Fatalf("want the slab recorded as filled to 700, got %d", got)
+		}
+	})
+
 	t.Run("a failed migration leaves the database as it was", func(t *testing.T) {
 		db := NewTestStore(t, ctx)
 		defer db.Close()

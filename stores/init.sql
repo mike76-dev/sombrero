@@ -190,3 +190,14 @@ CREATE TABLE pending_unpins (
     CONSTRAINT pending_unpins_key_length CHECK (octet_length(slab_key) = 32)
 );
 CREATE INDEX idx_pending_unpins_workgroup ON pending_unpins (workgroup);
+
+CREATE TABLE slabs (
+    share_name TEXT NOT NULL,
+    workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
+    slab_key BYTEA NOT NULL,
+    filled BIGINT NOT NULL,
+    CONSTRAINT slabs_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
+    CONSTRAINT slabs_unique UNIQUE (share_name, workgroup, slab_key),
+    CONSTRAINT slabs_key_length CHECK (octet_length(slab_key) = 32)
+);
+CREATE INDEX idx_slabs_workgroup ON slabs (workgroup);
