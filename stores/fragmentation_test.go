@@ -562,12 +562,12 @@ func TestRebufferSlab(t *testing.T) {
 
 	// They fall short of a slab between them, so it takes the age they now
 	// carry themselves to have them packed.
-	if _, err := db.ClaimPackedSlab(share, wg, slabSize, 0, time.Hour); !errors.Is(err, ErrNoUploadJobs) {
+	if _, err := db.ClaimPackedSlab(share, wg, slabSize, time.Hour); !errors.Is(err, ErrNoUploadJobs) {
 		t.Fatalf("ClaimPackedSlab straight away: want %v, got %v", ErrNoUploadJobs, err)
 	}
 	backdateJobs(t, db, 2*time.Hour)
 
-	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0, time.Hour)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, time.Hour)
 	if err != nil {
 		t.Fatalf("ClaimPackedSlab: %v", err)
 	}

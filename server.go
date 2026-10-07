@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/api"
+	"github.com/mike76-dev/sombrero/backup"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/rpc"
@@ -86,6 +87,11 @@ type server struct {
 
 	// backlog caps what the indexd shares keep buffered; nil when there is no cap.
 	backlog *client.Backlog
+
+	// backups writes the catalogs to this machine and network into the shares;
+	// each is nil when its tier is off.
+	backups *backup.Local
+	network *backup.Network
 }
 
 // newServerState returns a server with its tables in place and nothing running behind it: no
@@ -151,6 +157,8 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, cfg stores.
 	// limit still measures, so that the stats show the backlog before one is settled on.
 	if sdb, ok := db.(*stores.Database); ok && cfg.Mode == stores.ModeNormal {
 		s.backlog = client.NewBacklog(ctx, sdb, cfg.Indexd.MaxBufferedData)
+		s.backups = backup.NewLocal(ctx, sdb, cfg.Backup)
+		s.network = backup.NewNetwork(ctx, sdb, s.shareFiles, cfg.Backup)
 	}
 
 	go s.reapDurableOpens()
@@ -190,10 +198,13 @@ func (s *server) acceptConnections(l net.Listener) {
 			continue
 		}
 
-		// Ban the remote host if it forms too many connections.
+		// Ban the remote host if it holds too many connections open at once.
+		// A connection that is turned away is not counted: it never closes.
 		s.mu.Lock()
 		num := s.connectionCount[host]
-		s.connectionCount[host] = num + 1
+		if num < s.cfg.MaxConnections {
+			s.connectionCount[host] = num + 1
+		}
 		s.mu.Unlock()
 		if num >= s.cfg.MaxConnections {
 			s.blockHost(host, "too many connections")
@@ -209,6 +220,43 @@ func (s *server) acceptConnections(l net.Listener) {
 			c.readLoop(host)
 		}()
 	}
+}
+
+// BackupStatus reports what the backup tiers have done; a tier that is off is nil.
+func (s *server) BackupStatus() backup.Report {
+	var report backup.Report
+	if s.backups != nil {
+		status := s.backups.Status()
+		report.Local = &status
+	}
+	if s.network != nil {
+		status := s.network.Status()
+		report.Network = &status
+	}
+
+	return report
+}
+
+// shareFiles hands the backup the running connections of a share, as what it
+// takes to put a file into the share. None is started here: bringing one up
+// takes as long as the hosts take, so a backup round writes into what is up and
+// comes back for the rest.
+func (s *server) shareFiles(name string) (map[string]backup.ShareFiles, error) {
+	s.mu.Lock()
+	sh, found := s.shareList[name]
+	s.mu.Unlock()
+	if !found {
+		return nil, nil
+	}
+
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	files := make(map[string]backup.ShareFiles, len(sh.indexdConns))
+	for wg, conn := range sh.indexdConns {
+		files[wg] = conn.client
+	}
+
+	return files, nil
 }
 
 // Stats returns a snapshot of the current server statistics.
@@ -320,8 +368,18 @@ func (c *connection) grantOnResponse(resp smb2.GenericResponse) {
 
 // closeConnection destroys the Connection object.
 func (s *server) closeConnection(c *connection) {
+	// The count follows the open connections, so a closed one makes room for the next.
 	s.mu.Lock()
-	delete(s.connectionList, c.clientName)
+	if _, listed := s.connectionList[c.clientName]; listed {
+		delete(s.connectionList, c.clientName)
+		if host, _, err := net.SplitHostPort(c.clientName); err == nil {
+			if s.connectionCount[host] <= 1 {
+				delete(s.connectionCount, host)
+			} else {
+				s.connectionCount[host]--
+			}
+		}
+	}
 	s.mu.Unlock()
 
 	// The connection is no longer a channel of any of the sessions it carried.

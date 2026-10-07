@@ -53,6 +53,18 @@ func newHTTPHandler(ctx context.Context, a http.Handler, password string, debug 
 	return mux
 }
 
+// plainDuration prints a duration the way a person would: "15m", not "15m0s".
+func plainDuration(d time.Duration) string {
+	switch {
+	case d >= time.Hour && d%time.Hour == 0:
+		return fmt.Sprintf("%dh", d/time.Hour)
+	case d >= time.Minute && d%time.Minute == 0:
+		return fmt.Sprintf("%dm", d/time.Minute)
+	default:
+		return d.String()
+	}
+}
+
 func main() {
 	// Parse command-line args.
 	flag.Parse()
@@ -93,6 +105,18 @@ func main() {
 			// The phrase itself stays out of the log, which outlives the process
 			// and is readable by more than whoever may read the config file.
 			log.Printf("Generated a new seed phrase and saved it to %s; back it up, as the data on indexd shares cannot be recovered without it", filepath.Join(dir, "sombrero.yml"))
+		}
+
+		if cfg.Backup.Enabled {
+			if local := cfg.Backup.Local(); local > 0 {
+				log.Printf("Backups: a catalog is written to %s every %s, keeping %d", cfg.Backup.Path, plainDuration(local), cfg.Backup.KeepCount())
+			}
+			if network := cfg.Backup.Network(); network > 0 {
+				log.Printf("Backups: a catalog is written into each share every %s, keeping %d", plainDuration(network), cfg.Backup.KeepCount())
+			}
+			if cfg.Indexd.MaxBufferAge == 0 {
+				log.Printf("Backups: maxBufferAge is unset, so the leftover data of a backed-up share is uploaded after %s to be covered by them", plainDuration(cfg.BufferAge(true)))
+			}
 		}
 	} else {
 		log.Println("Running in Lite mode: only renterd shares are supported")
@@ -156,9 +180,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-time.After(10 * time.Minute):
-					// Reset the abuse protection.
 					server.mu.Lock()
-					server.connectionCount = make(map[string]int)
 					cl := make([]*connection, 0, len(server.connectionList))
 					for _, cn := range server.connectionList {
 						cl = append(cl, cn)

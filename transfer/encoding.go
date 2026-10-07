@@ -46,8 +46,159 @@ func (h *Header) DecodeFrom(d *types.Decoder) {
 }
 
 // EncodeTo implements types.EncoderTo.
+func (c Connection) EncodeTo(e *types.Encoder) {
+	c.Share.EncodeTo(e)
+	c.Workgroup.EncodeTo(e)
+	types.EncodeSlice(e, c.Accounts)
+	types.EncodeSlice(e, c.Policies)
+	e.WriteBytes(c.AppKey)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (c *Connection) DecodeFrom(d *types.Decoder) {
+	c.Share.DecodeFrom(d)
+	c.Workgroup.DecodeFrom(d)
+	types.DecodeSlice(d, &c.Accounts)
+	types.DecodeSlice(d, &c.Policies)
+	c.AppKey = d.ReadBytes()
+}
+
+// EncodeTo implements types.EncoderTo.
+func (s Server) EncodeTo(e *types.Encoder) {
+	types.EncodeSlice(e, s.Shares)
+	types.EncodeSlice(e, s.Workgroups)
+	types.EncodeSlice(e, s.Bans)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (s *Server) DecodeFrom(d *types.Decoder) {
+	types.DecodeSlice(d, &s.Shares)
+	types.DecodeSlice(d, &s.Workgroups)
+	types.DecodeSlice(d, &s.Bans)
+}
+
+// EncodeTo implements types.EncoderTo.
+func (w WorkgroupAccounts) EncodeTo(e *types.Encoder) {
+	w.Workgroup.EncodeTo(e)
+	types.EncodeSlice(e, w.Accounts)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (w *WorkgroupAccounts) DecodeFrom(d *types.Decoder) {
+	w.Workgroup.DecodeFrom(d)
+	types.DecodeSlice(d, &w.Accounts)
+}
+
+// EncodeTo implements types.EncoderTo.
+func (b Ban) EncodeTo(e *types.Encoder) {
+	e.WriteString(b.Host)
+	e.WriteString(b.Reason)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (b *Ban) DecodeFrom(d *types.Decoder) {
+	b.Host = d.ReadString()
+	b.Reason = d.ReadString()
+}
+
+// EncodeTo implements types.EncoderTo.
+func (s Share) EncodeTo(e *types.Encoder) {
+	e.WriteString(s.Name)
+	e.WriteString(s.Type)
+	e.WriteString(s.Server)
+	e.WriteString(s.Password)
+	e.WriteString(s.Bucket)
+	e.WriteString(s.Remark)
+	e.WriteTime(s.CreatedAt)
+	e.WriteUint8(s.DataShards)
+	e.WriteUint8(s.ParityShards)
+	e.WriteBool(s.AllowGuest)
+	e.WriteBool(s.AllowAnonymous)
+	e.WriteString(s.PublicDir)
+	e.WriteBool(s.SkipBackup)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (s *Share) DecodeFrom(d *types.Decoder) {
+	s.Name = d.ReadString()
+	s.Type = d.ReadString()
+	s.Server = d.ReadString()
+	s.Password = d.ReadString()
+	s.Bucket = d.ReadString()
+	s.Remark = d.ReadString()
+	s.CreatedAt = readTime(d)
+	s.DataShards = d.ReadUint8()
+	s.ParityShards = d.ReadUint8()
+	s.AllowGuest = d.ReadBool()
+	s.AllowAnonymous = d.ReadBool()
+	s.PublicDir = d.ReadString()
+	s.SkipBackup = d.ReadBool()
+}
+
+// EncodeTo implements types.EncoderTo.
+func (w Workgroup) EncodeTo(e *types.Encoder) {
+	e.Write(w.UUID[:])
+	e.WriteString(w.Name)
+	types.EncodeSlice(e, w.PublicDirs)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (w *Workgroup) DecodeFrom(d *types.Decoder) {
+	d.Read(w.UUID[:])
+	w.Name = d.ReadString()
+	types.DecodeSlice(d, &w.PublicDirs)
+}
+
+// EncodeTo implements types.EncoderTo.
+func (p PublicDir) EncodeTo(e *types.Encoder) {
+	e.WriteString(p.Path)
+	e.WriteBool(p.ReadOnly)
+	e.WriteBool(p.CaseSensitive)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (p *PublicDir) DecodeFrom(d *types.Decoder) {
+	p.Path = d.ReadString()
+	p.ReadOnly = d.ReadBool()
+	p.CaseSensitive = d.ReadBool()
+}
+
+// EncodeTo implements types.EncoderTo.
+func (a Account) EncodeTo(e *types.Encoder) {
+	e.WriteString(a.Name)
+	e.WriteBytes(a.PasswordHash)
+	e.WriteTime(a.CreatedAt)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (a *Account) DecodeFrom(d *types.Decoder) {
+	a.Name = d.ReadString()
+	a.PasswordHash = d.ReadBytes()
+	a.CreatedAt = readTime(d)
+}
+
+// EncodeTo implements types.EncoderTo.
+func (p Policy) EncodeTo(e *types.Encoder) {
+	e.WriteString(p.Account)
+	e.WriteBool(p.Read)
+	e.WriteBool(p.Write)
+	e.WriteBool(p.Delete)
+	e.WriteBool(p.Execute)
+}
+
+// DecodeFrom implements types.DecoderFrom.
+func (p *Policy) DecodeFrom(d *types.Decoder) {
+	p.Account = d.ReadString()
+	p.Read = d.ReadBool()
+	p.Write = d.ReadBool()
+	p.Delete = d.ReadBool()
+	p.Execute = d.ReadBool()
+}
+
+// EncodeTo implements types.EncoderTo.
 func (dir Directory) EncodeTo(e *types.Encoder) {
 	e.WriteString(dir.Path)
+	e.WriteString(dir.Owner)
 	e.WriteBool(dir.Private)
 	e.WriteBool(dir.ReadOnly)
 	e.WriteTime(dir.CreatedAt)
@@ -57,6 +208,7 @@ func (dir Directory) EncodeTo(e *types.Encoder) {
 // DecodeFrom implements types.DecoderFrom.
 func (dir *Directory) DecodeFrom(d *types.Decoder) {
 	dir.Path = d.ReadString()
+	dir.Owner = d.ReadString()
 	dir.Private = d.ReadBool()
 	dir.ReadOnly = d.ReadBool()
 	dir.CreatedAt = readTime(d)
@@ -66,6 +218,7 @@ func (dir *Directory) DecodeFrom(d *types.Decoder) {
 // EncodeTo implements types.EncoderTo.
 func (f File) EncodeTo(e *types.Encoder) {
 	e.WriteString(f.Path)
+	e.WriteString(f.Owner)
 	e.WriteUint64(f.Size)
 	e.WriteTime(f.CreatedAt)
 	e.WriteTime(f.ModifiedAt)
@@ -75,6 +228,7 @@ func (f File) EncodeTo(e *types.Encoder) {
 // DecodeFrom implements types.DecoderFrom.
 func (f *File) DecodeFrom(d *types.Decoder) {
 	f.Path = d.ReadString()
+	f.Owner = d.ReadString()
 	f.Size = d.ReadUint64()
 	f.CreatedAt = readTime(d)
 	f.ModifiedAt = readTime(d)
@@ -173,10 +327,12 @@ type Writer struct {
 	w    io.Writer
 	hash hash.Hash
 
-	dirs  uint64
-	files uint64
-	err   error
-	done  bool
+	dirs      uint64
+	files     uint64
+	connected bool
+	server    bool
+	err       error
+	done      bool
 }
 
 // NewWriter opens a stream and writes the header, which says where what follows
@@ -200,10 +356,54 @@ func NewWriter(w io.Writer, header Header) (*Writer, error) {
 	return tw, nil
 }
 
+// Connection writes what the folders and files belong to, which makes the stream
+// a catalog. It comes once, before any of them.
+func (w *Writer) Connection(c Connection) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if w.connected || w.server {
+		return errors.New("the catalog says what it is already")
+	}
+	if w.dirs > 0 || w.files > 0 {
+		return errors.New("the connection has to come before the folders and files")
+	}
+	if err := w.record(kindConnection, c); err != nil {
+		return err
+	}
+	w.connected = true
+
+	return nil
+}
+
+// Server writes what belongs to the server rather than to a connection, which
+// makes the stream a catalog of the server. It comes once, and alone: such a
+// stream holds no folders or files.
+func (w *Writer) Server(s Server) error {
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	if w.connected || w.server {
+		return errors.New("the catalog says what it is already")
+	}
+	if w.dirs > 0 || w.files > 0 {
+		return errors.New("a catalog of the server holds no folders or files")
+	}
+	if err := w.record(kindServer, s); err != nil {
+		return err
+	}
+	w.server = true
+
+	return nil
+}
+
 // Directory writes a folder.
 func (w *Writer) Directory(dir Directory) error {
 	if err := dir.Validate(); err != nil {
 		return err
+	}
+	if w.server {
+		return errors.New("a catalog of the server holds no folders or files")
 	}
 	if err := w.record(kindDirectory, dir); err != nil {
 		return err
@@ -217,6 +417,9 @@ func (w *Writer) Directory(dir Directory) error {
 func (w *Writer) File(f File) error {
 	if err := f.Validate(); err != nil {
 		return err
+	}
+	if w.server {
+		return errors.New("a catalog of the server holds no folders or files")
 	}
 	if err := w.record(kindFile, f); err != nil {
 		return err
@@ -318,10 +521,22 @@ type Reader struct {
 	r    io.Reader
 	hash hash.Hash
 
-	header Header
-	dirs   uint64
-	files  uint64
-	done   bool
+	header     Header
+	connection *Connection
+	server     *Server
+	dirs       uint64
+	files      uint64
+	done       bool
+
+	// pending is the record read while looking for the connection, which
+	// turned out to be the first folder or file instead.
+	pending *record
+}
+
+// record is one record of the stream as it was read, to be decoded later.
+type record struct {
+	kind    uint8
+	payload []byte
 }
 
 // NewReader opens a stream and reads its header, refusing what it is not meant
@@ -357,12 +572,45 @@ func NewReader(r io.Reader) (*Reader, error) {
 		return nil, err
 	}
 
+	// A catalog says what it belongs to before anything it holds; a plain
+	// description goes straight on to the folders and files.
+	kind, payload, err = tr.next()
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case kindConnection:
+		tr.connection = new(Connection)
+		if err := decode(payload, tr.connection); err != nil {
+			return nil, err
+		}
+	case kindServer:
+		tr.server = new(Server)
+		if err := decode(payload, tr.server); err != nil {
+			return nil, err
+		}
+	default:
+		tr.pending = &record{kind: kind, payload: payload}
+	}
+
 	return tr, nil
+}
+
+// Server returns what belongs to the server, which only a catalog of the server
+// says: it is nil for anything else.
+func (r *Reader) Server() *Server {
+	return r.server
 }
 
 // Header returns what the stream says about where it came from.
 func (r *Reader) Header() Header {
 	return r.header
+}
+
+// Connection returns what the folders and files belong to, which only a catalog
+// says: it is nil for a plain description.
+func (r *Reader) Connection() *Connection {
+	return r.connection
 }
 
 // Counts returns how many folders and files the stream said it holds, which is
@@ -379,12 +627,22 @@ func (r *Reader) Next() (*Directory, *File, error) {
 			return nil, nil, io.EOF
 		}
 
-		kind, payload, err := r.next()
-		if err != nil {
-			return nil, nil, err
+		var kind uint8
+		var payload []byte
+		if r.pending != nil {
+			kind, payload = r.pending.kind, r.pending.payload
+			r.pending = nil
+		} else {
+			var err error
+			if kind, payload, err = r.next(); err != nil {
+				return nil, nil, err
+			}
 		}
 
 		switch kind {
+		case kindConnection, kindServer:
+			return nil, nil, errors.New("what the catalog belongs to comes before the folders and files, not among them")
+
 		case kindEnd:
 			if err := r.end(payload); err != nil {
 				return nil, nil, err

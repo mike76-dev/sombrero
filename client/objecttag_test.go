@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mike76-dev/sombrero/stores"
+	"github.com/mike76-dev/sombrero/transfer"
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/api/app"
@@ -423,6 +424,29 @@ func TestSilentSlabsAreTaggedOnStart(t *testing.T) {
 	awaitRetag(t, backend, key, func(tag objectTag) bool {
 		return len(tag.Pieces) == 1 && tag.Pieces[0].Path == "/old.bin" && tag.Pieces[0].Share == share.Name
 	})
+}
+
+// TestTagKeepsTheCatalog verifies that a slab packed with more files than its tag
+// can name still names the catalog in it, wherever that was packed, since the
+// catalog is what a rescue of the account starts from.
+func TestTagKeepsTheCatalog(t *testing.T) {
+	tag := manyPieces(400)
+	last := tag.Pieces[len(tag.Pieces)-1]
+	tag.Pieces[len(tag.Pieces)-1] = objectPiece{
+		Share: "shared", Path: transfer.CatalogFolder + "/20261005T000000.000000000Z.catalog",
+		At: last.At, Length: last.Length, Size: last.Length,
+	}
+
+	got, ok := parseTag(tag.encode())
+	if !ok || got.Omitted == 0 {
+		t.Fatalf("the tag holds everything, so nothing is being tested: %+v", got)
+	}
+	if !isCatalog(got.Pieces[0]) || got.Pieces[0].At != last.At {
+		t.Errorf("the catalog is not the first piece named: %+v", got.Pieces[0])
+	}
+	if tag.Pieces[0].Path == got.Pieces[0].Path {
+		t.Error("the caller's pieces were reordered")
+	}
 }
 
 // TestWantsTag verifies which slabs a server tags when it starts: the silent

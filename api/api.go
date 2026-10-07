@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/julienschmidt/httprouter"
+	"github.com/mike76-dev/sombrero/backup"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"go.sia.tech/core/types"
@@ -100,6 +101,10 @@ type Server interface {
 	// building a second one. DiscardSDK closes an offer that was not taken up.
 	OfferSDK(wg stores.Workgroup, share stores.Share, sdkClient *sdk.SDK)
 	DiscardSDK(wg stores.Workgroup, share stores.Share)
+
+	// BackupStatus reports what the backup tiers have done; a tier that is off
+	// is nil.
+	BackupStatus() backup.Report
 }
 
 // OrphanedSlab is one entry of an orphan scan: a slab that the share's
@@ -290,6 +295,9 @@ type API struct {
 	ctx      context.Context
 	connects connectTracker
 	imports  importTracker
+
+	// catalogSource is what a recovery reads an account with.
+	catalogSource catalogSource
 }
 
 // NewAPI returns an initialized API object. srv is the running SMB server and
@@ -304,6 +312,7 @@ func NewAPI(ctx context.Context, s Store, srv Server, cfg stores.Config, version
 		version: version,
 		ctx:     ctx,
 	}
+	api.catalogSource = api.sdkCatalogSource
 	api.buildHTTPRoutes()
 	return api
 }
@@ -491,6 +500,22 @@ func (api *API) buildHTTPRoutes() {
 
 	router.DELETE("/connect/:workgroup/:share", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.connectHandlerDELETE(w, req, ps)
+	})
+
+	router.POST("/restore", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.restoreHandlerPOST(w, req, ps)
+	})
+
+	router.GET("/backup", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.backupHandlerGET(w, req, ps)
+	})
+
+	router.GET("/backup/catalogs", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.storedCatalogsHandlerGET(w, req, ps)
+	})
+
+	router.POST("/recover", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.recoverHandlerPOST(w, req, ps)
 	})
 
 	router.GET("/imports", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -1000,6 +1025,7 @@ func (api *API) shareHandlerPUT(w http.ResponseWriter, req *http.Request, ps htt
 	share.AllowGuest = settings.AllowGuest
 	share.AllowAnonymous = settings.AllowAnonymous
 	share.PublicDir = settings.PublicDir
+	share.SkipBackup = settings.SkipBackup
 
 	if status, msg := checkShareAccess(share, api.cfg.Anonymous); msg != "" {
 		writeError(w, msg, status)

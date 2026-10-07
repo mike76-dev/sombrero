@@ -8,6 +8,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
@@ -78,37 +79,46 @@ func (db *Database) ApplyTransfer(ctx context.Context, r *transfer.Reader, targe
 		if err != nil {
 			return stats, err
 		}
-
-		switch {
-		case dir != nil:
-			res, err := db.ApplyDirectory(target, *dir)
-			if err != nil {
-				return stats, fmt.Errorf("failed to apply the folder %q: %w", dir.Path, err)
-			}
-			if res == Applied {
-				stats.Directories++
-			} else {
-				stats.AlreadyThere++
-			}
-
-		case file != nil:
-			res, err := db.ApplyFile(target, *file)
-			if err != nil {
-				return stats, fmt.Errorf("failed to apply the file %q: %w", file.Path, err)
-			}
-			switch res {
-			case Applied:
-				stats.Files++
-				if !file.Complete() {
-					stats.Incomplete++
-				}
-			case AlreadyThere:
-				stats.AlreadyThere++
-			case Unresolved:
-				stats.Unresolved++
-			}
+		if err := db.applyRecord(target, dir, file, &stats); err != nil {
+			return stats, err
 		}
 	}
+}
+
+// applyRecord applies one folder or file, whichever is set, and counts what came
+// of it.
+func (db *Database) applyRecord(target TransferTarget, dir *transfer.Directory, file *transfer.File, stats *ApplyStats) error {
+	switch {
+	case dir != nil:
+		res, err := db.ApplyDirectory(target, *dir)
+		if err != nil {
+			return fmt.Errorf("failed to apply the folder %q: %w", dir.Path, err)
+		}
+		if res == Applied {
+			stats.Directories++
+		} else {
+			stats.AlreadyThere++
+		}
+
+	case file != nil:
+		res, err := db.ApplyFile(target, *file)
+		if err != nil {
+			return fmt.Errorf("failed to apply the file %q: %w", file.Path, err)
+		}
+		switch res {
+		case Applied:
+			stats.Files++
+			if !file.Complete() {
+				stats.Incomplete++
+			}
+		case AlreadyThere:
+			stats.AlreadyThere++
+		case Unresolved:
+			stats.Unresolved++
+		}
+	}
+
+	return nil
 }
 
 // ApplyDirectory creates the folder the description names, and the folders above
@@ -310,6 +320,83 @@ func cutFile(ctx context.Context, tx pgx.Tx, share, path string, remainder []tra
 	}
 
 	return nil
+}
+
+// AdoptFolder makes the folder at the path the owner's own: made where it is not
+// there, private, and handed over with everything in it where it is. It is for
+// the folders the server keeps for itself in a share, which have to belong to
+// whoever the server writes them as now.
+//
+// The folders above it are made where they are missing and otherwise left as
+// they are: a share has one tree for all its workgroups, and what is above one
+// workgroup's folder may be above another's too. Writing a file asks only for
+// the folder it goes into.
+func (db *Database) AdoptFolder(target TransferTarget, path string) error {
+	path = normalizePath(path)
+	if path == "/" {
+		return ErrNameInvalid
+	}
+
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		if err := indexdShare(ctx, tx, target.Share); err != nil {
+			return err
+		}
+		now := time.Now()
+		if _, _, err := ensureDirectory(ctx, tx, target, path, true, false, now, now); err != nil {
+			return err
+		}
+
+		// The path and everything under it, folders and files alike.
+		const folders = `
+			UPDATE directories
+			SET account = $3, workgroup = $4, private = TRUE
+			WHERE share_name = $1 AND (full_path = $2 OR full_path LIKE $2 || '/%')
+		`
+		if _, err := tx.Exec(ctx, folders, target.Share, path, target.Owner.ID, target.Workgroup); err != nil {
+			return fmt.Errorf("failed to adopt the folder %q: %w", path, err)
+		}
+		const files = `
+			UPDATE objects
+			SET account = $3, workgroup = $4
+			WHERE share_name = $1 AND full_path LIKE $2 || '/%'
+		`
+		if _, err := tx.Exec(ctx, files, target.Share, path, target.Owner.ID, target.Workgroup); err != nil {
+			return fmt.Errorf("failed to adopt the files in %q: %w", path, err)
+		}
+
+		return nil
+	})
+}
+
+// FolderOwner returns the account the folder at the path belongs to, or an
+// account of no ID where there is no such folder.
+func (db *Database) FolderOwner(share, path string) (acc Account, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT a.id, a.account_name, a.password_hash, w.uuid
+			FROM directories d
+			JOIN accounts a ON a.id = d.account
+			JOIN workgroups w ON w.id = a.workgroup
+			WHERE d.share_name = $1 AND d.full_path = $2
+		`
+		var u []byte
+		err := tx.QueryRow(ctx, query, share, normalizePath(path)).Scan(&acc.ID, &acc.Username, &acc.NTHash, &u)
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to look up the owner of %q: %w", path, err)
+		}
+		id, err := uuid.FromBytes(u)
+		if err != nil {
+			return err
+		}
+		acc.Workgroup = id.String()
+
+		return nil
+	})
+
+	return acc, err
 }
 
 // ensureDirectory returns the id of the folder at the path, creating it and the

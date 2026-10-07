@@ -2335,46 +2335,6 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// TestIndexdClient_PackingOptionsWarning verifies that a minimum size which the
-// leftover data can never reach without filling a slab first is reported, since
-// it leaves the configured age with nothing to trigger on.
-func TestIndexdClient_PackingOptionsWarning(t *testing.T) {
-	ctx := context.Background()
-
-	db := stores.NewTestStore(t, ctx)
-	t.Cleanup(db.Close)
-
-	newTestShare(t, db, "testshare")
-	slabSize := uint64(proto.SectorSize)
-
-	tests := []struct {
-		name    string
-		packing PackingOptions
-		warn    bool
-	}{
-		{name: "default", packing: PackingOptions{}},
-		{name: "usable minimum", packing: PackingOptions{MinSize: slabSize / 2, MaxAge: time.Hour}},
-		{name: "minimum without an age", packing: PackingOptions{MinSize: slabSize * 2}},
-		{name: "minimum at the slab size", packing: PackingOptions{MinSize: slabSize, MaxAge: time.Hour}, warn: true},
-		{name: "minimum past the slab size", packing: PackingOptions{MinSize: slabSize * 2, MaxAge: time.Hour}, warn: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var out syncBuffer
-			log.SetOutput(&out)
-			t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
-			c := newIndexdClient(db, newFakeBackend(), "testshare", 1, 1, 0, tc.packing, FragmentationOptions{}, false)
-			_ = c.Close()
-
-			if got := strings.Contains(out.String(), "will never upload anything"); got != tc.warn {
-				t.Fatalf("want warning %v, got %q", tc.warn, out.String())
-			}
-		})
-	}
-}
-
 // TestCompleteWithRetry verifies that recording an uploaded slab is retried on
 // transient failures, while a definite ErrNotFound is returned right away. A
 // batch that fell out of the queue at claim time depends on this to not be
@@ -2492,6 +2452,37 @@ func waitForSlabKey(t *testing.T, db *stores.Database, acc stores.Account, share
 // the storage backend stays staged and is unpinned by the periodic retry, and
 // that a staged slab whose key a live file references again is unstaged
 // instead of unpinned.
+// TestIndexdClient_UnpinOfAGoneSlabIsDone verifies that a slab the indexer no
+// longer has counts as unpinned, rather than being asked about forever: a file
+// restored from a catalog after its slabs were unpinned leaves such a slab
+// behind when it is deleted again.
+func TestIndexdClient_UnpinOfAGoneSlabIsDone(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	wgID := workgroupID(t, db, acc)
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, wgID, 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+	ic := c.(*IndexdClient)
+
+	fb.failDeletes(&app.HTTPError{StatusCode: http.StatusNotFound, Body: "object not found"})
+	key := types.Hash256{42}
+	if err := db.StageUnpin(share.Name, wgID, key); err != nil {
+		t.Fatalf("StageUnpin: %v", err)
+	}
+	ic.retryPendingUnpins(ctx)
+	if staged, err := db.PendingUnpins(share.Name, wgID); err != nil || len(staged) != 0 {
+		t.Errorf("a slab the indexer does not have is still staged: %v, %v", staged, err)
+	}
+}
+
 func TestIndexdClient_UnpinRetry(t *testing.T) {
 	ctx := context.Background()
 
@@ -2815,12 +2806,11 @@ func TestIndexdClient_FragmentationCheck(t *testing.T) {
 	share := newTestShare(t, db, "testshare")
 	grantFullAccess(t, db, share, acc)
 
-	// The two files are packed into one slab together: neither reaches the
-	// minimum on its own, and the age has the packer take them both as soon
-	// as the second one is finalized.
+	// The two files fill one slab between them, so the packer takes them
+	// together as soon as the second one is finalized.
 	slab := int(proto.SectorSize)
-	first, second := slab*3/8, slab/8
-	packing := PackingOptions{MinSize: uint64(first + second), MaxAge: time.Nanosecond}
+	first, second := slab*3/8, slab*5/8
+	packing := PackingOptions{}
 
 	var out syncBuffer
 	log.SetOutput(&out)
@@ -2848,7 +2838,7 @@ func TestIndexdClient_FragmentationCheck(t *testing.T) {
 	waitForMixedState(t, db, acc, share.Name, "first.bin", 1, 0)
 	waitForMixedState(t, db, acc, share.Name, "second.bin", 1, 0)
 
-	// The slab is only part full, but nobody has taken anything out of it.
+	// The slab is full, and nobody has taken anything out of it.
 	stats, err = ic.checkFragmentation()
 	if err != nil {
 		t.Fatalf("checkFragmentation: %v", err)
@@ -2964,68 +2954,6 @@ func TestIndexdClient_FragmentationMonitor(t *testing.T) {
 			t.Fatalf("want a reading right away, got %q", got)
 		}
 	})
-}
-
-// TestIndexdClient_FragmentationThresholdWarning verifies that a threshold no
-// slab uploaded at the minimum size can ever reach is reported, since it leaves
-// the holes in those slabs invisible however many they collect.
-func TestIndexdClient_FragmentationThresholdWarning(t *testing.T) {
-	ctx := context.Background()
-
-	db := stores.NewTestStore(t, ctx)
-	t.Cleanup(db.Close)
-
-	newTestShare(t, db, "testshare")
-	slab := uint64(proto.SectorSize)
-
-	tests := []struct {
-		name    string
-		packing PackingOptions
-		frag    FragmentationOptions
-		warn    bool
-	}{
-		{
-			name:    "nothing is uploaded short of full",
-			packing: PackingOptions{MinSize: slab / 10},
-			frag:    FragmentationOptions{Threshold: 0.25},
-		},
-		{
-			name:    "no minimum to compare against",
-			packing: PackingOptions{MaxAge: time.Hour},
-			frag:    FragmentationOptions{Threshold: 0.25},
-		},
-		{
-			name:    "threshold below the minimum",
-			packing: PackingOptions{MinSize: slab / 2, MaxAge: time.Hour},
-			frag:    FragmentationOptions{Threshold: 0.25},
-		},
-		{
-			name:    "threshold above the minimum",
-			packing: PackingOptions{MinSize: slab / 10, MaxAge: time.Hour},
-			frag:    FragmentationOptions{Threshold: 0.25},
-			warn:    true,
-		},
-		{
-			name:    "default threshold above the minimum",
-			packing: PackingOptions{MinSize: slab / 10, MaxAge: time.Hour},
-			warn:    true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var out syncBuffer
-			log.SetOutput(&out)
-			t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
-			c := newIndexdClient(db, newFakeBackend(), "testshare", 1, 1, 0, tc.packing, tc.frag, false)
-			_ = c.Close()
-
-			if got := strings.Contains(out.String(), "will never be reported"); got != tc.warn {
-				t.Fatalf("want warning %v, got %q", tc.warn, out.String())
-			}
-		})
-	}
 }
 
 // TestIndexdClient_DeleteCancelsTheUploadInFlight is the copy a client gives up

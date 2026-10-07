@@ -45,6 +45,9 @@ interface RequestOptions {
   method?: string
   query?: Query
   body?: unknown
+
+  // rawBody is sent as it is, for a file rather than a JSON document.
+  rawBody?: Blob
 }
 
 export async function request<T = void>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -64,14 +67,15 @@ export async function request<T = void>(path: string, opts: RequestOptions = {})
   const headers: Record<string, string> = {
     Authorization: 'Basic ' + btoa(':' + settings.password),
   }
-  if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
+  if (opts.rawBody !== undefined) headers['Content-Type'] = 'application/octet-stream'
+  else if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
 
   let res: Response
   try {
     res = await fetch(url, {
       method: opts.method ?? 'GET',
       headers,
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      body: opts.rawBody ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined),
     })
   } catch {
     throw new ApiError('cannot reach the API server — check the address in Settings', 0)

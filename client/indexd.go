@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -353,7 +354,6 @@ type IndexdClient struct {
 	dataShards   uint8
 	parityShards uint8
 	slabSize     uint64
-	minPackSize  uint64
 	maxBufferAge time.Duration
 	fragLevel    float64
 	fragInterval time.Duration
@@ -438,12 +438,8 @@ func (ic *IndexdClient) isClaimed(id uint64) bool {
 // files. The zero value keeps it waiting for as long as that takes, which is
 // what makes every uploaded slab a full one.
 type PackingOptions struct {
-	// MinSize is the least amount of leftover data, in bytes, that an
-	// incomplete slab is uploaded with. Zero puts no lower bound on it.
-	MinSize uint64
-
-	// MaxAge is how long the leftover data may wait. Zero means forever, in
-	// which case MinSize has no effect either.
+	// MaxAge is how long the leftover data may wait before it is uploaded as
+	// an incomplete slab, however little there is. Zero means forever.
 	MaxAge time.Duration
 }
 
@@ -491,7 +487,6 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		dataShards:   dataShards,
 		parityShards: parityShards,
 		slabSize:     uint64(dataShards) * proto.SectorSize,
-		minPackSize:  packing.MinSize,
 		maxBufferAge: packing.MaxAge,
 		fragLevel:    fragmentation.Threshold,
 		fragInterval: fragmentation.Interval,
@@ -514,25 +509,10 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		opt(ic)
 	}
 
-	// Leftover data that reaches the slab size is uploaded as a full slab
-	// before it can ever age, so a minimum at or above that size leaves the
-	// age with nothing left to trigger on.
-	if ic.maxBufferAge > 0 && ic.minPackSize >= ic.slabSize {
-		log.Printf("share %s: minPackedSlabSize of %d is not below the slab size of %d, so maxBufferAge of %s will never upload anything", share, ic.minPackSize, ic.slabSize, ic.maxBufferAge)
-	}
-
 	// A threshold of zero would report every slab that holds any dead space
 	// at all, which is not what leaving the setting out asks for.
 	if ic.fragLevel <= 0 || ic.fragLevel > 1 {
 		ic.fragLevel = stores.DefaultFragmentationThreshold
-	}
-
-	// A slab can never hold more dead space than it was filled with, so one
-	// uploaded at the minimum size never reaches a threshold above what that
-	// minimum is of a slab. Only an age uploads a slab short of full, and an
-	// unset minimum puts no floor on how short.
-	if ic.maxBufferAge > 0 && ic.minPackSize > 0 && ic.fragLevel*float64(ic.slabSize) > float64(ic.minPackSize) {
-		log.Printf("share %s: fragmentationThreshold of %.0f%% of a slab of %d is above the minPackedSlabSize of %d, so the holes in slabs uploaded at that minimum will never be reported", share, ic.fragLevel*100, ic.slabSize, ic.minPackSize)
 	}
 
 	// Start background upload threads.
@@ -1209,17 +1189,30 @@ func (ic *IndexdClient) Close() error {
 func (ic *IndexdClient) unpinSlabs(ctx context.Context, keys []types.Hash256) bool {
 	var dropped bool
 	for _, key := range keys {
-		if err := ic.backend.DeleteObject(ctx, key); err != nil {
+		err := ic.backend.DeleteObject(ctx, key)
+		switch {
+		case isNotFound(err):
+			// A slab the account no longer holds is as unpinned as it gets:
+			// asking again would only fail the same way.
+			log.Printf("slab %s is not in the account any more, so it counts as unpinned", key)
+		case err != nil:
 			log.Printf("failed to delete slab %s, leaving it staged for retry: %v", key, err)
 			continue
+		default:
+			dropped = true
 		}
-		dropped = true
 		if err := ic.db.UnstageUnpin(ic.share, ic.workgroup, key); err != nil {
 			log.Printf("failed to confirm unpin of slab %s: %v", key, err)
 		}
 	}
 
 	return dropped
+}
+
+// isNotFound reports whether the indexer answered that there is no such object.
+func isNotFound(err error) bool {
+	var httpErr *app.HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound
 }
 
 // retryPendingUnpins retries the unpins that could not be confirmed earlier,
@@ -1412,18 +1405,17 @@ func (ic *IndexdClient) logPackedSlab(jobs []stores.UploadJob, size int) {
 
 // packing returns when an incomplete slab is uploaded. A full backlog uploads any
 // leftovers at once, since writes held back by it would never complete them.
-func (ic *IndexdClient) packing() (minSize uint64, maxAge time.Duration) {
+func (ic *IndexdClient) packing() time.Duration {
 	if ic.backlog != nil && ic.backlog.full() {
-		return 0, time.Nanosecond
+		return time.Nanosecond
 	}
-	return ic.minPackSize, ic.maxBufferAge
+	return ic.maxBufferAge
 }
 
 // processPackedSlab checks if the buffered pieces of several files add up to a
 // slab and, if so, uploads them together as a single packed slab.
 func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
-	minSize, maxAge := ic.packing()
-	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.workgroup, ic.slabSize, minSize, maxAge)
+	jobs, err := ic.db.ClaimPackedSlab(ic.share, ic.workgroup, ic.slabSize, ic.packing())
 	if err != nil {
 		return err
 	}

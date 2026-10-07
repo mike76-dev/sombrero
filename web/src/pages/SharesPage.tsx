@@ -420,6 +420,7 @@ function ShareSettingsForm({
   const [guest, setGuest] = useState(!!share.allowGuest)
   const [anonymous, setAnonymous] = useState(!!share.allowAnonymous)
   const [publicDir, setPublicDir] = useState(share.publicDir || '')
+  const [backedUp, setBackedUp] = useState(!share.skipBackup)
 
   const serverAllows = settings?.anonymous !== false
 
@@ -436,6 +437,7 @@ function ShareSettingsForm({
         allowGuest: guest,
         allowAnonymous: anonymous,
         publicDir,
+        skipBackup: !backedUp,
       })
       setMessage('Saved. It applies to the connections made from now on.')
       onChanged()
@@ -515,6 +517,17 @@ function ShareSettingsForm({
           onChange={(e) => setPublicDir(e.target.value)}
         />
       </Field>
+      {share.type === 'indexd' && (
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={backedUp}
+            disabled={busy}
+            onChange={(e) => setBackedUp(e.target.checked)}
+          />
+          Back up: keep a catalog in this share and upload its leftover data in time for it
+        </label>
+      )}
       <div className="row">
         <button
           className="btn"

@@ -164,27 +164,39 @@ func (db *Database) AppKeyForServer(wg Workgroup, serverName string) (types.Priv
 }
 
 // KeyedConnection is a connection that holds an app key: which workgroup is on
-// which indexd share, and where that share's indexer is.
+// which indexd share, where that share's indexer is, and whether the share is
+// left out of the backups.
 type KeyedConnection struct {
-	Workgroup Workgroup
-	Share     string
-	Server    string
+	Workgroup  Workgroup
+	Share      string
+	Server     string
+	SkipBackup bool
 }
 
 // KeyedConnections returns every connection that holds an app key, which is what
 // an import of an indexd account can be read with instead of a pasted key.
-func (db *Database) KeyedConnections() (conns []KeyedConnection, err error) {
+func (db *Database) KeyedConnections() ([]KeyedConnection, error) {
+	return db.connections(true)
+}
+
+// AllConnections returns every connection there is, to shares of either kind,
+// which is what a backup goes through.
+func (db *Database) AllConnections() ([]KeyedConnection, error) {
+	return db.connections(false)
+}
+
+// connections lists the connections, all of them or only those with an app key.
+func (db *Database) connections(keyedOnly bool) (conns []KeyedConnection, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
-			SELECT w.id, w.uuid, w.name, c.share_name, s.server_name
+			SELECT w.id, w.uuid, w.name, c.share_name, s.server_name, s.skip_backup
 			FROM connections c
 			JOIN shares s ON s.share_name = c.share_name
 			JOIN workgroups w ON w.id = c.workgroup
-			WHERE s.share_type = 'indexd'
-			AND c.app_key IS NOT NULL
+			WHERE NOT $1::BOOLEAN OR (s.share_type = 'indexd' AND c.app_key IS NOT NULL)
 			ORDER BY c.share_name, w.id
 		`
-		rows, err := tx.Query(ctx, query)
+		rows, err := tx.Query(ctx, query, keyedOnly)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve the keyed connections: %w", err)
 		}
@@ -193,7 +205,7 @@ func (db *Database) KeyedConnections() (conns []KeyedConnection, err error) {
 		for rows.Next() {
 			var conn KeyedConnection
 			var name *string
-			if err := rows.Scan(&conn.Workgroup.ID, &conn.Workgroup.UUID, &name, &conn.Share, &conn.Server); err != nil {
+			if err := rows.Scan(&conn.Workgroup.ID, &conn.Workgroup.UUID, &name, &conn.Share, &conn.Server, &conn.SkipBackup); err != nil {
 				return fmt.Errorf("failed to scan a keyed connection: %w", err)
 			}
 			if name != nil {

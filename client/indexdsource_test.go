@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"path"
 	"slices"
 	"sort"
@@ -22,8 +23,20 @@ import (
 type fakeAccount struct {
 	events  []PinnedObject
 	objects map[types.Hash256]sdk.Object
+	data    map[types.Hash256][]byte
 	pins    int
 	err     error
+}
+
+// Download reads the bytes of an object, for the tests that read what the
+// account holds rather than only what it says about it.
+func (fa *fakeAccount) Download(_ context.Context, key types.Hash256, offset, length uint64, w io.Writer) error {
+	data, ok := fa.data[key]
+	if !ok || offset+length > uint64(len(data)) {
+		return errors.New("no such bytes")
+	}
+	_, err := w.Write(data[offset : offset+length])
+	return err
 }
 
 // pin adds an object of the given slab lengths to the account, and an event for

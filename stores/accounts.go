@@ -164,25 +164,115 @@ func (db *Database) HasAccount(username, workgroup string) (bool, error) {
 	return count > 0, err
 }
 
-// RemoveAccount removes the specified account from the database.
+// RemoveAccount removes the specified account from the database, and with it the
+// folders and files it owned. What those files were made of is released the way
+// deleting them one by one would: see accountStorage.
 func (db *Database) RemoveAccount(username, workgroup string) error {
 	u, err := uuid.Parse(workgroup)
 	if err != nil {
 		return fmt.Errorf("invalid workgroup UUID: %w", err)
 	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const owned = `
+			SELECT id FROM accounts
+			WHERE account_name = $1
+			AND workgroup = (SELECT id FROM workgroups WHERE uuid = $2)
+		`
+		storage, err := collectAccountStorage(ctx, tx, owned, username, u[:])
+		if err != nil {
+			return err
+		}
+
 		const query = `
 			DELETE FROM accounts
 			WHERE account_name = $1
 			AND workgroup = (SELECT id FROM workgroups WHERE uuid = $2)
 		`
-		_, err := tx.Exec(ctx, query, username, u[:])
-		if err != nil {
+		if _, err := tx.Exec(ctx, query, username, u[:]); err != nil {
 			return fmt.Errorf("failed to remove account: %w", err)
+		}
+		if err := storage.release(ctx, tx); err != nil {
+			return err
 		}
 		db.shares.RemoveAccess(Account{Username: username, Workgroup: workgroup})
 		return nil
 	})
+}
+
+// accountStorage is what the files of some accounts are made of: the buffers
+// that hold what has not been uploaded, and the slabs that hold the rest, by the
+// share and workgroup that pinned them.
+//
+// Deleting an account takes its files with it, by cascade, and a cascade knows
+// nothing of slabs: left at that, the slabs only those files referenced would
+// stay pinned and paid for with nothing pointing at them. So what the files are
+// made of is noted before the delete and released after it.
+type accountStorage struct {
+	buffers []uint64
+	slabs   map[pinner][][]byte
+}
+
+// pinner is a share and the workgroup whose connection to it pinned a slab.
+type pinner struct {
+	share     string
+	workgroup int
+}
+
+// collectAccountStorage notes what the files of the accounts the query selects
+// are made of. It has to run before the accounts are deleted.
+func collectAccountStorage(ctx context.Context, tx pgx.Tx, accounts string, args ...any) (accountStorage, error) {
+	storage := accountStorage{slabs: make(map[pinner][][]byte)}
+
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT o.share_name, o.workgroup, m.buffer_id, m.slab_key
+		FROM metadata m
+		JOIN objects o ON o.id = m.object_id
+		WHERE o.account IN (`+accounts+`)
+	`, args...)
+	if err != nil {
+		return storage, fmt.Errorf("failed to collect what the account's files are made of: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			p   pinner
+			bid *uint64
+			key []byte
+		)
+		if err := rows.Scan(&p.share, &p.workgroup, &bid, &key); err != nil {
+			return storage, fmt.Errorf("failed to scan a storage reference: %w", err)
+		}
+		if bid != nil {
+			storage.buffers = append(storage.buffers, *bid)
+		}
+		if key != nil {
+			storage.slabs[p] = append(storage.slabs[p], key)
+		}
+	}
+
+	return storage, rows.Err()
+}
+
+// release drops the buffers nothing refers to any more and stages the slabs
+// nothing refers to for unpinning. It has to run after the accounts are deleted.
+func (s accountStorage) release(ctx context.Context, tx pgx.Tx) error {
+	for _, bid := range s.buffers {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM buffers b
+			WHERE b.id = $1
+				AND NOT EXISTS (SELECT 1 FROM metadata m WHERE m.buffer_id = b.id)
+		`, bid); err != nil {
+			return fmt.Errorf("failed to delete an orphaned buffer: %w", err)
+		}
+	}
+	for p, keys := range s.slabs {
+		if _, err := unreferencedSlabs(ctx, tx, p.share, p.workgroup, keys); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // FindAccounts returns all accounts of the specified workgroup.
@@ -234,13 +324,24 @@ func (db *Database) RemoveAccounts(workgroup string) error {
 		return err
 	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const owned = `
+			SELECT id FROM accounts
+			WHERE workgroup = (SELECT id FROM workgroups WHERE uuid = $1)
+		`
+		storage, err := collectAccountStorage(ctx, tx, owned, u[:])
+		if err != nil {
+			return err
+		}
+
 		const query = `
 			DELETE FROM accounts
 			WHERE workgroup = (SELECT id FROM workgroups WHERE uuid = $1)
 		`
-		_, err := tx.Exec(ctx, query, u[:])
-		if err != nil {
+		if _, err := tx.Exec(ctx, query, u[:]); err != nil {
 			return fmt.Errorf("failed to remove accounts: %w", err)
+		}
+		if err := storage.release(ctx, tx); err != nil {
+			return err
 		}
 		for _, acc := range accs {
 			db.shares.RemoveAccess(acc)

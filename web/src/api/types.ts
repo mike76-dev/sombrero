@@ -24,6 +24,10 @@ export interface Share {
   allowGuest?: boolean
   allowAnonymous?: boolean
   publicDir?: string
+
+  // skipBackup leaves the share out of the backups that cost something: no
+  // catalog in it, and its leftover data waits for a full slab.
+  skipBackup?: boolean
 }
 
 // ShareSettings is what PUT /share/:name changes. serverName is only changed
@@ -36,6 +40,7 @@ export interface ShareSettings {
   allowGuest?: boolean
   allowAnonymous?: boolean
   publicDir?: string
+  skipBackup?: boolean
 }
 
 // ServerSettings is how the server itself is configured, as far as the UI needs
@@ -143,6 +148,107 @@ export interface AppKeyHolder {
 
 export interface AppKeyResponse {
   appKey: string
+}
+
+// What the backups are set to, and what the tiers that are on have done. A tier
+// that is off is left out.
+export interface BackupResponse {
+  enabled: boolean
+  bufferAge: string
+  local?: TierStatus
+  network?: TierStatus
+}
+
+export interface TierStatus {
+  path: string
+  interval: string
+  keep: number
+  lastRun?: string
+  error?: string
+  catalogs: CatalogStatus[]
+
+  // server is the catalog of the server itself, where the tier writes one:
+  // the shares, the workgroups with their accounts, and the bans.
+  server?: ServerCatalogStatus
+
+  // waiting names the connections whose catalog waits for the connection to
+  // come up, which is no failure: the tier comes back for them.
+  waiting?: { share: string; workgroup: string }[]
+}
+
+export interface ServerCatalogStatus {
+  path: string
+  size: number
+  writtenAt: string
+  shares: number
+  workgroups: number
+  accounts: number
+  bans: number
+}
+
+// One catalog that was written and what it holds.
+export interface CatalogStatus {
+  share: string
+  workgroup: string
+  path: string
+  size: number
+  writtenAt: string
+  directories: number
+  files: number
+  incomplete: number
+  inlined: number
+}
+
+// A catalog in the backup folder on this machine, by what it says of itself.
+export interface StoredCatalog {
+  path: string
+  kind: 'connection' | 'server'
+  share?: string
+  workgroup?: string
+  writtenAt: string
+  size: number
+}
+
+// The account to recover from: the indexer it is at and its app key. force
+// applies the catalog over a connection the server has already.
+export interface RecoverRequest {
+  address: string
+  appKey: string
+  force?: boolean
+}
+
+// What a recovery came to: the catalogs found in the account, one per
+// connection it serves, and what restoring each did.
+export interface RecoverResponse {
+  catalogs: RecoveredCatalog[]
+}
+
+// One catalog found in the account. error says why it could not be restored.
+export interface RecoveredCatalog extends RestoreResponse {
+  catalog: string
+  error?: string
+}
+
+// What restoring a catalog came to. kind says which catalog it was, and the
+// counts of the other kind are left out.
+export interface RestoreResponse {
+  kind: 'connection' | 'server'
+  share?: string
+  workgroup?: string
+  accounts: number
+  policies?: number
+  directories?: number
+  files?: number
+  alreadyThere?: number
+  incomplete?: number
+  shares?: number
+  workgroups?: number
+  bans?: number
+
+  // missing counts the files left out because their data is no longer in the
+  // account, and missingPaths names the first few of them.
+  missing?: number
+  missingPaths?: string[]
 }
 
 // A workgroup's connection to an indexd share, holding the app key of an account

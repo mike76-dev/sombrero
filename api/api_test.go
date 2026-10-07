@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mike76-dev/sombrero/backup"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
@@ -75,6 +76,8 @@ type mockStore struct {
 	applyDirectory      func(stores.TransferTarget, transfer.Directory) (stores.ApplyResult, error)
 	applyFile           func(stores.TransferTarget, transfer.File) (stores.ApplyResult, error)
 	setFileTimes        func(share, path string, createdAt, modifiedAt time.Time) error
+	restore             func(context.Context, *transfer.Reader, stores.RestoreOptions) (stores.RestoreStats, error)
+	restoreServer       func(context.Context, *transfer.Reader) (stores.ServerRestoreStats, error)
 }
 
 func (m *mockStore) IsBanned(h string) (bool, string, error) {
@@ -318,14 +321,31 @@ func (m *mockStore) SetFileTimes(share, path string, createdAt, modifiedAt time.
 	return nil
 }
 
+func (m *mockStore) Restore(ctx context.Context, r *transfer.Reader, opts stores.RestoreOptions) (stores.RestoreStats, error) {
+	if m.restore != nil {
+		return m.restore(ctx, r, opts)
+	}
+	return stores.RestoreStats{}, nil
+}
+
+func (m *mockStore) RestoreServer(ctx context.Context, r *transfer.Reader) (stores.ServerRestoreStats, error) {
+	if m.restoreServer != nil {
+		return m.restoreServer(ctx, r)
+	}
+	return stores.ServerRestoreStats{}, nil
+}
+
 // mockServer stands in for the running SMB server.
 type mockServer struct {
 	stats            ServerStats
 	shareConnections func(string) (map[string]client.Client, map[string]string, error)
 	offered          *sdk.SDK
+	backups          backup.Report
 }
 
 func (m *mockServer) Stats() ServerStats { return m.stats }
+
+func (m *mockServer) BackupStatus() backup.Report { return m.backups }
 
 func (m *mockServer) ShareConnections(name string) (map[string]client.Client, map[string]string, error) {
 	if m.shareConnections != nil {

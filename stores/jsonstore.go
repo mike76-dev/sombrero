@@ -858,6 +858,7 @@ func (js *JSONStore) UpdateShare(s Share) error {
 			sh.AllowGuest = s.AllowGuest
 			sh.AllowAnonymous = s.AllowAnonymous
 			sh.PublicDir = s.PublicDir
+			sh.SkipBackup = s.SkipBackup
 			d.Shares[i] = sh
 			updated = sh
 			return nil

@@ -768,17 +768,17 @@ func (db *Database) ClaimUploadJob(share string, workgroup int, minSize uint64) 
 // for.
 //
 // A positive maxAge also claims buffers that fall short of a slab, once the
-// oldest of them has been waiting that long and they amount to at least minSize
-// bytes. Such a claim fills the slab only partly, which costs as much as a full
-// one, so with maxAge left at zero the buffers wait for as long as it takes.
-// The age is measured from the creation of a buffer's upload, so it is not
-// reset when a failed claim requeues the buffer, and the remainder that a
-// split leaves behind keeps the age of the upload it came from. A piece that
-// belongs to no upload ages from its queue entry instead.
+// oldest of them has been waiting that long, however little there is. Such a
+// claim fills the slab only partly, which costs as much as a full one, so with
+// maxAge left at zero the buffers wait for as long as it takes. The age is
+// measured from the creation of a buffer's upload, so it is not reset when a
+// failed claim requeues the buffer, and the remainder that a split leaves
+// behind keeps the age of the upload it came from. A piece that belongs to no
+// upload ages from its queue entry instead.
 //
 // ErrNoUploadJobs is returned when neither applies, in which case nothing is
 // claimed.
-func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSize uint64, maxAge time.Duration) (jobs []UploadJob, err error) {
+func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize uint64, maxAge time.Duration) (jobs []UploadJob, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		// A running total cannot be computed over a locking select, so the
 		// candidate prefix is cut at the slab boundary without locking first.
@@ -859,7 +859,6 @@ func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSi
 						a.total >= $3::BIGINT
 						OR (
 							$4::DOUBLE PRECISION > 0
-							AND a.total >= $5::BIGINT
 							AND a.oldest <= NOW() - MAKE_INTERVAL(secs => $4::DOUBLE PRECISION)
 						)
 					)
@@ -887,7 +886,7 @@ func (db *Database) ClaimPackedSlab(share string, workgroup int, slabSize, minSi
 			ORDER BY p.object_id, p.obj_offset, p.id
 		`
 
-		rows, err := tx.Query(ctx, query, share, workgroup, int64(slabSize), maxAge.Seconds(), int64(minSize))
+		rows, err := tx.Query(ctx, query, share, workgroup, int64(slabSize), maxAge.Seconds())
 		if err != nil {
 			return fmt.Errorf("failed to claim packed slab: %w", err)
 		}

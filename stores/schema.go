@@ -31,6 +31,9 @@ var migrations = []migration{
 			toast.autovacuum_vacuum_cost_limit = 2000
 		)
 	`},
+	{name: "let a share opt out of backups", sql: `
+		ALTER TABLE shares ADD COLUMN skip_backup BOOLEAN NOT NULL DEFAULT FALSE
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

@@ -3,6 +3,7 @@ import type {
   Account,
   AccessRights,
   AppKeyResponse,
+  BackupResponse,
   Connection,
   ConnectStatusResponse,
   DefragmentResponse,
@@ -19,6 +20,10 @@ import type {
   PublicDir,
   ServerSettings,
   ServerStats,
+  RecoverRequest,
+  RecoverResponse,
+  RestoreResponse,
+  StoredCatalog,
   ShareSettings,
   Share,
   UnpinOrphansResponse,
@@ -197,6 +202,29 @@ export const connectionKey = (workgroup: string, share: string) =>
   )
 
 export const listConnections = () => request<Connection[] | null>('/connections')
+
+// Backups
+
+export const backupStatus = () => request<BackupResponse>('/backup')
+
+// A catalog is restored by sending the file as it is; force applies it over a
+// connection the server has already.
+export const restoreCatalog = (file: Blob, force: boolean) =>
+  request<RestoreResponse>('/restore', {
+    method: 'POST',
+    query: { force: force || undefined },
+    rawBody: file,
+  })
+
+export const recoverFromNetwork = (body: RecoverRequest) =>
+  request<RecoverResponse>('/recover', { method: 'POST', body })
+
+// The catalogs in the backup folder on this machine, which the server reads
+// itself: the browser has no business with that folder.
+export const listStoredCatalogs = () => request<StoredCatalog[] | null>('/backup/catalogs')
+
+export const restoreStoredCatalog = (path: string, force: boolean) =>
+  request<RestoreResponse>('/restore', { method: 'POST', body: { path, force } })
 
 // Imports
 

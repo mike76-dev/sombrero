@@ -11,10 +11,13 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mike76-dev/sombrero/stores"
+	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/api/app"
 	"go.sia.tech/indexd/slabs"
@@ -73,6 +76,13 @@ func (tag objectTag) encode() json.RawMessage {
 	if len(tag.Pieces) == 0 {
 		return nil
 	}
+
+	// A catalog is what a rescue of the account starts from, so its pieces go
+	// first, where a tag that cannot hold everything still holds them.
+	tag.Pieces = slices.Clone(tag.Pieces)
+	sort.SliceStable(tag.Pieces, func(i, j int) bool {
+		return isCatalog(tag.Pieces[i]) && !isCatalog(tag.Pieces[j])
+	})
 	fits := func(n int) bool { return len(tag.pack(n)) <= maxTagSize }
 
 	n := len(tag.Pieces)
@@ -93,6 +103,11 @@ func (tag objectTag) encode() json.RawMessage {
 	}
 
 	return tag.pack(n)
+}
+
+// isCatalog reports whether the piece is of a catalog the share keeps of itself.
+func isCatalog(piece objectPiece) bool {
+	return strings.HasPrefix(piece.Path, transfer.CatalogFolder+"/")
 }
 
 // pack lays out the first n pieces, the rest counted as omitted, and returns the
