@@ -266,36 +266,99 @@ func TestPackedSlabsTailHole(t *testing.T) {
 
 	acc, share, wg := newSlabTestFixture(t, db)
 
+	// A slab packed here has its extent on record.
+	plantBufferedFile(t, db, share, acc, "a.txt", 400, false)
+	plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
+	plantBufferedFile(t, db, share, acc, "c.txt", 300, false)
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
 	key := types.Hash256{1}
-	plantPiece(t, db, share, acc, "a.txt", key, 0, 400)
-	plantPiece(t, db, share, acc, "b.txt", key, 400, 300)
-	plantPiece(t, db, share, acc, "c.txt", key, 700, 300)
+	if err := db.CompletePackedSlab(jobs, key); err != nil {
+		t.Fatalf("CompletePackedSlab: %v", err)
+	}
+	if got := recordedExtent(t, db, key); got != slabSize {
+		t.Fatalf("want the slab recorded as filled to %d, got %d", slabSize, got)
+	}
 
-	// The last piece goes: the extent shrinks to where b.txt ends.
+	// The last piece goes, and the hole it leaves is seen.
 	if _, err := db.DeleteFile(acc, share, "c.txt"); err != nil {
 		t.Fatalf("DeleteFile: %v", err)
 	}
-
 	slabs, err := db.PackedSlabs(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
-	if len(slabs) != 0 {
-		t.Fatalf("want a hole at the tail to go unreported, got %+v", slabs)
+	assertPacked(t, slabs, []PackedSlab{
+		{Key: key, Used: 700, Filled: slabSize, Pieces: 2},
+	})
+
+	// The record goes with the slab.
+	for _, path := range []string{"a.txt", "b.txt"} {
+		if _, err := db.DeleteFile(acc, share, path); err != nil {
+			t.Fatalf("DeleteFile(%s): %v", path, err)
+		}
+	}
+	if got := recordedExtent(t, db, key); got != 0 {
+		t.Fatalf("want the record gone with the slab, got %d", got)
 	}
 
-	// The one in the middle is still seen.
-	if _, err := db.DeleteFile(acc, share, "a.txt"); err != nil {
+	// A slab that came from elsewhere has no record, so a hole at its tail
+	// stays out of sight while one before the last piece is seen.
+	key = types.Hash256{2}
+	plantPiece(t, db, share, acc, "d.txt", key, 0, 400)
+	plantPiece(t, db, share, acc, "e.txt", key, 400, 300)
+	plantPiece(t, db, share, acc, "f.txt", key, 700, 300)
+	if _, err := db.DeleteFile(acc, share, "f.txt"); err != nil {
 		t.Fatalf("DeleteFile: %v", err)
 	}
-
-	slabs, err = db.PackedSlabs(share, wg, slabSize, 0)
-	if err != nil {
+	if slabs, err = db.PackedSlabs(share, wg, slabSize, 0); err != nil || len(slabs) != 0 {
+		t.Fatalf("want a tail hole in an imported slab to go unreported, got %+v, %v", slabs, err)
+	}
+	if _, err := db.DeleteFile(acc, share, "d.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	if slabs, err = db.PackedSlabs(share, wg, slabSize, 0); err != nil {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
 		{Key: key, Used: 300, Filled: 700, Pieces: 1},
 	})
+}
+
+// TestFullSlabIsRecorded verifies that a slab one file fills on its own gets
+// its extent on record as well.
+func TestFullSlabIsRecorded(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+	plantBufferedFile(t, db, share, acc, "a.txt", slabSize, false)
+	job, err := db.ClaimUploadJob(share, wg, slabSize)
+	if err != nil {
+		t.Fatalf("ClaimUploadJob: %v", err)
+	}
+	key := types.Hash256{3}
+	if err := db.CompleteUploadJob(job.MetadataID, job.BufferID, key); err != nil {
+		t.Fatalf("CompleteUploadJob: %v", err)
+	}
+	if got := recordedExtent(t, db, key); got != slabSize {
+		t.Fatalf("want the slab recorded as filled to %d, got %d", slabSize, got)
+	}
+}
+
+// recordedExtent returns how far a slab is on record as filled, or 0 for none.
+func recordedExtent(t *testing.T, db *Database, key types.Hash256) uint64 {
+	t.Helper()
+
+	var filled uint64
+	err := db.pool.QueryRow(context.Background(), "SELECT COALESCE(MAX(filled), 0) FROM slabs WHERE slab_key = $1", key[:]).Scan(&filled)
+	if err != nil {
+		t.Fatalf("reading the slab record: %v", err)
+	}
+	return filled
 }
 
 // TestPackedSlabsThreshold verifies that only the slabs whose dead space

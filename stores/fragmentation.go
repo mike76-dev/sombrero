@@ -22,6 +22,8 @@ type PackedSlab struct {
 	// Used is what editing and deleting files punched out of the slab. The
 	// space past Filled was never written and is not dead space: an upload
 	// that aged out before it could fill a slab leaves it behind untouched.
+	// Filled is recorded when the slab is uploaded; for a slab that came from
+	// elsewhere it is derived from the pieces left in it.
 	Size   uint64 `json:"size"`
 	Filled uint64 `json:"filled"`
 	Used   uint64 `json:"used"`
@@ -250,23 +252,27 @@ type FragmentationStats struct {
 // denominator; the ones holding no dead space are filtered out where that
 // matters.
 //
-// Deriving the filled extent from the surviving pieces is blind to a hole at
-// the very end of a slab: deleting the last piece shrinks the extent along with
-// it, leaving the slab looking untouched. That under-reports and never
-// over-reports, which is the safe way round for a repair to act on later.
+// The filled extent is what was recorded when the slab was uploaded. Deriving it
+// from the surviving pieces is blind to a hole at the very end of a slab, since
+// deleting the last piece shrinks the extent along with it; that is all there is
+// for a slab that was imported or restored rather than uploaded here.
 const packedSlabsCTE = `
-	WITH slabs AS (
+	WITH packed AS (
 		SELECT
 			m.slab_key,
 			COUNT(*) AS pieces,
 			SUM(m.data_length) AS used,
-			MAX(m.data_offset + m.data_length) AS filled
+			GREATEST(MAX(m.data_offset + m.data_length), COALESCE(s.filled, 0)) AS filled
 		FROM metadata m
 		JOIN objects o ON o.id = m.object_id
+		LEFT JOIN slabs s
+			ON s.slab_key = m.slab_key
+			AND s.share_name = o.share_name
+			AND s.workgroup = o.workgroup
 		WHERE m.slab_key IS NOT NULL
 			AND o.share_name = $1
 			AND o.workgroup = $2
-		GROUP BY m.slab_key
+		GROUP BY m.slab_key, s.filled
 	)
 `
 
@@ -301,7 +307,7 @@ func (db *Database) PackedSlabs(share string, workgroup int, slabSize uint64, th
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = packedSlabsCTE + `
 			SELECT slab_key, pieces, used, filled
-			FROM slabs
+			FROM packed
 			WHERE ` + fragmentedPredicate + `
 			ORDER BY filled - used DESC, slab_key
 		`
@@ -363,7 +369,7 @@ func (db *Database) Fragmentation(share string, workgroup int, slabSize uint64, 
 				COALESCE(SUM(GREATEST(filled - used, 0)), 0),
 				COUNT(*) FILTER (WHERE ` + fragmentedPredicate + `),
 				COALESCE(SUM(filled - used) FILTER (WHERE ` + fragmentedPredicate + `), 0)
-			FROM slabs
+			FROM packed
 		`
 
 		var slabs, wasted, fragmented, fragmentedWasted int64
