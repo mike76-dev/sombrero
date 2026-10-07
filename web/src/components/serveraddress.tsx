@@ -45,7 +45,7 @@ export function ServerAddressField({
             setProbe(null)
           }}
           placeholder={
-            backend === 'indexd' ? 'https://indexer.example.com' : 'http://127.0.0.1:9980'
+            backend === 'indexd' ? 'e.g. https://indexer.example.com' : 'e.g. http://127.0.0.1:9980'
           }
         />
         <button

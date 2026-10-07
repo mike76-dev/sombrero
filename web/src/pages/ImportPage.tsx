@@ -332,7 +332,7 @@ export function ImportPage() {
                   type="text"
                   value={prefix}
                   onChange={(e) => setPrefix(e.target.value)}
-                  placeholder="/lost+found"
+                  placeholder="/lost+found if left empty"
                   autoComplete="off"
                 />
               </Field>

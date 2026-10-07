@@ -21,7 +21,7 @@ export function SettingsPage() {
               type="text"
               value={settings.apiBase}
               onChange={(e) => setSettings((s) => ({ ...s, apiBase: e.target.value }))}
-              placeholder="/api"
+              placeholder="/api if left empty"
             />
           </Field>
           <Field label="API password">

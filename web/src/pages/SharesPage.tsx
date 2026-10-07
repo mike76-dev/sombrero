@@ -84,7 +84,7 @@ function RegisterShareCard({ onRegistered }: { onRegistered: () => void }) {
                 type="text"
                 value={share.bucket}
                 onChange={(e) => set({ bucket: e.target.value })}
-                placeholder="default"
+                placeholder="default if left empty"
               />
             </Field>
           </>
@@ -457,7 +457,7 @@ function ShareSettingsForm({
             <input
               value={bucket}
               disabled={busy}
-              placeholder="default"
+              placeholder="default if left empty"
               onChange={(e) => setBucket(e.target.value)}
             />
           </Field>
@@ -513,7 +513,7 @@ function ShareSettingsForm({
         <input
           value={publicDir}
           disabled={busy || !serverAllows}
-          placeholder="Drop"
+          placeholder="e.g. Drop"
           onChange={(e) => setPublicDir(e.target.value)}
         />
       </Field>

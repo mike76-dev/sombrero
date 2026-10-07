@@ -223,7 +223,7 @@ function WorkgroupStep({
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="home"
+              placeholder="e.g. home"
               autoComplete="off"
             />
           </Field>
@@ -451,7 +451,7 @@ function ShareStep({ onBack, onDone }: { onBack: () => void; onDone: (patch: Par
                   type="text"
                   value={share.bucket}
                   onChange={(e) => set({ bucket: e.target.value })}
-                  placeholder="default"
+                  placeholder="default if left empty"
                 />
               </Field>
             </>

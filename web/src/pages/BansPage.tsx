@@ -18,7 +18,7 @@ export function BansPage() {
               type="text"
               value={host}
               onChange={(e) => setHost(e.target.value)}
-              placeholder="192.168.1.100"
+              placeholder="e.g. 192.168.1.100"
             />
           </Field>
           <Field label="Ban reason (optional)">

@@ -78,7 +78,7 @@ export function WorkgroupsPage() {
               type="text"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
-              placeholder="my-workgroup"
+              placeholder="e.g. my-workgroup"
             />
           </Field>
           <button
