@@ -111,6 +111,49 @@ func TestAcceptBansTooManyConnections(t *testing.T) {
 	}
 }
 
+// TestAcceptMakesRoomWhenConnectionsClose verifies that only the open connections count, so a
+// client that reconnects over and over is not banned for the ones it has already hung up.
+func TestAcceptMakesRoomWhenConnectionsClose(t *testing.T) {
+	s, store, l, _ := acceptTest(t, 2)
+
+	for round := range 5 {
+		var conns []net.Conn
+		for i := range 2 {
+			conn, err := net.Dial("tcp", l.Addr().String())
+			if err != nil {
+				t.Fatalf("round %d, Dial %d: %v", round, i, err)
+			}
+			conns = append(conns, conn)
+		}
+		time.Sleep(servedFor)
+		for _, conn := range conns {
+			conn.Close()
+		}
+
+		// The server notices a hangup on its own time.
+		deadline := time.Now().Add(turnedAwayIn)
+		for {
+			s.mu.Lock()
+			n := s.connectionCount["127.0.0.1"]
+			s.mu.Unlock()
+			if n == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("round %d: %d connections still counted after the client hung up", round, n)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if dial(t, l.Addr().String(), servedFor) {
+		t.Fatal("a connection was turned away after the earlier ones had closed")
+	}
+	if banned(t, store) {
+		t.Fatal("the host was banned for connections it had closed")
+	}
+}
+
 // TestAcceptStopsWhenTheListenerCloses verifies that the loop ends rather than spins.
 func TestAcceptStopsWhenTheListenerCloses(t *testing.T) {
 	_, _, l, done := acceptTest(t, 2)

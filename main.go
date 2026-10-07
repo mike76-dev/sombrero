@@ -180,9 +180,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-time.After(10 * time.Minute):
-					// Reset the abuse protection.
 					server.mu.Lock()
-					server.connectionCount = make(map[string]int)
 					cl := make([]*connection, 0, len(server.connectionList))
 					for _, cn := range server.connectionList {
 						cl = append(cl, cn)

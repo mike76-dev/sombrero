@@ -198,10 +198,13 @@ func (s *server) acceptConnections(l net.Listener) {
 			continue
 		}
 
-		// Ban the remote host if it forms too many connections.
+		// Ban the remote host if it holds too many connections open at once.
+		// A connection that is turned away is not counted: it never closes.
 		s.mu.Lock()
 		num := s.connectionCount[host]
-		s.connectionCount[host] = num + 1
+		if num < s.cfg.MaxConnections {
+			s.connectionCount[host] = num + 1
+		}
 		s.mu.Unlock()
 		if num >= s.cfg.MaxConnections {
 			s.blockHost(host, "too many connections")
@@ -365,8 +368,18 @@ func (c *connection) grantOnResponse(resp smb2.GenericResponse) {
 
 // closeConnection destroys the Connection object.
 func (s *server) closeConnection(c *connection) {
+	// The count follows the open connections, so a closed one makes room for the next.
 	s.mu.Lock()
-	delete(s.connectionList, c.clientName)
+	if _, listed := s.connectionList[c.clientName]; listed {
+		delete(s.connectionList, c.clientName)
+		if host, _, err := net.SplitHostPort(c.clientName); err == nil {
+			if s.connectionCount[host] <= 1 {
+				delete(s.connectionCount, host)
+			} else {
+				s.connectionCount[host]--
+			}
+		}
+	}
 	s.mu.Unlock()
 
 	// The connection is no longer a channel of any of the sessions it carried.
