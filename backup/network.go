@@ -30,10 +30,11 @@ func FolderOf(workgroup uuid.UUID) string {
 	return path.Join(CatalogFolder, workgroup.String())
 }
 
-// retryInterval is how soon a round that could not write every catalog is tried
-// again, rather than waiting the whole interval: at startup the connections
-// come up one by one, and the catalogs should not be an hour behind them.
-var retryInterval = time.Minute
+// defaultTick is how often the tier looks at the connections. Each catalog is
+// written on the interval of its own, but a connection that has just come up, a
+// share that has just been ticked or unticked, should not wait the rest of an
+// hour to be noticed.
+const defaultTick = time.Minute
 
 // errNotRunning is what a round says of a connection that is not up yet. It is
 // the usual state of things at startup, so it is kept for the status and not
@@ -69,15 +70,18 @@ type Network struct {
 	db       *stores.Database
 	clients  Clients
 	interval time.Duration
+	tick     time.Duration
 	keep     int
 	inline   uint64
 
-	mu     sync.Mutex
-	status Status
+	mu      sync.Mutex
+	status  Status
+	written map[string]Catalog // the newest catalog of each connection, by share and workgroup
 }
 
-// NewNetwork starts the network tier as the config says, writing once right away
-// and then every interval. It is nil where that tier is off.
+// NewNetwork starts the network tier as the config says: it looks at the
+// connections every tick and writes each one's catalog once per interval, the
+// first as soon as the connection is up. It is nil where that tier is off.
 func NewNetwork(ctx context.Context, db *stores.Database, clients Clients, cfg stores.BackupConfig) *Network {
 	interval := cfg.Network()
 	if interval == 0 {
@@ -88,6 +92,7 @@ func NewNetwork(ctx context.Context, db *stores.Database, clients Clients, cfg s
 		db:       db,
 		clients:  clients,
 		interval: interval,
+		tick:     defaultTick,
 		keep:     cfg.KeepCount(),
 		inline:   cfg.Inline(),
 		status:   Status{Path: CatalogFolder, Interval: interval, Keep: cfg.KeepCount()},
@@ -97,22 +102,17 @@ func NewNetwork(ctx context.Context, db *stores.Database, clients Clients, cfg s
 	return n
 }
 
-// run writes the catalogs on the interval until the context ends, coming back
-// sooner after a round that could not write all of them.
+// run looks at the connections every tick until the context ends.
 func (n *Network) run(ctx context.Context) {
 	for {
-		delay := n.interval
-		if err := n.WriteAll(ctx); err != nil && ctx.Err() == nil {
-			if !onlyNotRunning(err) {
-				log.Printf("backup: %v", err)
-			}
-			delay = min(delay, retryInterval)
+		if err := n.WriteAll(ctx); err != nil && ctx.Err() == nil && !onlyNotRunning(err) {
+			log.Printf("backup: %v", err)
 		}
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(delay):
+		case <-time.After(min(n.tick, n.interval)):
 		}
 	}
 }
@@ -129,6 +129,16 @@ func (n *Network) Status() Status {
 	return status
 }
 
+// due reports whether a connection's catalog is to be written in this round:
+// where it has none yet, or the last one is an interval old.
+func (n *Network) due(key string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	last, ok := n.written[key]
+	return !ok || time.Since(last.WrittenAt) >= n.interval
+}
+
 // WriteAll writes a catalog into the share of every connection that holds an app
 // key, which is what the catalog is sealed with. A connection that is not
 // running, or has nobody to own the file, is reported and passed over.
@@ -141,7 +151,7 @@ func (n *Network) WriteAll(ctx context.Context) error {
 
 	// What failed and what is only waiting for its connection are kept apart:
 	// the second is the usual state of things for a while after a start.
-	var written []Catalog
+	written := make(map[string]Catalog)
 	var waiting []Pending
 	var errs, failed []error
 	running := make(map[string]map[string]ShareFiles)
@@ -149,6 +159,7 @@ func (n *Network) WriteAll(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		key := c.Share + "/" + c.Workgroup.UUID.String()
 		clients, ok := running[c.Share]
 		if !ok {
 			if clients, err = n.clients(c.Share); err != nil {
@@ -177,29 +188,44 @@ func (n *Network) WriteAll(ctx context.Context) error {
 			continue
 		}
 
+		// A catalog that is not due yet stands as it is.
+		if !n.due(key) {
+			n.mu.Lock()
+			written[key] = n.written[key]
+			n.mu.Unlock()
+			continue
+		}
 		cat, err := n.write(ctx, c, files)
 		if err != nil {
 			err = fmt.Errorf("the catalog of %s for workgroup %s: %w", c.Share, c.Workgroup.UUID, err)
 			errs, failed = append(errs, err), append(failed, err)
 			continue
 		}
-		written = append(written, cat)
+		written[key] = cat
 	}
 
 	n.finish(written, waiting, joinLine(failed))
 
-	// The round is not done while anything is waiting either, which is what
-	// has the caller come back sooner.
+	// The round is not done while anything is waiting either.
 	return joinLine(errs)
 }
 
-// finish keeps what a round came to.
-func (n *Network) finish(written []Catalog, waiting []Pending, err error) {
+// finish keeps what a round came to: the newest catalog of every connection
+// that is backed up, what is waiting, and what failed.
+func (n *Network) finish(written map[string]Catalog, waiting []Pending, err error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	n.written = written
 	n.status.LastRun = time.Now()
-	n.status.Catalogs = written
+	n.status.Catalogs = n.status.Catalogs[:0]
+	for _, cat := range written {
+		n.status.Catalogs = append(n.status.Catalogs, cat)
+	}
+	sort.Slice(n.status.Catalogs, func(i, j int) bool {
+		a, b := n.status.Catalogs[i], n.status.Catalogs[j]
+		return a.Share < b.Share || a.Share == b.Share && a.Workgroup.String() < b.Workgroup.String()
+	})
 	n.status.Waiting = waiting
 	n.status.Error = ""
 	if err != nil {

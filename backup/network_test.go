@@ -137,12 +137,11 @@ func TestNetworkComesBackForWhatWasNotRunning(t *testing.T) {
 			return map[string]ShareFiles{wg.UUID.String(): share}, nil
 		},
 		interval: time.Hour,
+		tick:     5 * time.Millisecond,
 		keep:     2,
 		inline:   1024,
 		status:   Status{Path: CatalogFolder, Keep: 2},
 	}
-	retryInterval = 5 * time.Millisecond
-	t.Cleanup(func() { retryInterval = time.Minute })
 	go n.run(ctx)
 
 	await := func(what string, cond func(Status) bool) {
@@ -166,6 +165,59 @@ func TestNetworkComesBackForWhatWasNotRunning(t *testing.T) {
 	await("the catalog should be written soon after the connection comes up", func(s Status) bool {
 		return s.Error == "" && len(s.Waiting) == 0 && len(s.Catalogs) == 1
 	})
+}
+
+// TestNetworkWritesWhenDue verifies that a round writes a connection's catalog
+// only once per interval, and that a share ticked back into the backups gets one
+// in the next round rather than at the end of an interval that was never its.
+func TestNetworkWritesWhenDue(t *testing.T) {
+	ctx := context.Background()
+	db, wg, _ := connectedStore(t, ctx)
+
+	share := newFakeShare()
+	n := &Network{
+		db: db,
+		clients: func(string) (map[string]ShareFiles, error) {
+			return map[string]ShareFiles{wg.UUID.String(): share}, nil
+		},
+		interval: time.Hour,
+		keep:     5,
+		inline:   1024,
+	}
+
+	// Two rounds in a row write once: the second finds the catalog not due.
+	for range 2 {
+		if err := n.WriteAll(ctx); err != nil {
+			t.Fatalf("WriteAll: %v", err)
+		}
+	}
+	if names := share.catalogs(); len(names) != 1 {
+		t.Fatalf("the share holds %d catalog(s) after two rounds, want 1", len(names))
+	}
+	if status := n.Status(); len(status.Catalogs) != 1 {
+		t.Errorf("the status lists %d catalog(s), want the one written", len(status.Catalogs))
+	}
+
+	// Unticked, the share loses its catalogs; ticked again, it gets a fresh one
+	// in the very next round.
+	idx, err := db.GetShare("idx")
+	if err != nil {
+		t.Fatalf("GetShare: %v", err)
+	}
+	idx.SkipBackup = true
+	if err := db.UpdateShare(idx); err != nil {
+		t.Fatalf("UpdateShare: %v", err)
+	}
+	if err := n.WriteAll(ctx); err != nil || len(share.catalogs()) != 0 || len(n.Status().Catalogs) != 0 {
+		t.Fatalf("unticked: %v, %d catalog(s) in the share, %d listed", err, len(share.catalogs()), len(n.Status().Catalogs))
+	}
+	idx.SkipBackup = false
+	if err := db.UpdateShare(idx); err != nil {
+		t.Fatalf("UpdateShare: %v", err)
+	}
+	if err := n.WriteAll(ctx); err != nil || len(share.catalogs()) != 1 || len(n.Status().Catalogs) != 1 {
+		t.Errorf("ticked again: %v, %d catalog(s) in the share, %d listed", err, len(share.catalogs()), len(n.Status().Catalogs))
+	}
 }
 
 // TestNetworkKeepsWorkgroupsApart verifies that two workgroups on one share each
