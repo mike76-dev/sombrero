@@ -219,12 +219,14 @@ export function BackupPage() {
           If a catalog describes a share, the server registers the share, creates the workgroup
           with its accounts and their rights, connects to the indexer with the app key from the
           catalog, and recreates the folders and files. Nothing is downloaded: the files point at
-          data that is already on the network. If the server already has this connection,
-          nothing happens unless you tick the box below; then what is missing is added and the
-          rest is left alone. A restore brings back what the database lost, not what was deleted:
-          deleting a file unpins its data, and a catalog can only point at data that is still
-          there. The catalog of the server brings back the shares, the workgroups with their
-          accounts, and the bans, and never changes anything that is already there.
+          data that is already on the network. A restore brings back what the database lost,
+          not what was deleted: deleting a file unpins its data, and a catalog can only point at
+          data that is still there. If the server already has this connection, the restore is
+          refused unless you tick the box below. Then the files the connection lacks are added
+          and the rest is left alone. Mind that a file you deleted after the catalog was written
+          comes back too, if its data is still on the network because its slab holds other files.
+          The catalog of the server brings back the shares, the workgroups with their accounts,
+          and the bans, and never changes anything that is already there.
         </p>
         <label className="checkbox">
           <input
@@ -233,7 +235,8 @@ export function BackupPage() {
             onChange={(e) => setForce(e.target.checked)}
             disabled={restore.busy}
           />
-          Apply over a connection this server already has
+          Add what is missing to a connection this server already has, files deleted since
+          included
         </label>
         {(stored.data?.length ?? 0) > 0 && (
           <>
@@ -352,7 +355,8 @@ export function BackupPage() {
             onChange={(e) => setRecoverForce(e.target.checked)}
             disabled={recover.busy}
           />
-          Apply over a connection this server already has
+          Add what is missing to a connection this server already has, files deleted since
+          included
         </label>
         <div className="row">
           <button
