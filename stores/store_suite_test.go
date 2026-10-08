@@ -1211,9 +1211,9 @@ func TestStoreAnonymousIdentity(t *testing.T) {
 	})
 }
 
-// TestStoreUpdateShare verifies that what a share admits can be changed after
-// it is registered, that what it is backed by cannot, and that the running
-// server is told.
+// TestStoreUpdateShare verifies that what a share admits and where it is served
+// from can be changed after it is registered, that its type cannot, and that
+// the running server is told.
 func TestStoreUpdateShare(t *testing.T) {
 	forEachStore(t, func(t *testing.T, st Store, rs *recordingShares) {
 		sh := addShare(t, st, "myshare")
@@ -1224,6 +1224,8 @@ func TestStoreUpdateShare(t *testing.T) {
 		sh.Remark = "drop box"
 		sh.SkipBackup = true
 		sh.ServerName = "elsewhere"
+		sh.Bucket = "other"
+		sh.Type = "indexd"
 		if err := st.UpdateShare(sh); err != nil {
 			t.Fatalf("UpdateShare: %v", err)
 		}
@@ -1235,13 +1237,16 @@ func TestStoreUpdateShare(t *testing.T) {
 		if !got.AllowGuest || !got.AllowAnonymous || got.PublicDir != "Drop" || got.Remark != "drop box" || !got.SkipBackup {
 			t.Fatalf("want the settings stored, got %+v", got)
 		}
-		if got.ServerName != "srv" {
-			t.Fatalf("want the backend left alone, got %q", got.ServerName)
+		if got.ServerName != "elsewhere" || got.Bucket != "other" {
+			t.Fatalf("want the address and the bucket stored, got %q at %q", got.Bucket, got.ServerName)
+		}
+		if got.Type != "renterd" {
+			t.Fatalf("want the type left alone, got %q", got.Type)
 		}
 
 		// The server is running with a copy of what was registered, so it has
 		// to hear about the change.
-		if len(rs.settings) != 1 || !rs.settings[0].AllowAnonymous {
+		if len(rs.settings) != 1 || !rs.settings[0].AllowAnonymous || rs.settings[0].ServerName != "elsewhere" {
 			t.Fatalf("share manager not notified: %+v", rs.settings)
 		}
 

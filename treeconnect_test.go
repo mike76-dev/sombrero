@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
@@ -451,6 +453,37 @@ func TestUpdateShareTakesEffectOnTheRunningServer(t *testing.T) {
 
 	if status := connect(); status != smb2.STATUS_OK {
 		t.Fatalf("after the change the tree connect was answered %#x, want it served", status)
+	}
+}
+
+// TestUpdateShareMovesARenterdShare verifies that a renterd share told to serve
+// from another address or bucket is given a client for it, so that the change
+// is not left waiting for a restart. One that stays where it is keeps its client.
+func TestUpdateShareMovesARenterdShare(t *testing.T) {
+	store, err := stores.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewJSONStore: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	s := newServerState(ctx, store, stores.Config{})
+
+	old := client.NewRenterdClient("http://127.0.0.1:9980", "pw", "default")
+	sh := &share{name: "files", backend: "renterd", client: old, serverName: "http://127.0.0.1:9980", bucket: "default"}
+	s.shareList[sh.name] = sh
+
+	if err := s.UpdateShare(stores.Share{Name: "files", ServerName: "http://127.0.0.1:9980", Bucket: "default", Remark: "same place"}); err != nil {
+		t.Fatalf("UpdateShare: %v", err)
+	}
+	if sh.client != old || sh.remark != "same place" {
+		t.Fatal("a share that stayed where it was lost its client, or the remark was not applied")
+	}
+
+	if err := s.UpdateShare(stores.Share{Name: "files", ServerName: "http://10.0.0.2:9980", Bucket: "photos"}); err != nil {
+		t.Fatalf("UpdateShare: %v", err)
+	}
+	if sh.client == old || sh.serverName != "http://10.0.0.2:9980" || sh.bucket != "photos" {
+		t.Fatalf("want a client for the new address and bucket, got the old one, serving %q at %q", sh.bucket, sh.serverName)
 	}
 }
 

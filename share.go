@@ -125,6 +125,7 @@ type share struct {
 	// For renterd shares (single client shared by all workgroups).
 	client        client.Client
 	maxUploadSize uint64
+	serverName    string
 	bucket        string
 	createdAt     time.Time
 	volumeID      uint64
@@ -155,6 +156,7 @@ func (s *server) RegisterShare(ss stores.Share) error {
 		name:            ss.Name,
 		backend:         ss.Type,
 		shareType:       smb2.SHARE_TYPE_DISK,
+		serverName:      ss.ServerName,
 		bucket:          ss.Bucket,
 		remark:          ss.Remark,
 		allowGuest:      ss.AllowGuest,
@@ -247,8 +249,9 @@ func (s *server) loadAccessRights(sh *share, ars []stores.AccessRights) error {
 }
 
 // UpdateShare applies the settings of a share that has changed to the copy the server is running
-// with. Only what a client is admitted by can change: what the share is backed by is fixed when it
-// is registered, and the clients and the security tables hang off that.
+// with: what a client is admitted by, and where a renterd share is served from. An indexd share
+// is served per connection, from the address its app keys were registered at, and the API
+// refuses to move one while anything is connected, so there is nothing of it to change here.
 func (s *server) UpdateShare(ss stores.Share) error {
 	s.mu.Lock()
 	sh, found := s.shareList[ss.Name]
@@ -262,6 +265,14 @@ func (s *server) UpdateShare(ss stores.Share) error {
 	sh.allowGuest = ss.AllowGuest
 	sh.allowAnonymous = ss.AllowAnonymous
 	sh.publicDir = ss.PublicDir
+
+	// A renterd share is reached by its address and bucket alone, so a new one is served from the
+	// next tree connect on. The tree connects already open keep the client they were given.
+	if sh.backend == "renterd" && sh.client != nil && (sh.bucket != ss.Bucket || sh.serverName != ss.ServerName) {
+		sh.client = client.NewRenterdClient(ss.ServerName, ss.Password, ss.Bucket)
+		sh.bucket = ss.Bucket
+		sh.serverName = ss.ServerName
+	}
 	sh.mu.Unlock()
 
 	return nil

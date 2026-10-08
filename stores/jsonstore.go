@@ -841,8 +841,8 @@ func accessRightsFromPolicy(p jsonPolicy) AccessRights {
 	}
 }
 
-// UpdateShare changes what a share offers its clients, leaving what it is
-// backed by as it was registered.
+// UpdateShare changes what a share offers its clients and where it is served
+// from, leaving its type as it was registered.
 func (js *JSONStore) UpdateShare(s Share) error {
 	if s.Name == "" {
 		return nil
@@ -859,6 +859,8 @@ func (js *JSONStore) UpdateShare(s Share) error {
 			sh.AllowAnonymous = s.AllowAnonymous
 			sh.PublicDir = s.PublicDir
 			sh.SkipBackup = s.SkipBackup
+			sh.ServerName = s.ServerName
+			sh.Bucket = s.Bucket
 			d.Shares[i] = sh
 			updated = sh
 			return nil

@@ -304,9 +304,10 @@ func (db *Database) GetAccounts(sh Share) (ars []AccessRights, err error) {
 }
 
 // UpdateShare changes what a share offers its clients: who it admits and the
-// folder an anonymous session is confined to, along with its remark. What the
-// share is backed by is not part of it — a share that changed its server,
-// bucket or redundancy would be a different share holding the same files.
+// folder an anonymous session is confined to, along with its remark, and where
+// it is served from, by address and bucket. The type and the redundancy stay as
+// they are: a share that changed them would be a different share holding the
+// same files.
 func (db *Database) UpdateShare(s Share) error {
 	if s.Name == "" {
 		return nil
@@ -320,11 +321,13 @@ func (db *Database) UpdateShare(s Share) error {
 				allow_guest = $3,
 				allow_anonymous = $4,
 				public_dir = $5,
-				skip_backup = $6
+				skip_backup = $6,
+				server_name = $7,
+				bucket = $8
 			WHERE share_name = $1
 		`
 
-		tag, err := tx.Exec(ctx, query, s.Name, s.Remark, s.AllowGuest, s.AllowAnonymous, s.PublicDir, s.SkipBackup)
+		tag, err := tx.Exec(ctx, query, s.Name, s.Remark, s.AllowGuest, s.AllowAnonymous, s.PublicDir, s.SkipBackup, s.ServerName, s.Bucket)
 		if err != nil {
 			return fmt.Errorf("failed to update share: %w", err)
 		}
