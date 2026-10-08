@@ -2452,6 +2452,44 @@ func waitForSlabKey(t *testing.T, db *stores.Database, acc stores.Account, share
 // the storage backend stays staged and is unpinned by the periodic retry, and
 // that a staged slab whose key a live file references again is unstaged
 // instead of unpinned.
+// TestIndexdClient_OverwriteUnpinsTheOldSlab verifies that writing a file over
+// the one that was there unpins the slab only the old one referenced, instead
+// of leaving it pinned until an orphan scan finds it.
+func TestIndexdClient_OverwriteUnpinsTheOldSlab(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	first := frand.Bytes(proto.SectorSize)
+	uploadFile(t, ctx, c, acc, "doc.bin", first)
+	old := waitForSlabKey(t, db, acc, share.Name, "doc.bin", uint64(len(first)))
+
+	second := frand.Bytes(proto.SectorSize)
+	uploadFile(t, ctx, c, acc, "doc.bin", second)
+	if key := waitForSlabKey(t, db, acc, share.Name, "doc.bin", uint64(len(second))); key == old {
+		t.Fatal("the rewritten file still points at the old slab")
+	}
+
+	if n := fb.deleteCount(); n != 1 {
+		t.Fatalf("want the old slab unpinned once, got %d deletions", n)
+	}
+	fb.mu.Lock()
+	_, still := fb.objects[old]
+	fb.mu.Unlock()
+	if still {
+		t.Fatal("the old slab is still in the account")
+	}
+}
+
 // TestIndexdClient_UnpinOfAGoneSlabIsDone verifies that a slab the indexer no
 // longer has counts as unpinned, rather than being asked about forever: a file
 // restored from a catalog after its slabs were unpinned leaves such a slab
@@ -2567,7 +2605,7 @@ func TestIndexdClient_StrandedPieceRecovery(t *testing.T) {
 	if err := db.AddBufferedSlab(uploadID, 0, content); err != nil {
 		t.Fatalf("AddBufferedSlab: %v", err)
 	}
-	if err := db.FinalizeUpload(uploadID); err != nil {
+	if _, err := db.FinalizeUpload(uploadID); err != nil {
 		t.Fatalf("FinalizeUpload: %v", err)
 	}
 	if _, err := db.ClaimUploadJob(share.Name, wgID, uint64(proto.SectorSize)); err != nil {

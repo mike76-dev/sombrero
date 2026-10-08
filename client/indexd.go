@@ -850,7 +850,8 @@ func (ic *IndexdClient) FinishUpload(ctx context.Context, path string, uploadID 
 	// they still say what they held. Truncating a file is a rewrite of it too.
 	replaced := ic.slabsOf(path, false)
 
-	if err := ic.db.FinalizeUpload(uploadID); err != nil {
+	slabs, err := ic.db.FinalizeUpload(uploadID)
+	if err != nil {
 		return fmt.Errorf("couldn't finalize upload: %v", err)
 	}
 
@@ -861,6 +862,14 @@ func (ic *IndexdClient) FinishUpload(ctx context.Context, path string, uploadID 
 	select {
 	case ic.packChan <- struct{}{}:
 	default:
+	}
+
+	// The slabs only the replaced file referenced are staged in the database,
+	// so a failure here only delays their unpinning until the periodic retry.
+	if len(slabs) > 0 && ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after replacing %s: %v", path, err)
+		}
 	}
 
 	return nil

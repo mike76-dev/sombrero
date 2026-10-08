@@ -163,7 +163,7 @@ func plantBufferedFile(t *testing.T, db *Database, share string, acc Account, pa
 		t.Fatalf("AddBufferedSlab(%s): %v", path, err)
 	}
 	if !inFlight {
-		if err := db.FinalizeUpload(uploadID); err != nil {
+		if _, err := db.FinalizeUpload(uploadID); err != nil {
 			t.Fatalf("FinalizeUpload(%s): %v", path, err)
 		}
 	}
@@ -212,6 +212,21 @@ func storedBuffers(t *testing.T, db *Database) int {
 	})
 	if err != nil {
 		t.Fatalf("count buffers: %v", err)
+	}
+
+	return n
+}
+
+// pendingUnpins returns the number of slabs staged for unpinning.
+func pendingUnpins(t *testing.T, db *Database) int {
+	t.Helper()
+
+	var n int
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COUNT(*) FROM pending_unpins`).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("count pending unpins: %v", err)
 	}
 
 	return n
@@ -1220,7 +1235,7 @@ func TestDeleteFileTakesTheUploadInFlight(t *testing.T) {
 
 	// The upload is gone with it, so the close that comes after the deletion
 	// has nothing to finalize and the file cannot come back.
-	if err := db.FinalizeUpload(uploadID); !errors.Is(err, ErrNotFound) {
+	if _, err := db.FinalizeUpload(uploadID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("FinalizeUpload after the delete: %v, want the upload gone", err)
 	}
 	if _, err := db.Object(acc, share, "half.bin"); !errors.Is(err, ErrNotFound) {
@@ -1262,11 +1277,58 @@ func TestDeleteFileKeepsAnOverwritingUpload(t *testing.T) {
 		t.Errorf("the upload holds %d bytes, want its %d", n, len(data))
 	}
 
-	if err := db.FinalizeUpload(uploadID); err != nil {
+	if _, err := db.FinalizeUpload(uploadID); err != nil {
 		t.Fatalf("FinalizeUpload: %v", err)
 	}
 	if _, err := db.Object(acc, share, "notes.txt"); err != nil {
 		t.Fatalf("the file the upload wrote is not there: %v", err)
+	}
+}
+
+// TestFinalizeUploadReleasesTheReplacedFile verifies that a file written over
+// the one that was there gives up the slabs only the old one referenced, and
+// keeps the ones another file still holds runs in.
+func TestFinalizeUploadReleasesTheReplacedFile(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, _ := newSlabTestFixture(t, db)
+
+	own, shared := types.Hash256{1}, types.Hash256{2}
+	plantPiece(t, db, share, acc, "doc.txt", own, 0, 400)
+	plantPiece(t, db, share, acc, "other.txt", shared, 0, 400)
+	plantObject(t, db, share, acc, "doc.old", shared)
+
+	// A rewrite of doc.txt, which shares nothing with the old one but its name.
+	uploadID, err := db.CreateUpload(acc, share, "doc.txt")
+	if err != nil {
+		t.Fatalf("CreateUpload: %v", err)
+	}
+	if err := db.AddBufferedSlab(uploadID, 0, frand.Bytes(300)); err != nil {
+		t.Fatalf("AddBufferedSlab: %v", err)
+	}
+	slabs, err := db.FinalizeUpload(uploadID)
+	if err != nil {
+		t.Fatalf("FinalizeUpload: %v", err)
+	}
+	assertSlabs(t, "FinalizeUpload(doc.txt)", slabs, []types.Hash256{own})
+	if n := pendingUnpins(t, db); n != 1 {
+		t.Fatalf("want the slab of the old file staged for unpinning, got %d staged", n)
+	}
+
+	// A rewrite of doc.old, whose slab other.txt still holds a run in.
+	if uploadID, err = db.CreateUpload(acc, share, "doc.old"); err != nil {
+		t.Fatalf("CreateUpload: %v", err)
+	}
+	if err := db.AddBufferedSlab(uploadID, 0, frand.Bytes(300)); err != nil {
+		t.Fatalf("AddBufferedSlab: %v", err)
+	}
+	if slabs, err = db.FinalizeUpload(uploadID); err != nil {
+		t.Fatalf("FinalizeUpload: %v", err)
+	}
+	if len(slabs) != 0 {
+		t.Fatalf("a slab another file holds runs in was released: %v", slabs)
 	}
 }
 

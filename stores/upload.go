@@ -1379,25 +1379,28 @@ func (db *Database) RequeueUploadJob(uploadID, metadataID uint64) error {
 }
 
 // FinalizeUpload finalizes the upload by making the associated object visible.
-func (db *Database) FinalizeUpload(uploadID string) error {
+// A file that was there under the name is replaced, and the slabs only it
+// referenced are returned, staged for the caller to unpin.
+func (db *Database) FinalizeUpload(uploadID string) (slabs []types.Hash256, err error) {
 	id, err := hex.DecodeString(uploadID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		var uid, soid uint64
 		var share, path string
 		var aid uint64
+		var workgroup int
 		const lookup = `
-			SELECT u.id, u.object_id, o.share_name, o.full_path, o.account
+			SELECT u.id, u.object_id, o.share_name, o.full_path, o.account, o.workgroup
 			FROM uploads u
 			JOIN objects o ON o.id = u.object_id
 			WHERE u.upload_id = $1
 				AND o.temporary = TRUE
 		`
 
-		if err := tx.QueryRow(ctx, lookup, id).Scan(&uid, &soid, &share, &path, &aid); err != nil {
+		if err := tx.QueryRow(ctx, lookup, id).Scan(&uid, &soid, &share, &path, &aid, &workgroup); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
@@ -1463,31 +1466,21 @@ func (db *Database) FinalizeUpload(uploadID string) error {
 				return ErrNotFound
 			}
 		} else {
-			const collectBuffers = `
-				SELECT DISTINCT buffer_id
+			// What the file that is being replaced was made of, noted before it goes.
+			const collectReplaced = `
+				SELECT DISTINCT m.buffer_id, m.slab_key
 				FROM metadata m
 				WHERE m.object_id = $1
-					AND m.buffer_id IS NOT NULL
 			`
 
-			rows, err := tx.Query(ctx, collectBuffers, oid)
+			rows, err := tx.Query(ctx, collectReplaced, oid)
 			if err != nil {
-				return fmt.Errorf("failed to collect buffers: %w", err)
+				return fmt.Errorf("failed to collect the storage of the replaced file: %w", err)
 			}
-			var bids []uint64
-			for rows.Next() {
-				var bid uint64
-				if err := rows.Scan(&bid); err != nil {
-					rows.Close()
-					return fmt.Errorf("failed to scan buffer ID: %w", err)
-				}
-				bids = append(bids, bid)
+			bids, keys, err := collectStorage(rows)
+			if err != nil {
+				return err
 			}
-			if err := rows.Err(); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to iterate buffer IDs: %w", err)
-			}
-			rows.Close()
 
 			const deleteVisible = `
 				DELETE FROM metadata
@@ -1570,6 +1563,12 @@ func (db *Database) FinalizeUpload(uploadID string) error {
 				}
 			}
 
+			// The new metadata is in place, so a slab the new file shares with
+			// the old one is still referenced and stays pinned.
+			if slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys); err != nil {
+				return err
+			}
+
 			finalOid = oid
 		}
 
@@ -1586,6 +1585,11 @@ func (db *Database) FinalizeUpload(uploadID string) error {
 
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return slabs, nil
 }
 
 // GetMetadata retrieves the metadata of the file at the specified path that
