@@ -2,8 +2,11 @@ package smb2
 
 import (
 	"encoding/binary"
+	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/ntlm"
 )
 
@@ -34,6 +37,44 @@ func TestNewSecInfoWithNoDomainBehindTheSession(t *testing.T) {
 			}
 			if rid := binary.LittleEndian.Uint32(info[28:32]); rid != tt.want {
 				t.Errorf("the owner is S-1-5-%d, want S-1-5-%d", rid, tt.want)
+			}
+		})
+	}
+}
+
+// TestQueryDirectoryBufferStaysWithinTheBufferForEveryClass is a listing of long names, answered
+// in each information class, against a buffer the entries fill to the brim. The room an entry
+// takes was budgeted at the width of one class, and the wider ones ran past what the client set
+// aside once enough entries went in to use up the slack.
+func TestQueryDirectoryBufferStaysWithinTheBufferForEveryClass(t *testing.T) {
+	var entries []client.ObjectInfo
+	for i := range 200 {
+		entries = append(entries, client.ObjectInfo{Key: fmt.Sprintf("/dir/file-%03d-%s.txt", i, strings.Repeat("x", 30))})
+	}
+	const bufSize = 224 + 184*100
+
+	for _, tt := range []struct {
+		name  string
+		class uint8
+	}{
+		{"FILE_DIRECTORY_INFORMATION", FILE_DIRECTORY_INFORMATION},
+		{"FILE_FULL_DIRECTORY_INFORMATION", FILE_FULL_DIRECTORY_INFORMATION},
+		{"FILE_ID_FULL_DIRECTORY_INFORMATION", FILE_ID_FULL_DIRECTORY_INFORMATION},
+		{"FILE_ID_64_EXTD_DIRECTORY_INFORMATION", FILE_ID_64_EXTD_DIRECTORY_INFORMATION},
+		{"FILE_ID_EXTD_DIRECTORY_INFORMATION", FILE_ID_EXTD_DIRECTORY_INFORMATION},
+		{"FILE_BOTH_DIRECTORY_INFORMATION", FILE_BOTH_DIRECTORY_INFORMATION},
+		{"FILE_ID_ALL_EXTD_DIRECTORY_INFORMATION", FILE_ID_ALL_EXTD_DIRECTORY_INFORMATION},
+		{"FILE_ID_BOTH_DIRECTORY_INFORMATION", FILE_ID_BOTH_DIRECTORY_INFORMATION},
+		{"FILE_ID_64_EXTD_BOTH_DIRECTORY_INFORMATION", FILE_ID_64_EXTD_BOTH_DIRECTORY_INFORMATION},
+		{"FILE_ID_ALL_EXTD_BOTH_DIRECTORY_INFORMATION", FILE_ID_ALL_EXTD_BOTH_DIRECTORY_INFORMATION},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			buf, num := QueryDirectoryBuffer(tt.class, entries, bufSize, false, true, client.FileInfo{}, client.FileInfo{})
+			if num == 0 {
+				t.Fatal("nothing was listed into a buffer with room for dozens of entries")
+			}
+			if len(buf) > bufSize {
+				t.Fatalf("%d entries were encoded into %d bytes, past the %d the client set aside", num, len(buf), bufSize)
 			}
 		})
 	}

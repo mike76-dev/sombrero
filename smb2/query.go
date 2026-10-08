@@ -578,15 +578,54 @@ func (info fileIDAllExtdBothDirInfo) encode() []byte {
 	return buf
 }
 
+// dirInfoFixedSize returns the length of an entry of the given information class
+// ahead of its name, as its encoder lays it out.
+func dirInfoFixedSize(class uint8) (int, bool) {
+	switch class {
+	case FILE_DIRECTORY_INFORMATION:
+		return 64, true
+	case FILE_FULL_DIRECTORY_INFORMATION:
+		return 68, true
+	case FILE_ID_FULL_DIRECTORY_INFORMATION, FILE_ID_64_EXTD_DIRECTORY_INFORMATION:
+		return 80, true
+	case FILE_ID_EXTD_DIRECTORY_INFORMATION:
+		return 88, true
+	case FILE_BOTH_DIRECTORY_INFORMATION:
+		return 94, true
+	case FILE_ID_ALL_EXTD_DIRECTORY_INFORMATION:
+		return 96, true
+	case FILE_ID_BOTH_DIRECTORY_INFORMATION:
+		return 104, true
+	case FILE_ID_64_EXTD_BOTH_DIRECTORY_INFORMATION:
+		return 106, true
+	case FILE_ID_ALL_EXTD_BOTH_DIRECTORY_INFORMATION:
+		return 122, true
+	default:
+		return 0, false
+	}
+}
+
 // QueryDirectoryBuffer generates the query result depending on the provided parameters.
 func QueryDirectoryBuffer(class uint8, entries []client.ObjectInfo, bufSize uint32, single, root bool, dir, parent client.FileInfo) (buf []byte, num int) {
-	var info []dirInfo
-	size := uint32(224) // The minimal size of the buffer for safety
-	if bufSize < size {
+	fixed, ok := dirInfoFixedSize(class)
+	if !ok {
 		return nil, 0
 	}
 
+	// The room an entry takes, padded out to the next one; a UTF-8 byte never
+	// becomes more than two bytes of UTF-16, so the name is budgeted at that.
+	entrySize := func(name string) uint32 {
+		return uint32(utils.Roundup(fixed+len(name)*2, 8))
+	}
+
+	var info []dirInfo
+	var size uint32
 	if root { // "." and ".." directories need to be included in the response
+		size = entrySize(".") + entrySize("..")
+		if bufSize < size {
+			return nil, 0
+		}
+
 		info = append(info,
 			dirInfo{
 				CreationTime:   dir.CreatedAt,
@@ -611,9 +650,9 @@ func QueryDirectoryBuffer(class uint8, entries []client.ObjectInfo, bufSize uint
 		)
 	}
 
-	for i, entry := range entries {
+	for _, entry := range entries {
 		_, name, isDir := utils.ExtractFilename(entry.Key)
-		length := 104 + uint32(len(name))*2
+		length := entrySize(name)
 
 		// Check if the buffer length exceeds bufSize after adding the new record.
 		if size+length > bufSize {
@@ -650,9 +689,8 @@ func QueryDirectoryBuffer(class uint8, entries []client.ObjectInfo, bufSize uint
 
 		info = append(info, di)
 		num++
-		if !single && i < len(entries)-1 && size+uint32(utils.Roundup(104+len(name)*2, 8)) <= bufSize {
-			size += uint32(utils.Roundup(104+len(name)*2, 8))
-		} else { // Either single entry requested or the buffer length exceeds bufSize
+		size += length
+		if single {
 			break
 		}
 	}
