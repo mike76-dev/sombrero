@@ -2197,20 +2197,7 @@ func (op *open) setEndOfFile(acc stores.Account, eof uint64) error {
 		// has just given up on a copy is answered at once rather than held for as long as a slow
 		// backend takes over parts nobody will ever ask for.
 		if eof == 0 {
-			op.cancelUpload()
-
-			op.mu.Lock()
-			ctx, path := op.ctx, op.pathName
-			op.mu.Unlock()
-
-			if err := op.treeConnect.client.Delete(ctx, acc, path, false); err != nil && !errors.Is(err, stores.ErrNotFound) {
-				return err
-			}
-
-			op.file.empty()
-			op.file.markUnstored()
-
-			return nil
+			return op.emptyFile(acc)
 		}
 
 		// The new end is behind what has gone to the store. Nothing more may land while the parts
@@ -2234,22 +2221,32 @@ func (op *open) setEndOfFile(acc stores.Account, eof uint64) error {
 	// Nothing is being written, so the store holds the file as it stands and the truncation has to
 	// reach it. A file cut down to nothing is one this server already has a shape for: a file with
 	// no object behind it, known by its state alone. Nothing empty can be stored in any case.
+	if eof == 0 {
+		return op.emptyFile(acc)
+	}
+
+	return op.retainPrefix(acc, eof)
+}
+
+// emptyFile is the file after it has been cut down to nothing, whether by setting its end there or
+// by a create that overwrites or supersedes it: the upload is called off, the object the store holds
+// goes, and the state is all there is of the file from here on. The store having nothing to delete
+// is the expected end of a file that was never stored, not a failure.
+func (op *open) emptyFile(acc stores.Account) error {
+	op.cancelUpload()
+
 	op.mu.Lock()
 	ctx, path := op.ctx, op.pathName
 	op.mu.Unlock()
 
-	if eof == 0 {
-		if err := op.treeConnect.client.Delete(ctx, acc, path, false); err != nil && !errors.Is(err, stores.ErrNotFound) {
-			return err
-		}
-
-		op.file.empty()
-		op.file.markUnstored()
-
-		return nil
+	if err := op.treeConnect.client.Delete(ctx, acc, path, false); err != nil && !errors.Is(err, stores.ErrNotFound) {
+		return err
 	}
 
-	return op.retainPrefix(acc, eof)
+	op.file.empty()
+	op.file.markUnstored()
+
+	return nil
 }
 
 // retainPrefix cuts a stored file down to its first n bytes by writing them out again as a new

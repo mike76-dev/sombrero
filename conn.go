@@ -4161,8 +4161,21 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		tc.persistFile(path, op.file)
 	}
 
+	// A create that overwrites or supersedes the file empties it then and there, as NTFS does: the
+	// object the store holds goes with the contents, or a client that writes nothing afterwards would
+	// find them back the next time it opened the file. A file the store has nothing for is emptied
+	// in its state alone.
 	if result == smb2.FILE_SUPERSEDED || result == smb2.FILE_OVERWRITTEN {
-		op.file.empty()
+		if stored && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
+			if err := op.emptyFile(acc); err != nil {
+				log.Printf("Couldn't empty %s for a create that overwrites it: %v", path, err)
+				c.server.closeOpen(op)
+				resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
+				return resp, nil
+			}
+		} else {
+			op.file.empty()
+		}
 	}
 
 	_, _, _, createdModified, _ := op.file.stat()

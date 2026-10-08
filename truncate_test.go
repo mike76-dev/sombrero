@@ -115,6 +115,77 @@ func TestIntegrationCuttingAStoredFileToNothingTakesTheObjectAway(t *testing.T) 
 	}
 }
 
+// TestIntegrationOverwritingACreateEmptiesTheStoredFile is a create that overwrites or supersedes a
+// file the store holds, followed by nothing: the client meant an empty file, and before this the
+// object came back with its old contents the next time anybody opened the file.
+func TestIntegrationOverwritingACreateEmptiesTheStoredFile(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		disposition uint32
+	}{
+		{"overwrite", smb2.FILE_OVERWRITE},
+		{"overwrite if", smb2.FILE_OVERWRITE_IF},
+		{"supersede", smb2.FILE_SUPERSEDE},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newSMBTest(t)
+			h.files.putData("notes.txt", []byte("another test"))
+
+			cl := h.dial("alice")
+			handle, _ := cl.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, tt.disposition)
+			if status := smb2.Header(handle).Status(); status != smb2.STATUS_OK {
+				t.Fatalf("the create was answered with %#x", status)
+			}
+			if h.files.has("notes.txt") {
+				t.Error("the store still holds the object of the file that was overwritten")
+			}
+			if _, err := cl.closeHandle(createdFileID(handle)); err != nil {
+				t.Fatalf("the close failed: %v", err)
+			}
+
+			reopened, _ := cl.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			if status := smb2.Header(reopened).Status(); status != smb2.STATUS_OK {
+				t.Fatalf("reopening the file was answered with %#x, want the empty file still there", status)
+			}
+			info := queriedInfo(t, cl.queryInfo(createdFileID(reopened), smb2.FileStandardInformation, 64))
+			if len(info) < 16 {
+				t.Fatalf("the query answered with %d bytes, too few for a standard information structure", len(info))
+			}
+			if got := binary.LittleEndian.Uint64(info[8:16]); got != 0 {
+				t.Errorf("the file is %d bytes long, want the empty file the create left", got)
+			}
+		})
+	}
+}
+
+// TestIntegrationOverwritingACreateThenWritingStoresTheNewFile is the usual case: the create that
+// overwrites is followed by the new contents, which are what the store holds afterwards.
+func TestIntegrationOverwritingACreateThenWritingStoresTheNewFile(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putData("notes.txt", []byte("another test"))
+
+	cl := h.dial("alice")
+	handle, _ := cl.create("notes.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE)
+	if status := smb2.Header(handle).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the create was answered with %#x", status)
+	}
+
+	written, err := cl.write(createdFileID(handle), 0, []byte("new"))
+	if err != nil {
+		t.Fatalf("the write failed outright: %v", err)
+	}
+	if status := smb2.Header(written).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the write was answered with %#x", status)
+	}
+	if _, err := cl.closeHandle(createdFileID(handle)); err != nil {
+		t.Fatalf("the close failed: %v", err)
+	}
+
+	if got := string(h.files.dataOf("notes.txt")); got != "new" {
+		t.Errorf("the store holds %q, want the new contents", got)
+	}
+}
+
 // TestIntegrationCuttingShortAFileBeingWrittenCutsTheUpload is the truncation of a file that has not
 // been stored yet. The bytes are in the upload, so that is where the new end has to reach: stored as
 // they stood, the file would end up longer than the client made it.
