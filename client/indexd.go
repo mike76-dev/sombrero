@@ -1230,6 +1230,17 @@ func (ic *IndexdClient) unpinSlabs(ctx context.Context, keys []types.Hash256) bo
 	return dropped
 }
 
+// UnpinSlabs drops slabs that nothing references any more, for a caller that
+// could not stage them: the workgroup whose connection pinned them is going,
+// and this connection with it. What the backend refuses stays pinned.
+func (ic *IndexdClient) UnpinSlabs(ctx context.Context, keys []types.Hash256) {
+	if ic.unpinSlabs(ctx, keys) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after unpinning for a removed workgroup: %v", err)
+		}
+	}
+}
+
 // isNotFound reports whether the indexer answered that there is no such object.
 func isNotFound(err error) bool {
 	var httpErr *app.HTTPError

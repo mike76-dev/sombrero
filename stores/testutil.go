@@ -20,6 +20,7 @@ func (noopShares) UpdateAccessRights(sh Share, ar AccessRights) error           
 func (noopShares) RemoveAccess(acc Account)                                     {}
 func (noopShares) AddConnection(_ Workgroup, _ Share, _ types.PrivateKey) error { return nil }
 func (noopShares) RemoveConnection(_ Workgroup, _ Share) error                  { return nil }
+func (noopShares) UnpinSlabs(_ Workgroup, _ Share, _ []types.Hash256)           {}
 
 func NewTestStore(t *testing.T, ctx context.Context) *Database {
 	return NewTestStoreNamed(t, ctx, envOr(t, "TEST_DB_NAME", "sombrero_test"))

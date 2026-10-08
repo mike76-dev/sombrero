@@ -729,6 +729,44 @@ func (s *server) restoreConnectionsOnce(reported map[connKey]struct{}) bool {
 	return done
 }
 
+// UnpinSlabs drops slabs through the workgroup's connection to the share, which
+// is started if it is not running: only that connection holds the key to the
+// account they are pinned under. A slab the backend refuses is logged and left
+// pinned, since the connection is about to go and nothing can retry it.
+func (s *server) UnpinSlabs(wg stores.Workgroup, share stores.Share, slabs []types.Hash256) {
+	full, err := s.store.GetShare(share.Name)
+	if err != nil || full.Name == "" {
+		log.Printf("leaving %d slab(s) of workgroup %s pinned on %s: the share could not be looked up: %v", len(slabs), wg.UUID, share.Name, err)
+		return
+	}
+
+	sh, failed, err := s.startShareConnections(full)
+	if err != nil {
+		log.Printf("leaving %d slab(s) of workgroup %s pinned on %s: %v", len(slabs), wg.UUID, share.Name, err)
+		return
+	}
+	if reason, ok := failed[wg.UUID.String()]; ok {
+		log.Printf("leaving %d slab(s) of workgroup %s pinned on %s: the connection could not be started: %s", len(slabs), wg.UUID, share.Name, reason)
+		return
+	}
+
+	sh.mu.Lock()
+	conn, ok := sh.indexdConns[wg.UUID.String()]
+	sh.mu.Unlock()
+	if !ok {
+		log.Printf("leaving %d slab(s) of workgroup %s pinned on %s: the connection is not running", len(slabs), wg.UUID, share.Name)
+		return
+	}
+
+	unpinner, ok := conn.client.(interface {
+		UnpinSlabs(ctx context.Context, keys []types.Hash256)
+	})
+	if !ok {
+		return
+	}
+	unpinner.UnpinSlabs(s.ctx, slabs)
+}
+
 // RemoveConnection closes the workgroup's indexd client and removes their
 // accounts from the share's security maps.
 func (s *server) RemoveConnection(wg stores.Workgroup, share stores.Share) error {

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/mike76-dev/sombrero/utils"
+	"go.sia.tech/core/types"
 	"golang.org/x/crypto/md4"
 )
 
@@ -191,7 +192,7 @@ func (db *Database) RemoveAccount(username, workgroup string) error {
 		if _, err := tx.Exec(ctx, query, username, u[:]); err != nil {
 			return fmt.Errorf("failed to remove account: %w", err)
 		}
-		if err := storage.release(ctx, tx); err != nil {
+		if _, err := storage.release(ctx, tx); err != nil {
 			return err
 		}
 		db.shares.RemoveAccess(Account{Username: username, Workgroup: workgroup})
@@ -255,24 +256,31 @@ func collectAccountStorage(ctx context.Context, tx pgx.Tx, accounts string, args
 }
 
 // release drops the buffers nothing refers to any more and stages the slabs
-// nothing refers to for unpinning. It has to run after the accounts are deleted.
-func (s accountStorage) release(ctx context.Context, tx pgx.Tx) error {
+// nothing refers to for unpinning, returning them by the connection that pinned
+// them. It has to run after the accounts are deleted.
+func (s accountStorage) release(ctx context.Context, tx pgx.Tx) (map[pinner][]types.Hash256, error) {
 	for _, bid := range s.buffers {
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM buffers b
 			WHERE b.id = $1
 				AND NOT EXISTS (SELECT 1 FROM metadata m WHERE m.buffer_id = b.id)
 		`, bid); err != nil {
-			return fmt.Errorf("failed to delete an orphaned buffer: %w", err)
-		}
-	}
-	for p, keys := range s.slabs {
-		if _, err := unreferencedSlabs(ctx, tx, p.share, p.workgroup, keys); err != nil {
-			return err
+			return nil, fmt.Errorf("failed to delete an orphaned buffer: %w", err)
 		}
 	}
 
-	return nil
+	released := make(map[pinner][]types.Hash256)
+	for p, keys := range s.slabs {
+		slabs, err := unreferencedSlabs(ctx, tx, p.share, p.workgroup, keys)
+		if err != nil {
+			return nil, err
+		}
+		if len(slabs) > 0 {
+			released[p] = slabs
+		}
+	}
+
+	return released, nil
 }
 
 // FindAccounts returns all accounts of the specified workgroup.
@@ -340,7 +348,7 @@ func (db *Database) RemoveAccounts(workgroup string) error {
 		if _, err := tx.Exec(ctx, query, u[:]); err != nil {
 			return fmt.Errorf("failed to remove accounts: %w", err)
 		}
-		if err := storage.release(ctx, tx); err != nil {
+		if _, err := storage.release(ctx, tx); err != nil {
 			return err
 		}
 		for _, acc := range accs {

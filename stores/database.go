@@ -32,6 +32,11 @@ type Shares interface {
 	RemoveAccess(acc Account)
 	AddConnection(wg Workgroup, share Share, appKey types.PrivateKey) error
 	RemoveConnection(wg Workgroup, share Share) error
+
+	// UnpinSlabs drops slabs through the workgroup's connection to the share
+	// while it is still running, for a removal that takes the connection with it
+	// and so cannot stage them for later.
+	UnpinSlabs(wg Workgroup, share Share, slabs []types.Hash256)
 }
 
 // Close closes the underlying database connection. Whatever is still running a

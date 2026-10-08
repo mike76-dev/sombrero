@@ -281,6 +281,40 @@ func TestRemoveAccountReleasesItsStorage(t *testing.T) {
 	}
 }
 
+// TestRemoveWorkgroupReleasesItsStorage verifies that deleting a workgroup does
+// for the files of its accounts what deleting the accounts would, and hands the
+// slabs nothing references any more to the share manager while the connection
+// that pinned them can still drop them.
+func TestRemoveWorkgroupReleasesItsStorage(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	fx := plantCatalogFixture(t, db)
+	rec := &recordingShares{}
+	db.WithShares(rec)
+
+	if err := db.RemoveWorkgroup(fx.wg); err != nil {
+		t.Fatalf("RemoveWorkgroup: %v", err)
+	}
+
+	assertSlabs(t, "UnpinSlabs", rec.unpinned, []types.Hash256{fx.object, {8}})
+	for _, name := range rec.unpinnedOn {
+		if name != fx.share.Name {
+			t.Errorf("slabs unpinned on %q, want %q", name, fx.share.Name)
+		}
+	}
+	if len(rec.disconnected) != 1 || rec.disconnected[0] != fx.wg.UUID.String()+"/"+fx.share.Name {
+		t.Errorf("disconnected: got %v, want the one connection", rec.disconnected)
+	}
+	if n := storedBuffers(t, db); n != 0 {
+		t.Errorf("%d buffer(s) are left with nothing referring to them", n)
+	}
+	if wg, err := db.FindWorkgroup(fx.wg.UUID); err != nil || wg.ID != 0 {
+		t.Errorf("the workgroup is still there: %+v, %v", wg, err)
+	}
+}
+
 // TestRestoreRefusals verifies what a restore will not do: apply a description
 // that is not a catalog, or recreate a share over a different one.
 func TestRestoreRefusals(t *testing.T) {

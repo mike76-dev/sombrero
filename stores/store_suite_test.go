@@ -29,6 +29,8 @@ type recordingShares struct {
 	accessGone   []string // workgroup UUID + "/" + username, as keyed by the SMB server
 	connected    []string
 	disconnected []string
+	unpinned     []types.Hash256
+	unpinnedOn   []string
 	fail         error
 }
 
@@ -82,6 +84,11 @@ func (r *recordingShares) RemoveConnection(wg Workgroup, sh Share) error {
 	}
 	r.disconnected = append(r.disconnected, wg.UUID.String()+"/"+sh.Name)
 	return nil
+}
+
+func (r *recordingShares) UnpinSlabs(_ Workgroup, sh Share, slabs []types.Hash256) {
+	r.unpinned = append(r.unpinned, slabs...)
+	r.unpinnedOn = append(r.unpinnedOn, sh.Name)
 }
 
 // storeBackend is one implementation of the Store interface, together with the

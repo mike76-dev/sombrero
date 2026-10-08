@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"go.sia.tech/core/types"
 )
 
 // ErrWorkgroupExists is returned when a workgroup is created under a name that
@@ -409,13 +410,20 @@ func (db *Database) UpdateWorkgroup(wg Workgroup) error {
 	})
 }
 
-// RemoveWorkgroup removes the specified workgroup and all associated accounts from the database.
+// RemoveWorkgroup removes the specified workgroup and all associated accounts
+// from the database. What their files were made of is released the way deleting
+// them would, and the slabs nothing references any more are unpinned through the
+// workgroup's connections before those are closed: once the workgroup is gone,
+// nothing holds the keys to its accounts at the indexer.
 func (db *Database) RemoveWorkgroup(wg Workgroup) error {
 	accs, err := db.FindAccounts(wg.UUID.String())
 	if err != nil {
 		return err
 	}
-	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+
+	var shareNames []string
+	var released map[pinner][]types.Hash256
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const connQuery = `
 			SELECT share_name
 			FROM connections
@@ -425,7 +433,6 @@ func (db *Database) RemoveWorkgroup(wg Workgroup) error {
 		if err != nil {
 			return fmt.Errorf("failed to retrieve connections: %w", err)
 		}
-		var shareNames []string
 		for rows.Next() {
 			var name string
 			if err := rows.Scan(&name); err != nil {
@@ -436,22 +443,41 @@ func (db *Database) RemoveWorkgroup(wg Workgroup) error {
 		}
 		rows.Close()
 
-		const query = `
-			DELETE FROM workgroups
-			WHERE id = $1
-		`
-		if _, err := tx.Exec(ctx, query, wg.ID); err != nil {
-			return fmt.Errorf("failed to remove workgroup: %w", err)
+		// The accounts go first, so that what their files were made of is
+		// released while the workgroup they pinned under is still there.
+		const owned = `SELECT id FROM accounts WHERE workgroup = $1`
+		storage, err := collectAccountStorage(ctx, tx, owned, wg.ID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM accounts WHERE workgroup = $1`, wg.ID); err != nil {
+			return fmt.Errorf("failed to remove accounts: %w", err)
+		}
+		if released, err = storage.release(ctx, tx); err != nil {
+			return err
 		}
 
-		for _, name := range shareNames {
-			if err := db.shares.RemoveConnection(wg, Share{Name: name}); err != nil {
-				return fmt.Errorf("failed to disconnect share: %w", err)
-			}
-		}
-		for _, acc := range accs {
-			db.shares.RemoveAccess(acc)
+		if _, err := tx.Exec(ctx, `DELETE FROM workgroups WHERE id = $1`, wg.ID); err != nil {
+			return fmt.Errorf("failed to remove workgroup: %w", err)
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	// The unpins cannot stay staged: the rows went with the workgroup, and so
+	// will the connections that could carry them out.
+	for p, slabs := range released {
+		db.shares.UnpinSlabs(wg, Share{Name: p.share}, slabs)
+	}
+	for _, name := range shareNames {
+		if err := db.shares.RemoveConnection(wg, Share{Name: name}); err != nil {
+			return fmt.Errorf("failed to disconnect share: %w", err)
+		}
+	}
+	for _, acc := range accs {
+		db.shares.RemoveAccess(acc)
+	}
+	return nil
 }
