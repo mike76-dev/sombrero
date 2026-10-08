@@ -408,6 +408,34 @@ func TestIntegrationNegotiateSettlesACipher(t *testing.T) {
 	}
 }
 
+// TestNegotiateDoesNotRaceALeaseBreakScan is a client negotiating while a lease break looks for
+// the connections of another client. The scan reads the GUID of every listed connection, and a
+// connection is listed before it has negotiated, so the GUID it settles has to be written where
+// the scan reads it.
+func TestNegotiateDoesNotRaceALeaseBreakScan(t *testing.T) {
+	h := newSMBTest(t)
+	h.srv.applyCapabilities()
+
+	c := h.newTestConnection("negotiating")
+	c.ntlmServer = ntlm.NewServer("SERVER", "", h.srv.store, false)
+	h.srv.mu.Lock()
+	h.srv.connectionList[c.clientName] = c
+	h.srv.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 100 {
+			h.srv.clientConnections([16]byte{0xee})
+		}
+	}()
+
+	if _, _, err := c.processRequest(request(t, negotiateRequest(0, smb2.SMB_DIALECT_311))); err != nil {
+		t.Fatalf("the server gave up on the negotiate: %v", err)
+	}
+	<-done
+}
+
 // dispatcherState returns the scheduler state of the goroutine running processRequests, as the
 // runtime writes it in a stack dump: "select", "chan receive", "runnable" and so on.
 func dispatcherState(t *testing.T) string {

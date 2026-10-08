@@ -572,7 +572,11 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		}
 
 		c.clientCapabilities = nr.Capabilities()
+		// A lease break scans the GUIDs of the listed connections under the server
+		// lock, and this one is listed already.
+		c.server.mu.Lock()
 		c.clientGuid = nr.ClientGuid()
+		c.server.mu.Unlock()
 		c.clientSecurityMode = nr.SecurityMode()
 		c.negotiateDialect = nr.MaxCommonDialect()
 		c.dialect = dialectName(c.negotiateDialect)
