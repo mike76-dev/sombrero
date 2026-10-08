@@ -182,3 +182,37 @@ func TestLocalWritesAndKeeps(t *testing.T) {
 		t.Error("the failure was not kept in the status")
 	}
 }
+
+// TestLocalClearsAHalfWrittenCatalog plants what a crash in the middle of a
+// write leaves behind: a catalog that never took its name. The next round
+// takes it away rather than letting the folder fill with them.
+func TestLocalClearsAHalfWrittenCatalog(t *testing.T) {
+	ctx := context.Background()
+	db, wg, _ := connectedStore(t, ctx)
+
+	dir := t.TempDir()
+	folder := filepath.Join(dir, "idx_"+wg.UUID.String())
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	leftover := filepath.Join(folder, ".catalog-123456")
+	if err := os.WriteFile(leftover, []byte("half of one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	l := &Local{db: db, dir: dir, keep: 2, inline: 1024, status: Status{Path: dir, Keep: 2}}
+	if err := l.WriteAll(ctx); err != nil {
+		t.Fatalf("WriteAll: %v", err)
+	}
+
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Errorf("the half-written catalog is still there: %v", err)
+	}
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !strings.HasSuffix(entries[0].Name(), ".catalog") {
+		t.Errorf("the folder holds %d file(s), want the one catalog just written", len(entries))
+	}
+}

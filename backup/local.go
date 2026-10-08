@@ -246,7 +246,8 @@ func (l *Local) writeFile(dir string, snapshot func(io.Writer) error) (final str
 }
 
 // prune leaves the newest keep catalogs in the folder. Their names are their
-// times, so the order of the names is the order of the times.
+// times, so the order of the names is the order of the times. A catalog that
+// never took its name was left by a crash mid-write, and goes too.
 func (l *Local) prune(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -256,7 +257,16 @@ func (l *Local) prune(dir string) {
 
 	var names []string
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".catalog") {
+		if entry.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(entry.Name(), ".catalog-") {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				log.Printf("backup: failed to remove the half-written catalog %s: %v", entry.Name(), err)
+			}
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".catalog") {
 			names = append(names, entry.Name())
 		}
 	}
