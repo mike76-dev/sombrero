@@ -969,18 +969,30 @@ func (ic *IndexdClient) MakeDirectory(ctx context.Context, acc stores.Account, p
 	return ic.db.CreateDirectory(acc, ic.share, path, private, readOnly)
 }
 
-// Rename renames a file or a directory.
+// Rename renames a file or a directory. What was renamed over goes, and the
+// slabs only it referenced are unpinned.
 func (ic *IndexdClient) Rename(ctx context.Context, acc stores.Account, oldName, newName string, isDir, force bool) error {
+	var slabs []types.Hash256
+	var err error
 	if isDir {
-		if err := ic.db.RenameDirectory(acc, ic.share, oldName, newName, force); err != nil {
-			return err
-		}
-	} else if err := ic.db.RenameFile(acc, ic.share, oldName, newName, force); err != nil {
+		slabs, err = ic.db.RenameDirectory(acc, ic.share, oldName, newName, force)
+	} else {
+		slabs, err = ic.db.RenameFile(acc, ic.share, oldName, newName, force)
+	}
+	if err != nil {
 		return err
 	}
 
 	// The objects are still of the same bytes, under names they no longer go by.
 	ic.retag(ic.slabsOf(newName, isDir))
+
+	// The slabs are staged in the database, so a failure here only delays
+	// their unpinning until the periodic retry.
+	if len(slabs) > 0 && ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after renaming over %s: %v", newName, err)
+		}
+	}
 
 	return nil
 }

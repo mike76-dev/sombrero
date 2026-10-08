@@ -73,6 +73,77 @@ func TestDeleteDirectoryWildcardNames(t *testing.T) {
 	assertPath(t, db, share, acc, "/cxyzd", true)
 }
 
+// TestRenameFileOverReleasesTheOldFile verifies that a file renamed over gives
+// up the slabs only it referenced, and keeps the ones another file still holds
+// runs in.
+func TestRenameFileOverReleasesTheOldFile(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, _ := newSlabTestFixture(t, db)
+
+	own, shared := types.Hash256{1}, types.Hash256{2}
+	plantPiece(t, db, share, acc, "target.txt", own, 0, 400)
+	plantPiece(t, db, share, acc, "target.txt.bak", shared, 0, 400)
+	plantPiece(t, db, share, acc, "other.txt", shared, 400, 400)
+	plantPiece(t, db, share, acc, "source.txt", types.Hash256{3}, 0, 400)
+	plantPiece(t, db, share, acc, "source2.txt", types.Hash256{4}, 0, 400)
+
+	slabs, err := db.RenameFile(acc, share, "source.txt", "target.txt", true)
+	if err != nil {
+		t.Fatalf("RenameFile: %v", err)
+	}
+	assertSlabs(t, "RenameFile over target.txt", slabs, []types.Hash256{own})
+	if n := pendingUnpins(t, db); n != 1 {
+		t.Fatalf("want the slab of the old file staged for unpinning, got %d staged", n)
+	}
+	assertPath(t, db, share, acc, "source.txt", false)
+	assertPath(t, db, share, acc, "target.txt", true)
+
+	// The slab of target.txt.bak is still held by other.txt.
+	if slabs, err = db.RenameFile(acc, share, "source2.txt", "target.txt.bak", true); err != nil {
+		t.Fatalf("RenameFile: %v", err)
+	}
+	if len(slabs) != 0 {
+		t.Fatalf("a slab another file holds runs in was released: %v", slabs)
+	}
+}
+
+// TestRenameDirectoryOverReleasesItsContents verifies that a directory renamed
+// over goes with its files, and that their buffers and the slabs only they
+// referenced go with them instead of staying paid for.
+func TestRenameDirectoryOverReleasesItsContents(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, _ := newSlabTestFixture(t, db)
+
+	plantTree(t, db, share, acc, "/dst", 1)
+	if err := db.CreateDirectory(acc, share, "/dst/sub", false, false); err != nil {
+		t.Fatalf("CreateDirectory: %v", err)
+	}
+	plantPiece(t, db, share, acc, "/dst/sub/deep.txt", types.Hash256{2}, 0, 100)
+	plantBufferedFile(t, db, share, acc, "/dst/pending.txt", 300, false)
+	plantTree(t, db, share, acc, "/src", 3)
+
+	slabs, err := db.RenameDirectory(acc, share, "/src", "/dst", true)
+	if err != nil {
+		t.Fatalf("RenameDirectory: %v", err)
+	}
+	assertSlabs(t, "RenameDirectory over /dst", slabs, []types.Hash256{{1}, {2}})
+	if n := pendingUnpins(t, db); n != 2 {
+		t.Fatalf("want 2 slabs staged for unpinning, got %d", n)
+	}
+	if n := storedBuffers(t, db); n != 0 {
+		t.Fatalf("%d buffer(s) of the directory renamed over left behind", n)
+	}
+	assertPath(t, db, share, acc, "/dst/file.txt", true)
+	assertPath(t, db, share, acc, "/dst/sub/deep.txt", false)
+	assertPath(t, db, share, acc, "/src", false)
+}
+
 // TestRenameDirectoryWildcardNames verifies that renaming a directory whose
 // name holds a LIKE wildcard moves its own contents and nothing else.
 func TestRenameDirectoryWildcardNames(t *testing.T) {
@@ -85,7 +156,7 @@ func TestRenameDirectoryWildcardNames(t *testing.T) {
 	plantTree(t, db, share, acc, "/a_b", 1)
 	sibling := plantTree(t, db, share, acc, "/axb", 2)
 
-	if err := db.RenameDirectory(acc, share, "/a_b", "/renamed", false); err != nil {
+	if _, err := db.RenameDirectory(acc, share, "/a_b", "/renamed", false); err != nil {
 		t.Fatalf("RenameDirectory: %v", err)
 	}
 	assertPath(t, db, share, acc, "/renamed/file.txt", true)
@@ -109,7 +180,7 @@ func TestRenameDirectoryIntoWildcardSibling(t *testing.T) {
 	plantTree(t, db, share, acc, "/a_b", 1)
 	plantTree(t, db, share, acc, "/axb", 2)
 
-	if err := db.RenameDirectory(acc, share, "/a_b", "/axb/moved", false); err != nil {
+	if _, err := db.RenameDirectory(acc, share, "/a_b", "/axb/moved", false); err != nil {
 		t.Fatalf("RenameDirectory: %v", err)
 	}
 	assertPath(t, db, share, acc, "/axb/moved/file.txt", true)
@@ -117,7 +188,7 @@ func TestRenameDirectoryIntoWildcardSibling(t *testing.T) {
 	assertPath(t, db, share, acc, "/a_b", false)
 
 	// A directory still cannot be moved inside itself.
-	err := db.RenameDirectory(acc, share, "/axb", "/axb/moved/nested", false)
+	_, err := db.RenameDirectory(acc, share, "/axb", "/axb/moved/nested", false)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want a move into its own subtree refused, got %v", err)
 	}

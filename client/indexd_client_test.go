@@ -2490,6 +2490,48 @@ func TestIndexdClient_OverwriteUnpinsTheOldSlab(t *testing.T) {
 	}
 }
 
+// TestIndexdClient_RenameOverUnpinsTheOldSlab verifies that renaming a file over
+// another unpins the slab only the replaced file referenced.
+func TestIndexdClient_RenameOverUnpinsTheOldSlab(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	fb := newFakeBackend()
+	c := newIndexdClient(db, fb, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	content := frand.Bytes(proto.SectorSize)
+	uploadFile(t, ctx, c, acc, "doc.bin", content)
+	kept := waitForSlabKey(t, db, acc, share.Name, "doc.bin", uint64(len(content)))
+	replaced := frand.Bytes(proto.SectorSize)
+	uploadFile(t, ctx, c, acc, "doc.bin.tmp", replaced)
+	old := waitForSlabKey(t, db, acc, share.Name, "doc.bin.tmp", uint64(len(replaced)))
+
+	// The atomic save: the new contents go in under a temporary name and are
+	// renamed over the file.
+	if err := c.Rename(ctx, acc, "doc.bin.tmp", "doc.bin", false, true); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	mustReadEquals(t, ctx, c, acc, "doc.bin", replaced)
+
+	if n := fb.deleteCount(); n != 1 {
+		t.Fatalf("want the replaced file's slab unpinned once, got %d deletions", n)
+	}
+	fb.mu.Lock()
+	_, keptStill := fb.objects[old]
+	_, oldStill := fb.objects[kept]
+	fb.mu.Unlock()
+	if !keptStill || oldStill {
+		t.Fatalf("want the slab of the new contents kept and the replaced one gone, got kept %v, replaced %v", keptStill, oldStill)
+	}
+}
+
 // TestIndexdClient_UnpinOfAGoneSlabIsDone verifies that a slab the indexer no
 // longer has counts as unpinned, rather than being asked about forever: a file
 // restored from a catalog after its slabs were unpinned leaves such a slab

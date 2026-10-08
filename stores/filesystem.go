@@ -418,16 +418,17 @@ func (db *Database) CreateDirectory(acc Account, share string, path string, priv
 	})
 }
 
-// RenameFile renames or moves a file.
-func (db *Database) RenameFile(acc Account, share string, oldPath, newPath string, force bool) error {
+// RenameFile renames or moves a file. A file renamed over goes, and the slabs
+// only it referenced are returned, staged for the caller to unpin.
+func (db *Database) RenameFile(acc Account, share string, oldPath, newPath string, force bool) (slabs []types.Hash256, err error) {
 	oldPath = normalizePath(oldPath)
 	newPath = normalizePath(newPath)
 	dir, name := splitPath(newPath)
 	if oldPath == "" || name == "" {
-		return ErrNameInvalid
+		return nil, ErrNameInvalid
 	}
 
-	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		if force && oldPath != newPath {
 			// A file that belongs to another account and sits in a read-only
 			// folder must not be renamed over.
@@ -519,30 +520,19 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 					AND $7::boolean
 					AND (o.account = c.id OR t.new_parent_read_only = FALSE)
 			)
-			SELECT DISTINCT m.buffer_id
+			SELECT DISTINCT m.buffer_id, m.slab_key
 			FROM doomed_target dt
 			JOIN metadata m ON m.object_id = dt.id
-			WHERE m.buffer_id IS NOT NULL
 		`
 
 		rows, err := tx.Query(ctx, collectQuery, share, oldPath, dir, name, newPath, acc.ID, force)
 		if err != nil {
 			return fmt.Errorf("failed to collect information for renaming file: %v", err)
 		}
-		var bids []uint64
-		for rows.Next() {
-			var bid uint64
-			if err := rows.Scan(&bid); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan buffer ID: %v", err)
-			}
-			bids = append(bids, bid)
+		bids, keys, err := collectStorage(rows)
+		if err != nil {
+			return err
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to iterate through buffer IDs: %v", err)
-		}
-		rows.Close()
 
 		if force {
 			const deleteQuery = `
@@ -675,20 +665,37 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 			}
 		}
 
-		return nil
+		// The file that was renamed over is gone, so what only it referenced is
+		// staged to be unpinned by the caller's workgroup connection.
+		if len(keys) == 0 {
+			return nil
+		}
+		var workgroup int
+		if err := tx.QueryRow(ctx, `SELECT workgroup FROM accounts WHERE id = $1`, acc.ID).Scan(&workgroup); err != nil {
+			return fmt.Errorf("failed to resolve workgroup: %w", err)
+		}
+		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
+		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return slabs, nil
 }
 
-// RenameDirectory renames or moves a directory.
-func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath string, force bool) error {
+// RenameDirectory renames or moves a directory. A directory renamed over goes
+// with everything in it, and the slabs only its files referenced are returned,
+// staged for the caller to unpin.
+func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath string, force bool) (slabs []types.Hash256, err error) {
 	oldPath = normalizePath(oldPath)
 	newPath = normalizePath(newPath)
 	dir, name := splitPath(newPath)
 	if oldPath == "" || name == "" {
-		return ErrNameInvalid
+		return nil, ErrNameInvalid
 	}
 
-	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		if force && oldPath != newPath {
 			// A read-only directory that belongs to another account must not
 			// be renamed over.
@@ -708,6 +715,47 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 			}
 			if protected {
 				return ErrAccessDenied
+			}
+		}
+
+		// What the directory being renamed over holds, folders down, noted before
+		// the cascade takes it: the cascade knows nothing of buffers or slabs.
+		var bids []uint64
+		var keys [][]byte
+		if force && oldPath != newPath {
+			const collectDoomed = `
+				SELECT DISTINCT m.buffer_id, m.slab_key
+				FROM metadata m
+				JOIN objects o ON o.id = m.object_id
+				WHERE o.share_name = $1
+					AND starts_with(o.full_path, $2 || '/')
+					AND EXISTS (
+						SELECT 1 FROM directories d
+						WHERE d.share_name = $1 AND d.full_path = $2
+					)
+			`
+			rows, err := tx.Query(ctx, collectDoomed, share, newPath)
+			if err != nil {
+				return fmt.Errorf("failed to collect the storage of the directory renamed over: %w", err)
+			}
+			if bids, keys, err = collectStorage(rows); err != nil {
+				return err
+			}
+
+			// The directory renamed over goes in a statement of its own: deleted
+			// in a CTE of the rename, it would still be there to the unique index
+			// the rename has to pass, since a statement cannot see its own changes.
+			// A rename that then finds nothing to rename rolls this back with it.
+			const deleteExisting = `
+				DELETE FROM directories d
+				USING accounts c
+				WHERE c.id = $3
+					AND d.share_name = $1
+					AND d.full_path = $2
+					AND (d.account = c.id OR d.read_only = FALSE)
+			`
+			if _, err := tx.Exec(ctx, deleteExisting, share, newPath, acc.ID); err != nil {
+				return fmt.Errorf("failed to delete the directory renamed over: %w", err)
 			}
 		}
 
@@ -765,14 +813,6 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 				WHERE $5 <> s.full_path
 					AND NOT starts_with($5::text, s.full_path || '/')
 			),
-			delete_existing AS (
-				DELETE FROM directories d
-				USING target t, caller c
-				WHERE $7::boolean
-					AND d.share_name = $1
-					AND d.full_path = t.new_path
-					AND (d.account = c.id OR d.read_only = FALSE)
-			),
 			-- The permission to rename is decided on the directory itself in
 			-- src; everything underneath it has to follow the rename
 			-- unconditionally, or the paths of the entries the caller may not
@@ -806,15 +846,46 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 			WHERE d.id = t.src_id
 		`
 
-		tag, err := tx.Exec(ctx, query, share, oldPath, dir, name, newPath, acc.ID, force)
+		tag, err := tx.Exec(ctx, query, share, oldPath, dir, name, newPath, acc.ID)
 		if err != nil {
 			return fmt.Errorf("failed to rename directory: %v", err)
 		}
 		if tag.RowsAffected() == 0 {
 			return ErrNotFound
 		}
-		return nil
+
+		for _, bid := range bids {
+			if _, err := tx.Exec(ctx, `
+				DELETE FROM buffers b
+				WHERE b.id = $1
+					AND NOT EXISTS (
+						SELECT 1
+						FROM metadata m
+						WHERE m.buffer_id = b.id
+					)
+			`, bid); err != nil {
+				return fmt.Errorf("failed to delete orphaned buffer: %w", err)
+			}
+		}
+
+		// The directory that was renamed over is gone with its files, so what
+		// only they referenced is staged to be unpinned by the caller's workgroup
+		// connection.
+		if len(keys) == 0 {
+			return nil
+		}
+		var workgroup int
+		if err := tx.QueryRow(ctx, `SELECT workgroup FROM accounts WHERE id = $1`, acc.ID).Scan(&workgroup); err != nil {
+			return fmt.Errorf("failed to resolve workgroup: %w", err)
+		}
+		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
+		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return slabs, nil
 }
 
 // DeleteFile deletes a file. It returns the keys of the slabs that no other
