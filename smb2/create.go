@@ -307,6 +307,10 @@ func (cr CreateRequest) CreateContexts() (map[uint32][]byte, error) {
 		}
 
 		next := uint64(binary.LittleEndian.Uint32(cr.data[pos : pos+4]))
+		// A step shorter than the fixed part lands back inside this context.
+		if next != 0 && next < 16 {
+			return nil, ErrInvalidParameter
+		}
 		nameOff := uint64(binary.LittleEndian.Uint16(cr.data[pos+4 : pos+6]))
 		nameLen := binary.LittleEndian.Uint16(cr.data[pos+6 : pos+8])
 		if nameLen > 4 {
