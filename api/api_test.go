@@ -1239,6 +1239,11 @@ func TestShares(t *testing.T) {
 		}
 	})
 
+	t.Run("GET unknown share returns 404", func(t *testing.T) {
+		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/share/nothere", nil)
+		checkStatus(t, w, http.StatusNotFound)
+	})
+
 	t.Run("GET store error", func(t *testing.T) {
 		ms := &mockStore{getShare: func(string) (stores.Share, error) { return stores.Share{}, errStore }}
 		w := doRequest(newTestAPI(ms), http.MethodGet, "/share/myshare", nil)
@@ -1376,6 +1381,17 @@ func TestPolicy(t *testing.T) {
 	t.Run("GET missing username returns 400", func(t *testing.T) {
 		w := doRequest(newTestAPI(&mockStore{}), http.MethodGet, "/share/myshare/policy", nil)
 		checkStatus(t, w, http.StatusBadRequest)
+	})
+
+	t.Run("GET unknown account returns 404", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			findAccount: func(string, string) (stores.Account, error) {
+				return stores.Account{}, stores.ErrAccountNotFound
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/share/myshare/policy?username=nobody&workgroup="+testUUID.String(), nil)
+		checkStatus(t, w, http.StatusNotFound)
 	})
 
 	t.Run("GET findAccount store error", func(t *testing.T) {

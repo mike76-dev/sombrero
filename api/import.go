@@ -547,14 +547,8 @@ func (api *API) importSortHandlerPOST(w http.ResponseWriter, req *http.Request, 
 		return
 	}
 
-	acc, err := api.store.FindAccount(strings.ToLower(body.Username), wg.UUID.String())
-	if err != nil {
-		log.Printf("failed to find account: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if acc.ID == 0 {
-		writeError(w, "the recovered files need an owner, and this workgroup has no such account", http.StatusBadRequest)
+	acc, ok := api.findAccount(w, strings.ToLower(body.Username), wg, "the recovered files need an owner, and this workgroup has no such account", http.StatusBadRequest)
+	if !ok {
 		return
 	}
 
@@ -619,14 +613,8 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 		return
 	}
 
-	acc, err := api.store.FindAccount(strings.ToLower(body.Username), wg.UUID.String())
-	if err != nil {
-		log.Printf("failed to find account: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if acc.ID == 0 {
-		writeError(w, "the imported files need an owner, and this workgroup has no such account", http.StatusBadRequest)
+	acc, ok := api.findAccount(w, strings.ToLower(body.Username), wg, "the imported files need an owner, and this workgroup has no such account", http.StatusBadRequest)
+	if !ok {
 		return
 	}
 

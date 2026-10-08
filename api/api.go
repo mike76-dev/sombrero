@@ -1071,6 +1071,10 @@ func (api *API) shareHandlerGET(w http.ResponseWriter, req *http.Request, ps htt
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	if share.Name == "" {
+		writeError(w, "share not found", http.StatusNotFound)
+		return
+	}
 
 	share.Password = "" // Do not expose the API password.
 	writeJSON(w, share)
@@ -1463,10 +1467,8 @@ func (api *API) policyHandlerGET(w http.ResponseWriter, req *http.Request, ps ht
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, wg.UUID.String())
-	if err != nil {
-		log.Printf("failed to find account: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
+	acc, ok := api.findAccount(w, username, wg, "account not found", http.StatusNotFound)
+	if !ok {
 		return
 	}
 
@@ -1525,10 +1527,8 @@ func (api *API) policyHandlerPUT(w http.ResponseWriter, req *http.Request, ps ht
 	ea := strings.ToLower(req.FormValue("execute"))
 	executeAccess := ea == "true"
 
-	acc, err := api.store.FindAccount(username, wg.UUID.String())
-	if err != nil {
-		log.Printf("failed to find account: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
+	acc, ok := api.findAccount(w, username, wg, "account not found", http.StatusNotFound)
+	if !ok {
 		return
 	}
 
@@ -1580,10 +1580,8 @@ func (api *API) policyHandlerDELETE(w http.ResponseWriter, req *http.Request, ps
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, wg.UUID.String())
-	if err != nil {
-		log.Printf("failed to find account: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
+	acc, ok := api.findAccount(w, username, wg, "account not found", http.StatusNotFound)
+	if !ok {
 		return
 	}
 
@@ -1616,10 +1614,8 @@ func (api *API) accountSharesHandlerGET(w http.ResponseWriter, req *http.Request
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, wg.UUID.String())
-	if err != nil {
-		log.Printf("failed to find account: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
+	acc, ok := api.findAccount(w, username, wg, "account not found", http.StatusNotFound)
+	if !ok {
 		return
 	}
 
@@ -1650,10 +1646,8 @@ func (api *API) accountPolicyHandlerDELETE(w http.ResponseWriter, req *http.Requ
 		return
 	}
 
-	acc, err := api.store.FindAccount(username, wg.UUID.String())
-	if err != nil {
-		log.Printf("failed to find account: %v", err)
-		writeError(w, "internal error", http.StatusInternalServerError)
+	acc, ok := api.findAccount(w, username, wg, "account not found", http.StatusNotFound)
+	if !ok {
 		return
 	}
 
@@ -1687,6 +1681,24 @@ func (api *API) resolveConnection(w http.ResponseWriter, ps httprouter.Params) (
 	}
 
 	return wg, share, true
+}
+
+// findAccount looks up an account of the workgroup, and writes the refusal
+// where there is none, with the message and status the caller names: a name
+// nobody has is the caller's mistake, not a failure of the server.
+func (api *API) findAccount(w http.ResponseWriter, username string, wg stores.Workgroup, missing string, status int) (stores.Account, bool) {
+	acc, err := api.store.FindAccount(username, wg.UUID.String())
+	if errors.Is(err, stores.ErrAccountNotFound) || (err == nil && acc.ID == 0) {
+		writeError(w, missing, status)
+		return stores.Account{}, false
+	}
+	if err != nil {
+		log.Printf("failed to find account: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return stores.Account{}, false
+	}
+
+	return acc, true
 }
 
 // resolveWorkgroup looks up a workgroup by UUID or name.
