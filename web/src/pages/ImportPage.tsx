@@ -376,6 +376,7 @@ export function ImportPage() {
             disabled={busy || !ready || running(status)}
             onClick={() =>
               run(async () => {
+                setProbe(null)
                 setProbe(await probeImportSource(workgroup.trim(), share.trim(), request()))
               })
             }

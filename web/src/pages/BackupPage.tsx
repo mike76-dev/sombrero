@@ -275,6 +275,7 @@ export function BackupPage() {
                           restore.run(async () => {
                             // The list is refreshed whatever came of it: a row
                             // may have been pruned since the list was loaded.
+                            setRestored(null)
                             try {
                               setRestored(await restoreStoredCatalog(c.path, force))
                             } finally {
@@ -311,6 +312,7 @@ export function BackupPage() {
             onClick={() =>
               restore.run(async () => {
                 if (!file) return
+                setRestored(null)
                 setRestored(await restoreCatalog(file, force))
                 reloadAll()
               })
@@ -364,6 +366,7 @@ export function BackupPage() {
             disabled={recover.busy || !address.trim() || !appKey.trim()}
             onClick={() =>
               recover.run(async () => {
+                setRecovered(null)
                 setRecovered(
                   await recoverFromNetwork({
                     address: address.trim(),
