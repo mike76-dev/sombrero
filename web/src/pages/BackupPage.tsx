@@ -211,7 +211,24 @@ export function BackupPage() {
           </p>
         )}
         {status?.local && <Tier title="On this machine" tier={status.local} />}
+        {status?.enabled && !status.local && (
+          <div className="stack">
+            <h3>On this machine</h3>
+            <p className="muted">
+              No catalog is written on this machine, because <code>backup.path</code> is not set.
+            </p>
+          </div>
+        )}
         {status?.network && <Tier title="In the shares" tier={status.network} />}
+        {status?.enabled && !status.network && (
+          <div className="stack">
+            <h3>In the shares</h3>
+            <p className="muted">
+              No catalog is written into the shares, because{' '}
+              <code>backup.networkInterval</code> is <code>never</code>.
+            </p>
+          </div>
+        )}
       </Card>
 
       <Card title="Restore from a catalog">
