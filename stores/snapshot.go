@@ -30,7 +30,8 @@ type SnapshotStats struct {
 // its file incomplete.
 //
 // It is for the rows that nothing but this database holds: what is on the
-// network is only pointed at, by object key.
+// network is only pointed at, by object key. The catalogs the share keeps of
+// itself are left out: each would otherwise carry the ones before it.
 func (db *Database) Snapshot(w io.Writer, share string, workgroup int, inlineCap uint64) (stats SnapshotStats, err error) {
 	// One consistent view of a running server, and nothing changed by it.
 	tx, err := db.pool.BeginTx(db.ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -301,9 +302,10 @@ func snapshotDirectories(ctx context.Context, tx pgx.Tx, tw *transfer.Writer, sh
 		FROM directories d
 		JOIN accounts a ON a.id = d.account
 		WHERE d.share_name = $1 AND d.workgroup = $2
+			AND d.full_path <> $3 AND NOT starts_with(d.full_path, $3 || '/')
 		ORDER BY d.full_path
 	`
-	rows, err := tx.Query(ctx, query, share, workgroup)
+	rows, err := tx.Query(ctx, query, share, workgroup, transfer.CatalogFolder)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read the folders: %w", err)
 	}
@@ -342,9 +344,10 @@ func snapshotFiles(ctx context.Context, tx pgx.Tx, tw *transfer.Writer, share st
 		LEFT JOIN metadata m ON m.object_id = o.id
 		LEFT JOIN buffers b ON b.id = m.buffer_id
 		WHERE o.share_name = $1 AND o.workgroup = $2 AND o.temporary = FALSE
+			AND NOT starts_with(o.full_path, $4 || '/')
 		ORDER BY o.id, m.obj_offset
 	`
-	rows, err := tx.Query(ctx, query, share, workgroup, int64(inlineCap))
+	rows, err := tx.Query(ctx, query, share, workgroup, int64(inlineCap), transfer.CatalogFolder)
 	if err != nil {
 		return fmt.Errorf("failed to read the files: %w", err)
 	}

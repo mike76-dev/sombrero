@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,12 +126,23 @@ func TestSnapshot(t *testing.T) {
 	fx := plantCatalogFixture(t, db)
 	target, alice, wg, share, key, object, small := fx.target, fx.alice, fx.wg, fx.share, fx.key, fx.object, fx.small
 
+	// A catalog the share keeps of itself, small enough to be carried; its
+	// parent folder is one like any other.
+	now := time.Now().UTC().Truncate(time.Second)
+	older := path.Join(transfer.CatalogFolder, wg.UUID.String())
+	if _, err := db.ApplyDirectory(target, transfer.Directory{Path: older, CreatedAt: now, ModifiedAt: now}); err != nil {
+		t.Fatalf("ApplyDirectory(%s): %v", older, err)
+	}
+	if _, err := db.ApplyFile(target, transfer.File{Path: older + "/older.catalog", Size: 50, CreatedAt: now, ModifiedAt: now, Parts: []transfer.Part{{Length: 50, Inline: bytes.Repeat([]byte("c"), 50)}}}); err != nil {
+		t.Fatalf("ApplyFile(catalog): %v", err)
+	}
+
 	var buf bytes.Buffer
 	stats, err := db.Snapshot(&buf, share.Name, target.Workgroup, 1000)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	if stats.Directories != 1 || stats.Files != 5 || stats.Inlined != 100 || stats.Incomplete != 1 {
+	if stats.Directories != 2 || stats.Files != 5 || stats.Inlined != 100 || stats.Incomplete != 1 {
 		t.Errorf("stats: got %+v", stats)
 	}
 
@@ -158,7 +171,11 @@ func TestSnapshot(t *testing.T) {
 		t.Errorf("the app key: got %x", conn.AppKey)
 	}
 
-	if len(dirs) != 1 || dirs[0].Path != "/holiday" || dirs[0].Owner != alice.Username || !dirs[0].Private {
+	byDir := make(map[string]transfer.Directory, len(dirs))
+	for _, d := range dirs {
+		byDir[d.Path] = d
+	}
+	if _, ok := byDir["/.sombrero"]; len(dirs) != 2 || !ok || byDir["/holiday"].Owner != alice.Username || !byDir["/holiday"].Private {
 		t.Errorf("the folders: got %+v", dirs)
 	}
 
@@ -181,6 +198,11 @@ func TestSnapshot(t *testing.T) {
 	}
 	if got := byPath["/bob.bin"]; got.Owner != "bob" {
 		t.Errorf("bob's file: got %+v", got)
+	}
+	for p := range byPath {
+		if strings.HasPrefix(p, transfer.CatalogFolder) {
+			t.Errorf("the catalog carries the older catalog %s", p)
+		}
 	}
 
 	// A connection that is not there is said so.
