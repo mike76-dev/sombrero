@@ -394,6 +394,7 @@ type IndexdClient struct {
 	// run of identical failures it reports into one line at a time.
 	uploadFailures *repeatedFailure
 	packFailures   *repeatedFailure
+	lastPlan       string // the packing plan last reported; the packer alone touches it
 
 	// backlog holds writes back while too much is waiting to be uploaded; nil means no limit.
 	backlog *Backlog
@@ -1417,7 +1418,8 @@ func packSlab(jobs []stores.UploadJob, size uint64) []byte {
 
 // logPackedSlab reports which pieces went into the slab about to be uploaded,
 // in the order in which they are laid out in it. The pieces are already trimmed
-// to what fitted, so this is what the slab is made of, not what was claimed.
+// to what fitted, so this is what the slab is made of, not what was claimed. A
+// retry of the same plan says nothing.
 func (ic *IndexdClient) logPackedSlab(jobs []stores.UploadJob, size int) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "share %s, workgroup %d: packing %d piece(s) into a slab of %d out of %d bytes", ic.share, ic.workgroup, len(jobs), size, ic.slabSize)
@@ -1432,7 +1434,12 @@ func (ic *IndexdClient) logPackedSlab(jobs []stores.UploadJob, size int) {
 		offset += taken
 	}
 
-	log.Println(b.String())
+	plan := b.String()
+	if plan == ic.lastPlan {
+		return
+	}
+	ic.lastPlan = plan
+	log.Println(plan)
 }
 
 // packing returns when an incomplete slab is uploaded. A full backlog uploads any
@@ -1537,7 +1544,7 @@ func (ic *IndexdClient) packSlabs(ctx context.Context) {
 				return
 			}
 
-			ic.packFailures.report("failed to pack a slab", delay, err)
+			ic.packFailures.report(fmt.Sprintf("share %s, workgroup %d: failed to pack a slab", ic.share, ic.workgroup), delay, err)
 
 			// The pieces are back in the queue, so the wait is what
 			// keeps a backend that fails every slab from being asked
@@ -1875,7 +1882,7 @@ func (ic *IndexdClient) processUploads(ctx context.Context) {
 			return
 		}
 
-		ic.uploadFailures.report("failed to run upload job", delay, err)
+		ic.uploadFailures.report(fmt.Sprintf("share %s, workgroup %d: failed to run upload job", ic.share, ic.workgroup), delay, err)
 
 		select {
 		case <-ic.drainChan:
