@@ -738,6 +738,40 @@ func TestClaimPackedSlabRequeue(t *testing.T) {
 	}
 }
 
+// TestRequeueUploadJobDeletedPiece checks that a piece whose file was deleted
+// while it was claimed is not an error to requeue, and does not come back.
+func TestRequeueUploadJobDeletedPiece(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	acc, share, wg := newSlabTestFixture(t, db)
+
+	plantBufferedFile(t, db, share, acc, "a.txt", 600, false)
+	plantBufferedFile(t, db, share, acc, "b.txt", 600, false)
+
+	jobs, err := db.ClaimPackedSlab(share, wg, slabSize, 0)
+	if err != nil {
+		t.Fatalf("ClaimPackedSlab: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("want 2 pieces claimed, got %d", len(jobs))
+	}
+	if _, err := db.DeleteFile(acc, share, "a.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	for _, job := range jobs {
+		if err := db.RequeueUploadJob(job.UploadID, job.MetadataID); err != nil {
+			t.Fatalf("RequeueUploadJob %d: %v", job.MetadataID, err)
+		}
+	}
+
+	if n := pendingJobs(t, db); n != 1 {
+		t.Fatalf("want only the surviving piece back in the queue, got %d jobs", n)
+	}
+}
+
 // packSlab concatenates a claimed batch into the slab that would be uploaded,
 // trimming the last item to the slab boundary the way the packer does.
 func packSlab(t *testing.T, jobs []UploadJob, size uint64) []byte {

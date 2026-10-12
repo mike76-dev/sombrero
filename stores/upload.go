@@ -1361,12 +1361,15 @@ func (db *Database) CompletePackedSlab(jobs []UploadJob, slabKey types.Hash256) 
 }
 
 // RequeueUploadJob re-adds the given upload job to the queue for retrying. An
-// upload ID of zero requeues the piece without one, as it was claimed.
+// upload ID of zero requeues the piece without one, as it was claimed. A piece
+// whose file was deleted in the meantime is gone with it and is left alone.
 func (db *Database) RequeueUploadJob(uploadID, metadataID uint64) error {
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
 			INSERT INTO upload_jobs (upload_id, metadata_id)
-			VALUES (NULLIF($1, 0::BIGINT), $2)
+			SELECT NULLIF($1, 0::BIGINT), m.id
+			FROM metadata m
+			WHERE m.id = $2
 			ON CONFLICT (metadata_id) DO NOTHING
 		`
 
