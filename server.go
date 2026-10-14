@@ -158,7 +158,7 @@ func newServer(ctx context.Context, l net.Listener, db stores.Store, cfg stores.
 	if sdb, ok := db.(*stores.Database); ok && cfg.Mode == stores.ModeNormal {
 		s.backlog = client.NewBacklog(ctx, sdb, cfg.Indexd.MaxBufferedData)
 		s.backups = backup.NewLocal(ctx, sdb, cfg.Backup)
-		s.network = backup.NewNetwork(ctx, sdb, s.shareFiles, cfg.Backup)
+		s.network = backup.NewNetwork(ctx, sdb, s.shareFiles, cfg)
 	}
 
 	go s.reapDurableOpens()

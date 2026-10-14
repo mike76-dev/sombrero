@@ -82,8 +82,8 @@ type Network struct {
 // NewNetwork starts the network tier as the config says: it looks at the
 // connections every tick and writes each one's catalog once per interval, the
 // first as soon as the connection is up. It is nil where that tier is off.
-func NewNetwork(ctx context.Context, db *stores.Database, clients Clients, cfg stores.BackupConfig) *Network {
-	interval := cfg.Network()
+func NewNetwork(ctx context.Context, db *stores.Database, clients Clients, cfg stores.Config) *Network {
+	interval := cfg.NetworkBackup()
 	if interval == 0 {
 		return nil
 	}
@@ -93,9 +93,9 @@ func NewNetwork(ctx context.Context, db *stores.Database, clients Clients, cfg s
 		clients:  clients,
 		interval: interval,
 		tick:     defaultTick,
-		keep:     cfg.KeepCount(),
-		inline:   cfg.Inline(),
-		status:   Status{Path: CatalogFolder, Interval: interval, Keep: cfg.KeepCount()},
+		keep:     cfg.Backup.KeepCount(),
+		inline:   cfg.Backup.Inline(),
+		status:   Status{Path: CatalogFolder, Interval: interval, Keep: cfg.Backup.KeepCount()},
 	}
 	go n.run(ctx)
 

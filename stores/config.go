@@ -254,11 +254,10 @@ func (c IndexdConfig) Fragmentation() (threshold float64, interval time.Duration
 // Config lists the config fields.
 // The defaults of the backups.
 const (
-	DefaultBackupInterval        = 15 * time.Minute
-	DefaultNetworkBackupInterval = time.Hour
-	DefaultBackupKeep            = 7
-	DefaultBackupInlineCap       = 256 << 10
-	DefaultBackupBufferAge       = 24 * time.Hour
+	DefaultBackupInterval  = 15 * time.Minute
+	DefaultBackupKeep      = 7
+	DefaultBackupInlineCap = 256 << 10
+	DefaultBackupBufferAge = 24 * time.Hour
 )
 
 // BackupConfig says whether and where catalogs of what the shares hold are
@@ -275,7 +274,9 @@ type BackupConfig struct {
 	Interval CheckInterval `yaml:"interval,omitempty"`
 
 	// NetworkInterval is how often a catalog is written into each share, as a
-	// file of its own; "never" leaves that tier off.
+	// file of its own; "never" leaves that tier off. Unset, it is the buffer
+	// age: the catalog reaches the network with the leftover data, and written
+	// more often it would be pruned before it got there.
 	NetworkInterval CheckInterval `yaml:"networkInterval,omitempty"`
 
 	// Keep is how many catalogs are kept, per connection and tier.
@@ -293,15 +294,6 @@ func (b BackupConfig) Local() time.Duration {
 		return 0
 	}
 	return b.Interval.Interval(DefaultBackupInterval)
-}
-
-// Network returns how often a catalog is written into each share, or zero where
-// that tier is off.
-func (b BackupConfig) Network() time.Duration {
-	if !b.Enabled {
-		return 0
-	}
-	return b.NetworkInterval.Interval(DefaultNetworkBackupInterval)
 }
 
 // KeepCount returns how many catalogs are kept per connection and tier.
@@ -347,6 +339,15 @@ func (c Config) BufferAge(backedUp bool) time.Duration {
 	return c.Indexd.MaxBufferAge.Duration()
 }
 
+// NetworkBackup returns how often a catalog is written into each share, or
+// zero where that tier is off. Unset, the interval is the buffer age.
+func (c Config) NetworkBackup() time.Duration {
+	if !c.Backup.Enabled {
+		return 0
+	}
+	return c.Backup.NetworkInterval.Interval(c.BufferAge(true))
+}
+
 // ReadConfig tries to read the config from the specified directory.
 func ReadConfig(dir string) (cfg Config, err error) {
 	path := filepath.Join(dir, "sombrero.yml")
@@ -378,7 +379,7 @@ func ReadConfig(dir string) (cfg Config, err error) {
 		switch {
 		case cfg.Mode == ModeLite:
 			err = fmt.Errorf("backups need the Normal mode: the Lite mode has no database to back up")
-		case cfg.Backup.Local() == 0 && cfg.Backup.Network() == 0:
+		case cfg.Backup.Local() == 0 && cfg.NetworkBackup() == 0:
 			err = fmt.Errorf("backups are enabled, but neither a path nor a networkInterval is set")
 		case cfg.Backup.Keep < 0:
 			err = fmt.Errorf("keep must be at least 1, got %d", cfg.Backup.Keep)

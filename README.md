@@ -119,7 +119,8 @@ backup:                       # optional: catalogs of what the shares hold, to r
   path: /var/backups/sombrero # optional: a folder on this machine for the catalogs; if omitted, only the copies on the network are kept.
                               # The catalogs hold the app keys, so treat the folder like the database
   interval: 15m               # optional: how often the local catalog is written; defaults to 15m
-  networkInterval: 1h         # optional: how often a catalog is written into each share; 'never' turns that off; defaults to 1h
+  networkInterval: 24h        # optional: how often a catalog is written into each share; 'never' turns that off; if omitted,
+                              # follows maxBufferAge, or 24h if that is omitted too
   keep: 7                     # optional: how many catalogs to keep, per connection and per place; defaults to 7
   inlineCap: 262144           # optional: the largest piece of a file still waiting in the database that a catalog carries itself,
                               # in bytes, so that the file is complete in the backup; defaults to 262144
@@ -301,7 +302,7 @@ backup:
   enabled: true
   path: /var/backups/sombrero
 ```
-The server then writes a catalog of every connection into that folder every 15 minutes, keeps the newest 7 of each, and writes one more file with what belongs to no connection: all shares, all workgroups with their accounts, and the bans. Every hour it also writes a catalog into each `indexd` share itself, as a file under `/.sombrero/catalog`, so that the account on the network carries a description of what it holds. That file is encrypted with a key derived from the app key, and the folder belongs to the oldest account of the workgroup that has a password, so the other members of the workgroup do not see it, and nobody who logs in as a guest can touch it. A workgroup with only guest accounts gets no catalog in its share.
+The server then writes a catalog of every connection into that folder every 15 minutes, keeps the newest 7 of each, and writes one more file with what belongs to no connection: all shares, all workgroups with their accounts, and the bans. Once a day, or once per `maxBufferAge` if that is set, it also writes a catalog into each `indexd` share itself, as a file under `/.sombrero/catalog`, so that the account on the network carries a description of what it holds. This catalog is a file like any other: it waits in the database with the rest of the leftover data and reaches the network together with it. This is why it is not written more often than the leftover data is uploaded. If it were, it would be pruned before it ever got there. The catalog is encrypted with a key derived from the app key, and the folder belongs to the oldest account of the workgroup that has a password, so the other members of the workgroup do not see it, and nobody who logs in as a guest can touch it. A workgroup with only guest accounts gets no catalog in its share.
 
 A share can be left out. Untick "Back up" in the share's settings on the Shares page, and the server writes no catalog into that share and lets its leftover data wait for a full slab as if backups were off. The catalogs it had already written into that share are removed, because a catalog that is no longer refreshed gets older every day, and a recovery from the network would restore the share as it was back then. The catalog on this machine is written regardless, since it costs nothing.
 

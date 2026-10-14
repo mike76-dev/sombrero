@@ -111,8 +111,14 @@ func main() {
 			if local := cfg.Backup.Local(); local > 0 {
 				log.Printf("Backups: a catalog is written to %s every %s, keeping %d", cfg.Backup.Path, plainDuration(local), cfg.Backup.KeepCount())
 			}
-			if network := cfg.Backup.Network(); network > 0 {
-				log.Printf("Backups: a catalog is written into each share every %s, keeping %d", plainDuration(network), cfg.Backup.KeepCount())
+			if network := cfg.NetworkBackup(); network > 0 {
+				keep := cfg.Backup.KeepCount()
+				log.Printf("Backups: a catalog is written into each share every %s, keeping %d", plainDuration(network), keep)
+				// A catalog is pruned after keep intervals, and leaves the
+				// database only with the leftover data, after the buffer age.
+				if age := cfg.BufferAge(true); network*time.Duration(keep) < age {
+					log.Printf("Backups: WARNING: with networkInterval %s and keep %d, a catalog is removed after %s, before the leftover data is uploaded after %s, so no catalog ever reaches the network; set networkInterval to at least %s", plainDuration(network), keep, plainDuration(network*time.Duration(keep)), plainDuration(age), plainDuration(age))
+				}
 			}
 			if cfg.Indexd.MaxBufferAge == 0 {
 				log.Printf("Backups: maxBufferAge is unset, so the leftover data of a backed-up share is uploaded after %s to be covered by them", plainDuration(cfg.BufferAge(true)))

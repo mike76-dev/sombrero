@@ -185,7 +185,7 @@ func TestBackupConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadConfig: %v", err)
 	}
-	if cfg.Backup.Enabled || cfg.Backup.Local() != 0 || cfg.Backup.Network() != 0 || cfg.BufferAge(true) != 0 {
+	if cfg.Backup.Enabled || cfg.Backup.Local() != 0 || cfg.NetworkBackup() != 0 || cfg.BufferAge(true) != 0 {
 		t.Errorf("backups are on without being asked for: %+v", cfg.Backup)
 	}
 
@@ -194,8 +194,8 @@ func TestBackupConfig(t *testing.T) {
 		t.Fatalf("ReadConfig: %v", err)
 	}
 	b := cfg.Backup
-	if b.Local() != 0 || b.Network() != DefaultNetworkBackupInterval || b.KeepCount() != DefaultBackupKeep || b.Inline() != DefaultBackupInlineCap {
-		t.Errorf("the defaults: got local %s, network %s, keep %d, inline %d", b.Local(), b.Network(), b.KeepCount(), b.Inline())
+	if b.Local() != 0 || cfg.NetworkBackup() != DefaultBackupBufferAge || b.KeepCount() != DefaultBackupKeep || b.Inline() != DefaultBackupInlineCap {
+		t.Errorf("the defaults: got local %s, network %s, keep %d, inline %d", b.Local(), cfg.NetworkBackup(), b.KeepCount(), b.Inline())
 	}
 	if cfg.BufferAge(true) != DefaultBackupBufferAge {
 		t.Errorf("the buffer age with backups on and none set: got %s", cfg.BufferAge(true))
@@ -204,14 +204,30 @@ func TestBackupConfig(t *testing.T) {
 		t.Errorf("the buffer age of a share left out of the backups: got %s", cfg.BufferAge(false))
 	}
 
+	// The catalogs follow a buffer age that is set, unless told otherwise.
+	cfg, err = read("backup:\n  enabled: true\nindexd:\n  maxBufferAge: 1h\n")
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if cfg.NetworkBackup() != time.Hour {
+		t.Errorf("the network interval with a buffer age of 1h: got %s", cfg.NetworkBackup())
+	}
+	cfg, err = read("backup:\n  enabled: true\n  networkInterval: 2h\nindexd:\n  maxBufferAge: 1h\n")
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if cfg.NetworkBackup() != 2*time.Hour {
+		t.Errorf("the network interval that was set: got %s", cfg.NetworkBackup())
+	}
+
 	// Everything set says what it says, and a set buffer age is left alone.
 	cfg, err = read("backup:\n  enabled: true\n  path: /tmp/x\n  interval: 5m\n  networkInterval: never\n  keep: 3\n  inlineCap: 1024\nindexd:\n  maxBufferAge: 1h\n")
 	if err != nil {
 		t.Fatalf("ReadConfig: %v", err)
 	}
 	b = cfg.Backup
-	if b.Local() != 5*time.Minute || b.Network() != 0 || b.KeepCount() != 3 || b.Inline() != 1024 {
-		t.Errorf("the settings: got local %s, network %s, keep %d, inline %d", b.Local(), b.Network(), b.KeepCount(), b.Inline())
+	if b.Local() != 5*time.Minute || cfg.NetworkBackup() != 0 || b.KeepCount() != 3 || b.Inline() != 1024 {
+		t.Errorf("the settings: got local %s, network %s, keep %d, inline %d", b.Local(), cfg.NetworkBackup(), b.KeepCount(), b.Inline())
 	}
 	if cfg.BufferAge(true) != time.Hour || cfg.BufferAge(false) != time.Hour {
 		t.Errorf("the buffer age that was set: got %s and %s", cfg.BufferAge(true), cfg.BufferAge(false))
