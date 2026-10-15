@@ -223,11 +223,12 @@ type IndexdConfig struct {
 	MaxBufferAge BufferAge `yaml:"maxBufferAge,omitempty"`
 
 	// Editing and deleting files leaves dead space behind in the slabs they
-	// were packed into, which keeps being paid for. These govern the check
-	// that watches for it: how much of a slab may be dead space before it is
-	// reported, as a fraction between 0 and 1, and how often to look. Unset,
-	// both fall back to their defaults; a FragmentationCheck of "never" turns
-	// the check off and leaves the API to report on demand.
+	// were packed into, and an upload that aged out before its slab was full
+	// leaves the rest of it empty; both keep being paid for. These govern the
+	// check that watches for it: how much of a slab may be dead space before
+	// it is reported, as a fraction between 0 and 1, and how often to look.
+	// Unset, both fall back to their defaults; a FragmentationCheck of "never"
+	// turns the check off and leaves the API to report on demand.
 	FragmentationThreshold float64       `yaml:"fragmentationThreshold,omitempty"`
 	FragmentationCheck     CheckInterval `yaml:"fragmentationCheck,omitempty"`
 

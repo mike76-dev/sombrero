@@ -82,9 +82,9 @@ func assertPacked(t *testing.T, got []PackedSlab, want []PackedSlab) {
 	}
 }
 
-// TestPackedSlabs verifies that only the holes files leave behind count as dead
-// space: a slab nobody has touched holds none, whether it was filled to the
-// brim or left half empty by an upload that aged out.
+// TestPackedSlabs verifies that everything no file uses counts as dead space:
+// the room an aged upload left empty from the start as much as the hole a
+// deleted file leaves behind, while a slab filled to the brim holds none.
 func TestPackedSlabs(t *testing.T) {
 	ctx := context.Background()
 	db := NewTestStore(t, ctx)
@@ -102,12 +102,16 @@ func TestPackedSlabs(t *testing.T) {
 	plantPiece(t, db, share, acc, "big.txt", types.Hash256{2}, 0, slabSize)
 	plantPiece(t, db, share, acc, "d.txt", types.Hash256{3}, 0, 400)
 
+	// Only the aged slab is reported before anything is deleted.
 	slabs, err := db.PackedSlabs(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
-	if len(slabs) != 0 {
-		t.Fatalf("want nothing reported before anything is deleted, got %+v", slabs)
+	assertPacked(t, slabs, []PackedSlab{
+		{Key: types.Hash256{3}, Used: 400, Filled: 400, Pieces: 1},
+	})
+	if w := slabs[0].Wasted(); w != 600 {
+		t.Fatalf("want the room the aged slab never held wasted, got %d bytes", w)
 	}
 
 	// Deleting the middle file leaves a hole of its size behind.
@@ -120,21 +124,20 @@ func TestPackedSlabs(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
+		{Key: types.Hash256{3}, Used: 400, Filled: 400, Pieces: 1},
 		{Key: packed, Used: 700, Filled: 1000, Pieces: 2},
 	})
-	if f := slabs[0].Fragmentation(); f != 0.3 {
+	if f := slabs[1].Fragmentation(); f != 0.3 {
 		t.Fatalf("want the emptied slab 30%% fragmented, got %v", f)
 	}
-	if w := slabs[0].Wasted(); w != 300 {
+	if w := slabs[1].Wasted(); w != 300 {
 		t.Fatalf("want 300 bytes wasted, got %d", w)
 	}
 }
 
-// TestPackedSlabsPartialWithHole covers a slab that an upload threshold sent
-// off before it was full, and that then lost a piece: only the hole counts as
-// dead space, while the part the slab was never filled with does not, and the
-// level is measured against the whole slab, which is what is paid for either
-// way.
+// TestPackedSlabsPartialWithHole covers a slab that an aged upload sent off
+// before it was full, and that then lost a piece: the hole and the room never
+// filled both count, against the whole slab, which is what is paid for.
 func TestPackedSlabsPartialWithHole(t *testing.T) {
 	ctx := context.Background()
 	db := NewTestStore(t, ctx)
@@ -160,52 +163,56 @@ func TestPackedSlabsPartialWithHole(t *testing.T) {
 		{Key: key, Used: 500, Filled: 600, Pieces: 2},
 	})
 
-	// The hole is the 100 bytes b.txt held, not the 500 that separate what is
-	// used from the slab size.
-	if w := slabs[0].Wasted(); w != 100 {
-		t.Fatalf("want the hole alone wasted, got %d bytes", w)
+	// The hole is the 100 bytes b.txt held, and the room never filled 400 more.
+	if w := slabs[0].Wasted(); w != 500 {
+		t.Fatalf("want the hole and the empty room wasted, got %d bytes", w)
 	}
-	if f := slabs[0].Fragmentation(); f != 0.1 {
-		t.Fatalf("want the hole measured against the slab size, got %v", f)
-	}
-
-	// So it is reported at a threshold of 10%, but not at the default 25%.
-	stats, err := db.Fragmentation(share, wg, slabSize, 0.1)
-	if err != nil {
-		t.Fatalf("Fragmentation(0.1): %v", err)
-	}
-	if stats.Fragmented != 1 || stats.FragmentedWasted != 100 {
-		t.Fatalf("want the slab reported at 10%%, got %+v", stats)
+	if f := slabs[0].Fragmentation(); f != 0.5 {
+		t.Fatalf("want the dead space measured against the slab size, got %v", f)
 	}
 
-	stats, err = db.Fragmentation(share, wg, slabSize, DefaultFragmentationThreshold)
+	// So it is reported at the default threshold, but not past its level.
+	stats, err := db.Fragmentation(share, wg, slabSize, DefaultFragmentationThreshold)
 	if err != nil {
 		t.Fatalf("Fragmentation(default): %v", err)
 	}
-	if stats.Slabs != 1 || stats.Fragmented != 0 || stats.Wasted != 100 {
-		t.Fatalf("want the slab counted but under the default threshold, got %+v", stats)
+	if stats.Slabs != 1 || stats.Fragmented != 1 || stats.Wasted != 500 || stats.FragmentedWasted != 500 {
+		t.Fatalf("want the slab reported at the default threshold, got %+v", stats)
+	}
+
+	stats, err = db.Fragmentation(share, wg, slabSize, 0.6)
+	if err != nil {
+		t.Fatalf("Fragmentation(0.6): %v", err)
+	}
+	if stats.Slabs != 1 || stats.Fragmented != 0 || stats.Wasted != 500 {
+		t.Fatalf("want the slab counted but under a threshold of 60%%, got %+v", stats)
 	}
 }
 
-// TestPackedSlabsUploadThreshold covers how the fragmentation threshold relates
-// to the upload threshold that sent a slab off before it was full. A slab can
-// never hold more dead space than it was filled with, so one uploaded at the
-// minimum size is only ever reported by a fragmentation threshold below the
-// share that minimum is of a slab.
-func TestPackedSlabsUploadThreshold(t *testing.T) {
+// TestPackedSlabsEarlyUpload covers a slab that an aged upload sent off at 30%
+// of its size: the 70% it never held is dead space from the start, and what
+// deleting files takes out of the rest adds to it.
+func TestPackedSlabsEarlyUpload(t *testing.T) {
 	ctx := context.Background()
 	db := NewTestStore(t, ctx)
 	defer db.Close()
 
 	acc, share, wg := newSlabTestFixture(t, db)
 
-	// An upload threshold of 30% of a slab, uploaded at exactly that.
 	const uploaded = slabSize * 3 / 10
 
 	key := types.Hash256{1}
 	plantPiece(t, db, share, acc, "a.txt", key, 0, 100)
 	plantPiece(t, db, share, acc, "b.txt", key, 100, 100)
 	plantPiece(t, db, share, acc, "c.txt", key, 200, uploaded-200)
+
+	slabs, err := db.PackedSlabs(share, wg, slabSize, 0.7)
+	if err != nil {
+		t.Fatalf("PackedSlabs: %v", err)
+	}
+	assertPacked(t, slabs, []PackedSlab{
+		{Key: key, Used: uploaded, Filled: uploaded, Pieces: 3},
+	})
 
 	// All but the last piece go, which is as empty as the slab can get: one
 	// piece has to survive, or the slab is an orphan rather than fragmented.
@@ -215,7 +222,7 @@ func TestPackedSlabsUploadThreshold(t *testing.T) {
 		}
 	}
 
-	slabs, err := db.PackedSlabs(share, wg, slabSize, 0)
+	slabs, err = db.PackedSlabs(share, wg, slabSize, 0)
 	if err != nil {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
@@ -223,17 +230,16 @@ func TestPackedSlabsUploadThreshold(t *testing.T) {
 		{Key: key, Used: uploaded - 200, Filled: uploaded, Pieces: 1},
 	})
 
-	// Below the upload threshold it is reported, at or above it never, however
-	// much of it is dead: the whole slab only ever held 30% of a slab's worth.
+	// Reported at every threshold up to its level of 90%, and not past it.
 	tests := []struct {
 		threshold float64
 		want      int
 	}{
 		{threshold: 0.1, want: 1},
-		{threshold: 0.2, want: 1},
-		{threshold: 0.25, want: 0},
-		{threshold: 0.3, want: 0},
-		{threshold: DefaultFragmentationThreshold, want: 0},
+		{threshold: DefaultFragmentationThreshold, want: 1},
+		{threshold: 0.85, want: 1},
+		{threshold: 0.95, want: 0},
+		{threshold: 1, want: 0},
 	}
 
 	for _, tc := range tests {
@@ -255,10 +261,9 @@ func TestPackedSlabsUploadThreshold(t *testing.T) {
 	}
 }
 
-// TestPackedSlabsTailHole documents the blind spot of deriving the filled
-// extent from the surviving pieces: a hole at the very end of a slab shrinks
-// the extent with it and goes unreported. It under-reports, which is the safe
-// way round, and a hole anywhere else is still seen.
+// TestPackedSlabsTailHole verifies that a hole at the very end of a slab is
+// seen like any other, whether the slab has its filled extent on record or,
+// having come from elsewhere, only what the surviving pieces reach.
 func TestPackedSlabsTailHole(t *testing.T) {
 	ctx := context.Background()
 	db := NewTestStore(t, ctx)
@@ -304,8 +309,8 @@ func TestPackedSlabsTailHole(t *testing.T) {
 		t.Fatalf("want the record gone with the slab, got %d", got)
 	}
 
-	// A slab that came from elsewhere has no record, so a hole at its tail
-	// stays out of sight while one before the last piece is seen.
+	// A slab that came from elsewhere has no record: its extent is what the
+	// pieces reach, and the dead space is counted against the slab size.
 	key = types.Hash256{2}
 	plantPiece(t, db, share, acc, "d.txt", key, 0, 400)
 	plantPiece(t, db, share, acc, "e.txt", key, 400, 300)
@@ -313,9 +318,12 @@ func TestPackedSlabsTailHole(t *testing.T) {
 	if _, err := db.DeleteFile(acc, share, "f.txt"); err != nil {
 		t.Fatalf("DeleteFile: %v", err)
 	}
-	if slabs, err = db.PackedSlabs(share, wg, slabSize, 0); err != nil || len(slabs) != 0 {
-		t.Fatalf("want a tail hole in an imported slab to go unreported, got %+v, %v", slabs, err)
+	if slabs, err = db.PackedSlabs(share, wg, slabSize, 0); err != nil {
+		t.Fatalf("PackedSlabs: %v", err)
 	}
+	assertPacked(t, slabs, []PackedSlab{
+		{Key: key, Used: 700, Filled: 700, Pieces: 2},
+	})
 	if _, err := db.DeleteFile(acc, share, "d.txt"); err != nil {
 		t.Fatalf("DeleteFile: %v", err)
 	}
@@ -438,9 +446,9 @@ func TestPackedSlabsWorkgroupScope(t *testing.T) {
 	})
 }
 
-// TestFragmentationStats verifies that the summary counts every slab but only
-// charges dead space to the ones that hold any, and that it matches what the
-// listing reports, since the check and the API endpoint have to agree.
+// TestFragmentationStats verifies that the summary counts every slab, charges
+// each with the room no file uses, and matches what the listing reports, since
+// the check and the API endpoint have to agree.
 func TestFragmentationStats(t *testing.T) {
 	ctx := context.Background()
 	db := NewTestStore(t, ctx)
@@ -468,13 +476,13 @@ func TestFragmentationStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fragmentation: %v", err)
 	}
-	// The untouched slabs count towards the total but waste nothing, so that
-	// the fragmented ones are reported against a denominator.
+	// The full slab counts towards the total but wastes nothing; the aged one
+	// wastes the 600 bytes it never held.
 	want := FragmentationStats{
 		Slabs:            5,
-		Wasted:           100 + 500 + 900,
-		Fragmented:       2,
-		FragmentedWasted: 500 + 900,
+		Wasted:           100 + 500 + 900 + 600,
+		Fragmented:       3,
+		FragmentedWasted: 500 + 900 + 600,
 	}
 	if stats != want {
 		t.Fatalf("want %+v, got %+v", want, stats)

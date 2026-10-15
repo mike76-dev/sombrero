@@ -269,8 +269,9 @@ function formatPercent(fraction: number): string {
   return `${Math.min(Math.round(pct), 99)}%`
 }
 
-// FragmentationCard reports the dead space that editing and deleting files
-// leaves behind in the slabs they were packed into, and offers to repack them.
+// FragmentationCard reports the dead space in the slabs, what editing and
+// deleting files left behind and what early uploads never filled, and offers
+// to repack them.
 // indexd shares only: renterd packs its objects itself.
 function FragmentationCard({ share }: { share: Share }) {
   const { run, busy, error, message, setMessage } = useApiAction()

@@ -278,7 +278,7 @@ The web UI reports both figures on its Statistics page, across all shares: how m
 The limit only applies to `indexd` shares, so it has no effect in the [Lite mode](#lite-mode). `renterd` keeps its own upload cache, which Sombrero cannot see.
 
 ## Slab Fragmentation
-Deleting or overwriting a file punches a hole in the slab it was packed into, and the share keeps paying for the whole slab. A slab belongs to the workgroup that uploaded it, so each workgroup's connection to the share looks for it in its own slabs every `fragmentationCheck` (`1h` by default, `never` to turn the check off) and reports the slabs that are at least `fragmentationThreshold` dead space (`0.25` by default).
+Deleting or overwriting a file punches a hole in the slab it was packed into, and an upload that `maxBufferAge` sent off before the slab was full leaves the rest of it empty. Either way, the share keeps paying for the whole slab, so both count as dead space. A slab belongs to the workgroup that uploaded it, so each workgroup's connection to the share looks for it in its own slabs every `fragmentationCheck` (`1h` by default, `never` to turn the check off) and reports the slabs that are at least `fragmentationThreshold` dead space (`0.25` by default).
 
 Setting `defragment: true` has the check repack what it reports instead of only reporting it: what is still referenced in those slabs is downloaded, put back into the upload queue to be packed together with the data of other files, and the slabs it came out of are unpinned once nothing reads from them any more.
 

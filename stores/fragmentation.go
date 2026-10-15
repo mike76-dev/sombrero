@@ -18,10 +18,10 @@ type PackedSlab struct {
 	// reached when it was uploaded, and Used is what is still referenced, all
 	// in bytes. Pieces counts the file slices that make up Used.
 	//
-	// The pieces are laid out contiguously, so what is left between Filled and
-	// Used is what editing and deleting files punched out of the slab. The
-	// space past Filled was never written and is not dead space: an upload
-	// that aged out before it could fill a slab leaves it behind untouched.
+	// Everything paid for that no file uses is dead space: the holes that
+	// editing and deleting files punched between the pieces, and the room past
+	// Filled that an upload sent off before the slab was full never wrote. A
+	// slab is never added to once uploaded, so both are lost the same way.
 	// Filled is recorded when the slab is uploaded; for a slab that came from
 	// elsewhere it is derived from the pieces left in it.
 	Size   uint64 `json:"size"`
@@ -32,10 +32,10 @@ type PackedSlab struct {
 
 // Wasted returns the dead space in the slab, in bytes.
 func (s PackedSlab) Wasted() uint64 {
-	if s.Used >= s.Filled {
+	if s.Used >= s.Size {
 		return 0
 	}
-	return s.Filled - s.Used
+	return s.Size - s.Used
 }
 
 // Fragmentation returns the dead space as a fraction of what the slab is paid
@@ -235,7 +235,7 @@ func (db *Database) RebufferSlab(share string, workgroup int, key types.Hash256,
 // FragmentationStats summarizes a share's slabs.
 type FragmentationStats struct {
 	// Slabs counts every slab the connection has pieces in, and Wasted is the
-	// dead space punched out of all of them, in bytes.
+	// dead space in all of them, in bytes.
 	Slabs  int    `json:"slabs"`
 	Wasted uint64 `json:"wasted"`
 
@@ -252,10 +252,10 @@ type FragmentationStats struct {
 // denominator; the ones holding no dead space are filtered out where that
 // matters.
 //
-// The filled extent is what was recorded when the slab was uploaded. Deriving it
-// from the surviving pieces is blind to a hole at the very end of a slab, since
-// deleting the last piece shrinks the extent along with it; that is all there is
-// for a slab that was imported or restored rather than uploaded here.
+// The filled extent is what was recorded when the slab was uploaded, or what
+// the surviving pieces reach for a slab that was imported or restored rather
+// than uploaded here. It says how far the slab was written; the dead space is
+// measured against the slab size, which is what is paid for.
 const packedSlabsCTE = `
 	WITH packed AS (
 		SELECT
@@ -277,9 +277,9 @@ const packedSlabsCTE = `
 `
 
 // fragmentedPredicate matches the slabs whose dead space reaches the threshold
-// ($4) of the slab size ($3). A slab with no hole in it never matches, not even
-// at a threshold of zero.
-const fragmentedPredicate = `filled > used AND filled - used >= $3::BIGINT * $4::DOUBLE PRECISION`
+// ($4) of the slab size ($3). A full slab never matches, not even at a
+// threshold of zero.
+const fragmentedPredicate = `used < $3::BIGINT AND $3::BIGINT - used >= $3::BIGINT * $4::DOUBLE PRECISION`
 
 // checkFragmentationArgs validates what both of the queries are scoped by.
 func checkFragmentationArgs(share string, slabSize uint64, threshold float64) error {
@@ -309,7 +309,7 @@ func (db *Database) PackedSlabs(share string, workgroup int, slabSize uint64, th
 			SELECT slab_key, pieces, used, filled
 			FROM packed
 			WHERE ` + fragmentedPredicate + `
-			ORDER BY filled - used DESC, slab_key
+			ORDER BY used, slab_key
 		`
 
 		rows, err := tx.Query(ctx, query, share, workgroup, int64(slabSize), threshold)
@@ -366,9 +366,9 @@ func (db *Database) Fragmentation(share string, workgroup int, slabSize uint64, 
 		const query = packedSlabsCTE + `
 			SELECT
 				COUNT(*),
-				COALESCE(SUM(GREATEST(filled - used, 0)), 0),
+				COALESCE(SUM(GREATEST($3::BIGINT - used, 0)), 0),
 				COUNT(*) FILTER (WHERE ` + fragmentedPredicate + `),
-				COALESCE(SUM(filled - used) FILTER (WHERE ` + fragmentedPredicate + `), 0)
+				COALESCE(SUM($3::BIGINT - used) FILTER (WHERE ` + fragmentedPredicate + `), 0)
 			FROM packed
 		`
 
