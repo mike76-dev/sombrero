@@ -14,18 +14,14 @@ import (
 type PackedSlab struct {
 	Key types.Hash256 `json:"key"`
 
-	// Size is what the slab is paid for, Filled is how far into it the pieces
-	// reached when it was uploaded, and Used is what is still referenced, all
-	// in bytes. Pieces counts the file slices that make up Used.
+	// Size is what the slab is paid for and Used is what is still referenced,
+	// both in bytes. Pieces counts the file slices that make up Used.
 	//
 	// Everything paid for that no file uses is dead space: the holes that
-	// editing and deleting files punched between the pieces, and the room past
-	// Filled that an upload sent off before the slab was full never wrote. A
-	// slab is never added to once uploaded, so both are lost the same way.
-	// Filled is recorded when the slab is uploaded; for a slab that came from
-	// elsewhere it is derived from the pieces left in it.
+	// editing and deleting files punched between the pieces, and the room an
+	// upload sent off before the slab was full never wrote. A slab is never
+	// added to once uploaded, so both are lost the same way.
 	Size   uint64 `json:"size"`
-	Filled uint64 `json:"filled"`
 	Used   uint64 `json:"used"`
 	Pieces int    `json:"pieces"`
 }
@@ -246,33 +242,22 @@ type FragmentationStats struct {
 }
 
 // packedSlabsCTE gathers the slabs of the share ($1) and workgroup ($2), with
-// what is still referenced in each and how far the pieces reached. A slab
-// belongs to one share and workgroup, the same scope the claims are made under,
-// so this sees all of its pieces. Every slab is kept, so that the counts have a
-// denominator; the ones holding no dead space are filtered out where that
-// matters.
-//
-// The filled extent is what was recorded when the slab was uploaded, or what
-// the surviving pieces reach for a slab that was imported or restored rather
-// than uploaded here. It says how far the slab was written; the dead space is
-// measured against the slab size, which is what is paid for.
+// what is still referenced in each. A slab belongs to one share and workgroup,
+// the same scope the claims are made under, so this sees all of its pieces.
+// Every slab is kept, so that the counts have a denominator; the ones holding
+// no dead space are filtered out where that matters.
 const packedSlabsCTE = `
 	WITH packed AS (
 		SELECT
 			m.slab_key,
 			COUNT(*) AS pieces,
-			SUM(m.data_length) AS used,
-			GREATEST(MAX(m.data_offset + m.data_length), COALESCE(s.filled, 0)) AS filled
+			SUM(m.data_length) AS used
 		FROM metadata m
 		JOIN objects o ON o.id = m.object_id
-		LEFT JOIN slabs s
-			ON s.slab_key = m.slab_key
-			AND s.share_name = o.share_name
-			AND s.workgroup = o.workgroup
 		WHERE m.slab_key IS NOT NULL
 			AND o.share_name = $1
 			AND o.workgroup = $2
-		GROUP BY m.slab_key, s.filled
+		GROUP BY m.slab_key
 	)
 `
 
@@ -306,7 +291,7 @@ func (db *Database) PackedSlabs(share string, workgroup int, slabSize uint64, th
 
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = packedSlabsCTE + `
-			SELECT slab_key, pieces, used, filled
+			SELECT slab_key, pieces, used
 			FROM packed
 			WHERE ` + fragmentedPredicate + `
 			ORDER BY used, slab_key
@@ -323,9 +308,8 @@ func (db *Database) PackedSlabs(share string, workgroup int, slabSize uint64, th
 				raw    []byte
 				pieces int64
 				used   int64
-				filled int64
 			)
-			if err := rows.Scan(&raw, &pieces, &used, &filled); err != nil {
+			if err := rows.Scan(&raw, &pieces, &used); err != nil {
 				return fmt.Errorf("failed to scan packed slab: %w", err)
 			}
 			if len(raw) != 32 {
@@ -334,7 +318,6 @@ func (db *Database) PackedSlabs(share string, workgroup int, slabSize uint64, th
 
 			slab := PackedSlab{
 				Size:   slabSize,
-				Filled: uint64(filled),
 				Used:   uint64(used),
 				Pieces: int(pieces),
 			}

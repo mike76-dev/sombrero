@@ -387,9 +387,6 @@ export interface FragmentedSlab {
   workgroup: string
   key: string
   size: number
-  // How far into the slab the pieces reached when it was uploaded. What is
-  // left between it and `used` is what deleting and editing punched out.
-  filled: number
   used: number
   wasted: number
   pieces: number

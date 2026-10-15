@@ -138,7 +138,6 @@ type FragmentedSlab struct {
 	Workgroup     string        `json:"workgroup"`
 	Key           types.Hash256 `json:"key"`
 	Size          uint64        `json:"size"`
-	Filled        uint64        `json:"filled"`
 	Used          uint64        `json:"used"`
 	Wasted        uint64        `json:"wasted"`
 	Pieces        int           `json:"pieces"`
@@ -1373,7 +1372,6 @@ func (api *API) fragmentationHandlerGET(w http.ResponseWriter, req *http.Request
 				Workgroup:     wg,
 				Key:           slab.Key,
 				Size:          slab.Size,
-				Filled:        slab.Filled,
 				Used:          slab.Used,
 				Wasted:        slab.Wasted(),
 				Pieces:        slab.Pieces,

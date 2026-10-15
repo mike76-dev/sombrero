@@ -211,28 +211,8 @@ func collectStorage(rows pgx.Rows) (bids []uint64, keys [][]byte, err error) {
 	return bids, keys, nil
 }
 
-// recordSlab notes how far a slab was filled when it was uploaded, which a hole
-// at its tail would otherwise hide from the fragmentation check.
-func recordSlab(ctx context.Context, tx pgx.Tx, key types.Hash256, filled uint64) error {
-	const query = `
-		INSERT INTO slabs (share_name, workgroup, slab_key, filled)
-		SELECT DISTINCT o.share_name, o.workgroup, $1::BYTEA, $2::BIGINT
-		FROM metadata m
-		JOIN objects o ON o.id = m.object_id
-		WHERE m.slab_key = $1
-		ON CONFLICT (share_name, workgroup, slab_key)
-			DO UPDATE SET filled = GREATEST(slabs.filled, EXCLUDED.filled)
-	`
-
-	if _, err := tx.Exec(ctx, query, key[:], int64(filled)); err != nil {
-		return fmt.Errorf("failed to record the slab: %w", err)
-	}
-	return nil
-}
-
 // unreferencedSlabs returns those of the given slab keys that no metadata entry
 // references any more, and stages them for unpinning in the same transaction.
-// What was recorded about them goes with them.
 // The staging is what makes the unpin survive a crash or an unreachable storage
 // backend: a slab stays listed until its unpin is confirmed, so it cannot leak.
 // It has to be called after the referencing metadata has been deleted, so that
@@ -257,13 +237,6 @@ func unreferencedSlabs(ctx context.Context, tx pgx.Tx, share string, workgroup i
 			SELECT $1, $2, u.k
 			FROM unreferenced u
 			ON CONFLICT DO NOTHING
-		),
-		forgotten AS (
-			DELETE FROM slabs s
-			USING unreferenced u
-			WHERE s.slab_key = u.k
-				AND s.share_name = $1
-				AND s.workgroup = $2
 		)
 		SELECT k FROM unreferenced
 	`
@@ -1166,7 +1139,7 @@ func (db *Database) CompleteUploadJob(metadataID uint64, bufferID uint64, slabKe
 			return fmt.Errorf("failed to delete orphaned buffer: %w", err)
 		}
 
-		return recordSlab(ctx, tx, slabKey, uint64(length))
+		return nil
 	})
 }
 
@@ -1356,7 +1329,7 @@ func (db *Database) CompletePackedSlab(jobs []UploadJob, slabKey types.Hash256) 
 		if completed == 0 {
 			return ErrNotFound
 		}
-		return recordSlab(ctx, tx, slabKey, offset)
+		return nil
 	})
 }
 

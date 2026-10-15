@@ -282,9 +282,9 @@ function FragmentationCard({ share }: { share: Share }) {
   return (
     <div className="stack">
       <p className="muted">
-        Editing or deleting a file leaves a hole in the slab it was packed into, and the share
-        keeps paying for the whole slab. Space a slab was never filled with does not count — only
-        what was taken back out of it. Repacking moves what is left in those slabs back into the
+        Editing or deleting a file leaves a hole in the slab it was packed into, and an upload
+        that went out before its slab was full leaves the rest of it empty. Either way, the share
+        keeps paying for the whole slab. Repacking moves what is left in those slabs back into the
         upload queue, to be packed into fewer slabs than they take up now.
       </p>
       <div className="row">
@@ -375,7 +375,7 @@ function FragmentationCard({ share }: { share: Share }) {
                         <td>{formatPercent(slab.fragmentation)}</td>
                         <td>{formatBytes(slab.wasted)}</td>
                         <td>
-                          {formatBytes(slab.used)} of {formatBytes(slab.filled)} written
+                          {formatBytes(slab.used)} of {formatBytes(slab.size)}
                         </td>
                         <td>{slab.pieces}</td>
                         <td className="mono muted">{slab.workgroup}</td>

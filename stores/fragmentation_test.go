@@ -64,7 +64,7 @@ func plantHole(t *testing.T, db *Database, share string, acc Account, name strin
 }
 
 // assertPacked checks the slabs a listing reported against the expected key,
-// used and filled bytes and piece count, in order.
+// used bytes and piece count, in order.
 func assertPacked(t *testing.T, got []PackedSlab, want []PackedSlab) {
 	t.Helper()
 
@@ -72,8 +72,7 @@ func assertPacked(t *testing.T, got []PackedSlab, want []PackedSlab) {
 		t.Fatalf("want %d packed slab(s), got %d: %+v", len(want), len(got), got)
 	}
 	for i := range want {
-		if got[i].Key != want[i].Key || got[i].Used != want[i].Used ||
-			got[i].Filled != want[i].Filled || got[i].Pieces != want[i].Pieces {
+		if got[i].Key != want[i].Key || got[i].Used != want[i].Used || got[i].Pieces != want[i].Pieces {
 			t.Fatalf("slab %d: want %+v, got %+v", i, want[i], got[i])
 		}
 		if got[i].Size != slabSize {
@@ -108,7 +107,7 @@ func TestPackedSlabs(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: types.Hash256{3}, Used: 400, Filled: 400, Pieces: 1},
+		{Key: types.Hash256{3}, Used: 400, Pieces: 1},
 	})
 	if w := slabs[0].Wasted(); w != 600 {
 		t.Fatalf("want the room the aged slab never held wasted, got %d bytes", w)
@@ -124,8 +123,8 @@ func TestPackedSlabs(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: types.Hash256{3}, Used: 400, Filled: 400, Pieces: 1},
-		{Key: packed, Used: 700, Filled: 1000, Pieces: 2},
+		{Key: types.Hash256{3}, Used: 400, Pieces: 1},
+		{Key: packed, Used: 700, Pieces: 2},
 	})
 	if f := slabs[1].Fragmentation(); f != 0.3 {
 		t.Fatalf("want the emptied slab 30%% fragmented, got %v", f)
@@ -160,7 +159,7 @@ func TestPackedSlabsPartialWithHole(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: key, Used: 500, Filled: 600, Pieces: 2},
+		{Key: key, Used: 500, Pieces: 2},
 	})
 
 	// The hole is the 100 bytes b.txt held, and the room never filled 400 more.
@@ -211,7 +210,7 @@ func TestPackedSlabsEarlyUpload(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: key, Used: uploaded, Filled: uploaded, Pieces: 3},
+		{Key: key, Used: uploaded, Pieces: 3},
 	})
 
 	// All but the last piece go, which is as empty as the slab can get: one
@@ -227,7 +226,7 @@ func TestPackedSlabsEarlyUpload(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: key, Used: uploaded - 200, Filled: uploaded, Pieces: 1},
+		{Key: key, Used: uploaded - 200, Pieces: 1},
 	})
 
 	// Reported at every threshold up to its level of 90%, and not past it.
@@ -262,8 +261,8 @@ func TestPackedSlabsEarlyUpload(t *testing.T) {
 }
 
 // TestPackedSlabsTailHole verifies that a hole at the very end of a slab is
-// seen like any other, whether the slab has its filled extent on record or,
-// having come from elsewhere, only what the surviving pieces reach.
+// seen like any other, in a slab packed here as in one that came from
+// elsewhere.
 func TestPackedSlabsTailHole(t *testing.T) {
 	ctx := context.Background()
 	db := NewTestStore(t, ctx)
@@ -271,7 +270,6 @@ func TestPackedSlabsTailHole(t *testing.T) {
 
 	acc, share, wg := newSlabTestFixture(t, db)
 
-	// A slab packed here has its extent on record.
 	plantBufferedFile(t, db, share, acc, "a.txt", 400, false)
 	plantBufferedFile(t, db, share, acc, "b.txt", 300, false)
 	plantBufferedFile(t, db, share, acc, "c.txt", 300, false)
@@ -283,9 +281,6 @@ func TestPackedSlabsTailHole(t *testing.T) {
 	if err := db.CompletePackedSlab(jobs, key); err != nil {
 		t.Fatalf("CompletePackedSlab: %v", err)
 	}
-	if got := recordedExtent(t, db, key); got != slabSize {
-		t.Fatalf("want the slab recorded as filled to %d, got %d", slabSize, got)
-	}
 
 	// The last piece goes, and the hole it leaves is seen.
 	if _, err := db.DeleteFile(acc, share, "c.txt"); err != nil {
@@ -296,21 +291,10 @@ func TestPackedSlabsTailHole(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: key, Used: 700, Filled: slabSize, Pieces: 2},
+		{Key: key, Used: 700, Pieces: 2},
 	})
 
-	// The record goes with the slab.
-	for _, path := range []string{"a.txt", "b.txt"} {
-		if _, err := db.DeleteFile(acc, share, path); err != nil {
-			t.Fatalf("DeleteFile(%s): %v", path, err)
-		}
-	}
-	if got := recordedExtent(t, db, key); got != 0 {
-		t.Fatalf("want the record gone with the slab, got %d", got)
-	}
-
-	// A slab that came from elsewhere has no record: its extent is what the
-	// pieces reach, and the dead space is counted against the slab size.
+	// A slab that came from elsewhere, the same way.
 	key = types.Hash256{2}
 	plantPiece(t, db, share, acc, "d.txt", key, 0, 400)
 	plantPiece(t, db, share, acc, "e.txt", key, 400, 300)
@@ -322,7 +306,8 @@ func TestPackedSlabsTailHole(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: key, Used: 700, Filled: 700, Pieces: 2},
+		{Key: types.Hash256{1}, Used: 700, Pieces: 2},
+		{Key: key, Used: 700, Pieces: 2},
 	})
 	if _, err := db.DeleteFile(acc, share, "d.txt"); err != nil {
 		t.Fatalf("DeleteFile: %v", err)
@@ -331,42 +316,9 @@ func TestPackedSlabsTailHole(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: key, Used: 300, Filled: 700, Pieces: 1},
+		{Key: key, Used: 300, Pieces: 1},
+		{Key: types.Hash256{1}, Used: 700, Pieces: 2},
 	})
-}
-
-// TestFullSlabIsRecorded verifies that a slab one file fills on its own gets
-// its extent on record as well.
-func TestFullSlabIsRecorded(t *testing.T) {
-	ctx := context.Background()
-	db := NewTestStore(t, ctx)
-	defer db.Close()
-
-	acc, share, wg := newSlabTestFixture(t, db)
-	plantBufferedFile(t, db, share, acc, "a.txt", slabSize, false)
-	job, err := db.ClaimUploadJob(share, wg, slabSize)
-	if err != nil {
-		t.Fatalf("ClaimUploadJob: %v", err)
-	}
-	key := types.Hash256{3}
-	if err := db.CompleteUploadJob(job.MetadataID, job.BufferID, key); err != nil {
-		t.Fatalf("CompleteUploadJob: %v", err)
-	}
-	if got := recordedExtent(t, db, key); got != slabSize {
-		t.Fatalf("want the slab recorded as filled to %d, got %d", slabSize, got)
-	}
-}
-
-// recordedExtent returns how far a slab is on record as filled, or 0 for none.
-func recordedExtent(t *testing.T, db *Database, key types.Hash256) uint64 {
-	t.Helper()
-
-	var filled uint64
-	err := db.pool.QueryRow(context.Background(), "SELECT COALESCE(MAX(filled), 0) FROM slabs WHERE slab_key = $1", key[:]).Scan(&filled)
-	if err != nil {
-		t.Fatalf("reading the slab record: %v", err)
-	}
-	return filled
 }
 
 // TestPackedSlabsThreshold verifies that only the slabs whose dead space
@@ -434,7 +386,7 @@ func TestPackedSlabsWorkgroupScope(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: mine, Used: 700, Filled: 1000, Pieces: 1},
+		{Key: mine, Used: 700, Pieces: 1},
 	})
 
 	slabs, err = db.PackedSlabs(share, bobWG, slabSize, 0)
@@ -442,7 +394,7 @@ func TestPackedSlabsWorkgroupScope(t *testing.T) {
 		t.Fatalf("PackedSlabs(bob): %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: theirs, Used: 500, Filled: 1000, Pieces: 1},
+		{Key: theirs, Used: 500, Pieces: 1},
 	})
 }
 
@@ -726,7 +678,7 @@ func TestRebufferSlabChanged(t *testing.T) {
 		t.Fatalf("PackedSlabs: %v", err)
 	}
 	assertPacked(t, slabs, []PackedSlab{
-		{Key: key, Used: 300, Filled: 1000, Pieces: 1},
+		{Key: key, Used: 300, Pieces: 1},
 	})
 
 	// A piece that appeared since the listing is one nothing was downloaded

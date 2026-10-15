@@ -52,6 +52,9 @@ var migrations = []migration{
 		WHERE m.slab_key IS NOT NULL
 		GROUP BY o.share_name, o.workgroup, m.slab_key
 	`},
+	{name: "forget how far a slab was filled", sql: `
+		DROP TABLE slabs
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

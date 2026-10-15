@@ -3161,7 +3161,7 @@ func TestDefragBatch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			slabs := make([]stores.PackedSlab, len(tc.used))
 			for i, used := range tc.used {
-				slabs[i] = stores.PackedSlab{Size: size, Filled: size, Used: used}
+				slabs[i] = stores.PackedSlab{Size: size, Used: used}
 			}
 
 			if got := defragBatch(slabs, size, tc.buffered); len(got) != tc.want {
