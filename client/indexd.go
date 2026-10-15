@@ -394,7 +394,8 @@ type IndexdClient struct {
 	// run of identical failures it reports into one line at a time.
 	uploadFailures *repeatedFailure
 	packFailures   *repeatedFailure
-	lastPlan       string // the packing plan last reported; the packer alone touches it
+	lastPlan       string                     // the packing plan last reported; the packer alone touches it
+	lastFrag       *stores.FragmentationStats // the reading last reported; the monitor alone touches it
 
 	// backlog holds writes back while too much is waiting to be uploaded; nil means no limit.
 	backlog *Backlog
@@ -1596,11 +1597,17 @@ func (ic *IndexdClient) cleanupUploadJobs(ctx context.Context) {
 
 // logFragmentation reports what the check found. A connection holding no slabs
 // has nothing to report: that is what every check of a share nobody has
-// uploaded to finds, from the first one the connection runs onwards.
+// uploaded to finds, from the first one the connection runs onwards. A reading
+// that has not changed since the last one says nothing either.
 func (ic *IndexdClient) logFragmentation(stats stores.FragmentationStats) {
 	if stats.Slabs == 0 {
+		ic.lastFrag = nil
 		return
 	}
+	if ic.lastFrag != nil && *ic.lastFrag == stats {
+		return
+	}
+	ic.lastFrag = &stats
 
 	if stats.Fragmented > 0 {
 		log.Printf("share %s, workgroup %d: %d of %d slab(s) have %.0f%% or more dead space, which is %d bytes of the total %d wasted",

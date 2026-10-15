@@ -34,3 +34,31 @@ func TestLogPackedSlabNamesAPlanOnce(t *testing.T) {
 		t.Fatalf("a changed plan: logged %d time(s)\n%s", got, out.String())
 	}
 }
+
+// TestLogFragmentationReportsAChangeOnce checks that a reading is logged when
+// it differs from the last one, and again after the slabs were all released.
+func TestLogFragmentationReportsAChangeOnce(t *testing.T) {
+	var out syncBuffer
+	log.SetOutput(&out)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	ic := &IndexdClient{share: "s", workgroup: 7, fragLevel: 0.1}
+	same := stores.FragmentationStats{Slabs: 1, Wasted: 100, Fragmented: 1, FragmentedWasted: 100}
+	for range 3 {
+		ic.logFragmentation(same)
+	}
+	if got := strings.Count(out.String(), "dead space"); got != 1 {
+		t.Fatalf("the same reading three times: logged %d time(s)\n%s", got, out.String())
+	}
+
+	ic.logFragmentation(stores.FragmentationStats{Slabs: 1, Wasted: 200, Fragmented: 1, FragmentedWasted: 200})
+	if got := strings.Count(out.String(), "dead space"); got != 2 {
+		t.Fatalf("a changed reading: logged %d time(s) in all\n%s", got, out.String())
+	}
+
+	ic.logFragmentation(stores.FragmentationStats{})
+	ic.logFragmentation(same)
+	if got := strings.Count(out.String(), "dead space"); got != 3 {
+		t.Fatalf("the first reading after the slabs were released: logged %d time(s) in all\n%s", got, out.String())
+	}
+}

@@ -26,7 +26,7 @@ func (noShares) RemoveAccess(stores.Account)                                {}
 func (noShares) AddConnection(stores.Workgroup, stores.Share, types.PrivateKey) error {
 	return nil
 }
-func (noShares) RemoveConnection(stores.Workgroup, stores.Share) error { return nil }
+func (noShares) RemoveConnection(stores.Workgroup, stores.Share) error      { return nil }
 func (noShares) UnpinSlabs(stores.Workgroup, stores.Share, []types.Hash256) {}
 
 // connectedStore is a store with one connection to write catalogs of.
