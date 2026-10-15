@@ -63,6 +63,10 @@ type CatalogResponse struct {
 	Files       int       `json:"files"`
 	Incomplete  int       `json:"incomplete"`
 	Inlined     uint64    `json:"inlined"`
+
+	// Found says the catalog was left by an earlier run and its contents were
+	// not read, so the counts above are empty.
+	Found bool `json:"found,omitempty"`
 }
 
 // StoredCatalogResponse is one entry of GET /backup/catalogs: a catalog in the
@@ -134,6 +138,7 @@ func tierStatus(status *backup.Status) *TierStatus {
 		tier.Catalogs = append(tier.Catalogs, CatalogResponse{
 			Share: c.Share, Workgroup: c.Workgroup.String(), Path: c.Path, Size: c.Size, WrittenAt: c.WrittenAt,
 			Directories: c.Stats.Directories, Files: c.Stats.Files, Incomplete: c.Stats.Incomplete, Inlined: c.Stats.Inlined,
+			Found: c.Found,
 		})
 	}
 	for _, p := range status.Waiting {

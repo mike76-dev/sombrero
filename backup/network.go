@@ -139,6 +139,48 @@ func (n *Network) due(key string) bool {
 	return !ok || time.Since(last.WrittenAt) >= n.interval
 }
 
+// known reports whether the tier has a last write for the connection.
+func (n *Network) known(key string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	_, ok := n.written[key]
+	return ok
+}
+
+// catalogName is the layout of a catalog's name: its time, so that the names
+// sort as the times do.
+const catalogName = "20060102T150405.000000000Z"
+
+// found returns the newest catalog already in the connection's folder, which a
+// first look after a start takes as the last write. Its contents are not read.
+func (n *Network) found(ctx context.Context, c stores.KeyedConnection, files ShareFiles) (cat Catalog, ok bool, err error) {
+	folder := FolderOf(c.Workgroup.UUID)
+	owner, err := n.db.FolderOwner(c.Share, folder)
+	if err != nil || owner.ID == 0 {
+		return Catalog{}, false, err
+	}
+	entries, err := files.List(ctx, owner, folder)
+	if err != nil {
+		return Catalog{}, false, err
+	}
+
+	for _, entry := range entries {
+		name := path.Base(entry.Key)
+		if !strings.HasSuffix(name, ".catalog") {
+			continue
+		}
+		at, err := time.Parse(catalogName, strings.TrimSuffix(name, ".catalog"))
+		if err != nil || at.Before(cat.WrittenAt) {
+			continue
+		}
+		cat = Catalog{Share: c.Share, Workgroup: c.Workgroup.UUID, Path: path.Join(folder, name), Size: int64(entry.Size), WrittenAt: at, Found: true}
+		ok = true
+	}
+
+	return cat, ok, nil
+}
+
 // WriteAll writes a catalog into the share of every connection that holds an app
 // key, which is what the catalog is sealed with. A connection that is not
 // running, or has nobody to own the file, is reported and passed over.
@@ -186,6 +228,21 @@ func (n *Network) WriteAll(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("the catalog of %s for workgroup %s: %w", c.Share, c.Workgroup.UUID, errNotRunning))
 			waiting = append(waiting, Pending{Share: c.Share, Workgroup: c.Workgroup.UUID})
 			continue
+		}
+
+		// A catalog an earlier run left in the share counts as the last write,
+		// so that a restart does not add one.
+		if !n.known(key) {
+			cat, ok, err := n.found(ctx, c, files)
+			if err != nil {
+				err = fmt.Errorf("the catalogs of %s for workgroup %s: %w", c.Share, c.Workgroup.UUID, err)
+				errs, failed = append(errs, err), append(failed, err)
+				continue
+			}
+			if ok && time.Since(cat.WrittenAt) < n.interval {
+				written[key] = cat
+				continue
+			}
 		}
 
 		// A catalog that is not due yet stands as it is.
@@ -328,7 +385,7 @@ func (n *Network) write(ctx context.Context, c stores.KeyedConnection, files Sha
 	}
 
 	now := time.Now().UTC()
-	name := path.Join(folder, now.Format("20060102T150405.000000000Z")+".catalog")
+	name := path.Join(folder, now.Format(catalogName)+".catalog")
 	uploadID, err := files.StartUpload(ctx, owner, name)
 	if err != nil {
 		return Catalog{}, err

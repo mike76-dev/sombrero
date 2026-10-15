@@ -220,6 +220,53 @@ func TestNetworkWritesWhenDue(t *testing.T) {
 	}
 }
 
+// TestNetworkCountsFromTheCatalogFound verifies that a start takes the newest
+// catalog already in the share as the last write, so that a restart adds none
+// until an interval has passed since that one.
+func TestNetworkCountsFromTheCatalogFound(t *testing.T) {
+	ctx := context.Background()
+	db, wg, _ := connectedStore(t, ctx)
+
+	share := newFakeShare()
+	clients := func(string) (map[string]ShareFiles, error) {
+		return map[string]ShareFiles{wg.UUID.String(): share}, nil
+	}
+	tier := func(interval time.Duration) *Network {
+		return &Network{db: db, clients: clients, interval: interval, keep: 5, inline: 1024}
+	}
+
+	if err := tier(time.Hour).WriteAll(ctx); err != nil {
+		t.Fatalf("WriteAll: %v", err)
+	}
+	names := share.catalogs()
+	if len(names) != 1 {
+		t.Fatalf("the share holds %d catalog(s) after the first run, want 1", len(names))
+	}
+
+	// A new run within the interval leaves the share alone and reports what it
+	// found, without the counts it cannot know.
+	restarted := tier(time.Hour)
+	if err := restarted.WriteAll(ctx); err != nil {
+		t.Fatalf("WriteAll after a restart: %v", err)
+	}
+	if got := share.catalogs(); len(got) != 1 {
+		t.Fatalf("the share holds %d catalog(s) after a restart, want the 1 found", len(got))
+	}
+	status := restarted.Status()
+	if len(status.Catalogs) != 1 || !status.Catalogs[0].Found || status.Catalogs[0].Path != names[0] || status.Catalogs[0].Size == 0 {
+		t.Fatalf("the status after a restart: %+v", status.Catalogs)
+	}
+
+	// Once the one found is an interval old, the next round writes.
+	time.Sleep(2 * time.Millisecond)
+	if err := tier(time.Millisecond).WriteAll(ctx); err != nil {
+		t.Fatalf("WriteAll past the interval: %v", err)
+	}
+	if got := share.catalogs(); len(got) != 2 {
+		t.Fatalf("the share holds %d catalog(s) past the interval, want 2", len(got))
+	}
+}
+
 // TestNetworkKeepsWorkgroupsApart verifies that two workgroups on one share each
 // get their catalogs in a folder of their own, owned by an account of their own,
 // since the share has one tree for both and neither is to take the other's.

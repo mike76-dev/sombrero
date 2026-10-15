@@ -197,6 +197,7 @@ export interface CatalogStatus {
   files: number
   incomplete: number
   inlined: number
+  found?: boolean
 }
 
 // A catalog in the backup folder on this machine, by what it says of itself.

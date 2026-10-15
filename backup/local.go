@@ -30,6 +30,10 @@ type Catalog struct {
 	Size      int64
 	WrittenAt time.Time
 	Stats     stores.SnapshotStats
+
+	// Found marks a catalog an earlier run left in the share, taken as the last
+	// write after a start; its contents were not read, so Stats are empty.
+	Found bool
 }
 
 // ServerCatalog is the catalog of the server itself that was written last: what

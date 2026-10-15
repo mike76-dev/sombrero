@@ -134,9 +134,9 @@ function Tier({ title, tier }: { title: string; tier: TierStatus }) {
               <tr key={`${c.share}/${c.workgroup}`}>
                 <td>{c.share}</td>
                 <td className="mono muted">{c.workgroup}</td>
-                <td>{c.directories}</td>
-                <td>{c.files}</td>
-                <td>{c.incomplete}</td>
+                <td>{c.found ? '—' : c.directories}</td>
+                <td>{c.found ? '—' : c.files}</td>
+                <td>{c.found ? '—' : c.incomplete}</td>
                 <td>{formatBytes(c.size)}</td>
                 <td>{new Date(c.writtenAt).toLocaleString()}</td>
               </tr>
