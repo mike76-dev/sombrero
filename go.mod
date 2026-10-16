@@ -10,9 +10,9 @@ require (
 	github.com/oiweiwei/go-msrpc v1.2.7
 	github.com/pierrec/lz4/v4 v4.1.25
 	go.sia.tech/core v0.21.7
-	go.sia.tech/indexd v0.5.1-0.20260918120320-591102207582
+	go.sia.tech/indexd v0.6.2-0.20261015180230-82142a6ad704
 	go.sia.tech/renterd/v2 v2.9.3-0.20260615081323-2b8e3b095b1f
-	go.sia.tech/siastorage v0.2.2-0.20260916111234-b44a7f80de18
+	go.sia.tech/siastorage v0.2.2-0.20260929080211-dec618f3a567
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
@@ -22,10 +22,11 @@ require (
 
 require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
-	github.com/bytedance/sonic v1.15.3 // indirect
+	github.com/bytedance/sonic v1.15.4 // indirect
 	github.com/bytedance/sonic/loader v0.5.2 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
-	github.com/dunglas/httpsfv v1.1.0 // indirect
+	github.com/dunglas/httpsfv v1.1.1 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/gotd/contrib v0.24.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/indece-official/go-ebcdic v1.2.0 // indirect
@@ -38,6 +39,7 @@ require (
 	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
 	github.com/jcmturner/gokrb5/v8 v8.4.4 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
+	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/klauspost/reedsolomon v1.14.2 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
@@ -48,18 +50,19 @@ require (
 	github.com/oschwald/geoip2-golang v1.13.0 // indirect
 	github.com/oschwald/maxminddb-golang v1.13.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.61.0 // indirect
-	github.com/quic-go/webtransport-go v0.12.0 // indirect
+	github.com/quic-go/quic-go v0.63.0 // indirect
+	github.com/quic-go/webtransport-go v0.13.0 // indirect
 	github.com/rs/zerolog v1.32.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
-	go.sia.tech/coreutils v0.24.0 // indirect
-	go.sia.tech/jape v0.14.3 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
+	go.sia.tech/coreutils v0.25.0 // indirect
+	go.sia.tech/jape v0.14.4 // indirect
 	go.sia.tech/mux v1.5.3 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/tools v0.50.0 // indirect
 )
