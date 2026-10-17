@@ -22,7 +22,7 @@ import (
 	sdk "go.sia.tech/siastorage"
 )
 
-const version = "3.1.0-alpha.1"
+const version = "3.1.0-rc.1"
 
 var storesDir = flag.String("dir", ".", "directory for storing persistent data")
 var printVersion = flag.Bool("version", false, "print the version and exit")
