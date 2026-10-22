@@ -548,9 +548,10 @@ func (c *readChunk) startNow() {
 const (
 	// Bounds for the read chunk size. Within these bounds, chunks are kept aligned to the
 	// slab size of the backend, so that a chunk download translates into as few range
-	// requests as possible.
-	minReadChunkSize = 16 * 1024 * 1024
-	maxReadChunkSize = 32 * 1024 * 1024
+	// requests as possible. A read not in the cache waits for its whole chunk, and an SMB
+	// client gives up on a read after some twenty seconds, so the chunks are kept small.
+	minReadChunkSize = 8 * 1024 * 1024
+	maxReadChunkSize = 16 * 1024 * 1024
 
 	// How many chunks to prefetch ahead of a sequential read.
 	readPrefetchDepth = 3
