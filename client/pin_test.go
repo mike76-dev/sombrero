@@ -320,6 +320,51 @@ func TestImportLeavesWhatIsThere(t *testing.T) {
 	}
 }
 
+// TestImportCompletesWhatIsThere verifies that a file restored with a hole,
+// from a catalog written before its tail was uploaded, is made whole by an
+// import that brings the tail.
+func TestImportCompletesWhatIsThere(t *testing.T) {
+	ctx := context.Background()
+
+	db := stores.NewTestStore(t, ctx)
+	t.Cleanup(db.Close)
+
+	acc := newTestAccount(t, db, "alice", "secret123")
+	share := newTestShare(t, db, "testshare")
+	grantFullAccess(t, db, share, acc)
+
+	c := newIndexdClient(db, newFakeBackend(), share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)
+	t.Cleanup(func() { _ = c.Close() })
+
+	target := importTarget(t, db, acc, share.Name)
+	head := transfer.Part{Offset: 0, Length: 256, Object: types.Hash256{7}}
+	holed := transfer.File{Path: "/holed.bin", Size: 512, Parts: []transfer.Part{head}}
+	if res, err := db.ApplyFile(target, holed); err != nil || res != stores.Applied {
+		t.Fatalf("the restore: %v %v", res, err)
+	}
+
+	tail := foreignFile("/holed.bin", 256).Parts[0]
+	tail.Offset = 256
+	whole := transfer.File{Path: "/holed.bin", Size: 512, Parts: []transfer.Part{head, tail}}
+	pinner := &fakePinner{}
+	stats, err := Import(ctx, db, c, &fakeSource{content: map[string][]byte{}}, pinner, describeFiles(t, []transfer.File{whole}),
+		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: target})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if stats.Completed != 1 || stats.Pinned != 0 || stats.Skipped != 0 || len(pinner.pinned) != 1 {
+		t.Errorf("want the file made whole with its tail pinned, got %+v and %v", stats, pinner.pinned)
+	}
+
+	slabs, err := db.GetMetadata(acc, share.Name, "/holed.bin", 0, 512)
+	if err != nil {
+		t.Fatalf("GetMetadata: %v", err)
+	}
+	if len(slabs) != 2 || slabs[1].At != 256 || slabs[1].Length != 256 {
+		t.Errorf("the metadata of the mended file: got %+v", slabs)
+	}
+}
+
 // TestTheDestinationPinsWhatIsImported verifies whose account the objects end up
 // in: the share's own, since pinning them where they already are does nothing and
 // would leave the rows naming objects this share does not hold.

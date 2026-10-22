@@ -232,6 +232,57 @@ func TestApplyFileResults(t *testing.T) {
 	}
 }
 
+// TestApplyFileCompletesAHole verifies that a file applied with a run no part
+// described takes that part later, which is how an import mends a restore.
+func TestApplyFileCompletesAHole(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	target, acc := applyTarget(t, db)
+	holed := transfer.File{
+		Path: "/x.bin", Size: 30,
+		Parts: []transfer.Part{{Offset: 0, Length: 10, Object: types.Hash256{1}}, {Offset: 20, Length: 10, Object: types.Hash256{3}}},
+	}
+	if res, err := db.ApplyFile(target, holed); err != nil || res != Applied {
+		t.Fatalf("the file with a hole: %v %v", res, err)
+	}
+
+	// A part that overlaps what is there is passed over, and so is a file of
+	// another size.
+	overlapping := transfer.File{Path: "/x.bin", Size: 30, Parts: []transfer.Part{{Offset: 5, Length: 10, Object: types.Hash256{2}}}}
+	if res, err := db.ApplyFile(target, overlapping); err != nil || res != AlreadyThere {
+		t.Fatalf("a part overlapping what is there: %v %v", res, err)
+	}
+	grown := transfer.File{Path: "/x.bin", Size: 40, Parts: []transfer.Part{{Offset: 10, Length: 10, Object: types.Hash256{2}}}}
+	if res, err := db.ApplyFile(target, grown); err != nil || res != AlreadyThere {
+		t.Fatalf("a file of another size: %v %v", res, err)
+	}
+
+	whole := transfer.File{
+		Path: "/x.bin", Size: 30,
+		Parts: []transfer.Part{
+			{Offset: 0, Length: 10, Object: types.Hash256{1}},
+			{Offset: 10, Length: 10, Object: types.Hash256{2}},
+			{Offset: 20, Length: 10, Object: types.Hash256{3}},
+		},
+	}
+	if res, err := db.ApplyFile(target, whole); err != nil || res != Completed {
+		t.Fatalf("the part that fills the hole: %v %v", res, err)
+	}
+	if res, err := db.ApplyFile(target, whole); err != nil || res != AlreadyThere {
+		t.Fatalf("once whole: %v %v", res, err)
+	}
+
+	slabs, err := db.GetMetadata(acc, target.Share, "/x.bin", 0, 30)
+	if err != nil {
+		t.Fatalf("GetMetadata: %v", err)
+	}
+	if len(slabs) != 3 || slabs[1].Key != (types.Hash256{2}) || slabs[1].At != 10 || slabs[1].Length != 10 {
+		t.Errorf("the metadata of the mended file: got %+v", slabs)
+	}
+}
+
 // TestRecover verifies what comes of cutting the files found inside a file out of
 // it: the finds are files, the file is what lies between them, and a file with
 // nothing left is gone.

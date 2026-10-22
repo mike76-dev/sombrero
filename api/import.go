@@ -129,6 +129,10 @@ type ImportStatusResponse struct {
 	Refused int    `json:"refused"`
 	Refusal string `json:"refusal,omitempty"`
 
+	// Completed counts the files that were there with holes, left by a restore
+	// of a catalog written before their data was uploaded, and are now whole.
+	Completed int `json:"completed,omitempty"`
+
 	Failures []string `json:"failures,omitempty"`
 	Error    string   `json:"error,omitempty"`
 }
@@ -329,11 +333,12 @@ func (r *importRun) status() ImportStatusResponse {
 
 		// What is behind us is every file the import is done with, however it
 		// came to be done with it.
-		Done:     r.stats.Pinned + r.stats.Copied + r.stats.Skipped + r.stats.Failed + r.stats.Unresolved,
-		Refused:  r.stats.Refused,
-		Refusal:  r.refusal,
-		Failures: append([]string(nil), r.failures...),
-		Error:    r.err,
+		Done:      r.stats.Pinned + r.stats.Completed + r.stats.Copied + r.stats.Skipped + r.stats.Failed + r.stats.Unresolved,
+		Refused:   r.stats.Refused,
+		Refusal:   r.refusal,
+		Completed: r.stats.Completed,
+		Failures:  append([]string(nil), r.failures...),
+		Error:     r.err,
 	}
 }
 

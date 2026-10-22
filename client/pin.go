@@ -133,6 +133,10 @@ type ImportStats struct {
 	// Refused counts the files the indexer would not take over, which were
 	// copied instead. A source on another indexer is every file of it.
 	Refused int
+
+	// Completed counts the files that were there with holes, which a restore
+	// leaves where the catalog came before the data, and are now whole.
+	Completed int
 }
 
 // Import takes over what a description names: what can be pinned is pinned, and
@@ -215,8 +219,12 @@ func importFile(ctx context.Context, store TransferStore, dst Client, src PartRe
 			}
 
 			switch res {
-			case stores.Applied:
-				stats.Pinned++
+			case stores.Applied, stores.Completed:
+				if res == stores.Applied {
+					stats.Pinned++
+				} else {
+					stats.Completed++
+				}
 
 				// The objects still say what they were files of at the source;
 				// now that the rows are in, they can be told what they are here.

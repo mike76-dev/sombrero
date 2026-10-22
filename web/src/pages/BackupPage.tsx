@@ -60,7 +60,7 @@ function RestoredBanner({ restored, from }: { restored: RestoreResponse; from?: 
         <div>
           {incomplete === 1 ? 'One file is' : `${incomplete} files are`} incomplete: the catalog
           was written before all of {incomplete === 1 ? 'its' : 'their'} data had reached the
-          network.
+          network. An import of the same account into this share fills what is missing.
         </div>
       )}
       {(restored.missing ?? 0) > 0 && (

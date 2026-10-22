@@ -362,6 +362,10 @@ export interface ImportStatusResponse {
   // failures.
   refused: number
   refusal?: string
+
+  // completed counts the files that were there with holes, left by a restore of
+  // a catalog written before their data was uploaded, and are now whole.
+  completed?: number
   failures?: string[]
   error?: string
 }

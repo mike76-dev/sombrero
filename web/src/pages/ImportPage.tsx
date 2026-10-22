@@ -649,6 +649,12 @@ function ImportStatusView({ status }: { status: ImportStatusResponse | null }) {
               <td>{status.refused}</td>
             </tr>
           )}
+          {(status.completed ?? 0) > 0 && (
+            <tr>
+              <th>Made whole</th>
+              <td>{status.completed}</td>
+            </tr>
+          )}
           {status.waits > 0 && (
             <tr>
               <th>Waited for space</th>

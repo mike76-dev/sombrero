@@ -37,6 +37,11 @@ const (
 	// fetched or pinned from, which this server cannot act on: whoever applies
 	// the description has to get at them first.
 	Unresolved
+
+	// Completed means the path was taken by a file with holes, and the parts
+	// that fall into them were added. A restore leaves such holes where the
+	// catalog was written before the data had been uploaded.
+	Completed
 )
 
 // String implements fmt.Stringer.
@@ -48,6 +53,8 @@ func (r ApplyResult) String() string {
 		return "already there"
 	case Unresolved:
 		return "unresolved"
+	case Completed:
+		return "completed"
 	default:
 		return fmt.Sprintf("ApplyResult(%d)", int(r))
 	}
@@ -106,7 +113,7 @@ func (db *Database) applyRecord(target TransferTarget, dir *transfer.Directory, 
 			return fmt.Errorf("failed to apply the file %q: %w", file.Path, err)
 		}
 		switch res {
-		case Applied:
+		case Applied, Completed:
 			stats.Files++
 			if !file.Complete() {
 				stats.Incomplete++
@@ -180,8 +187,13 @@ func (db *Database) ApplyFile(target TransferTarget, file transfer.File) (ApplyR
 			return err
 		}
 		if taken {
-			res = AlreadyThere
-			return nil
+			added, err := completeFile(ctx, tx, target.Share, normalizePath(file.Path), file)
+			if added {
+				res = Completed
+			} else {
+				res = AlreadyThere
+			}
+			return err
 		}
 
 		// A folder the description did not name is made for the workgroup rather
@@ -495,6 +507,68 @@ func pathTaken(ctx context.Context, tx pgx.Tx, share, path string) (bool, error)
 	}
 
 	return taken, nil
+}
+
+// completeFile adds the parts of the description that fall into the holes of
+// the file at the path, and reports whether any did. A folder, or a file of
+// another size, takes none; a part that overlaps what is there is passed over.
+func completeFile(ctx context.Context, tx pgx.Tx, share, path string, file transfer.File) (bool, error) {
+	var id, size uint64
+	err := tx.QueryRow(ctx, `SELECT id, size FROM objects WHERE share_name = $1 AND full_path = $2`, share, path).Scan(&id, &size)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to look up the file %q: %w", path, err)
+	}
+	if size != file.Size {
+		return false, nil
+	}
+
+	rows, err := tx.Query(ctx, `SELECT obj_offset, data_length FROM metadata WHERE object_id = $1 ORDER BY obj_offset`, id)
+	if err != nil {
+		return false, fmt.Errorf("failed to read the runs of %q: %w", path, err)
+	}
+	held := transfer.File{Size: size}
+	for rows.Next() {
+		var part transfer.Part
+		if err := rows.Scan(&part.Offset, &part.Length); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("failed to read a run of %q: %w", path, err)
+		}
+		held.Parts = append(held.Parts, part)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("failed to read the runs of %q: %w", path, err)
+	}
+
+	// The parts of a description do not overlap each other, so the gaps need
+	// not be reckoned again as they fill.
+	added := false
+	gaps := held.Gaps()
+	for _, part := range file.Parts {
+		if !inAGap(part, gaps) {
+			continue
+		}
+		if err := insertPart(ctx, tx, share, id, part); err != nil {
+			return added, err
+		}
+		added = true
+	}
+
+	return added, nil
+}
+
+// inAGap reports whether the part lies wholly inside one of the gaps.
+func inAGap(part transfer.Part, gaps []transfer.Gap) bool {
+	for _, gap := range gaps {
+		if part.Offset >= gap.Offset && part.End() <= gap.Offset+gap.Length {
+			return true
+		}
+	}
+
+	return false
 }
 
 // insertObject writes the file itself, which is no longer of an upload: what it
