@@ -512,7 +512,8 @@ type open struct {
 	// caches, because the SMB2_READ requests may come out of order. Chunks are downloaded in the
 	// background, so an entry may still be in flight; readers wait on its done channel. When the
 	// reads look sequential, the next few chunks are prefetched so the network transfer overlaps
-	// with serving cached data.
+	// with serving cached data. The prefetches go one after another: fetched together they split
+	// the line and the chunk needed next lands last, late enough for the client to give up on it.
 	buffer       map[uint64]*readChunk
 	cacheOrder   []uint64
 	chunkSize    uint64
@@ -529,12 +530,19 @@ type open struct {
 	mu sync.Mutex
 }
 
-// readChunk is a cached chunk of a file. The download runs in the background;
-// done is closed once data (or err) is set.
+// readChunk is a cached chunk of a file. The download runs in the background and closes done
+// when data (or err) is set; a prefetch waits for the chunk before it unless start is closed.
 type readChunk struct {
-	data []byte
-	err  error
-	done chan struct{}
+	data  []byte
+	err   error
+	done  chan struct{}
+	start chan struct{}
+	once  sync.Once
+}
+
+// startNow lets the download of a waiting chunk begin.
+func (c *readChunk) startNow() {
+	c.once.Do(func() { close(c.start) })
 }
 
 const (
@@ -1734,7 +1742,12 @@ func (op *open) tryReadCached(offset, length uint64) ([]byte, bool) {
 		if err == nil {
 			op.mu.Lock()
 			for _, chunkOffset := range prefetch {
-				op.ensureChunk(acc, chunkOffset, size)
+				// Each prefetch waits for the chunk before it, which is in the cache or in flight.
+				var after <-chan struct{}
+				if prev, ok := op.buffer[chunkOffset-chunkSize]; ok {
+					after = prev.done
+				}
+				op.ensureChunk(acc, chunkOffset, size, after)
 			}
 			op.mu.Unlock()
 		}
@@ -1798,7 +1811,7 @@ func (op *open) read(offset, length uint64) ([]byte, error) {
 	op.mu.Lock()
 	var chunks []*readChunk
 	for chunkOffset := firstChunk; chunkOffset <= lastChunk; chunkOffset += chunkSize {
-		chunks = append(chunks, op.ensureChunk(acc, chunkOffset, size))
+		chunks = append(chunks, op.ensureChunk(acc, chunkOffset, size, nil))
 	}
 	op.lastReadEnd = offset + length
 	op.mu.Unlock()
@@ -1854,15 +1867,21 @@ func (op *open) touchChunk(chunkOffset uint64) {
 	}
 }
 
-// ensureChunk returns the cache entry for the chunk at chunkOffset, starting a
-// background download if there is no entry yet. op.mu must be held.
-func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readChunk {
+// ensureChunk returns the cache entry for the chunk at chunkOffset, downloading it in the background
+// once after is closed, or at once (even if it was waiting) when after is nil. op.mu must be held.
+func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64, after <-chan struct{}) *readChunk {
 	if chunk, ok := op.buffer[chunkOffset]; ok {
 		op.touchChunk(chunkOffset)
+		if after == nil {
+			chunk.startNow()
+		}
 		return chunk
 	}
 
-	chunk := &readChunk{done: make(chan struct{})}
+	chunk := &readChunk{done: make(chan struct{}), start: make(chan struct{})}
+	if after == nil {
+		chunk.startNow()
+	}
 	op.buffer[chunkOffset] = chunk
 	op.cacheOrder = append(op.cacheOrder, chunkOffset)
 	op.evictChunks()
@@ -1874,6 +1893,12 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64) *readC
 	path := op.pathName
 
 	go func() {
+		select {
+		case <-chunk.start:
+		case <-after:
+		case <-op.ctx.Done():
+		}
+
 		var buf bytes.Buffer
 		err := recoverAsError("reading "+path, func() error {
 			return op.treeConnect.client.Read(op.ctx, acc, path, chunkOffset, toRead, &buf)

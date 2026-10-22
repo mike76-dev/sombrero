@@ -100,6 +100,71 @@ func TestOverwritingCreateInvalidatesTheReadCache(t *testing.T) {
 	}
 }
 
+// TestPrefetchesGoOneAfterAnother: prefetched chunks are fetched in turn, so the chunk needed next
+// is not slowed by the ones behind it; a chunk the client asks for does not wait its turn.
+func TestPrefetchesGoOneAfterAnother(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	const chunk = 1024
+	h.files.putData("clip.mp4", bytes.Repeat([]byte("O"), 8*chunk))
+	created := cl.createWithOptions("clip.mp4", smb2.FILE_OPEN, 0)
+	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
+	file.mu.Lock()
+	file.chunkSize = chunk
+	file.maxCacheSize = readCacheSize(chunk)
+	file.mu.Unlock()
+
+	// The first chunk is fetched by the read that needs it; the one after is the first prefetch.
+	if _, err := file.read(0, chunk); err != nil {
+		t.Fatalf("the first read failed: %v", err)
+	}
+	release := h.files.holdReads()
+	if _, ok := file.tryReadCached(0, chunk); !ok {
+		t.Fatal("the cache did not answer the read of the chunk just fetched")
+	}
+	waitFor(t, func() bool { return h.files.readsStarted() == 2 })
+	time.Sleep(50 * time.Millisecond)
+	if n := h.files.readsStarted(); n != 2 {
+		t.Fatalf("%d reads reached the backend, want the first prefetch alone", n-1)
+	}
+
+	// A read of a chunk still waiting its turn starts it at once.
+	demanded := make(chan error, 1)
+	go func() {
+		_, err := file.read(3*chunk, 10)
+		demanded <- err
+	}()
+	waitFor(t, func() bool { return h.files.readsStarted() == 3 })
+
+	// Let go, and the rest follow in turn.
+	release()
+	if err := <-demanded; err != nil {
+		t.Fatalf("the demanded read failed: %v", err)
+	}
+	waitFor(t, func() bool { return h.files.readsStarted() == 4 })
+	file.mu.Lock()
+	for _, offset := range []uint64{chunk, 2 * chunk, 3 * chunk} {
+		select {
+		case <-file.buffer[offset].done:
+		default:
+			t.Errorf("the chunk at %d was not fetched", offset)
+		}
+	}
+	file.mu.Unlock()
+}
+
+// waitFor polls until the condition holds, or fails the test after a while.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatal("the condition did not come to hold")
+}
+
 // closedChan returns a channel that is already closed, which is how a cache entry says its
 // download has finished.
 func closedChan() chan struct{} {

@@ -65,7 +65,9 @@ type fakeClient struct {
 
 	// readGate holds up every read until a test lets it go, so that a test can arrange for
 	// something to happen to the handle while a read on it is still being worked on.
-	readGate chan struct{}
+	// readsBegun counts the reads that reached the backend, held up or not.
+	readGate   chan struct{}
+	readsBegun int
 
 	// readPanic and writePanic make the backend panic rather than answer. A backend is reached
 	// from goroutines nobody is left waiting on, so what the server does when one of them comes
@@ -190,6 +192,14 @@ func (fc *fakeClient) storedParts() []int {
 	defer fc.mu.Unlock()
 
 	return append([]int(nil), fc.partsFinished...)
+}
+
+// readsStarted is how many reads have reached the backend so far.
+func (fc *fakeClient) readsStarted() int {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	return fc.readsBegun
 }
 
 // holdReads makes every read wait, and returns what lets them all go.
@@ -356,6 +366,7 @@ func (fc *fakeClient) parentsAsked() string {
 // reads as nothing, as it did before any test cared what came back.
 func (fc *fakeClient) Read(_ context.Context, _ stores.Account, path string, offset, length uint64, w io.Writer) error {
 	fc.mu.Lock()
+	fc.readsBegun++
 	gate, boom := fc.readGate, fc.readPanic
 	fc.mu.Unlock()
 
