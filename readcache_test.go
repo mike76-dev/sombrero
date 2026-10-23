@@ -154,6 +154,37 @@ func TestPrefetchesGoOneAfterAnother(t *testing.T) {
 	file.mu.Unlock()
 }
 
+// TestAChunkDownloadIsGivenUpBeforeTheClientIs: a download that does not finish in its time fails
+// the read, so the client gets an error while it is still listening rather than dropping the connection.
+func TestAChunkDownloadIsGivenUpBeforeTheClientIs(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+
+	h.files.putData("clip.mp4", bytes.Repeat([]byte("O"), 4096))
+	created := cl.createWithOptions("clip.mp4", smb2.FILE_OPEN, 0)
+	file := h.srv.globalOpenTable[openIDOf(createdFileID(created))]
+	file.mu.Lock()
+	file.chunkTimeout = 50 * time.Millisecond
+	file.mu.Unlock()
+	h.files.hangReads()
+
+	start := time.Now()
+	if _, err := file.read(0, 1024); err == nil {
+		t.Fatal("the read of a chunk that never arrives succeeded")
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Errorf("the read took %v to give up", waited)
+	}
+
+	// The failed chunk is not kept, so the next read tries again.
+	file.mu.Lock()
+	cached := len(file.buffer)
+	file.mu.Unlock()
+	if cached != 0 {
+		t.Errorf("%d chunk(s) left in the cache after the download was given up", cached)
+	}
+}
+
 // TestReadChunkSize: a chunk is a whole number of small slabs or an exact fraction of a large one,
 // and no larger than a client waits for on a slow evening.
 func TestReadChunkSize(t *testing.T) {

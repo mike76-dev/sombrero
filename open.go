@@ -517,6 +517,7 @@ type open struct {
 	buffer       map[uint64]*readChunk
 	cacheOrder   []uint64
 	chunkSize    uint64
+	chunkTimeout time.Duration
 	maxCacheSize int
 	lastReadEnd  uint64
 
@@ -561,6 +562,10 @@ const (
 
 	// How long a read may wait for its chunks before debug mode logs it.
 	slowReadLog = 5 * time.Second
+
+	// How long a chunk download may take. A desktop SMB client gives up on a read after some
+	// twenty seconds and drops the whole connection, so the read must be answered before that.
+	readChunkTimeout = 15 * time.Second
 
 	// How often a directory that is being watched is looked at again, to see whether anything a
 	// client asked to be told about has changed.
@@ -1180,7 +1185,8 @@ func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeCo
 		// alignment that makes downloads the cheapest. For renterd shares, it is
 		// merely the multipart part size; renterd serves arbitrary ranges, so the
 		// chunk size derived from it is just a reasonable default.
-		chunkSize: readChunkSize(tc.maxUploadSize),
+		chunkSize:    readChunkSize(tc.maxUploadSize),
+		chunkTimeout: readChunkTimeout,
 	}
 	op.maxCacheSize = readCacheSize(op.chunkSize)
 
@@ -1909,9 +1915,11 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64, after 
 		case <-op.ctx.Done():
 		}
 
+		ctx, cancel := context.WithTimeout(op.ctx, op.chunkTimeout)
+		defer cancel()
 		var buf bytes.Buffer
 		err := recoverAsError("reading "+path, func() error {
-			return op.treeConnect.client.Read(op.ctx, acc, path, chunkOffset, toRead, &buf)
+			return op.treeConnect.client.Read(ctx, acc, path, chunkOffset, toRead, &buf)
 		})
 
 		op.mu.Lock()
