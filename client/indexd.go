@@ -61,8 +61,8 @@ const (
 )
 
 // defaultSlabRetryDelays are the waits before retrying a slab download that reached too few hosts,
-// which is usually transient.
-var defaultSlabRetryDelays = []time.Duration{time.Second, 3 * time.Second}
+// which usually passes within seconds; for a video being played, a pause beats an error.
+var defaultSlabRetryDelays = []time.Duration{time.Second, 3 * time.Second, 5 * time.Second, 10 * time.Second}
 
 // nextRetry doubles the wait after another failure, up to retryMax.
 func nextRetry(d time.Duration) time.Duration {
