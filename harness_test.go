@@ -65,10 +65,8 @@ type fakeClient struct {
 
 	// readGate holds up every read until a test lets it go, so that a test can arrange for
 	// something to happen to the handle while a read on it is still being worked on.
-	// readHang makes every read wait until it is called off. readsBegun counts the reads
-	// that reached the backend, held up or not.
+	// readsBegun counts the reads that reached the backend, held up or not.
 	readGate   chan struct{}
-	readHang   bool
 	readsBegun int
 
 	// readPanic and writePanic make the backend panic rather than answer. A backend is reached
@@ -202,14 +200,6 @@ func (fc *fakeClient) readsStarted() int {
 	defer fc.mu.Unlock()
 
 	return fc.readsBegun
-}
-
-// hangReads makes every read wait until it is called off, the way a store that never answers would.
-func (fc *fakeClient) hangReads() {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
-	fc.readHang = true
 }
 
 // holdReads makes every read wait, and returns what lets them all go.
@@ -374,16 +364,12 @@ func (fc *fakeClient) parentsAsked() string {
 // Read serves the range out of the contents the test gave the file, which is what lets a test tell
 // the bytes of one version of a file from those of another. A file that was only ever given a size
 // reads as nothing, as it did before any test cared what came back.
-func (fc *fakeClient) Read(ctx context.Context, _ stores.Account, path string, offset, length uint64, w io.Writer) error {
+func (fc *fakeClient) Read(_ context.Context, _ stores.Account, path string, offset, length uint64, w io.Writer) error {
 	fc.mu.Lock()
 	fc.readsBegun++
-	gate, hang, boom := fc.readGate, fc.readHang, fc.readPanic
+	gate, boom := fc.readGate, fc.readPanic
 	fc.mu.Unlock()
 
-	if hang {
-		<-ctx.Done()
-		return ctx.Err()
-	}
 	if gate != nil {
 		<-gate
 	}
