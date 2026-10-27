@@ -448,7 +448,7 @@ func TestImportAppMetadata(t *testing.T) {
 
 	meta := api.appMetadata()
 	want := types.HashBytes([]byte("SombreroSombrero SMB server"))
-	if meta.ID != want {
-		t.Errorf("app ID: want %s, got %s", want, meta.ID)
+	if meta.AppID != want {
+		t.Errorf("app ID: want %s, got %s", want, meta.AppID)
 	}
 }

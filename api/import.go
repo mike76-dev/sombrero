@@ -842,7 +842,14 @@ func (api *API) indexdSource(w http.ResponseWriter, body ImportRequest) (*client
 		key = decoded
 	}
 
-	sdkClient, err := sdk.NewBuilder(address, api.appMetadata()).SDK(key)
+	builder, err := sdk.NewBuilder(address, api.appMetadata())
+	if err != nil {
+		writeError(w, "that indexer cannot be prepared for: "+err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	defer builder.Close()
+
+	sdkClient, err := builder.Connect(api.ctx, key)
 	if err != nil {
 		writeError(w, "that indexer did not accept the app key: "+err.Error(), http.StatusBadRequest)
 		return nil, false
@@ -888,7 +895,7 @@ func (api *API) connectionKey(w http.ResponseWriter, ref ConnectionRef) (types.P
 // app key is derived under.
 func (api *API) appMetadata() sdk.AppMetadata {
 	return sdk.AppMetadata{
-		ID:          types.HashBytes(append([]byte(api.cfg.Indexd.Name), []byte(api.cfg.Indexd.Description)...)),
+		AppID:       types.HashBytes(append([]byte(api.cfg.Indexd.Name), []byte(api.cfg.Indexd.Description)...)),
 		Name:        api.cfg.Indexd.Name,
 		Description: api.cfg.Indexd.Description,
 		LogoURL:     api.cfg.Indexd.LogoURL,

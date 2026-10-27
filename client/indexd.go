@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -19,7 +18,6 @@ import (
 	"github.com/mike76-dev/sombrero/stores"
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
-	"go.sia.tech/indexd/api/app"
 	"go.sia.tech/indexd/slabs"
 	"go.sia.tech/renterd/v2/api"
 	sdk "go.sia.tech/siastorage"
@@ -190,13 +188,35 @@ type sdkBackend struct {
 	// Slab objects are content-addressed and immutable, so the lookups are
 	// cached to save a round trip on repeat downloads of the same slab.
 	mu       sync.Mutex
-	objCache map[types.Hash256]sdk.Object
+	objCache map[types.Hash256]*sdk.Object
 	objOrder []types.Hash256
+}
+
+// sdkObject is the SDK's handle behind SlabObject. The keys stay inside it, and
+// the backend asserts it back where a pin or a seal needs them.
+type sdkObject struct {
+	obj *sdk.Object
+}
+
+func (o sdkObject) ID() types.Hash256         { return o.obj.ID() }
+func (o sdkObject) Size() uint64              { return o.obj.Size() }
+func (o sdkObject) CreatedAt() time.Time      { return o.obj.CreatedAt() }
+func (o sdkObject) UpdatedAt() time.Time      { return o.obj.UpdatedAt() }
+func (o sdkObject) Metadata() json.RawMessage { return json.RawMessage(o.obj.Metadata()) }
+
+// handleOf is the SDK handle behind an object this backend handed out.
+func handleOf(obj SlabObject) (*sdk.Object, error) {
+	o, ok := obj.(sdkObject)
+	if !ok {
+		return nil, fmt.Errorf("the object %s was not opened by this backend", obj.ID())
+	}
+
+	return o.obj, nil
 }
 
 // object returns the slab object with the given key, looking it up remotely
 // on a cache miss.
-func (b *sdkBackend) object(ctx context.Context, key types.Hash256) (sdk.Object, error) {
+func (b *sdkBackend) object(ctx context.Context, key types.Hash256) (*sdk.Object, error) {
 	b.mu.Lock()
 	obj, ok := b.objCache[key]
 	b.mu.Unlock()
@@ -206,7 +226,7 @@ func (b *sdkBackend) object(ctx context.Context, key types.Hash256) (sdk.Object,
 
 	obj, err := b.sdk.Object(ctx, key)
 	if err != nil {
-		return sdk.Object{}, markNotFound(err)
+		return nil, markNotFound(err)
 	}
 
 	b.mu.Lock()
@@ -254,12 +274,12 @@ func (b *sdkBackend) Account(ctx context.Context) (AccountInfo, error) {
 // Upload uploads the object and directly pins it. The tag goes with it, sealed
 // by the SDK with the app key, so that the object can later say what it holds.
 func (b *sdkBackend) Upload(ctx context.Context, r io.Reader, dataShards, parityShards uint8, meta json.RawMessage) (types.Hash256, error) {
-	obj := sdk.NewEmptyObject()
-	if err := b.sdk.Upload(ctx, &obj, r, sdk.WithRedundancy(dataShards, parityShards)); err != nil {
+	obj, err := b.sdk.Upload(ctx, sdk.NewEmptyObject(), r, sdk.WithRedundancy(dataShards, parityShards))
+	if err != nil {
 		return types.Hash256{}, err
 	}
 	if len(meta) > 0 {
-		obj.UpdateMetadata(meta)
+		obj = obj.WithMetadata(meta)
 	}
 
 	key := obj.ID()
@@ -268,7 +288,7 @@ func (b *sdkBackend) Upload(ctx context.Context, r io.Reader, dataShards, parity
 			return types.Hash256{}, fmt.Errorf("failed to pin slab %s: %w; failed to delete orphaned slab: %w", key, err, derr)
 		}
 
-		if perr := b.sdk.PruneSlabs(ctx); perr != nil {
+		if perr := b.PruneSlabs(ctx); perr != nil {
 			return types.Hash256{}, fmt.Errorf("failed to pin slab %s: %w; failed to prune: %w", key, err, perr)
 		}
 
@@ -285,7 +305,7 @@ func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, le
 		return err
 	}
 
-	rc, err := b.sdk.Download(obj, sdk.WithDownloadRange(offset, length))
+	rc, err := b.sdk.Download(ctx, obj, sdk.WithDownloadRange(offset, length))
 	if err != nil {
 		return err
 	}
@@ -315,25 +335,23 @@ func (b *sdkBackend) Download(ctx context.Context, key types.Hash256, offset, le
 // The object has to be one this backend handed out or opened: only the SDK's own
 // handle carries the keys a pin is made with.
 func (b *sdkBackend) Pin(ctx context.Context, obj SlabObject) error {
-	o, ok := obj.(*sdk.Object)
-	if !ok {
-		return fmt.Errorf("the object %s was not opened by this backend", obj.ID())
+	o, err := handleOf(obj)
+	if err != nil {
+		return err
 	}
 
-	return b.sdk.PinObject(ctx, *o)
+	return b.sdk.PinObject(ctx, o)
 }
 
-// Retag replaces what the object says about its contents. Pinning an object the
-// account already holds writes the metadata and nothing else, so this costs one
-// request and moves no data.
+// Retag replaces what the object says about its contents, which is one request
+// that moves no data.
 func (b *sdkBackend) Retag(ctx context.Context, key types.Hash256, meta json.RawMessage) error {
 	obj, err := b.object(ctx, key)
 	if err != nil {
 		return err
 	}
 
-	obj.UpdateMetadata(meta)
-	if err := b.sdk.PinObject(ctx, obj); err != nil {
+	if err := b.sdk.UpdateObjectMetadata(ctx, obj.WithMetadata(meta)); err != nil {
 		return markRefusal(err)
 	}
 
@@ -344,20 +362,21 @@ func (b *sdkBackend) Retag(ctx context.Context, key types.Hash256, meta json.Raw
 }
 
 // markRefusal wraps an answer that waiting will not change, so that the caller
-// can tell it from a backend that failed to answer at all.
+// can tell it from a backend that failed to answer at all. The metadata cap is
+// matched by its wording, which is all the SDK passes on of it.
 func markRefusal(err error) error {
-	var httpErr *app.HTTPError
-	if errors.As(err, &httpErr) && httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 && httpErr.StatusCode != http.StatusTooManyRequests {
+	if errors.Is(err, sdk.ErrUnauthorized) || errors.Is(err, sdk.ErrInvalidState) ||
+		strings.Contains(err.Error(), "metadata size limit") {
 		return fmt.Errorf("%w: %w", errRefused, err)
 	}
 
 	return err
 }
 
-// markNotFound translates the backend's way of saying there is no such object.
+// markNotFound translates the backend's way of saying there is no such object,
+// which reaches the SDK as the indexer's wording and nothing more.
 func markNotFound(err error) error {
-	var httpErr *app.HTTPError
-	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+	if strings.Contains(strings.ToLower(err.Error()), "not found") {
 		return fmt.Errorf("%w: %w", errObjectNotFound, err)
 	}
 
@@ -368,24 +387,23 @@ func markNotFound(err error) error {
 // description carries what it takes to pin the object elsewhere. Only an object
 // this backend handed out can be sealed: the keys live in the SDK's own handle.
 func (b *sdkBackend) SealObject(obj SlabObject) (slabs.SealedObject, error) {
-	o, ok := obj.(*sdk.Object)
-	if !ok {
-		return slabs.SealedObject{}, fmt.Errorf("the object %s was not opened by this backend", obj.ID())
+	o, err := handleOf(obj)
+	if err != nil {
+		return slabs.SealedObject{}, err
 	}
 
-	return o.Seal(b.sdk.AppKey()).SealedObject, nil
+	return b.sdk.SealObject(o)
 }
 
 // ObjectFromSealed opens a sealed pin with this account's app key, which fits
 // the descriptions this account made.
 func (b *sdkBackend) ObjectFromSealed(sealed slabs.SealedObject) (SlabObject, error) {
-	so := sdk.SealedObject{SealedObject: sealed}
-	obj, err := so.Open(b.sdk.AppKey())
+	obj, err := b.sdk.ObjectFromSealed(sealed)
 	if err != nil {
 		return nil, err
 	}
 
-	return &obj, nil
+	return sdkObject{obj: obj}, nil
 }
 
 // DeleteObject calls sdk.DeleteObject.
@@ -398,16 +416,18 @@ func (b *sdkBackend) DeleteObject(ctx context.Context, key types.Hash256) error 
 	return nil
 }
 
-// PruneSlabs calls sdk.PruneSlabs.
+// PruneSlabs calls sdk.PruneSlabs. The zero cutoff leaves the guard to the
+// indexer, which holds back what was pinned recently, so an upload that is
+// still in flight is not swept up.
 func (b *sdkBackend) PruneSlabs(ctx context.Context) error {
-	return b.sdk.PruneSlabs(ctx)
+	return b.sdk.PruneSlabs(ctx, time.Time{})
 }
 
 // ListObjects returns one page of the account's object event log, oldest event
 // first. A deleted object is reported as an event without an object, which is
 // how the log keeps a record of what is gone.
 func (b *sdkBackend) ListObjects(ctx context.Context, cursor ObjectCursor, limit int) ([]PinnedObject, error) {
-	events, err := b.sdk.ObjectEvents(ctx, slabs.Cursor{After: cursor.After, Key: cursor.Key}, limit)
+	events, err := b.sdk.ObjectEvents(ctx, sdk.EventCursor{After: cursor.After, AfterID: cursor.Key}, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -415,13 +435,13 @@ func (b *sdkBackend) ListObjects(ctx context.Context, cursor ObjectCursor, limit
 	objs := make([]PinnedObject, 0, len(events))
 	for _, ev := range events {
 		obj := PinnedObject{
-			Key:       ev.Key,
+			Key:       ev.ID,
 			UpdatedAt: ev.UpdatedAt,
 			Deleted:   ev.Deleted || ev.Object == nil,
 		}
 		if ev.Object != nil {
 			obj.Size = ev.Object.Size()
-			obj.Object = ev.Object
+			obj.Object = sdkObject{obj: ev.Object}
 		}
 		objs = append(objs, obj)
 	}
@@ -559,7 +579,7 @@ type FragmentationOptions struct {
 func NewIndexdClient(db *stores.Database, sdkClient *sdk.SDK, share string, workgroup int, dataShards, parityShards uint8, packing PackingOptions, fragmentation FragmentationOptions, backlog *Backlog, debug bool) Client {
 	backend := &sdkBackend{
 		sdk:      sdkClient,
-		objCache: make(map[types.Hash256]sdk.Object),
+		objCache: make(map[types.Hash256]*sdk.Object),
 	}
 	return newIndexdClient(db, backend, share, workgroup, dataShards, parityShards, packing, fragmentation, debug, withBacklog(backlog))
 }

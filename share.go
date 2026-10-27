@@ -465,14 +465,20 @@ func (s *server) AddConnection(wg stores.Workgroup, share stores.Share, appKey t
 		}
 		sdkClient := offered
 		if sdkClient == nil {
-			builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
-				ID:          types.HashBytes(append([]byte(s.cfg.Indexd.Name), []byte(s.cfg.Indexd.Description)...)),
+			builder, berr := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
+				AppID:       types.HashBytes(append([]byte(s.cfg.Indexd.Name), []byte(s.cfg.Indexd.Description)...)),
 				Name:        s.cfg.Indexd.Name,
 				Description: s.cfg.Indexd.Description,
 				LogoURL:     s.cfg.Indexd.LogoURL,
 				ServiceURL:  s.cfg.Indexd.ServiceURL,
 			})
-			sdkClient, err = builder.SDK(appKey)
+			if berr != nil {
+				return berr
+			}
+			sdkClient, err = builder.Connect(s.ctx, appKey)
+			if cerr := builder.Close(); cerr != nil {
+				log.Printf("failed to close the builder: %v", cerr)
+			}
 			if err != nil {
 				return err
 			}

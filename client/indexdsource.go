@@ -433,5 +433,5 @@ func (b *sdkBackend) Object(ctx context.Context, key types.Hash256) (SlabObject,
 		return nil, err
 	}
 
-	return &obj, nil
+	return sdkObject{obj: obj}, nil
 }

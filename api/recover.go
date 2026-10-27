@@ -54,7 +54,13 @@ type catalogSource func(address string, key types.PrivateKey) (client.CatalogSou
 
 // sdkCatalogSource reads an account through the SDK, as the server does.
 func (api *API) sdkCatalogSource(address string, key types.PrivateKey) (client.CatalogSource, error) {
-	sdkClient, err := sdk.NewBuilder(address, api.appMetadata()).SDK(key)
+	builder, err := sdk.NewBuilder(address, api.appMetadata())
+	if err != nil {
+		return nil, err
+	}
+	defer builder.Close()
+
+	sdkClient, err := builder.Connect(api.ctx, key)
 	if err != nil {
 		return nil, err
 	}

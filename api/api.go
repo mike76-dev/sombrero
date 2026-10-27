@@ -1990,13 +1990,13 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 		return
 	}
 
-	builder := sdk.NewBuilder(share.ServerName, sdk.AppMetadata{
-		ID:          types.HashBytes(append([]byte(api.cfg.Indexd.Name), []byte(api.cfg.Indexd.Description)...)),
-		Name:        api.cfg.Indexd.Name,
-		Description: api.cfg.Indexd.Description,
-		LogoURL:     api.cfg.Indexd.LogoURL,
-		ServiceURL:  api.cfg.Indexd.ServiceURL,
-	})
+	builder, err := sdk.NewBuilder(share.ServerName, api.appMetadata())
+	if err != nil {
+		api.connects.drop(connectKey(wg, share))
+		log.Printf("failed to prepare for the indexer: %v", err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
 	approvalURL, err := builder.RequestConnection(req.Context())
 	if err != nil {
@@ -2029,6 +2029,8 @@ func (api *API) runConnect(attempt *connectAttempt, builder *sdk.Builder, wg sto
 	var derived types.PrivateKey
 
 	if builder != nil {
+		defer builder.Close()
+
 		ctx, cancel := context.WithTimeout(api.ctx, connectApprovalTimeout)
 		defer cancel()
 
