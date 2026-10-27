@@ -79,6 +79,12 @@ func (fa *fakeAccount) unpin(key types.Hash256, at time.Time) {
 	fa.events = append(fa.events, PinnedObject{Key: key, UpdatedAt: at, Deleted: true})
 }
 
+// SealObject implements AccountObjects, sealing with the key the tests stand up
+// as the source account's.
+func (fa *fakeAccount) SealObject(obj *sdk.Object) (slabs.SealedObject, error) {
+	return obj.Seal(testSealKey).SealedObject, nil
+}
+
 func (fa *fakeAccount) ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error) {
 	if fa.err != nil {
 		return nil, fa.err
@@ -187,14 +193,20 @@ func TestDescribeAccount(t *testing.T) {
 	if part.Pin == nil {
 		t.Fatal("the part says nothing about pinning the object")
 	}
-	if part.Pin.DataKey != [32]byte{1} {
-		t.Errorf("the data key of the part: got %x", part.Pin.DataKey)
+	if len(part.Pin.Sealed.Slabs) != 2 || part.Pin.Sealed.Slabs[0].Length != 1<<20 || part.Pin.Sealed.Slabs[1].Length != 2<<20 {
+		t.Errorf("the slabs of the part: got %+v", part.Pin.Sealed.Slabs)
 	}
-	if len(part.Pin.Slabs) != 2 || part.Pin.Slabs[0].Length != 1<<20 || part.Pin.Slabs[1].Length != 2<<20 {
-		t.Errorf("the slabs of the part: got %+v", part.Pin.Slabs)
+	if part.Pin.Sealed.Slabs[0].Sectors[0].Root != (types.Hash256{1, 1}) {
+		t.Errorf("the sectors of the part: got %+v", part.Pin.Sealed.Slabs[0].Sectors)
 	}
-	if part.Pin.Slabs[0].Sectors[0].Root != (types.Hash256{1, 1}) {
-		t.Errorf("the sectors of the part: got %+v", part.Pin.Slabs[0].Sectors)
+
+	// The pin opens with the account's app key into the object it was sealed from.
+	opened, err := (testUnsealer{}).ObjectFromSealed(part.Pin.Sealed)
+	if err != nil {
+		t.Fatalf("the pin would not open: %v", err)
+	}
+	if opened.ID() != kept {
+		t.Errorf("the pin opened into %s, want %s", opened.ID(), kept)
 	}
 	if part.Source == nil || part.Source.Kind != "indexd" || part.Source.Origin != "http://indexer" {
 		t.Errorf("the source of the part: got %+v", part.Source)

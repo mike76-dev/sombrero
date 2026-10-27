@@ -27,6 +27,12 @@ type fakeCatalogSource struct {
 	data []byte
 }
 
+// SealObject implements client.AccountObjects. A recovery reads catalogs and
+// pins nothing, so no real seal is owed.
+func (f *fakeCatalogSource) SealObject(obj *sdk.Object) (slabs.SealedObject, error) {
+	return slabs.SealedObject{}, nil
+}
+
 func newFakeCatalogSource(path string, data []byte) *fakeCatalogSource {
 	ss := []slabs.SlabSlice{{
 		Version:       1,

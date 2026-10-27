@@ -298,6 +298,19 @@ func (b *sdkBackend) Retag(ctx context.Context, key types.Hash256, meta json.Raw
 	return nil
 }
 
+// SealObject locks the object with this account's app key, which is how a
+// description carries what it takes to pin the object elsewhere.
+func (b *sdkBackend) SealObject(obj *sdk.Object) (slabs.SealedObject, error) {
+	return obj.Seal(b.sdk.AppKey()).SealedObject, nil
+}
+
+// ObjectFromSealed opens a sealed pin with this account's app key, which fits
+// the descriptions this account made.
+func (b *sdkBackend) ObjectFromSealed(sealed slabs.SealedObject) (sdk.Object, error) {
+	so := sdk.SealedObject{SealedObject: sealed}
+	return so.Open(b.sdk.AppKey())
+}
+
 // DeleteObject calls sdk.DeleteObject.
 func (b *sdkBackend) DeleteObject(ctx context.Context, key types.Hash256) error {
 	b.forgetObject(key)

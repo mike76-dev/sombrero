@@ -628,7 +628,7 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 		return
 	}
 
-	src, _, describe, ok := api.source(w, body, share)
+	src, unsealer, describe, ok := api.source(w, body, share)
 	if !ok {
 		return
 	}
@@ -657,6 +657,7 @@ func (api *API) importHandlerPOST(w http.ResponseWriter, req *http.Request, ps h
 			OnError:  run.failure,
 		},
 		Target:    stores.TransferTarget{Share: share.Name, Workgroup: wg.ID, Owner: acc},
+		Unsealer:  unsealer,
 		Copy:      body.Copy,
 		Report:    run.count,
 		OnRefusal: run.refused,
@@ -764,7 +765,7 @@ func (api *API) destination(w http.ResponseWriter, wg stores.Workgroup, share st
 }
 
 // source builds what the data is read from, and the walk that describes it.
-func (api *API) source(w http.ResponseWriter, body ImportRequest, share stores.Share) (client.PartReader, client.ObjectPinner, describer, bool) {
+func (api *API) source(w http.ResponseWriter, body ImportRequest, share stores.Share) (client.PartReader, client.ObjectUnsealer, describer, bool) {
 	switch body.Source {
 	case "renterd":
 		rc, ok := api.renterdSource(w, body)
@@ -790,7 +791,7 @@ func (api *API) source(w http.ResponseWriter, body ImportRequest, share stores.S
 
 		prefix := body.Prefix
 
-		return client.IndexdSource{Objects: account}, nil, describer{
+		return client.IndexdSource{Objects: account}, account, describer{
 			origin: body.Address,
 			walk: func(ctx context.Context, tw *transfer.Writer) (client.DescribeStats, error) {
 				return client.DescribeAccount(ctx, account, tw, body.Address, prefix)

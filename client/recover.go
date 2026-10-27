@@ -10,6 +10,7 @@ import (
 
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
+	"go.sia.tech/indexd/slabs"
 )
 
 // CatalogSource is an account whose objects can be listed and read, which is
@@ -94,7 +95,8 @@ func FindCatalogs(ctx context.Context, src CatalogSource) ([]FoundCatalog, func(
 		}
 		for _, piece := range tag.Pieces {
 			if isCatalog(piece) {
-				collectPiece(files, piece, *obj, "")
+				// The catalogs are read here, never pinned, so no seal is owed.
+				collectPiece(files, piece, *obj, slabs.SealedObject{}, "")
 				shares[piece.Share+piece.Path] = piece.Share
 			}
 		}

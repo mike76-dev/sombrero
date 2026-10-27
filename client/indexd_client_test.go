@@ -283,6 +283,12 @@ func (fb *fakeBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, lim
 	return page, nil
 }
 
+// SealObject implements AccountObjects, sealing with the key the tests stand up
+// as the source account's.
+func (fb *fakeBackend) SealObject(obj *sdk.Object) (slabs.SealedObject, error) {
+	return obj.Seal(testSealKey).SealedObject, nil
+}
+
 // Object answers for the objects this account holds, which is what confirms that
 // a pin took. One it does not hold is answered the way the indexer answers for
 // it, so that the two are told apart.
