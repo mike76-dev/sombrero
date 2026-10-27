@@ -10,7 +10,6 @@ import (
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/slabs"
-	sdk "go.sia.tech/siastorage"
 )
 
 // fakePinner stands in for an indexer asked to take over objects it does not
@@ -21,7 +20,7 @@ type fakePinner struct {
 }
 
 // PinObject implements ObjectPinner.
-func (fp *fakePinner) PinObject(ctx context.Context, obj sdk.Object) error {
+func (fp *fakePinner) PinObject(ctx context.Context, obj SlabObject) error {
 	if fp.err != nil {
 		return fp.err
 	}
@@ -45,23 +44,10 @@ func foreignSlab(n byte, length uint32) slabs.SlabSlice {
 	}
 }
 
-// testSealKey is the app key the tests' descriptions are sealed with, standing
-// for the source account's.
-var testSealKey = types.GeneratePrivateKey()
-
-// testUnsealer opens pins sealed with testSealKey, as the source account would.
-type testUnsealer struct{}
-
-// ObjectFromSealed implements ObjectUnsealer.
-func (testUnsealer) ObjectFromSealed(sealed slabs.SealedObject) (sdk.Object, error) {
-	so := sdk.SealedObject{SealedObject: sealed}
-	return so.Open(testSealKey)
-}
-
 // foreignObject is the object foreignFile describes, for the tests that check
 // what was pinned.
-func foreignObject(length uint32) sdk.Object {
-	return sdk.NewUnsafeObject([32]byte{9}, []slabs.SlabSlice{foreignSlab(1, length)})
+func foreignObject(length uint32) *fakeObject {
+	return newFakeObject([32]byte{9}, []slabs.SlabSlice{foreignSlab(1, length)})
 }
 
 // foreignFile is a file of another account's, with what it takes to pin it and
@@ -76,7 +62,7 @@ func foreignFile(path string, length uint32) transfer.File {
 		ModifiedAt: time.Now().Add(-24 * time.Hour).UTC().Truncate(time.Second),
 		Parts: []transfer.Part{{
 			Offset: 0, Length: uint64(length),
-			Pin:    &transfer.Pin{Sealed: obj.Seal(testSealKey).SealedObject},
+			Pin:    &transfer.Pin{Sealed: sealFake(obj)},
 			Source: &transfer.Source{Kind: "indexd", Key: obj.ID().String()},
 		}},
 	}
@@ -480,13 +466,13 @@ func TestImportReportsAsItGoes(t *testing.T) {
 // TestPinFileRewritesTheParts verifies what pinning makes of a description: the
 // parts name the objects this account holds, with nothing left to pin.
 func TestPinFileRewritesTheParts(t *testing.T) {
-	objA := sdk.NewUnsafeObject([32]byte{1}, []slabs.SlabSlice{foreignSlab(1, 1024)})
-	objB := sdk.NewUnsafeObject([32]byte{2}, []slabs.SlabSlice{foreignSlab(4, 2048)})
+	objA := newFakeObject([32]byte{1}, []slabs.SlabSlice{foreignSlab(1, 1024)})
+	objB := newFakeObject([32]byte{2}, []slabs.SlabSlice{foreignSlab(4, 2048)})
 	file := transfer.File{
 		Path: "/x.bin", Size: 3072,
 		Parts: []transfer.Part{
-			{Offset: 0, Length: 1024, Pin: &transfer.Pin{Sealed: objA.Seal(testSealKey).SealedObject}},
-			{Offset: 1024, Length: 2048, Pin: &transfer.Pin{Sealed: objB.Seal(testSealKey).SealedObject}},
+			{Offset: 0, Length: 1024, Pin: &transfer.Pin{Sealed: sealFake(objA)}},
+			{Offset: 1024, Length: 2048, Pin: &transfer.Pin{Sealed: sealFake(objB)}},
 		},
 	}
 

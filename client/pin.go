@@ -5,16 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"path"
 	"slices"
 
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
-	"go.sia.tech/indexd/api/app"
 	"go.sia.tech/indexd/slabs"
-	sdk "go.sia.tech/siastorage"
 )
 
 // TransferStore is the part of a store an import writes the rows of what it
@@ -32,13 +29,13 @@ type TransferStore interface {
 // of an import rather than the source it is reading: pinning into the account
 // that already holds them would do nothing at all.
 type ObjectPinner interface {
-	PinObject(ctx context.Context, obj sdk.Object) error
+	PinObject(ctx context.Context, obj SlabObject) error
 }
 
 // ObjectUnsealer opens the sealed pins of a description, which takes the app
 // key of the account that described it: the source's, not the destination's.
 type ObjectUnsealer interface {
-	ObjectFromSealed(sealed slabs.SealedObject) (sdk.Object, error)
+	ObjectFromSealed(sealed slabs.SealedObject) (SlabObject, error)
 }
 
 // ObjectChecker says whether the account holds an object. A pinner that is one
@@ -50,7 +47,7 @@ type ObjectChecker interface {
 
 // PinObject takes over an object for this connection's account, which is what
 // makes an IndexdClient the pinner of an import into its share.
-func (ic *IndexdClient) PinObject(ctx context.Context, obj sdk.Object) error {
+func (ic *IndexdClient) PinObject(ctx context.Context, obj SlabObject) error {
 	return ic.backend.Pin(ctx, obj)
 }
 
@@ -61,9 +58,7 @@ func (ic *IndexdClient) HasObject(ctx context.Context, key types.Hash256) (bool,
 	if err == nil {
 		return true, nil
 	}
-
-	var httpErr *app.HTTPError
-	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+	if isNotFound(err) {
 		return false, nil
 	}
 

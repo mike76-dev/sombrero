@@ -86,7 +86,7 @@ func FindCatalogs(ctx context.Context, src CatalogSource) ([]FoundCatalog, func(
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to retrieve the object %s: %w", key, err)
 			}
-			obj = &fetched
+			obj = fetched
 		}
 
 		tag, ok := parseTag(obj.Metadata())
@@ -96,7 +96,7 @@ func FindCatalogs(ctx context.Context, src CatalogSource) ([]FoundCatalog, func(
 		for _, piece := range tag.Pieces {
 			if isCatalog(piece) {
 				// The catalogs are read here, never pinned, so no seal is owed.
-				collectPiece(files, piece, *obj, slabs.SealedObject{}, "")
+				collectPiece(files, piece, obj, slabs.SealedObject{}, "")
 				shares[piece.Share+piece.Path] = piece.Share
 			}
 		}

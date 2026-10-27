@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,49 +18,58 @@ import (
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/slabs"
-	sdk "go.sia.tech/siastorage"
 )
+
+// fakeObj is the one object the fake account holds, with what client.SlabObject
+// says of one.
+type fakeObj struct {
+	id       types.Hash256
+	size     uint64
+	metadata json.RawMessage
+}
+
+func (o *fakeObj) ID() types.Hash256         { return o.id }
+func (o *fakeObj) Size() uint64              { return o.size }
+func (o *fakeObj) CreatedAt() time.Time      { return time.Time{} }
+func (o *fakeObj) UpdatedAt() time.Time      { return time.Time{} }
+func (o *fakeObj) Metadata() json.RawMessage { return o.metadata }
 
 // fakeCatalogSource stands in for an account that holds one object: a slab of
 // the given bytes, tagged as the file it is.
 type fakeCatalogSource struct {
-	obj  sdk.Object
+	obj  *fakeObj
 	data []byte
 }
 
 // SealObject implements client.AccountObjects. A recovery reads catalogs and
 // pins nothing, so no real seal is owed.
-func (f *fakeCatalogSource) SealObject(obj *sdk.Object) (slabs.SealedObject, error) {
+func (f *fakeCatalogSource) SealObject(obj client.SlabObject) (slabs.SealedObject, error) {
 	return slabs.SealedObject{}, nil
 }
 
 func newFakeCatalogSource(path string, data []byte) *fakeCatalogSource {
-	ss := []slabs.SlabSlice{{
-		Version:       1,
-		EncryptionKey: slabs.EncryptionKey{1},
-		MinShards:     2,
-		Sectors:       []slabs.PinnedSector{{Root: types.Hash256{1}, HostKey: types.PublicKey{2}}},
-		Length:        uint32(len(data)),
-	}}
-	obj := sdk.NewUnsafeObject([32]byte{3}, ss)
-	obj.UpdateMetadata([]byte(fmt.Sprintf(
-		`{"sombrero":1,"pieces":[{"share":"myshare","path":%q,"offset":0,"at":0,"length":%d,"size":%d}]}`,
-		path, len(data), len(data),
-	)))
+	obj := &fakeObj{
+		id:   types.HashBytes(data),
+		size: uint64(len(data)),
+		metadata: []byte(fmt.Sprintf(
+			`{"sombrero":1,"pieces":[{"share":"myshare","path":%q,"offset":0,"at":0,"length":%d,"size":%d}]}`,
+			path, len(data), len(data),
+		)),
+	}
 
 	return &fakeCatalogSource{obj: obj, data: data}
 }
 
-func (f *fakeCatalogSource) ListObjects(_ context.Context, cursor slabs.Cursor, _ int) ([]client.PinnedObject, error) {
+func (f *fakeCatalogSource) ListObjects(_ context.Context, cursor client.ObjectCursor, _ int) ([]client.PinnedObject, error) {
 	if !cursor.After.IsZero() {
 		return nil, nil
 	}
-	return []client.PinnedObject{{Key: f.obj.ID(), Size: uint64(len(f.data)), UpdatedAt: time.Now(), Object: &f.obj}}, nil
+	return []client.PinnedObject{{Key: f.obj.ID(), Size: uint64(len(f.data)), UpdatedAt: time.Now(), Object: f.obj}}, nil
 }
 
-func (f *fakeCatalogSource) Object(_ context.Context, key types.Hash256) (sdk.Object, error) {
+func (f *fakeCatalogSource) Object(_ context.Context, key types.Hash256) (client.SlabObject, error) {
 	if key != f.obj.ID() {
-		return sdk.Object{}, errors.New("no such object")
+		return nil, errors.New("no such object")
 	}
 	return f.obj, nil
 }

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"math/rand"
-	"net/http"
 	"slices"
 	"testing"
 	"time"
@@ -19,7 +18,6 @@ import (
 	"github.com/mike76-dev/sombrero/transfer"
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
-	"go.sia.tech/indexd/api/app"
 )
 
 // lastTag returns what the object uploaded last was told to say about itself.
@@ -330,7 +328,7 @@ func TestRetagIsNotForcedOnTheIndexer(t *testing.T) {
 
 	backend := newFakeBackend()
 	backend.mu.Lock()
-	backend.retagErr = &app.HTTPError{StatusCode: http.StatusBadRequest, Body: "object metadata size limit (1024) exceeded"}
+	backend.retagErr = fmt.Errorf("%w: object metadata size limit (1024) exceeded", errRefused)
 	backend.mu.Unlock()
 
 	c := newIndexdClient(db, backend, share.Name, workgroupID(t, db, acc), 1, 0, PackingOptions{}, FragmentationOptions{}, false)

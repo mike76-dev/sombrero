@@ -15,14 +15,13 @@ import (
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/slabs"
-	sdk "go.sia.tech/siastorage"
 )
 
 // fakeAccount stands in for an indexd account: the log of what it pinned, and
 // the objects that log names.
 type fakeAccount struct {
 	events  []PinnedObject
-	objects map[types.Hash256]sdk.Object
+	objects map[types.Hash256]*fakeObject
 	data    map[types.Hash256][]byte
 	pins    int
 	err     error
@@ -44,7 +43,7 @@ func (fa *fakeAccount) Download(_ context.Context, key types.Hash256, offset, le
 // it is what the object turns out to be rather than something chosen for it.
 func (fa *fakeAccount) pin(at time.Time, meta json.RawMessage, lengths ...uint32) types.Hash256 {
 	if fa.objects == nil {
-		fa.objects = make(map[types.Hash256]sdk.Object)
+		fa.objects = make(map[types.Hash256]*fakeObject)
 	}
 	fa.pins++
 
@@ -61,9 +60,10 @@ func (fa *fakeAccount) pin(at time.Time, meta json.RawMessage, lengths ...uint32
 		size += uint64(length)
 	}
 
-	obj := sdk.NewUnsafeObject([32]byte{byte(fa.pins)}, ss)
+	obj := newFakeObject([32]byte{byte(fa.pins)}, ss)
+	obj.created, obj.updated = at, at
 	if len(meta) > 0 {
-		obj.UpdateMetadata(meta)
+		obj.metadata = meta
 	}
 
 	key := obj.ID()
@@ -79,13 +79,12 @@ func (fa *fakeAccount) unpin(key types.Hash256, at time.Time) {
 	fa.events = append(fa.events, PinnedObject{Key: key, UpdatedAt: at, Deleted: true})
 }
 
-// SealObject implements AccountObjects, sealing with the key the tests stand up
-// as the source account's.
-func (fa *fakeAccount) SealObject(obj *sdk.Object) (slabs.SealedObject, error) {
-	return obj.Seal(testSealKey).SealedObject, nil
+// SealObject implements AccountObjects the way the fakes exchange seals.
+func (fa *fakeAccount) SealObject(obj SlabObject) (slabs.SealedObject, error) {
+	return sealFake(obj.(*fakeObject)), nil
 }
 
-func (fa *fakeAccount) ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error) {
+func (fa *fakeAccount) ListObjects(ctx context.Context, cursor ObjectCursor, limit int) ([]PinnedObject, error) {
 	if fa.err != nil {
 		return nil, fa.err
 	}
@@ -109,7 +108,7 @@ func (fa *fakeAccount) ListObjects(ctx context.Context, cursor slabs.Cursor, lim
 		// The real log hands over the object along with the event, which is
 		// what saves asking after each of them.
 		if obj, ok := fa.objects[ev.Key]; ok && !ev.Deleted {
-			ev.Object = &obj
+			ev.Object = obj
 		}
 
 		page = append(page, ev)
@@ -121,10 +120,10 @@ func (fa *fakeAccount) ListObjects(ctx context.Context, cursor slabs.Cursor, lim
 	return page, nil
 }
 
-func (fa *fakeAccount) Object(ctx context.Context, key types.Hash256) (sdk.Object, error) {
+func (fa *fakeAccount) Object(ctx context.Context, key types.Hash256) (SlabObject, error) {
 	obj, ok := fa.objects[key]
 	if !ok {
-		return sdk.Object{}, errors.New("no such object")
+		return nil, errors.New("no such object")
 	}
 
 	return obj, nil
