@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -20,7 +19,6 @@ import (
 	"github.com/mike76-dev/sombrero/stores"
 	proto "go.sia.tech/core/rhp/v4"
 	"go.sia.tech/core/types"
-	"go.sia.tech/indexd/api/app"
 	"go.sia.tech/indexd/slabs"
 	sdk "go.sia.tech/siastorage"
 	"lukechampine.com/frand"
@@ -47,7 +45,7 @@ type fakeBackend struct {
 
 	// pinned holds the objects taken over from somewhere else, which is what an
 	// import of another account's data does rather than uploading it again.
-	pinned map[types.Hash256]sdk.Object
+	pinned map[types.Hash256]SlabObject
 	pinErr error
 
 	downloadErrs []error // returned by the next downloads, one each
@@ -154,8 +152,8 @@ func (fb *fakeBackend) nextKey() types.Hash256 {
 	return h
 }
 
-func (fb *fakeBackend) Account(ctx context.Context) (app.AccountResponse, error) {
-	return app.AccountResponse{
+func (fb *fakeBackend) Account(ctx context.Context) (AccountInfo, error) {
+	return AccountInfo{
 		MaxPinnedData: 1 << 40,
 		PinnedData:    0,
 	}, nil
@@ -253,7 +251,7 @@ func (fb *fakeBackend) PruneSlabs(ctx context.Context) error {
 
 // ListObjects returns one page of the event log, the way the real backend
 // paginates it: the events strictly after the cursor, oldest first.
-func (fb *fakeBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error) {
+func (fb *fakeBackend) ListObjects(ctx context.Context, cursor ObjectCursor, limit int) ([]PinnedObject, error) {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 
@@ -283,26 +281,31 @@ func (fb *fakeBackend) ListObjects(ctx context.Context, cursor slabs.Cursor, lim
 	return page, nil
 }
 
+// SealObject implements AccountObjects the way the fakes exchange seals.
+func (fb *fakeBackend) SealObject(obj SlabObject) (slabs.SealedObject, error) {
+	return sealFake(obj.(*fakeObject)), nil
+}
+
 // Object answers for the objects this account holds, which is what confirms that
-// a pin took. One it does not hold is answered the way the indexer answers for
+// a pin took. One it does not hold is answered the way the backend answers for
 // it, so that the two are told apart.
-func (fb *fakeBackend) Object(ctx context.Context, key types.Hash256) (sdk.Object, error) {
+func (fb *fakeBackend) Object(ctx context.Context, key types.Hash256) (SlabObject, error) {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 
 	if _, uploaded := fb.objects[key]; uploaded {
-		return sdk.NewUnsafeObject([32]byte{}, nil), nil
+		return &fakeObject{id: key}, nil
 	}
 	if obj, pinned := fb.pinned[key]; pinned {
 		return obj, nil
 	}
 
-	return sdk.Object{}, &app.HTTPError{StatusCode: http.StatusNotFound, Body: "object not found"}
+	return nil, fmt.Errorf("%w: %s", errObjectNotFound, key)
 }
 
 // Pin takes over an object the account does not hold yet, the way pinning one
 // does: the slabs come to be this account's and the data stays where it is.
-func (fb *fakeBackend) Pin(ctx context.Context, obj sdk.Object) error {
+func (fb *fakeBackend) Pin(ctx context.Context, obj SlabObject) error {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 
@@ -310,7 +313,7 @@ func (fb *fakeBackend) Pin(ctx context.Context, obj sdk.Object) error {
 		return fb.pinErr
 	}
 	if fb.pinned == nil {
-		fb.pinned = make(map[types.Hash256]sdk.Object)
+		fb.pinned = make(map[types.Hash256]SlabObject)
 	}
 	fb.pinned[obj.ID()] = obj
 
@@ -2552,7 +2555,7 @@ func TestIndexdClient_UnpinOfAGoneSlabIsDone(t *testing.T) {
 	t.Cleanup(func() { _ = c.Close() })
 	ic := c.(*IndexdClient)
 
-	fb.failDeletes(&app.HTTPError{StatusCode: http.StatusNotFound, Body: "object not found"})
+	fb.failDeletes(fmt.Errorf("%w: it is gone already", errObjectNotFound))
 	key := types.Hash256{42}
 	if err := db.StageUnpin(share.Name, wgID, key); err != nil {
 		t.Fatalf("StageUnpin: %v", err)

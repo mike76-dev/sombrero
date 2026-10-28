@@ -11,7 +11,6 @@ import (
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/slabs"
-	sdk "go.sia.tech/siastorage"
 )
 
 // LostAndFound is where the objects of an account are described, an account
@@ -21,8 +20,12 @@ const LostAndFound = "/lost+found"
 // AccountObjects is what describing an indexd account takes: the log of what it
 // has pinned, and the objects the log names.
 type AccountObjects interface {
-	ListObjects(ctx context.Context, cursor slabs.Cursor, limit int) ([]PinnedObject, error)
-	Object(ctx context.Context, key types.Hash256) (sdk.Object, error)
+	ListObjects(ctx context.Context, cursor ObjectCursor, limit int) ([]PinnedObject, error)
+	Object(ctx context.Context, key types.Hash256) (SlabObject, error)
+
+	// SealObject locks the object with the account's app key, which is how a
+	// description carries what it takes to pin it elsewhere.
+	SealObject(obj SlabObject) (slabs.SealedObject, error)
 }
 
 // probeSample is how many of an account's objects are looked at to see whether
@@ -57,7 +60,7 @@ type AccountProbe struct {
 func ProbeAccount(ctx context.Context, src AccountObjects) (probe AccountProbe, err error) {
 	held := make(map[types.Hash256]struct{})
 
-	var cursor slabs.Cursor
+	var cursor ObjectCursor
 	for page := 0; page < probePages; page++ {
 		if err := ctx.Err(); err != nil {
 			return probe, err
@@ -90,7 +93,7 @@ func ProbeAccount(ctx context.Context, src AccountObjects) (probe AccountProbe, 
 		if !last.UpdatedAt.After(cursor.After) && last.Key == cursor.Key {
 			return finishProbe(probe, held, false), nil
 		}
-		cursor = slabs.Cursor{After: last.UpdatedAt, Key: last.Key}
+		cursor = ObjectCursor{After: last.UpdatedAt, Key: last.Key}
 
 		if len(events) < objectPageSize {
 			return finishProbe(probe, held, false), nil
@@ -204,12 +207,19 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 			if err != nil {
 				return stats, fmt.Errorf("failed to retrieve the object %s: %w", key, err)
 			}
-			obj = &fetched
+			obj = fetched
+		}
+
+		// The pin of every part is the object, sealed once here however many
+		// runs lie in it.
+		sealed, err := src.SealObject(obj)
+		if err != nil {
+			return stats, fmt.Errorf("failed to seal the object %s: %w", key, err)
 		}
 
 		tag, ok := parseTag(obj.Metadata())
 		if !ok {
-			nameless = append(nameless, describeObject(*obj, prefix, origin))
+			nameless = append(nameless, describeObject(obj, sealed, prefix, origin))
 			continue
 		}
 
@@ -217,10 +227,10 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 			if !slices.Contains(shares, piece.Share) {
 				shares = append(shares, piece.Share)
 			}
-			collectPiece(files, piece, *obj, origin)
+			collectPiece(files, piece, obj, sealed, origin)
 		}
 		if tag.Omitted > 0 {
-			if rest := describeGaps(*obj, tag.Pieces, prefix, origin); rest.Size > 0 {
+			if rest := describeGaps(obj, sealed, tag.Pieces, prefix, origin); rest.Size > 0 {
 				nameless = append(nameless, rest)
 			}
 		}
@@ -250,7 +260,7 @@ func DescribeAccount(ctx context.Context, src AccountObjects, w *transfer.Writer
 }
 
 // collectPiece adds one run of a file to what is known of that file so far.
-func collectPiece(files map[string]*transfer.File, piece objectPiece, obj sdk.Object, origin string) {
+func collectPiece(files map[string]*transfer.File, piece objectPiece, obj SlabObject, sealed slabs.SealedObject, origin string) {
 	key := piece.Share + piece.Path
 	file, ok := files[key]
 	if !ok {
@@ -278,12 +288,11 @@ func collectPiece(files map[string]*transfer.File, piece objectPiece, obj sdk.Ob
 	// The object is named as the source's, not as one this server holds: the key
 	// is the same either way, but a row may only name an object this account has
 	// pinned, which is what applying the description after pinning it does.
-	dataKey := obj.UnsafeDataKey()
 	file.Parts = append(file.Parts, transfer.Part{
 		Offset:     piece.Offset,
 		DataOffset: piece.At,
 		Length:     piece.Length,
-		Pin:        &transfer.Pin{DataKey: dataKey, Slabs: obj.Slabs()},
+		Pin:        &transfer.Pin{Sealed: sealed},
 		Source:     &transfer.Source{Kind: "indexd", Origin: origin, Key: obj.ID().String()},
 	})
 }
@@ -321,7 +330,7 @@ func writeNamedFiles(w *transfer.Writer, files map[string]*transfer.File, shares
 
 // describeObject describes an object as a file of its own, which is what an
 // object that says nothing about itself amounts to.
-func describeObject(obj sdk.Object, prefix, origin string) transfer.File {
+func describeObject(obj SlabObject, sealed slabs.SealedObject, prefix, origin string) transfer.File {
 	file := transfer.File{
 		Path:       path.Join(prefix, obj.ID().String()),
 		CreatedAt:  obj.CreatedAt(),
@@ -330,7 +339,7 @@ func describeObject(obj sdk.Object, prefix, origin string) transfer.File {
 
 	// An object of no bytes is made of no parts, the same as an empty file.
 	if obj.Size() > 0 {
-		leaveRun(&file, obj, 0, obj.Size(), origin)
+		leaveRun(&file, obj, sealed, 0, obj.Size(), origin)
 	}
 
 	return file
@@ -339,7 +348,7 @@ func describeObject(obj sdk.Object, prefix, origin string) transfer.File {
 // describeGaps describes the runs of an object its tag did not name as one file of
 // its own, the way an object that says nothing is described: the runs lie in it
 // one after the other, each where the tag leaves off.
-func describeGaps(obj sdk.Object, pieces []objectPiece, prefix, origin string) transfer.File {
+func describeGaps(obj SlabObject, sealed slabs.SealedObject, pieces []objectPiece, prefix, origin string) transfer.File {
 	named := slices.Clone(pieces)
 	sort.Slice(named, func(i, j int) bool { return named[i].At < named[j].At })
 
@@ -352,14 +361,14 @@ func describeGaps(obj sdk.Object, pieces []objectPiece, prefix, origin string) t
 	var at uint64
 	for _, piece := range named {
 		if piece.At > at {
-			leaveRun(&file, obj, at, piece.At, origin)
+			leaveRun(&file, obj, sealed, at, piece.At, origin)
 		}
 		if end := piece.At + piece.Length; end > at {
 			at = end
 		}
 	}
 	if at < obj.Size() {
-		leaveRun(&file, obj, at, obj.Size(), origin)
+		leaveRun(&file, obj, sealed, at, obj.Size(), origin)
 	}
 
 	return file
@@ -367,12 +376,12 @@ func describeGaps(obj sdk.Object, pieces []objectPiece, prefix, origin string) t
 
 // leaveRun adds the run of the object from one offset to another to the end of the
 // file, with what it takes to pin the object or fetch the bytes.
-func leaveRun(file *transfer.File, obj sdk.Object, from, to uint64, origin string) {
+func leaveRun(file *transfer.File, obj SlabObject, sealed slabs.SealedObject, from, to uint64, origin string) {
 	file.Parts = append(file.Parts, transfer.Part{
 		Offset:     file.Size,
 		DataOffset: from,
 		Length:     to - from,
-		Pin:        &transfer.Pin{DataKey: obj.UnsafeDataKey(), Slabs: obj.Slabs()},
+		Pin:        &transfer.Pin{Sealed: sealed},
 		Source:     &transfer.Source{Kind: "indexd", Origin: origin, Key: obj.ID().String()},
 	})
 	file.Size += to - from
@@ -383,7 +392,7 @@ func leaveRun(file *transfer.File, obj sdk.Object, from, to uint64, origin strin
 func listPinned(ctx context.Context, src AccountObjects) (map[types.Hash256]PinnedObject, error) {
 	pinned := make(map[types.Hash256]PinnedObject)
 
-	var cursor slabs.Cursor
+	var cursor ObjectCursor
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -412,12 +421,17 @@ func listPinned(ctx context.Context, src AccountObjects) (map[types.Hash256]Pinn
 		if !last.UpdatedAt.After(cursor.After) && last.Key == cursor.Key {
 			return pinned, nil
 		}
-		cursor = slabs.Cursor{After: last.UpdatedAt, Key: last.Key}
+		cursor = ObjectCursor{After: last.UpdatedAt, Key: last.Key}
 	}
 }
 
 // Object retrieves an object of the account by its key, which is what describing
 // what the account holds is made of.
-func (b *sdkBackend) Object(ctx context.Context, key types.Hash256) (sdk.Object, error) {
-	return b.object(ctx, key)
+func (b *sdkBackend) Object(ctx context.Context, key types.Hash256) (SlabObject, error) {
+	obj, err := b.object(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+
+	return sdkObject{obj: obj}, nil
 }

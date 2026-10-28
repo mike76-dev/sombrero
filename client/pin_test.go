@@ -10,7 +10,6 @@ import (
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
 	"go.sia.tech/indexd/slabs"
-	sdk "go.sia.tech/siastorage"
 )
 
 // fakePinner stands in for an indexer asked to take over objects it does not
@@ -21,7 +20,7 @@ type fakePinner struct {
 }
 
 // PinObject implements ObjectPinner.
-func (fp *fakePinner) PinObject(ctx context.Context, obj sdk.Object) error {
+func (fp *fakePinner) PinObject(ctx context.Context, obj SlabObject) error {
 	if fp.err != nil {
 		return fp.err
 	}
@@ -45,11 +44,16 @@ func foreignSlab(n byte, length uint32) slabs.SlabSlice {
 	}
 }
 
+// foreignObject is the object foreignFile describes, for the tests that check
+// what was pinned.
+func foreignObject(length uint32) *fakeObject {
+	return newFakeObject([32]byte{9}, []slabs.SlabSlice{foreignSlab(1, length)})
+}
+
 // foreignFile is a file of another account's, with what it takes to pin it and
 // where to fetch it from if that cannot be had.
 func foreignFile(path string, length uint32) transfer.File {
-	pin := &transfer.Pin{DataKey: [32]byte{9}, Slabs: []slabs.SlabSlice{foreignSlab(1, length)}}
-	obj := sdk.NewUnsafeObject(pin.DataKey, pin.Slabs)
+	obj := foreignObject(length)
 
 	return transfer.File{
 		Path:       path,
@@ -58,7 +62,7 @@ func foreignFile(path string, length uint32) transfer.File {
 		ModifiedAt: time.Now().Add(-24 * time.Hour).UTC().Truncate(time.Second),
 		Parts: []transfer.Part{{
 			Offset: 0, Length: uint64(length),
-			Pin:    pin,
+			Pin:    &transfer.Pin{Sealed: sealFake(obj)},
 			Source: &transfer.Source{Kind: "indexd", Key: obj.ID().String()},
 		}},
 	}
@@ -93,7 +97,7 @@ func TestImportPins(t *testing.T) {
 
 	stats, err := Import(ctx, db, c, src, pinner,
 		describeFiles(t, []transfer.File{file}, transfer.Directory{Path: "/taken", ReadOnly: true}),
-		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: importTarget(t, db, acc, share.Name)})
+		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: importTarget(t, db, acc, share.Name), Unsealer: testUnsealer{}})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -105,7 +109,7 @@ func TestImportPins(t *testing.T) {
 	}
 
 	// The object the account now holds is the one the description named.
-	wanted := sdk.NewUnsafeObject(file.Parts[0].Pin.DataKey, file.Parts[0].Pin.Slabs)
+	wanted := foreignObject(4096)
 	want := wanted.ID()
 	if len(pinner.pinned) != 1 || pinner.pinned[0] != want {
 		t.Errorf("pinned: want %s, got %v", want, pinner.pinned)
@@ -162,6 +166,7 @@ func TestImportCopiesWhatItCannotPin(t *testing.T) {
 		ImportOptions{
 			CopyOptions: CopyOptions{Account: acc, OnError: func(path string, err error) { failed = append(failed, path) }},
 			Target:      importTarget(t, db, acc, share.Name),
+			Unsealer:    testUnsealer{},
 			OnRefusal:   func(path string, err error) { refused = append(refused, path) },
 		})
 	if err != nil {
@@ -229,6 +234,7 @@ func TestImportCopiesWhatThePinDidNotTake(t *testing.T) {
 		ImportOptions{
 			CopyOptions: CopyOptions{Account: acc},
 			Target:      importTarget(t, db, acc, share.Name),
+			Unsealer:    testUnsealer{},
 			OnRefusal:   func(path string, err error) { reported = append(reported, path) },
 		})
 	if err != nil {
@@ -306,12 +312,12 @@ func TestImportLeavesWhatIsThere(t *testing.T) {
 	target := importTarget(t, db, acc, share.Name)
 
 	if _, err := Import(ctx, db, c, src, pinner, describeFiles(t, []transfer.File{file}),
-		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: target}); err != nil {
+		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: target, Unsealer: testUnsealer{}}); err != nil {
 		t.Fatalf("the first import: %v", err)
 	}
 
 	stats, err := Import(ctx, db, c, src, pinner, describeFiles(t, []transfer.File{file}),
-		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: target})
+		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: target, Unsealer: testUnsealer{}})
 	if err != nil {
 		t.Fatalf("the second import: %v", err)
 	}
@@ -348,7 +354,7 @@ func TestImportCompletesWhatIsThere(t *testing.T) {
 	whole := transfer.File{Path: "/holed.bin", Size: 512, Parts: []transfer.Part{head, tail}}
 	pinner := &fakePinner{}
 	stats, err := Import(ctx, db, c, &fakeSource{content: map[string][]byte{}}, pinner, describeFiles(t, []transfer.File{whole}),
-		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: target})
+		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: target, Unsealer: testUnsealer{}})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -390,7 +396,7 @@ func TestTheDestinationPinsWhatIsImported(t *testing.T) {
 	file := foreignFile("/taken/over.bin", 2048)
 	stats, err := Import(ctx, db, c, &fakeSource{}, pinner,
 		describeFiles(t, []transfer.File{file}),
-		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: importTarget(t, db, acc, share.Name)})
+		ImportOptions{CopyOptions: CopyOptions{Account: acc}, Target: importTarget(t, db, acc, share.Name), Unsealer: testUnsealer{}})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -399,7 +405,7 @@ func TestTheDestinationPinsWhatIsImported(t *testing.T) {
 	}
 
 	// The object is the destination's now, under the key the description named.
-	want := sdk.NewUnsafeObject(file.Parts[0].Pin.DataKey, file.Parts[0].Pin.Slabs)
+	want := foreignObject(2048)
 	backend.mu.Lock()
 	_, held := backend.pinned[want.ID()]
 	backend.mu.Unlock()
@@ -435,6 +441,7 @@ func TestImportReportsAsItGoes(t *testing.T) {
 		ImportOptions{
 			CopyOptions: CopyOptions{Account: acc},
 			Target:      importTarget(t, db, acc, share.Name),
+			Unsealer:    testUnsealer{},
 			Report:      func(s ImportStats) { reports = append(reports, s) },
 		})
 	if err != nil {
@@ -459,16 +466,18 @@ func TestImportReportsAsItGoes(t *testing.T) {
 // TestPinFileRewritesTheParts verifies what pinning makes of a description: the
 // parts name the objects this account holds, with nothing left to pin.
 func TestPinFileRewritesTheParts(t *testing.T) {
+	objA := newFakeObject([32]byte{1}, []slabs.SlabSlice{foreignSlab(1, 1024)})
+	objB := newFakeObject([32]byte{2}, []slabs.SlabSlice{foreignSlab(4, 2048)})
 	file := transfer.File{
 		Path: "/x.bin", Size: 3072,
 		Parts: []transfer.Part{
-			{Offset: 0, Length: 1024, Pin: &transfer.Pin{DataKey: [32]byte{1}, Slabs: []slabs.SlabSlice{foreignSlab(1, 1024)}}},
-			{Offset: 1024, Length: 2048, Pin: &transfer.Pin{DataKey: [32]byte{2}, Slabs: []slabs.SlabSlice{foreignSlab(4, 2048)}}},
+			{Offset: 0, Length: 1024, Pin: &transfer.Pin{Sealed: sealFake(objA)}},
+			{Offset: 1024, Length: 2048, Pin: &transfer.Pin{Sealed: sealFake(objB)}},
 		},
 	}
 
 	pinner := &fakePinner{}
-	pinned, err := PinFile(context.Background(), pinner, file)
+	pinned, err := PinFile(context.Background(), pinner, testUnsealer{}, file)
 	if err != nil {
 		t.Fatalf("PinFile: %v", err)
 	}
@@ -488,7 +497,7 @@ func TestPinFileRewritesTheParts(t *testing.T) {
 	// A file is taken over whole: one refusal leaves the description as it was,
 	// for whoever copies it instead.
 	refusing := &fakePinner{err: errors.New("no")}
-	if _, err := PinFile(context.Background(), refusing, file); err == nil {
+	if _, err := PinFile(context.Background(), refusing, testUnsealer{}, file); err == nil {
 		t.Error("a file was taken over although its objects were refused")
 	}
 }

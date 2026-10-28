@@ -193,11 +193,10 @@ type Part struct {
 	Inline []byte
 }
 
-// Pin is what an object is made of: the key its data is encrypted with, and the
-// slabs it is spread over, each naming the sectors and the hosts that hold them.
+// Pin is the object a part lies in, sealed with the app key of the account it
+// was described from: whoever holds that key can open it and pin the object.
 type Pin struct {
-	DataKey [32]byte
-	Slabs   []slabs.SlabSlice
+	Sealed slabs.SealedObject
 }
 
 // Source is where the bytes of a part can be fetched from when they cannot be

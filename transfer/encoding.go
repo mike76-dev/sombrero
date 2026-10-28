@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"go.sia.tech/core/types"
-	"go.sia.tech/indexd/slabs"
 )
 
 // The flags that say which of the ways to the bytes a part carries.
@@ -295,14 +294,15 @@ func (p *Part) DecodeFrom(d *types.Decoder) {
 
 // EncodeTo implements types.EncoderTo.
 func (p Pin) EncodeTo(e *types.Encoder) {
-	e.Write(p.DataKey[:])
-	types.EncodeSlice(e, p.Slabs)
+	p.Sealed.EncodeTo(e)
 }
 
 // DecodeFrom implements types.DecoderFrom.
 func (p *Pin) DecodeFrom(d *types.Decoder) {
-	d.Read(p.DataKey[:])
-	types.DecodeSlice[slabs.SlabSlice](d, &p.Slabs)
+	p.Sealed.DecodeFrom(d)
+	// Times read back in UTC, like every other time in the stream.
+	p.Sealed.CreatedAt = p.Sealed.CreatedAt.UTC()
+	p.Sealed.UpdatedAt = p.Sealed.UpdatedAt.UTC()
 }
 
 // EncodeTo implements types.EncoderTo.

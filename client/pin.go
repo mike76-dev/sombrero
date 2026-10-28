@@ -5,15 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"path"
 	"slices"
 
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
-	"go.sia.tech/indexd/api/app"
-	sdk "go.sia.tech/siastorage"
+	"go.sia.tech/indexd/slabs"
 )
 
 // TransferStore is the part of a store an import writes the rows of what it
@@ -31,7 +29,13 @@ type TransferStore interface {
 // of an import rather than the source it is reading: pinning into the account
 // that already holds them would do nothing at all.
 type ObjectPinner interface {
-	PinObject(ctx context.Context, obj sdk.Object) error
+	PinObject(ctx context.Context, obj SlabObject) error
+}
+
+// ObjectUnsealer opens the sealed pins of a description, which takes the app
+// key of the account that described it: the source's, not the destination's.
+type ObjectUnsealer interface {
+	ObjectFromSealed(sealed slabs.SealedObject) (SlabObject, error)
 }
 
 // ObjectChecker says whether the account holds an object. A pinner that is one
@@ -43,7 +47,7 @@ type ObjectChecker interface {
 
 // PinObject takes over an object for this connection's account, which is what
 // makes an IndexdClient the pinner of an import into its share.
-func (ic *IndexdClient) PinObject(ctx context.Context, obj sdk.Object) error {
+func (ic *IndexdClient) PinObject(ctx context.Context, obj SlabObject) error {
 	return ic.backend.Pin(ctx, obj)
 }
 
@@ -54,9 +58,7 @@ func (ic *IndexdClient) HasObject(ctx context.Context, key types.Hash256) (bool,
 	if err == nil {
 		return true, nil
 	}
-
-	var httpErr *app.HTTPError
-	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+	if isNotFound(err) {
 		return false, nil
 	}
 
@@ -69,7 +71,7 @@ func (ic *IndexdClient) HasObject(ctx context.Context, key types.Hash256) (bool,
 // A file is taken over whole or not at all. Where one part cannot be pinned, the
 // ones before it stay pinned and unreferenced, which the orphan scan is there to
 // find; what they cost until then is a slab apiece.
-func PinFile(ctx context.Context, pinner ObjectPinner, file transfer.File) (transfer.File, error) {
+func PinFile(ctx context.Context, pinner ObjectPinner, unsealer ObjectUnsealer, file transfer.File) (transfer.File, error) {
 	pinned := file
 	pinned.Parts = make([]transfer.Part, len(file.Parts))
 
@@ -84,7 +86,10 @@ func PinFile(ctx context.Context, pinner ObjectPinner, file transfer.File) (tran
 			continue
 		}
 
-		obj := sdk.NewUnsafeObject(part.Pin.DataKey, part.Pin.Slabs)
+		obj, err := unsealer.ObjectFromSealed(part.Pin.Sealed)
+		if err != nil {
+			return file, fmt.Errorf("failed to open the pin of the run at %d: %w", part.Offset, err)
+		}
 		if err := pinner.PinObject(ctx, obj); err != nil {
 			return file, fmt.Errorf("failed to pin the object of the run at %d: %w", part.Offset, err)
 		}
@@ -104,6 +109,10 @@ type ImportOptions struct {
 	// Target is where the rows of what is pinned are written. What is copied
 	// goes through the destination's upload path instead, which writes its own.
 	Target stores.TransferTarget
+
+	// Unsealer opens the sealed pins of the description, with the source
+	// account's app key. Without one, everything is copied.
+	Unsealer ObjectUnsealer
 
 	// Copy has everything copied, even what could have been pinned, for a source
 	// whose data is to be left behind rather than taken over.
@@ -198,8 +207,8 @@ func Import(ctx context.Context, store TransferStore, dst Client, src PartReader
 // importFile takes over one file, by pinning what it is made of where that is to
 // be had and by copying it where it is not.
 func importFile(ctx context.Context, store TransferStore, dst Client, src PartReader, pinner ObjectPinner, file transfer.File, opts ImportOptions, copyOpts CopyOptions, stats *ImportStats) error {
-	if !opts.Copy && pinner != nil && pinnable(file) {
-		pinned, err := PinFile(ctx, pinner, file)
+	if !opts.Copy && pinner != nil && opts.Unsealer != nil && pinnable(file) {
+		pinned, err := PinFile(ctx, pinner, opts.Unsealer, file)
 		if err == nil {
 			// A pin that was answered is not a pin that took: a source and a
 			// destination on different networks, or on the same account, both

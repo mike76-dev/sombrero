@@ -82,7 +82,7 @@ type IndexdAccount struct {
 func NewIndexdAccount(sdkClient *sdk.SDK) *IndexdAccount {
 	return &IndexdAccount{sdkBackend: &sdkBackend{
 		sdk:      sdkClient,
-		objCache: make(map[types.Hash256]sdk.Object),
+		objCache: make(map[types.Hash256]*sdk.Object),
 	}}
 }
 

@@ -137,21 +137,28 @@ func TestPrefetchesGoOneAfterAnother(t *testing.T) {
 	}()
 	waitFor(t, func() bool { return h.files.readsStarted() == 3 })
 
-	// Let go, and the rest follow in turn.
+	// Let go, and the rest follow in turn. A read that has begun has not landed
+	// yet, so each chunk is waited for, not counted.
 	release()
 	if err := <-demanded; err != nil {
 		t.Fatalf("the demanded read failed: %v", err)
 	}
-	waitFor(t, func() bool { return h.files.readsStarted() == 4 })
-	file.mu.Lock()
 	for _, offset := range []uint64{chunk, 2 * chunk, 3 * chunk} {
-		select {
-		case <-file.buffer[offset].done:
-		default:
-			t.Errorf("the chunk at %d was not fetched", offset)
-		}
+		waitFor(t, func() bool {
+			file.mu.Lock()
+			ch, ok := file.buffer[offset]
+			file.mu.Unlock()
+			if !ok {
+				return false
+			}
+			select {
+			case <-ch.done:
+				return true
+			default:
+				return false
+			}
+		})
 	}
-	file.mu.Unlock()
 }
 
 // TestReadChunkSize: a chunk is a whole number of small slabs or an exact fraction of a large one,

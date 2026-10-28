@@ -10,7 +10,6 @@ import (
 	"hash/crc32"
 	"io"
 	"log"
-	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -19,7 +18,6 @@ import (
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/transfer"
 	"go.sia.tech/core/types"
-	"go.sia.tech/indexd/api/app"
 	"go.sia.tech/indexd/slabs"
 )
 
@@ -420,7 +418,7 @@ func (ic *IndexdClient) tagSilentSlabs(ctx context.Context) {
 				}
 				continue
 			}
-			o = &fetched
+			o = fetched
 		}
 		if wantsTag(o.Metadata()) {
 			silent = append(silent, key)
@@ -495,15 +493,10 @@ func (ic *IndexdClient) writeTags(ctx context.Context) (owing bool) {
 	return owing
 }
 
-// refused reports whether the indexer turned a request down for what it was,
+// refused reports whether the backend turned a request down for what it was,
 // rather than failing to answer it: an answer that waiting will not change.
 func refused(err error) bool {
-	var httpErr *app.HTTPError
-	if !errors.As(err, &httpErr) {
-		return false
-	}
-
-	return httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 && httpErr.StatusCode != http.StatusTooManyRequests
+	return errors.Is(err, errRefused)
 }
 
 // takeRetags takes the slabs that are waiting off the list, so that one that is
