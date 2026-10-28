@@ -456,6 +456,7 @@ function ShareSettingsForm({
         {share.type === 'renterd' && (
           <Field label="Bucket">
             <input
+              type="text"
               value={bucket}
               disabled={busy}
               placeholder="default if left empty"
@@ -464,7 +465,12 @@ function ShareSettingsForm({
           </Field>
         )}
         <Field label="Remark">
-          <input value={remark} disabled={busy} onChange={(e) => setRemark(e.target.value)} />
+          <input
+            type="text"
+            value={remark}
+            disabled={busy}
+            onChange={(e) => setRemark(e.target.value)}
+          />
         </Field>
       </div>
       {moved && (
@@ -512,6 +518,7 @@ function ShareSettingsForm({
       )}
       <Field label="Public folder">
         <input
+          type="text"
           value={publicDir}
           disabled={busy || !serverAllows}
           placeholder="e.g. Drop"

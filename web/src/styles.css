@@ -222,6 +222,7 @@ body {
 input[type='text'],
 input[type='password'],
 input[type='number'],
+input[type='file'],
 select,
 textarea {
   font: inherit;
@@ -244,6 +245,26 @@ textarea {
   resize: vertical;
   font-family: ui-monospace, 'Cascadia Mono', 'JetBrains Mono', Menlo, monospace;
   font-size: 13px;
+}
+
+input[type='file'] {
+  padding: 5px 10px;
+}
+
+input[type='file']::file-selector-button {
+  font: inherit;
+  font-size: 13px;
+  padding: 3px 10px;
+  margin-right: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+input[type='file']::file-selector-button:hover {
+  background: var(--surface-2);
 }
 
 .checkbox {
