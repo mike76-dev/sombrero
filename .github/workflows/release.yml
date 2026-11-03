@@ -1,0 +1,131 @@
+name: Release
+
+# A tag push publishes the zips and the Docker image; a manual run only builds, to prove the pipeline.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag must match the version constant
+        if: github.event_name == 'push'
+        run: |
+          VERSION=$(sed -n 's/^const version = "\(.*\)"$/\1/p' main.go)
+          [ "v$VERSION" = "$GITHUB_REF_NAME" ] || { echo "main.go says $VERSION, the tag says $GITHUB_REF_NAME"; exit 1; }
+
+  build:
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest,    goos: linux,   goarch: amd64 }
+          - { os: ubuntu-24.04-arm, goos: linux,   goarch: arm64 }
+          - { os: macos-latest,     goos: darwin,  goarch: arm64 }
+          # There are no Intel macOS runners anymore; clang cross-compiles from the ARM one.
+          - { os: macos-latest,     goos: darwin,  goarch: amd64, cc: clang -arch x86_64 }
+          - { os: windows-latest,   goos: windows, goarch: amd64 }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      CGO_ENABLED: '1'
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The binary embeds the web UI, so it has to be built first.
+      - name: Build the web UI
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+      - name: Build the server
+        shell: bash
+        run: |
+          go build -trimpath -tags timetzdata -ldflags '-s -w' -o bundle/ .
+          cp LICENSE README.md sombrero.yml bundle/
+      - name: Package
+        shell: bash
+        run: |
+          cd bundle
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "../sombrero_${GOOS}_${GOARCH}.zip" .
+          else
+            zip "../sombrero_${GOOS}_${GOARCH}" *
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sombrero_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: sombrero_*.zip
+      # Provenance: `gh attestation verify <zip> --repo mike76-dev/sombrero` proves the origin.
+      - uses: actions/attest-build-provenance@v4
+        if: github.event_name == 'push'
+        with:
+          subject-path: sombrero_*.zip
+
+  docker:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the image, pushing it only for a tag
+        id: image
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARGS="-t ghcr.io/mike76-dev/sombrero:$VERSION -t ghcr.io/mike76-dev/sombrero:latest --push"
+          [ "$GITHUB_EVENT_NAME" = "push" ] || ARGS=""
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --label org.opencontainers.image.version="$VERSION" \
+            --metadata-file meta.json $ARGS .
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            echo "digest=$(jq -r '."containerimage.digest"' meta.json)" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/attest-build-provenance@v4
+        if: github.event_name == 'push'
+        with:
+          subject-name: ghcr.io/mike76-dev/sombrero
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+  # The release is drafted, not published: the notes are written by hand on GitHub.
+  release:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Draft the release with the zips and their checksums attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum sombrero_*.zip > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag --title "$GITHUB_REF_NAME" sombrero_*.zip SHA256SUMS

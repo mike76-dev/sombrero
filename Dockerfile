@@ -11,18 +11,25 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
-ARG TARGETOS TARGETARCH
+FROM --platform=$BUILDPLATFORM golang:1.27-trixie AS build
+ARG TARGETOS TARGETARCH BUILDARCH
+# The Rust engine makes every build a cgo build, so a foreign target needs its C cross-compiler.
+RUN case "$TARGETARCH" in "$BUILDARCH") ;; \
+    arm64) apt-get update && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross ;; \
+    amd64) apt-get update && apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu libc6-dev-amd64-cross ;; esac
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /src/web/dist ./web/dist
 # timetzdata embeds the time zones, so that TZ can set the zone of the log timestamps.
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -tags timetzdata -ldflags="-s -w" -o /sombrero .
+RUN case "$TARGETARCH" in "$BUILDARCH") ;; arm64) export CC=aarch64-linux-gnu-gcc ;; amd64) export CC=x86_64-linux-gnu-gcc ;; esac \
+    && CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -tags timetzdata -ldflags="-s -w" -o /sombrero .
 
-# The base image already carries the CA certificates, and nothing is run in it.
-FROM alpine:3.22
+# The storage engine's prebuilt libraries need glibc 2.38+, so the image is Debian 13, not Alpine.
+# Nothing is run in it, so no emulation is ever needed; the CA certificates are copied in.
+FROM debian:trixie-slim
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /sombrero /usr/local/bin/sombrero
 
 # Links the published package to the repository on GitHub.
