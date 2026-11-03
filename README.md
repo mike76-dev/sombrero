@@ -503,5 +503,8 @@ curl -u "":<API_PASSWORD> "http://127.0.0.1:9999/api/debug/pprof/goroutine?debug
 ```
 They are only there in the debug mode, because a CPU profile takes 30 seconds and slows the server down while it runs.
 
+## License
+Sombrero is licensed under the GNU Affero General Public License v3.0, see [LICENSE](LICENSE). Versions up to 3.0.0 were released under MIT.
+
 ## Acknowledgement
 This project was supported by a [Sia Foundation](https://sia.tech) grant.
