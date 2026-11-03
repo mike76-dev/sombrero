@@ -178,6 +178,14 @@ check_system() {
 		confirm "Continue anyway?" n || exit 1
 	fi
 
+	# A released binary refuses to start on an older glibc; a build of one's own (--binary) is exempt.
+	local os_version
+	os_version=$(. /etc/os-release && echo "${VERSION_ID:-0}")
+	if [ -z "$BINARY" ] && [ "$os_id" = ubuntu ] && dpkg --compare-versions "$os_version" lt 26.04; then
+		warn "the released binaries need Ubuntu 26.04 or newer, and this is $os_name"
+		confirm "Continue anyway?" n || exit 1
+	fi
+
 	ARCH=$(dpkg --print-architecture)
 	case "$ARCH" in
 	amd64 | arm64) ;;
