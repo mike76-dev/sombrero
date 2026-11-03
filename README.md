@@ -18,10 +18,12 @@ sudo bash install-sombrero.sh
 ```
 It asks for the mode and an API password, and prints how to reach the web UI when it is done. Run it again to upgrade the server to the latest release; the configuration and the data are kept. `sudo bash install-sombrero.sh --help` lists the options.
 
+The released binaries need Ubuntu 26.04 / Debian 13 or newer. On an older system, use the Docker image or build from source.
+
 The sections below describe the same setup by hand, which is also what to follow on the other systems.
 
 ## Installing PostgreSQL
-This section will assume you are running Ubuntu Server 24.04. On the other systems, the commands may be different.
+This section will assume you are running Ubuntu Server 26.04. On the other systems, the commands may be different.
 
 The default Ubuntu repositories ship an older PostgreSQL version, so add the official PostgreSQL (PGDG) repository first:
 ```Bash
