@@ -76,6 +76,14 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
+          <a
+            className="source-link"
+            href="https://github.com/mike76-dev/sombrero"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Source
+          </a>
           <button className="btn" onClick={toggleTheme} title="Toggle theme">
             {theme === 'light' ? '\u{1F319} Dark mode' : '☀️ Light mode'}
           </button>

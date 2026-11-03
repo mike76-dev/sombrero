@@ -120,6 +120,18 @@ body {
   width: 100%;
 }
 
+.source-link {
+  display: block;
+  margin-bottom: 8px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.source-link:hover {
+  color: var(--text);
+}
+
 /* Content */
 
 .content {
