@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -204,6 +205,73 @@ func (db *Database) WorkgroupGrants(wg Workgroup) (grants []Grant, err error) {
 			}
 			g.Level = GrantLevel(level)
 			grants = append(grants, g)
+		}
+		return rows.Err()
+	})
+	return
+}
+
+// PathSecurity is what a security descriptor is built from: who owns the path,
+// and which workgroups hold grants on it, folded over the ancestors.
+type PathSecurity struct {
+	OwnerUser      string
+	OwnerWorkgroup uuid.UUID
+	Grants         []Grant
+}
+
+// PathSecurity reports the owner of the path and the workgroups it is granted
+// to, each with the highest level it holds here.
+func (db *Database) PathSecurity(shareName, path string) (ps PathSecurity, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const ownerQuery = `
+			SELECT a.account_name, w.uuid
+			FROM (
+				SELECT d.account FROM directories d
+				WHERE d.share_name = $1 AND d.full_path = $2
+				UNION ALL
+				SELECT o.account FROM objects o
+				WHERE o.share_name = $1 AND o.full_path = $2 AND o.temporary = FALSE
+			) t
+			JOIN accounts a ON a.id = t.account
+			JOIN workgroups w ON w.id = a.workgroup
+			LIMIT 1
+		`
+		var u []byte
+		if err := tx.QueryRow(ctx, ownerQuery, shareName, path).Scan(&ps.OwnerUser, &u); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("failed to query the owner: %w", err)
+		}
+		copy(ps.OwnerWorkgroup[:], u)
+
+		const grantsQuery = `
+			SELECT w.uuid, COALESCE(w.name, ''), MAX(g.level)
+			FROM grants g
+			JOIN directories d ON d.share_name = g.share_name AND d.id = g.directory_id
+			JOIN workgroups w ON w.id = g.workgroup
+			WHERE g.share_name = $1
+			AND (d.full_path = $2 OR starts_with($2, d.full_path || '/'))
+			GROUP BY w.uuid, w.name
+			ORDER BY w.name
+		`
+		rows, err := tx.Query(ctx, grantsQuery, shareName, path)
+		if err != nil {
+			return fmt.Errorf("failed to query the grants: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			g := Grant{ShareName: shareName, Path: path}
+			var level int16
+			var wu []byte
+			if err := rows.Scan(&wu, &g.Workgroup.Name, &level); err != nil {
+				return fmt.Errorf("failed to scan a grant: %w", err)
+			}
+			copy(g.Workgroup.UUID[:], wu)
+			g.Level = GrantLevel(level)
+			ps.Grants = append(ps.Grants, g)
 		}
 		return rows.Err()
 	})

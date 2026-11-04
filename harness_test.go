@@ -95,6 +95,10 @@ type fakeClient struct {
 	// backend refuses for a reason other than the file not being there is the one the server
 	// still has to complain about.
 	deleteErr error
+
+	// pathSecurity answers the owner-and-grants lookup, when a test sets it;
+	// without it the backend knows no owners, like renterd.
+	pathSecurity func(path string) (stores.PathSecurity, error)
 }
 
 // stagedPart is a part the backend has taken and not yet put into an object.
@@ -111,6 +115,17 @@ func newFakeClient() *fakeClient {
 }
 
 // put makes a file appear in the store, as if it had been uploaded out of band.
+// PathSecurity makes the fake a client.SecurityDescriber; a test that sets no
+// answer gets the no-owners error the server falls back from.
+func (fc *fakeClient) PathSecurity(_ context.Context, path string) (stores.PathSecurity, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if fc.pathSecurity == nil {
+		return stores.PathSecurity{}, errNoObject
+	}
+	return fc.pathSecurity(path)
+}
+
 func (fc *fakeClient) put(path string, size uint64) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()

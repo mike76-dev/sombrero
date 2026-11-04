@@ -1320,6 +1320,56 @@ func (si *SecInfo) Encode() []byte {
 	return buf
 }
 
+// Grantee is one allow entry of a DACL built from the real grants.
+type Grantee struct {
+	SID    dtyp.SID
+	Access uint32
+}
+
+// NewOwnedSecInfo answers a security query with the stored truth: the owner of
+// the path, the owner's workgroup as the group, and an entry per grant. The
+// synthetic NewSecInfo remains for the backends that know no owners.
+func NewOwnedSecInfo(info uint32, owner, group dtyp.SID, grantees []Grantee) []byte {
+	si := SecInfo{
+		Revision: 1,
+		Type:     dtyp.SelfRelative,
+	}
+
+	if info&OWNER_SECURITY_INFORMATION > 0 {
+		si.Owner = owner
+	}
+
+	if info&GROUP_SECURITY_INFORMATION > 0 {
+		si.Group = group
+	}
+
+	if info&SACL_SECURITY_INFORMATION > 0 {
+		si.Type |= dtyp.SACLPresent | dtyp.SACLProtected
+		si.SACL = ACL{
+			Revision: 2,
+			ACEs:     []ACE{},
+		}
+	}
+
+	if info&DACL_SECURITY_INFORMATION > 0 {
+		si.Type |= dtyp.DACLPresent | dtyp.DACLProtected
+		var aces []ACE
+		for _, g := range grantees {
+			aces = append(aces, ACE{
+				Type:   0,
+				Access: g.Access,
+				SID:    g.SID,
+			})
+		}
+		si.DACL = ACL{
+			Revision: 2,
+			ACEs:     aces,
+		}
+	}
+
+	return si.Encode()
+}
+
 // NewSecInfo generates the output buffer for the SMB2_0_INFO_SECURITY info type request.
 func NewSecInfo(ctx ntlm.SecurityContext, info uint32, access uint32) []byte {
 	si := SecInfo{

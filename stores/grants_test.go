@@ -297,6 +297,53 @@ func TestReadOnlyHoldsAgainstGrants(t *testing.T) {
 	}
 }
 
+// TestPathSecurity verifies the lookup a security descriptor is built from:
+// the owner of the path, and the grants folded over the ancestors.
+func TestPathSecurity(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	owner, share, _, wg := newGrantFixture(t, db)
+	if err := db.CreateDirectory(owner, share, "/proj", true, false); err != nil {
+		t.Fatalf("CreateDirectory: %v", err)
+	}
+	if err := db.CreateDirectory(owner, share, "/proj/sub", true, false); err != nil {
+		t.Fatalf("CreateDirectory(sub): %v", err)
+	}
+	plantPiece(t, db, share, owner, "/proj/sub/file.txt", types.Hash256{5}, 0, 100)
+
+	if err := db.SetGrant(share, "/proj", wg, LevelRead); err != nil {
+		t.Fatalf("SetGrant: %v", err)
+	}
+	if err := db.SetGrant(share, "/proj/sub", wg, LevelDelete); err != nil {
+		t.Fatalf("SetGrant(sub): %v", err)
+	}
+
+	ps, err := db.PathSecurity(share, "/proj/sub/file.txt")
+	if err != nil {
+		t.Fatalf("PathSecurity: %v", err)
+	}
+	if ps.OwnerUser != owner.Username || ps.OwnerWorkgroup.String() != owner.Workgroup {
+		t.Fatalf("wrong owner: %+v", ps)
+	}
+	if len(ps.Grants) != 1 || ps.Grants[0].Workgroup.UUID != wg.UUID || ps.Grants[0].Level != LevelDelete {
+		t.Fatalf("wrong grants: %+v", ps.Grants)
+	}
+
+	ps, err = db.PathSecurity(share, "/proj")
+	if err != nil {
+		t.Fatalf("PathSecurity(/proj): %v", err)
+	}
+	if len(ps.Grants) != 1 || ps.Grants[0].Level != LevelRead {
+		t.Fatalf("the shallow path reports the deep grant: %+v", ps.Grants)
+	}
+
+	if _, err := db.PathSecurity(share, "/nowhere"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a missing path has an owner: %v", err)
+	}
+}
+
 // TestGrantLevelNames verifies the level names parse back to themselves.
 func TestGrantLevelNames(t *testing.T) {
 	for l := LevelRead; l <= LevelAdmin; l++ {

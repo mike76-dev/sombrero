@@ -138,6 +138,13 @@ type Client interface {
 	Close() error
 }
 
+// SecurityDescriber is the part of a client that knows who owns a path and who
+// holds grants on it, for the real security descriptors. The renterd backend
+// has no owners, so it does not implement it and keeps the synthetic answer.
+type SecurityDescriber interface {
+	PathSecurity(ctx context.Context, path string) (stores.PathSecurity, error)
+}
+
 // sizeFromSeeker tries to find out the size of a file.
 func sizeFromSeeker(r io.Reader) (int64, error) {
 	s, ok := r.(io.Seeker)

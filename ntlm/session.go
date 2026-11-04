@@ -89,26 +89,60 @@ func (s *Session) GetSecurityContext() (sc SecurityContext) {
 		}
 	}
 
-	h.Write([]byte(s.domain))
-	hash := h.Sum(nil)
+	rid, domainSID := Identity(s.user, s.domain)
 	return SecurityContext{
-		User:    s.user,
-		Domain:  s.domain,
-		UserRID: binary.LittleEndian.Uint32(hash[:4]),
-		DomainSID: &dtyp.SID{
-			Revision:          1,
-			SubAuthorityCount: 4,
-			IDAuthority: &dtyp.SIDIDAuthority{
-				Value: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x05},
-			},
-			SubAuthority: []uint32{
-				0x15,
-				binary.LittleEndian.Uint32(hash[4:8]),
-				binary.LittleEndian.Uint32(hash[8:12]),
-				binary.LittleEndian.Uint32(hash[12:16]),
-			},
-		},
+		User:       s.user,
+		Domain:     s.domain,
+		UserRID:    rid,
+		DomainSID:  domainSID,
 		SessionKey: s.exportedSessionKey,
+	}
+}
+
+// Identity derives the stable SID parts of an account from the names it
+// authenticates with. The descriptors of what the account owns are built from
+// the same two names, so they show the identity its own sessions carry.
+func Identity(user, domain string) (rid uint32, domainSID *dtyp.SID) {
+	h, _ := blake2b.New256(nil)
+	h.Write([]byte(user))
+	h.Write([]byte(domain))
+	hash := h.Sum(nil)
+	return binary.LittleEndian.Uint32(hash[:4]), &dtyp.SID{
+		Revision:          1,
+		SubAuthorityCount: 4,
+		IDAuthority: &dtyp.SIDIDAuthority{
+			Value: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x05},
+		},
+		SubAuthority: []uint32{
+			0x15,
+			binary.LittleEndian.Uint32(hash[4:8]),
+			binary.LittleEndian.Uint32(hash[8:12]),
+			binary.LittleEndian.Uint32(hash[12:16]),
+		},
+	}
+}
+
+// AccountSID is the full SID of an account: its domain part with the RID appended.
+func AccountSID(user, domain string) dtyp.SID {
+	rid, domainSID := Identity(user, domain)
+	sid := *domainSID
+	sid.SubAuthority = append(append([]uint32{}, domainSID.SubAuthority...), rid)
+	sid.SubAuthorityCount = uint8(len(sid.SubAuthority))
+	return sid
+}
+
+// GroupSID is the SID of a workgroup as a whole, for the ACL entries that
+// grant to every account in it. It lives under the same authority the file
+// owners' groups already use.
+func GroupSID(domain string) dtyp.SID {
+	h, _ := blake2b.New256(nil)
+	h.Write([]byte(domain))
+	hash := h.Sum(nil)
+	return dtyp.SID{
+		Revision:          1,
+		SubAuthorityCount: 2,
+		IDAuthority:       &dtyp.SIDIDAuthority{Value: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x16}},
+		SubAuthority:      []uint32{2, binary.LittleEndian.Uint32(hash[:4])},
 	}
 }
 

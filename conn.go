@@ -2799,7 +2799,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 
 		case smb2.INFO_SECURITY:
-			info = smb2.NewSecInfo(ss.securityContext, qir.AdditionalInformation(), ga)
+			info = securityInfo(op, tc, ss, qir.AdditionalInformation(), ga)
 
 			// A security descriptor is never sent in part: the client is told how much room it
 			// takes and asks again. [MS-SMB2] 3.3.5.20.3 names STATUS_BUFFER_OVERFLOW as the one
@@ -4278,4 +4278,39 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	}
 
 	return resp, op
+}
+
+// securityInfo answers a security query with the real owner and grants where
+// the backend knows them, and with the asking session's own identity where it
+// does not.
+func securityInfo(op *open, tc *treeConnect, ss *session, info, granted uint32) []byte {
+	describer, ok := tc.client.(client.SecurityDescriber)
+	if !ok {
+		return smb2.NewSecInfo(ss.securityContext, info, granted)
+	}
+	ps, err := describer.PathSecurity(op.ctx, op.fileName)
+	if err != nil {
+		return smb2.NewSecInfo(ss.securityContext, info, granted)
+	}
+
+	owner := ntlm.AccountSID(ps.OwnerUser, ps.OwnerWorkgroup.String())
+	grantees := []smb2.Grantee{{SID: owner, Access: grantAccessMask(stores.LevelAdmin)}}
+	for _, g := range ps.Grants {
+		grantees = append(grantees, smb2.Grantee{
+			SID:    ntlm.GroupSID(g.Workgroup.UUID.String()),
+			Access: grantAccessMask(g.Level),
+		})
+	}
+	return smb2.NewOwnedSecInfo(info, owner, ntlm.GroupSID(ps.OwnerWorkgroup.String()), grantees)
+}
+
+// grantAccessMask is the access a grant level carries, each level including the
+// ones below; reading implies traversal.
+func grantAccessMask(level stores.GrantLevel) uint32 {
+	return stores.FlagsFromAccessRights(stores.AccessRights{
+		ReadAccess:    true,
+		ExecuteAccess: true,
+		WriteAccess:   level >= stores.LevelWrite,
+		DeleteAccess:  level >= stores.LevelDelete,
+	})
 }
