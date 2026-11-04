@@ -70,6 +70,22 @@ var migrations = []migration{
 		CREATE INDEX idx_grants_workgroup ON grants (workgroup);
 		CREATE INDEX idx_grants_connection ON grants (workgroup, share_name)
 	`},
+	{name: "look grants up from the queries", sql: `
+		CREATE FUNCTION granted_level(TEXT, INT, TEXT) RETURNS SMALLINT AS $$
+    SELECT MAX(g.level)
+    FROM grants g
+    JOIN directories d ON d.share_name = g.share_name AND d.id = g.directory_id
+    WHERE g.share_name = $1 AND g.workgroup = $2
+    AND (d.full_path = $3 OR starts_with($3, d.full_path || '/'))
+$$ LANGUAGE SQL STABLE;
+		CREATE FUNCTION owns_ancestor(TEXT, INT, TEXT) RETURNS BOOLEAN AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM directories d
+        WHERE d.share_name = $1 AND d.account = $2
+        AND (d.full_path = $3 OR starts_with($3, d.full_path || '/'))
+    )
+$$ LANGUAGE SQL STABLE
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

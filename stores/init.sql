@@ -141,6 +141,26 @@ CREATE TABLE grants (
 CREATE INDEX idx_grants_workgroup ON grants (workgroup);
 CREATE INDEX idx_grants_connection ON grants (workgroup, share_name);
 
+-- The highest level the workgroup holds on the path, its own grant or an
+-- ancestor's: a grant covers the whole subtree under its folder.
+CREATE FUNCTION granted_level(TEXT, INT, TEXT) RETURNS SMALLINT AS $$
+    SELECT MAX(g.level)
+    FROM grants g
+    JOIN directories d ON d.share_name = g.share_name AND d.id = g.directory_id
+    WHERE g.share_name = $1 AND g.workgroup = $2
+    AND (d.full_path = $3 OR starts_with($3, d.full_path || '/'))
+$$ LANGUAGE SQL STABLE;
+
+-- Whether the account owns the folder at the path or one above it: the owner
+-- of a granted folder keeps seeing and managing whatever grantees put inside.
+CREATE FUNCTION owns_ancestor(TEXT, INT, TEXT) RETURNS BOOLEAN AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM directories d
+        WHERE d.share_name = $1 AND d.account = $2
+        AND (d.full_path = $3 OR starts_with($3, d.full_path || '/'))
+    )
+$$ LANGUAGE SQL STABLE;
+
 CREATE TABLE buffers (
     id BIGSERIAL PRIMARY KEY,
     share_name TEXT NOT NULL,

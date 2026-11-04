@@ -182,17 +182,16 @@ func (db *Database) WorkgroupGrants(wg Workgroup) (grants []Grant, err error) {
 func (db *Database) EffectiveLevel(shareName, path string, wg Workgroup) (level GrantLevel, granted bool, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		// The prefix is compared by length, not LIKE, so wildcards in folder names stay literal.
 		const query = `
-			SELECT MAX(g.level)
-			FROM grants g
-			JOIN directories d ON d.share_name = g.share_name AND d.id = g.directory_id
-			JOIN workgroups w ON w.id = g.workgroup
-			WHERE g.share_name = $1 AND w.uuid = $2
-			AND (d.full_path = $3 OR left($3, length(d.full_path) + 1) = d.full_path || '/')
+			SELECT granted_level($1, w.id, $3)
+			FROM workgroups w
+			WHERE w.uuid = $2
 		`
 		var max *int16
-		if err := tx.QueryRow(ctx, query, shareName, wg.UUID[:], path).Scan(&max); err != nil {
+		err := tx.QueryRow(ctx, query, shareName, wg.UUID[:], path).Scan(&max)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		} else if err != nil {
 			return fmt.Errorf("failed to query the level: %w", err)
 		}
 		if max != nil {
