@@ -318,11 +318,38 @@ input[type='file']::file-selector-button:hover {
   transition: width 0.3s linear;
 }
 
-.group-label {
-  margin: 16px 0 8px;
-  font-size: 13px;
+.group-label,
+.card h3 {
+  margin: 18px 0 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
   font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
   color: var(--text-muted);
+}
+
+.card-title + .group-label,
+.card-title + h3 {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.group-label + *,
+.card h3 + * {
+  margin-top: 0;
+}
+
+.group-label + * > p:first-child,
+.card h3 + * > p:first-child {
+  margin-top: 0;
+}
+
+.stack > .group-label,
+.stack > h3 {
+  margin-bottom: 0;
 }
 
 /* Buttons */

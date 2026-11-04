@@ -56,6 +56,7 @@ function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void
         </button>
       </div>
       <div className="stack">
+        <div className="group-label">Public folders</div>
         <PublicDirsEditor dirs={publicDirs} onChange={setPublicDirs} disabled={busy} />
         <div className="row">
           <button className="btn btn-primary" onClick={save} disabled={busy}>
@@ -65,6 +66,7 @@ function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void
             {grants ? 'Reload granted folders' : 'Show granted folders'}
           </button>
         </div>
+        {grants && <div className="group-label">Granted folders</div>}
         {grants &&
           (grants.length === 0 ? (
             <p className="muted">No folders are granted to this workgroup.</p>

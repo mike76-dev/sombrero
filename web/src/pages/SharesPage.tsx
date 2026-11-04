@@ -714,6 +714,7 @@ function ShareDetails({
           )}
         </tbody>
       </table>
+      <div className="group-label">Settings</div>
       <ShareSettingsForm share={share} settings={settings} onChanged={onChanged} />
       <div className="row">
         <button className="btn" disabled={busy} onClick={loadAccounts}>
@@ -734,9 +735,17 @@ function ShareDetails({
         </button>
       </div>
       <ErrorBanner error={error} />
-      {share.type === 'indexd' && <GrantsCard share={share} />}
-      {share.type === 'indexd' && <OrphanedSlabsCard share={share} />}
-      {share.type === 'indexd' && <FragmentationCard share={share} />}
+      {share.type === 'indexd' && (
+        <>
+          <div className="group-label">Shared folders</div>
+          <GrantsCard share={share} />
+          <div className="group-label">Orphaned slabs</div>
+          <OrphanedSlabsCard share={share} />
+          <div className="group-label">Fragmentation</div>
+          <FragmentationCard share={share} />
+        </>
+      )}
+      {accounts && <div className="group-label">Accounts with access</div>}
       {accounts &&
         (accounts.length === 0 ? (
           <p className="muted">No accounts have access to this share.</p>
