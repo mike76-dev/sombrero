@@ -18,6 +18,7 @@ type Grants interface {
 	SetGrant(shareName, path string, wg stores.Workgroup, level stores.GrantLevel) error
 	RemoveGrant(shareName, path string, wg stores.Workgroup) error
 	Grants(shareName, path string) ([]stores.Grant, error)
+	ShareGrants(shareName string) ([]stores.Grant, error)
 	WorkgroupGrants(wg stores.Workgroup) ([]stores.Grant, error)
 }
 
@@ -52,19 +53,20 @@ func (api *API) grantsHandlerGET(w http.ResponseWriter, req *http.Request, ps ht
 		return
 	}
 
-	path := req.FormValue("path")
-	if path == "" {
-		writeError(w, "path cannot be empty", http.StatusBadRequest)
-		return
-	}
-
 	gr, ok := api.store.(Grants)
 	if !ok {
 		writeJSON(w, []GrantInfo{})
 		return
 	}
 
-	grants, err := gr.Grants(shareName, path)
+	// Without a path, the whole share's grants are listed.
+	var grants []stores.Grant
+	var err error
+	if path := req.FormValue("path"); path != "" {
+		grants, err = gr.Grants(shareName, path)
+	} else {
+		grants, err = gr.ShareGrants(shareName)
+	}
 	if err != nil {
 		log.Printf("failed to list the grants: %v", err)
 		writeError(w, "internal error", http.StatusInternalServerError)

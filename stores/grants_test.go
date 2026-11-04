@@ -74,6 +74,14 @@ func TestGrantRoundTrip(t *testing.T) {
 		t.Fatalf("wrong workgroup grants: %+v", mine)
 	}
 
+	all, err := db.ShareGrants(share)
+	if err != nil {
+		t.Fatalf("ShareGrants: %v", err)
+	}
+	if len(all) != 1 || all[0].Path != "/folder" || all[0].Workgroup.UUID != wg.UUID {
+		t.Fatalf("wrong share grants: %+v", all)
+	}
+
 	if err := db.RemoveGrant(share, "/folder", wg); err != nil {
 		t.Fatalf("RemoveGrant: %v", err)
 	}

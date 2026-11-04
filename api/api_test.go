@@ -76,6 +76,7 @@ type mockStore struct {
 	setGrant            func(string, string, stores.Workgroup, stores.GrantLevel) error
 	removeGrant         func(string, string, stores.Workgroup) error
 	grants              func(string, string) ([]stores.Grant, error)
+	shareGrants         func(string) ([]stores.Grant, error)
 	workgroupGrants     func(stores.Workgroup) ([]stores.Grant, error)
 	applyDirectory      func(stores.TransferTarget, transfer.Directory) (stores.ApplyResult, error)
 	applyFile           func(stores.TransferTarget, transfer.File) (stores.ApplyResult, error)
@@ -316,6 +317,12 @@ func (m *mockStore) RemoveGrant(shareName, path string, wg stores.Workgroup) err
 func (m *mockStore) Grants(shareName, path string) ([]stores.Grant, error) {
 	if m.grants != nil {
 		return m.grants(shareName, path)
+	}
+	return nil, nil
+}
+func (m *mockStore) ShareGrants(shareName string) ([]stores.Grant, error) {
+	if m.shareGrants != nil {
+		return m.shareGrants(shareName)
 	}
 	return nil, nil
 }

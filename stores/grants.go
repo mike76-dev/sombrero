@@ -146,6 +146,39 @@ func (db *Database) Grants(shareName, path string) (grants []Grant, err error) {
 	return
 }
 
+// ShareGrants lists every grant on the share, for the share's settings page.
+func (db *Database) ShareGrants(shareName string) (grants []Grant, err error) {
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT d.full_path, w.uuid, COALESCE(w.name, ''), g.level
+			FROM grants g
+			JOIN directories d ON d.share_name = g.share_name AND d.id = g.directory_id
+			JOIN workgroups w ON w.id = g.workgroup
+			WHERE g.share_name = $1
+			ORDER BY d.full_path, w.name
+		`
+		rows, err := tx.Query(ctx, query, shareName)
+		if err != nil {
+			return fmt.Errorf("failed to query the grants: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			g := Grant{ShareName: shareName}
+			var level int16
+			var u []byte
+			if err := rows.Scan(&g.Path, &u, &g.Workgroup.Name, &level); err != nil {
+				return fmt.Errorf("failed to scan a grant: %w", err)
+			}
+			copy(g.Workgroup.UUID[:], u)
+			g.Level = GrantLevel(level)
+			grants = append(grants, g)
+		}
+		return rows.Err()
+	})
+	return
+}
+
 // WorkgroupGrants lists the folders granted to the workgroup across all shares.
 func (db *Database) WorkgroupGrants(wg Workgroup) (grants []Grant, err error) {
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {

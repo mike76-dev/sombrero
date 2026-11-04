@@ -100,6 +100,23 @@ func TestGrants(t *testing.T) {
 		}
 	})
 
+	t.Run("GET without a path lists the whole share", func(t *testing.T) {
+		ms := &mockStore{
+			shareGrants: func(share string) ([]stores.Grant, error) {
+				return []stores.Grant{
+					{ShareName: share, Path: "/proj", Workgroup: stores.Workgroup{UUID: testUUID}, Level: stores.LevelRead},
+					{ShareName: share, Path: "/pub", Workgroup: stores.Workgroup{UUID: testUUID}, Level: stores.LevelAdmin},
+				}, nil
+			},
+		}
+		w := doRequest(newTestAPI(ms), http.MethodGet, "/share/myshare/grants", nil)
+		checkStatus(t, w, http.StatusOK)
+		got := decodeJSON[[]GrantInfo](t, w)
+		if len(got) != 2 || got[1].Level != "admin" {
+			t.Errorf("wrong grants: %+v", got)
+		}
+	})
+
 	t.Run("DELETE removes a grant", func(t *testing.T) {
 		var gotPath string
 		ms := &mockStore{

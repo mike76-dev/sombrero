@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { PublicDir, Workgroup } from '../api/types'
+import { GrantInfo, PublicDir, Workgroup } from '../api/types'
 import {
   createWorkgroup,
+  listWorkgroupGrants,
   listWorkgroups,
   removeWorkgroup,
   updateWorkgroup,
@@ -20,6 +21,12 @@ import { PublicDirsEditor, cleanPublicDirs } from '../components/publicdirs'
 function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void }) {
   const { run, busy, error, message } = useApiAction()
   const [publicDirs, setPublicDirs] = useState<PublicDir[]>(wg.publicDirs || [])
+  const [grants, setGrants] = useState<GrantInfo[] | null>(null)
+
+  const loadGrants = () =>
+    run(async () => {
+      setGrants((await listWorkgroupGrants(wg.uuid)) || [])
+    })
 
   const save = () =>
     run(async () => {
@@ -54,7 +61,33 @@ function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             Save
           </button>
+          <button className="btn" onClick={loadGrants} disabled={busy}>
+            {grants ? 'Reload granted folders' : 'Show granted folders'}
+          </button>
         </div>
+        {grants &&
+          (grants.length === 0 ? (
+            <p className="muted">No folders are granted to this workgroup.</p>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Share</th>
+                  <th>Folder</th>
+                  <th>Level</th>
+                </tr>
+              </thead>
+              <tbody>
+                {grants.map((g) => (
+                  <tr key={g.shareName + g.path}>
+                    <td>{g.shareName}</td>
+                    <td className="mono">{g.path}</td>
+                    <td>{g.level}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ))}
       </div>
       <ErrorBanner error={error} />
       <SuccessBanner message={message} />
