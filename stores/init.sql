@@ -126,6 +126,21 @@ CREATE INDEX idx_objects_workgroup ON objects (workgroup);
 CREATE UNIQUE INDEX idx_objects_lookup_path ON objects (share_name, full_path) WHERE temporary = FALSE;
 CREATE UNIQUE INDEX idx_objects_lookup_entry ON objects (share_name, directory_id, name) WHERE temporary = FALSE;
 
+-- level is a ladder, not flags: 0 read, 1 write, 2 delete, 3 admin.
+CREATE TABLE grants (
+    share_name TEXT NOT NULL,
+    directory_id BIGINT NOT NULL,
+    workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
+    level SMALLINT NOT NULL,
+    CONSTRAINT grants_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
+    CONSTRAINT grants_directory_fk FOREIGN KEY (share_name, directory_id) REFERENCES directories(share_name, id) ON DELETE CASCADE,
+    CONSTRAINT grants_connection_fk FOREIGN KEY (workgroup, share_name) REFERENCES connections(workgroup, share_name) ON DELETE CASCADE,
+    CONSTRAINT grants_unique UNIQUE (share_name, directory_id, workgroup),
+    CONSTRAINT grants_level CHECK (level BETWEEN 0 AND 3)
+);
+CREATE INDEX idx_grants_workgroup ON grants (workgroup);
+CREATE INDEX idx_grants_connection ON grants (workgroup, share_name);
+
 CREATE TABLE buffers (
     id BIGSERIAL PRIMARY KEY,
     share_name TEXT NOT NULL,
