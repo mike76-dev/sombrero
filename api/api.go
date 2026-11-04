@@ -433,6 +433,18 @@ func (api *API) buildHTTPRoutes() {
 		api.policyHandlerDELETE(w, req, ps)
 	})
 
+	router.GET("/share/:name/grants", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.grantsHandlerGET(w, req, ps)
+	})
+
+	router.PUT("/share/:name/grant", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.grantHandlerPUT(w, req, ps)
+	})
+
+	router.DELETE("/share/:name/grant", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.grantHandlerDELETE(w, req, ps)
+	})
+
 	router.GET("/account/shares", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.accountSharesHandlerGET(w, req, ps)
 	})
@@ -459,6 +471,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.DELETE("/workgroup/:id", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.workgroupHandlerDELETE(w, req, ps)
+	})
+
+	router.GET("/workgroup/:id/grants", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.workgroupGrantsHandlerGET(w, req, ps)
 	})
 
 	router.GET("/stats", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {

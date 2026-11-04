@@ -73,6 +73,10 @@ type mockStore struct {
 	appKeyForServer     func(stores.Workgroup, string) (types.PrivateKey, error)
 	appKeyHolders       func(string) ([]stores.Workgroup, error)
 	keyedConnections    func() ([]stores.KeyedConnection, error)
+	setGrant            func(string, string, stores.Workgroup, stores.GrantLevel) error
+	removeGrant         func(string, string, stores.Workgroup) error
+	grants              func(string, string) ([]stores.Grant, error)
+	workgroupGrants     func(stores.Workgroup) ([]stores.Grant, error)
 	applyDirectory      func(stores.TransferTarget, transfer.Directory) (stores.ApplyResult, error)
 	applyFile           func(stores.TransferTarget, transfer.File) (stores.ApplyResult, error)
 	setFileTimes        func(share, path string, createdAt, modifiedAt time.Time) error
@@ -294,6 +298,30 @@ func (m *mockStore) AppKeyHolders(serverName string) ([]stores.Workgroup, error)
 func (m *mockStore) KeyedConnections() ([]stores.KeyedConnection, error) {
 	if m.keyedConnections != nil {
 		return m.keyedConnections()
+	}
+	return nil, nil
+}
+func (m *mockStore) SetGrant(shareName, path string, wg stores.Workgroup, level stores.GrantLevel) error {
+	if m.setGrant != nil {
+		return m.setGrant(shareName, path, wg, level)
+	}
+	return nil
+}
+func (m *mockStore) RemoveGrant(shareName, path string, wg stores.Workgroup) error {
+	if m.removeGrant != nil {
+		return m.removeGrant(shareName, path, wg)
+	}
+	return nil
+}
+func (m *mockStore) Grants(shareName, path string) ([]stores.Grant, error) {
+	if m.grants != nil {
+		return m.grants(shareName, path)
+	}
+	return nil, nil
+}
+func (m *mockStore) WorkgroupGrants(wg stores.Workgroup) ([]stores.Grant, error) {
+	if m.workgroupGrants != nil {
+		return m.workgroupGrants(wg)
 	}
 	return nil, nil
 }
