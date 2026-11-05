@@ -556,10 +556,14 @@ func TestAnAnonymousSessionIsAskedWhoOwnsAFile(t *testing.T) {
 // DACL entry for the owner and one per granted workgroup.
 func TestASecurityDescriptorNamesTheOwnerAndGrants(t *testing.T) {
 	h := newSMBTest(t)
-	h.files.put("file", 64)
+	h.files.put("proj/file", 64)
 
+	// The store is asked about the whole path, not the file's name alone.
 	ownerWG, granteeWG := uuid.New(), uuid.New()
-	h.files.pathSecurity = func(string) (stores.PathSecurity, error) {
+	h.files.pathSecurity = func(path string) (stores.PathSecurity, error) {
+		if path != "proj/file" {
+			return stores.PathSecurity{}, stores.ErrNotFound
+		}
 		return stores.PathSecurity{
 			OwnerUser:      "owner",
 			OwnerWorkgroup: ownerWG,
@@ -571,7 +575,7 @@ func TestASecurityDescriptorNamesTheOwnerAndGrants(t *testing.T) {
 	}
 
 	cl := h.dial("alice")
-	created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	created, _ := cl.create("proj/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
 	fid := createdFileID(created)
 
 	msg := queryInfoRequest(cl.mid+1, cl.ss.sessionID, cl.tc.treeID, fid, smb2.INFO_SECURITY, 0, 4096)

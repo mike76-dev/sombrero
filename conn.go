@@ -4308,7 +4308,7 @@ func securityInfo(op *open, tc *treeConnect, ss *session, info, granted uint32) 
 	if !ok {
 		return smb2.NewSecInfo(ss.securityContext, info, granted)
 	}
-	ps, err := describer.PathSecurity(op.ctx, op.fileName)
+	ps, err := describer.PathSecurity(op.ctx, op.pathName)
 	if err != nil {
 		return smb2.NewSecInfo(ss.securityContext, info, granted)
 	}
