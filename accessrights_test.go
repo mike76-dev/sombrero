@@ -177,7 +177,8 @@ func TestShareSecurityIsReadSafelyWhileItChanges(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 300 {
-			grantAccess(cr, cl.tc, cl.ss)
+			fs, _ := shareRights(cl.tc, cl.ss)
+			grantAccess(cr, fs)
 		}
 	}()
 
@@ -488,5 +489,64 @@ func TestAShareWithNoSecurityGrantsNothing(t *testing.T) {
 				t.Errorf("a tree connect on the same share was refused with %v, want it denied", err)
 			}
 		})
+	}
+}
+
+// TestAGrantNarrowsTheHandle verifies that what the share allows the user is
+// cut down to what the store allows them at the path: a refusal comes at the
+// create, with nothing half-made left behind, and a handle that asked for
+// everything carries no right the path does not give.
+func TestAGrantNarrowsTheHandle(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("proj/doc.txt", 1024)
+	h.files.pathAccess = func(path string) (stores.PathAccess, error) {
+		switch path {
+		case "proj/hidden.txt":
+			return stores.PathAccess{}, stores.ErrNotFound
+		case "proj/doc.txt", "proj/new.txt":
+			return stores.PathAccess{}, nil
+		}
+		return stores.PathAccess{Write: true, Delete: true}, nil
+	}
+
+	alice := h.dial("alice")
+
+	resp, err := alice.createErr("proj/new.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE)
+	if err != nil {
+		t.Fatalf("the create did not come back: %v", err)
+	}
+	if status := smb2.Header(resp).Status(); status != smb2.STATUS_ACCESS_DENIED {
+		t.Errorf("a file was made where nothing may be written: got %#x, want access denied", status)
+	}
+
+	resp, err = alice.createAccessing("proj/doc.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, writeAccess, nil)
+	if err != nil {
+		t.Fatalf("the open did not come back: %v", err)
+	}
+	if status := smb2.Header(resp).Status(); status != smb2.STATUS_ACCESS_DENIED {
+		t.Errorf("a read-only path was opened for writing: got %#x, want access denied", status)
+	}
+
+	resp, err = alice.createAccessing("proj/doc.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, smb2.MAXIMUM_ALLOWED, nil)
+	if err != nil {
+		t.Fatalf("the open did not come back: %v", err)
+	}
+	if status := smb2.Header(resp).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("a read-only path would not open for reading: got %#x", status)
+	}
+	mark, err := alice.markForDeletion(createdFileID(resp))
+	if err != nil {
+		t.Fatalf("the deletion mark did not come back: %v", err)
+	}
+	if status := smb2.Header(mark).Status(); status != smb2.STATUS_ACCESS_DENIED {
+		t.Errorf("a read-only path was marked for deletion: got %#x, want access denied", status)
+	}
+
+	resp, err = alice.createErr("proj/hidden.txt", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	if err != nil {
+		t.Fatalf("the open did not come back: %v", err)
+	}
+	if status := smb2.Header(resp).Status(); status != smb2.STATUS_OBJECT_NAME_NOT_FOUND {
+		t.Errorf("an invisible path answered: got %#x, want name not found", status)
 	}
 }

@@ -145,6 +145,12 @@ type SecurityDescriber interface {
 	PathSecurity(ctx context.Context, path string) (stores.PathSecurity, error)
 }
 
+// AccessChecker is the part of a client whose store can say what an account may
+// do at one path, for the server to narrow a handle's access rights to.
+type AccessChecker interface {
+	PathAccess(ctx context.Context, acc stores.Account, path string) (stores.PathAccess, error)
+}
+
 // sizeFromSeeker tries to find out the size of a file.
 func sizeFromSeeker(r io.Reader) (int64, error) {
 	s, ok := r.(io.Seeker)

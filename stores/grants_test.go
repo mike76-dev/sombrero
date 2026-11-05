@@ -297,6 +297,77 @@ func TestReadOnlyHoldsAgainstGrants(t *testing.T) {
 	}
 }
 
+// TestPathAccess verifies the per-path rights the handles are narrowed to: the
+// owner holds everything, a grantee climbs the ladder, a read-only folder keeps
+// protecting its files, and an invisible path is not there at all.
+func TestPathAccess(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+
+	owner, share, guest, wg := newGrantFixture(t, db)
+	if err := db.CreateDirectory(owner, share, "/proj", true, false); err != nil {
+		t.Fatalf("CreateDirectory: %v", err)
+	}
+	plantPiece(t, db, share, owner, "/proj/file.txt", types.Hash256{5}, 0, 100)
+
+	check := func(acc Account, path string, want PathAccess) {
+		t.Helper()
+		pa, err := db.PathAccess(acc, share, path)
+		if err != nil {
+			t.Fatalf("PathAccess(%s): %v", path, err)
+		}
+		if pa != want {
+			t.Fatalf("PathAccess(%s) = %+v, want %+v", path, pa, want)
+		}
+	}
+	checkGone := func(acc Account, path string) {
+		t.Helper()
+		if _, err := db.PathAccess(acc, share, path); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("PathAccess(%s) = %v, want not found", path, err)
+		}
+	}
+
+	check(owner, "/", PathAccess{Write: true})
+	check(owner, "/proj", PathAccess{Write: true, Delete: true})
+	check(owner, "/proj/file.txt", PathAccess{Write: true, Delete: true})
+	check(owner, "/proj/new.txt", PathAccess{Write: true, Delete: true})
+	check(owner, "/new.txt", PathAccess{Write: true, Delete: true})
+
+	checkGone(guest, "/proj")
+	checkGone(guest, "/proj/file.txt")
+	checkGone(guest, "/proj/new.txt")
+
+	if err := db.SetGrant(share, "/proj", wg, LevelRead); err != nil {
+		t.Fatalf("SetGrant: %v", err)
+	}
+	check(guest, "/proj", PathAccess{})
+	check(guest, "/proj/file.txt", PathAccess{})
+	check(guest, "/proj/new.txt", PathAccess{})
+
+	if err := db.SetGrant(share, "/proj", wg, LevelWrite); err != nil {
+		t.Fatalf("SetGrant: %v", err)
+	}
+	check(guest, "/proj", PathAccess{Write: true})
+	check(guest, "/proj/file.txt", PathAccess{Write: true})
+	check(guest, "/proj/new.txt", PathAccess{Write: true, Delete: true})
+	plantPiece(t, db, share, guest, "/proj/own.txt", types.Hash256{6}, 0, 100)
+	check(guest, "/proj/own.txt", PathAccess{Write: true, Delete: true})
+
+	if err := db.SetGrant(share, "/proj", wg, LevelDelete); err != nil {
+		t.Fatalf("SetGrant: %v", err)
+	}
+	check(guest, "/proj", PathAccess{Write: true, Delete: true})
+	check(guest, "/proj/file.txt", PathAccess{Write: true, Delete: true})
+
+	if err := db.CreateDirectory(owner, share, "/proj/locked", true, true); err != nil {
+		t.Fatalf("CreateDirectory(locked): %v", err)
+	}
+	plantPiece(t, db, share, owner, "/proj/locked/keep.txt", types.Hash256{7}, 0, 100)
+	check(guest, "/proj/locked/keep.txt", PathAccess{})
+	check(owner, "/proj/locked/keep.txt", PathAccess{Write: true, Delete: true})
+}
+
 // TestPathSecurity verifies the lookup a security descriptor is built from:
 // the owner of the path, and the grants folded over the ancestors.
 func TestPathSecurity(t *testing.T) {

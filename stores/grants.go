@@ -278,6 +278,157 @@ func (db *Database) PathSecurity(shareName, path string) (ps PathSecurity, err e
 	return
 }
 
+// PathAccess is what the account may do at one path. For a path that holds
+// nothing yet, Write is the right to put something of the account's own there.
+type PathAccess struct {
+	Write  bool
+	Delete bool
+}
+
+// PathAccess reports what the account may do at the path, mirroring the
+// predicates the write and delete queries enforce. A path the account cannot
+// see, and whose parent it cannot see either, is ErrNotFound.
+func (db *Database) PathAccess(acc Account, shareName, path string) (pa PathAccess, err error) {
+	path = normalizePath(path)
+	if path == "/" {
+		return PathAccess{Write: true}, nil
+	}
+
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const objectQuery = `
+			WITH caller AS (
+				SELECT id, workgroup
+				FROM accounts
+				WHERE id = $3
+			)
+			SELECT
+				COALESCE(
+					o.account = c.id
+					OR (od.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+					OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+					OR owns_ancestor(o.share_name, c.id, o.full_path)
+				, FALSE) AS visible,
+				COALESCE(
+					COALESCE(
+						o.directory_id IS NULL
+						OR od.account = c.id
+						OR (od.private = FALSE AND (powner.workgroup = c.workgroup OR powner.workgroup = anonymous_workgroup()))
+						OR granted_level(o.share_name, c.workgroup, o.full_path) >= 1
+						OR owns_ancestor(o.share_name, c.id, o.full_path)
+					, FALSE)
+					AND (od.read_only IS NOT TRUE OR o.account = c.id)
+				, FALSE) AS can_write,
+				COALESCE(
+					o.account = c.id
+					OR (
+						od.private = FALSE
+						AND od.read_only = FALSE
+						AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
+					)
+					OR (od.read_only = FALSE AND (
+						granted_level(o.share_name, c.workgroup, o.full_path) >= 2
+						OR owns_ancestor(o.share_name, c.id, o.full_path)
+					))
+				, FALSE) AS can_delete
+			FROM objects o
+			JOIN accounts owner ON owner.id = o.account
+			LEFT JOIN directories od
+				ON od.share_name = o.share_name
+				AND od.id = o.directory_id
+			LEFT JOIN accounts powner ON powner.id = od.account
+			CROSS JOIN caller c
+			WHERE o.share_name = $1
+				AND o.full_path = $2
+				AND o.temporary = FALSE
+		`
+
+		var visible, canWrite, canDelete bool
+		err := tx.QueryRow(ctx, objectQuery, shareName, path, acc.ID).Scan(&visible, &canWrite, &canDelete)
+		if err == nil {
+			if !visible {
+				return ErrNotFound
+			}
+			pa = PathAccess{Write: canWrite, Delete: canDelete}
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("failed to query the object: %w", err)
+		}
+
+		const directoryQuery = `
+			WITH caller AS (
+				SELECT id, workgroup
+				FROM accounts
+				WHERE id = $3
+			)
+			SELECT
+				COALESCE(
+					d.account = c.id
+					OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+					OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+					OR owns_ancestor(d.share_name, c.id, d.full_path)
+				, FALSE) AS visible,
+				COALESCE(
+					d.account = c.id
+					OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+					OR granted_level(d.share_name, c.workgroup, d.full_path) >= 1
+					OR owns_ancestor(d.share_name, c.id, d.full_path)
+				, FALSE) AS can_write,
+				COALESCE(
+					d.account = c.id
+					OR (
+						d.private = FALSE
+						AND d.read_only = FALSE
+						AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
+					)
+					OR (d.read_only = FALSE AND (
+						granted_level(d.share_name, c.workgroup, d.full_path) >= 2
+						OR owns_ancestor(d.share_name, c.id, d.full_path)
+					))
+				, FALSE) AS can_delete
+			FROM directories d
+			JOIN accounts owner ON owner.id = d.account
+			CROSS JOIN caller c
+			WHERE d.share_name = $1
+				AND d.full_path = $2
+		`
+
+		err = tx.QueryRow(ctx, directoryQuery, shareName, path, acc.ID).Scan(&visible, &canWrite, &canDelete)
+		if err == nil {
+			if !visible {
+				return ErrNotFound
+			}
+			pa = PathAccess{Write: canWrite, Delete: canDelete}
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("failed to query the directory: %w", err)
+		}
+
+		// Nothing is at the path, so the parent decides, and what would be made
+		// there would be the caller's own to delete.
+		parent, _ := splitPath(path)
+		if parent == "/" {
+			pa = PathAccess{Write: true, Delete: true}
+			return nil
+		}
+
+		err = tx.QueryRow(ctx, directoryQuery, shareName, parent, acc.ID).Scan(&visible, &canWrite, &canDelete)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("failed to query the parent: %w", err)
+		}
+		if !visible {
+			return ErrNotFound
+		}
+		pa = PathAccess{Write: canWrite, Delete: canWrite}
+		return nil
+	})
+	return
+}
+
 // EffectiveLevel is the highest level the workgroup holds on the path, its own
 // grant or an ancestor's: a grant covers the whole subtree under its folder.
 func (db *Database) EffectiveLevel(shareName, path string, wg Workgroup) (level GrantLevel, granted bool, err error) {

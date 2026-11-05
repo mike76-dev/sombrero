@@ -656,23 +656,61 @@ func satisfies(held, desired uint32) bool {
 	return expandGeneric(desired)&^generic&^(expandGeneric(held)|notWeighed) == 0
 }
 
-// grantAccess returns true if the user's access rights are sufficient for performing the requested operation(s) on the file.
-func grantAccess(cr smb2.CreateRequest, tc *treeConnect, ss *session) bool {
+// shareRights returns what the share's security tables allow the user, before
+// the path itself weighs in.
+func shareRights(tc *treeConnect, ss *session) (uint32, bool) {
 	// An anonymous session is in neither of the share's security tables: it holds no policies of
 	// its own, and what the tree connect granted it over the public folder is the whole of what
 	// it may do.
-	fs, held := tc.maximalAccess, tc.maximalAccess != 0
-	if !ss.isAnonymous {
-		// A share holding no security for the user grants nothing, which is what the tree connect
-		// makes of one and so what a file on it has to make of one as well. Read the other way
-		// round, an empty table would be a share every user has every right over.
-		if !tc.share.mayConnect(ss.workgroup, ss.userName) {
-			return false
-		}
-
-		fs, held = tc.share.fileAccess(ss.workgroup, ss.userName)
+	if ss.isAnonymous {
+		return tc.maximalAccess, tc.maximalAccess != 0
 	}
-	if !held {
+
+	// A share holding no security for the user grants nothing, which is what the tree connect
+	// makes of one and so what a file on it has to make of one as well. Read the other way
+	// round, an empty table would be a share every user has every right over.
+	if !tc.share.mayConnect(ss.workgroup, ss.userName) {
+		return 0, false
+	}
+
+	return tc.share.fileAccess(ss.workgroup, ss.userName)
+}
+
+// narrowToPath takes out of fs whatever the store does not allow the account at
+// this path. A path the account may not see at all is ErrNotFound.
+func narrowToPath(fs uint32, tc *treeConnect, acc stores.Account, path string) (uint32, error) {
+	checker, ok := tc.client.(client.AccessChecker)
+	if !ok {
+		return fs, nil
+	}
+
+	pa, err := checker.PathAccess(context.Background(), acc, path)
+	if err != nil {
+		// A file that was created and never stored is known by its state alone,
+		// and stays as reachable as the day it was made.
+		if errors.Is(err, stores.ErrNotFound) {
+			if _, known := tc.persistedFile(path); known {
+				return fs, nil
+			}
+		}
+		return 0, err
+	}
+
+	if !pa.Write {
+		fs &^= smb2.FILE_WRITE_DATA | smb2.FILE_APPEND_DATA | smb2.FILE_WRITE_EA |
+			smb2.FILE_WRITE_ATTRIBUTES | smb2.WRITE_DAC | smb2.WRITE_OWNER |
+			smb2.GENERIC_WRITE | smb2.GENERIC_ALL | smb2.MAXIMUM_ALLOWED
+	}
+	if !pa.Delete {
+		fs &^= smb2.DELETE | smb2.FILE_DELETE_CHILD | smb2.GENERIC_ALL | smb2.MAXIMUM_ALLOWED
+	}
+
+	return fs, nil
+}
+
+// grantAccess returns true if the access rights fs are sufficient for performing the requested operation(s) on the file.
+func grantAccess(cr smb2.CreateRequest, fs uint32) bool {
+	if fs == 0 {
 		return false
 	}
 	write := fs&(smb2.FILE_WRITE_DATA|smb2.FILE_APPEND_DATA|smb2.FILE_WRITE_EA|smb2.FILE_WRITE_ATTRIBUTES) > 0
@@ -1097,14 +1135,15 @@ func (fs *fileState) dropUpload(u *upload) {
 // registerOpen creates a new Open object and registers it with the server.
 // fs is the state of the file the open is on, which is nil for a file being opened for the first
 // time and the state every other open on it shares for one that is already known.
-func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeConnect, info client.ObjectInfo, ctx context.Context, cancel context.CancelFunc, fs *fileState) *open {
+// pm is the maximal access on this path, the share's rights narrowed to what the store allows here.
+func (ss *session) registerOpen(cr smb2.CreateRequest, c *connection, tc *treeConnect, info client.ObjectInfo, ctx context.Context, cancel context.CancelFunc, fs *fileState, pm uint32) *open {
 	h, _ := blake2b.New256(nil)
 	h.Write([]byte(info.Key))
 	id := h.Sum(nil)
 
 	var filepath, filename string
 	var isDir bool
-	access := grantedFor(cr.DesiredAccess(), tc.maximalAccess)
+	access := grantedFor(cr.DesiredAccess(), pm)
 	name := strings.ToLower(info.Key)
 	switch name {
 	case "lsarpc", "srvsvc", "mdssvc": // Standard named pipes on MacOS, Linux, and Windows

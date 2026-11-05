@@ -99,6 +99,10 @@ type fakeClient struct {
 	// pathSecurity answers the owner-and-grants lookup, when a test sets it;
 	// without it the backend knows no owners, like renterd.
 	pathSecurity func(path string) (stores.PathSecurity, error)
+
+	// pathAccess answers the per-path rights lookup, when a test sets it;
+	// without it every path allows everything, like renterd.
+	pathAccess func(path string) (stores.PathAccess, error)
 }
 
 // stagedPart is a part the backend has taken and not yet put into an object.
@@ -124,6 +128,17 @@ func (fc *fakeClient) PathSecurity(_ context.Context, path string) (stores.PathS
 		return stores.PathSecurity{}, errNoObject
 	}
 	return fc.pathSecurity(path)
+}
+
+// PathAccess makes the fake a client.AccessChecker; a test that sets no answer
+// gets every right, so nothing is narrowed.
+func (fc *fakeClient) PathAccess(_ context.Context, _ stores.Account, path string) (stores.PathAccess, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if fc.pathAccess == nil {
+		return stores.PathAccess{Write: true, Delete: true}, nil
+	}
+	return fc.pathAccess(path)
 }
 
 func (fc *fakeClient) put(path string, size uint64) {

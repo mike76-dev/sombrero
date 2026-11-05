@@ -674,9 +674,17 @@ func TestQueryingAttributesNeedsReadAttributes(t *testing.T) {
 			h.files.put("file", 1024)
 
 			cl := h.dial("alice")
-			cl.tc.maximalAccess = tt.access
+			// The handle takes its rights from the share's security table, so
+			// that is where the principal is cut down to the access under test.
+			h.share.fileSecurity[h.workgroup+"/alice"] = tt.access
 
-			created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			created, err := cl.createAccessing("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, tt.access, nil)
+			if err != nil {
+				t.Fatalf("the create did not come back: %v", err)
+			}
+			if status := smb2.Header(created).Status(); status != smb2.STATUS_OK {
+				t.Fatalf("the create was answered %#x", status)
+			}
 			fid := createdFileID(created)
 
 			buf := cl.queryInfo(fid, tt.class, 4096)
