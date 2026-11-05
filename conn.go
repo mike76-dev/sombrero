@@ -1175,12 +1175,32 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// may not have the file has no business making whoever holds it give it up, and a
 		// create that is going to be refused has nothing to wait for. The desired access is
 		// read after the adjustment above, which is what decides it in the marginal cases.
-		if tc.share.name != "ipc$" && !grantAccess(cr, tc, ss) {
-			c.server.mu.Lock()
-			c.server.stats.PermErrors++
-			c.server.mu.Unlock()
-			resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
-			return resp, ss, nil
+		// What the share allows the user is narrowed to what the store allows them at this
+		// path, so that a folder granted for reading hands out no write or delete access.
+		pm := tc.maximalAccess
+		if tc.share.name != "ipc$" {
+			fs, held := shareRights(tc, ss)
+			if held {
+				var aerr error
+				fs, aerr = narrowToPath(fs, tc, acc, path)
+				if aerr != nil {
+					if errors.Is(aerr, stores.ErrNotFound) {
+						resp := smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil)
+						return resp, ss, nil
+					}
+					log.Printf("Couldn't settle the access rights on %s: %v\n", path, aerr)
+					resp := smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
+					return resp, ss, nil
+				}
+			}
+			if !held || !grantAccess(cr, fs) {
+				c.server.mu.Lock()
+				c.server.stats.PermErrors++
+				c.server.mu.Unlock()
+				resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
+				return resp, ss, nil
+			}
+			pm = fs
 		}
 
 		// A lease the client already holds on this file is not something the create has to
@@ -1215,7 +1235,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 		if !c.server.needsBreakWait(tc.share, path, nil, asking, sharedOK) {
 			c.server.tellHoldersOn(tc.share, path, nil, asking, sharedOK)
-			resp, _ := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
+			resp, _ := c.createFile(req, cr, ss, tc, acc, contexts, path, lr, pm)
 			return resp, ss, nil
 		}
 
@@ -1239,7 +1259,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 
 			c.server.breakHoldersOn(tc.share, path, nil, asking, sharedOK)
 
-			resp, made := c.createFile(req, cr, ss, tc, acc, contexts, path, lr)
+			resp, made := c.createFile(req, cr, ss, tc, acc, contexts, path, lr, pm)
 
 			c.awaitInterim(interim)
 
@@ -2799,7 +2819,7 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 
 		case smb2.INFO_SECURITY:
-			info = smb2.NewSecInfo(ss.securityContext, qir.AdditionalInformation(), ga)
+			info = securityInfo(op, tc, ss, qir.AdditionalInformation(), ga)
 
 			// A security descriptor is never sent in part: the client is told how much room it
 			// takes and asks again. [MS-SMB2] 3.3.5.20.3 names STATUS_BUFFER_OVERFLOW as the one
@@ -3924,7 +3944,7 @@ func (s *server) reapConnections() {
 // It is kept apart from the dispatcher because a create that has to revoke somebody else's
 // oplock first can only finish once the break is over, which is too long to keep the
 // connection waiting, so it runs on a goroutine of its own.
-func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *session, tc *treeConnect, acc stores.Account, contexts map[uint32][]byte, path string, lr *smb2.LeaseRequest) (smb2.GenericResponse, *open) {
+func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *session, tc *treeConnect, acc stores.Account, contexts map[uint32][]byte, path string, lr *smb2.LeaseRequest, pm uint32) (smb2.GenericResponse, *open) {
 	// A lease key is bound to the file it was first used for. Naming the same key on another
 	// file is the one thing a client may not do with one, and is settled before the open is
 	// made, so that a refusal leaves nothing behind.
@@ -3942,7 +3962,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	// an instance of its own, so there is nothing for the sharing mode to be weighed against
 	// ([MS-SMB2] 2.2.13).
 	if tc.share.name != "ipc$" {
-		access := grantedFor(cr.DesiredAccess(), tc.maximalAccess)
+		access := grantedFor(cr.DesiredAccess(), pm)
 		if other := c.server.sharingViolation(tc.share, path, access, cr.ShareAccess()); other != nil {
 			if c.server.debug {
 				log.Println(describeSharingViolation(path, access, cr.ShareAccess(), other))
@@ -4147,7 +4167,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	// two handles on one file are two opens, with a file ID and a caching promise apiece, and
 	// handing the same open to both is what left the server breaking an oplock on the very handle
 	// a create was about to answer with.
-	op = ss.registerOpen(cr, c, tc, info, ctx, cancel, known)
+	op = ss.registerOpen(cr, c, tc, info, ctx, cancel, known, pm)
 	if op == nil {
 		cancel()
 		resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
@@ -4189,9 +4209,9 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	for id, ctx := range contexts {
 		switch id {
 		case smb2.CREATE_QUERY_MAXIMAL_ACCESS_REQUEST:
-			// What the user may do with the file, which is the access of the tree connect
+			// What the user may do with the file, which is the access on the path
 			// rather than the narrower one this handle was given.
-			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, createdModified, tc.maximalAccess)
+			respContexts[id] = smb2.HandleCreateQueryMaximalAccessRequest(ctx, createdModified, pm)
 		case smb2.CREATE_QUERY_ON_DISK_ID:
 			respContexts[id] = smb2.HandleCreateQueryOnDiskID(op.handle, tc.volumeID)
 		case smb2.CREATE_ALLOCATION_SIZE: // The file is about to be uploaded, we just got its size
@@ -4278,4 +4298,39 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	}
 
 	return resp, op
+}
+
+// securityInfo answers a security query with the real owner and grants where
+// the backend knows them, and with the asking session's own identity where it
+// does not.
+func securityInfo(op *open, tc *treeConnect, ss *session, info, granted uint32) []byte {
+	describer, ok := tc.client.(client.SecurityDescriber)
+	if !ok {
+		return smb2.NewSecInfo(ss.securityContext, info, granted)
+	}
+	ps, err := describer.PathSecurity(op.ctx, op.pathName)
+	if err != nil {
+		return smb2.NewSecInfo(ss.securityContext, info, granted)
+	}
+
+	owner := ntlm.AccountSID(ps.OwnerUser, ps.OwnerWorkgroup.String())
+	grantees := []smb2.Grantee{{SID: owner, Access: grantAccessMask(stores.LevelAdmin)}}
+	for _, g := range ps.Grants {
+		grantees = append(grantees, smb2.Grantee{
+			SID:    ntlm.GroupSID(g.Workgroup.UUID.String()),
+			Access: grantAccessMask(g.Level),
+		})
+	}
+	return smb2.NewOwnedSecInfo(info, owner, ntlm.GroupSID(ps.OwnerWorkgroup.String()), grantees)
+}
+
+// grantAccessMask is the access a grant level carries, each level including the
+// ones below; reading implies traversal.
+func grantAccessMask(level stores.GrantLevel) uint32 {
+	return stores.FlagsFromAccessRights(stores.AccessRights{
+		ReadAccess:    true,
+		ExecuteAccess: true,
+		WriteAccess:   level >= stores.LevelWrite,
+		DeleteAccess:  level >= stores.LevelDelete,
+	})
 }

@@ -75,6 +75,17 @@ export interface AccessRights {
   ExecuteAccess: boolean
 }
 
+export const grantLevels = ['read', 'write', 'delete', 'admin'] as const
+export type GrantLevel = (typeof grantLevels)[number]
+
+export interface GrantInfo {
+  shareName: string
+  path: string
+  workgroup: string
+  workgroupName?: string
+  level: GrantLevel
+}
+
 export interface BacklogStats {
   buffered: number
   limit: number

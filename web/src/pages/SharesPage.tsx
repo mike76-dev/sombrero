@@ -3,9 +3,11 @@ import {
   AccessRights,
   Account,
   FragmentationResponse,
+  GrantLevel,
   OrphansResponse,
   ServerSettings,
   Share,
+  grantLevels,
 } from '../api/types'
 import {
   checkFragmentation,
@@ -15,11 +17,14 @@ import {
   getSettings,
   getShareAccounts,
   listAccounts,
+  listShareGrants,
   listShares,
   registerShare,
+  removeGrant,
   removePolicy,
   removeShare,
   scanOrphans,
+  setGrant,
   setPolicy,
   unpinOrphans,
   updateShare,
@@ -561,6 +566,106 @@ function ShareSettingsForm({
   )
 }
 
+// GrantsCard shares folders of the share with other workgroups.
+function GrantsCard({ share }: { share: Share }) {
+  const { data, error, reload } = useApiData(() => listShareGrants(share.name), [share.name])
+  const action = useApiAction()
+  const [path, setPath] = useState('')
+  const [workgroup, setWorkgroup] = useState('')
+  const [level, setLevel] = useState<GrantLevel>('read')
+  const grants = data || []
+
+  const grant = () =>
+    action.run(async () => {
+      await setGrant(share.name, path.trim(), workgroup, level)
+      setPath('')
+      reload()
+    }, 'Folder granted.')
+
+  return (
+    <div className="stack">
+      <p className="muted">
+        A grant shares a folder, and everything under it, with another workgroup, even where the
+        folder is private. Read lets its accounts see the files, write add their own, delete
+        remove anybody's; admin is the full set, reserved for managing the folder's grants later.
+        A grant widens where those accounts may act, not what they may do: each one still works
+        within its own policy on the share.
+      </p>
+      {grants.length > 0 && (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Folder</th>
+              <th>Workgroup</th>
+              <th>Level</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {grants.map((g) => (
+              <tr key={g.path + g.workgroup}>
+                <td className="mono">{g.path}</td>
+                <td>{g.workgroupName || <span className="mono muted">{g.workgroup}</span>}</td>
+                <td>{g.level}</td>
+                <td>
+                  <button
+                    className="btn btn-small btn-danger"
+                    disabled={action.busy}
+                    onClick={() =>
+                      action.run(async () => {
+                        await removeGrant(share.name, g.path, g.workgroup)
+                        reload()
+                      })
+                    }
+                  >
+                    Revoke
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="row row-form">
+        <Field label="Folder">
+          <input
+            type="text"
+            value={path}
+            placeholder="e.g. Projects"
+            onChange={(e) => setPath(e.target.value)}
+            disabled={action.busy}
+          />
+        </Field>
+        <Field label="Workgroup">
+          <WorkgroupSelect value={workgroup} onChange={setWorkgroup} />
+        </Field>
+        <Field label="Level">
+          <select
+            value={level}
+            onChange={(e) => setLevel(e.target.value as GrantLevel)}
+            disabled={action.busy}
+          >
+            {grantLevels.map((l) => (
+              <option key={l} value={l}>
+                {l}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <button
+          className="btn btn-primary"
+          disabled={action.busy || !path.trim() || !workgroup}
+          onClick={grant}
+        >
+          Grant
+        </button>
+      </div>
+      <ErrorBanner error={error || action.error} />
+      <SuccessBanner message={action.message} />
+    </div>
+  )
+}
+
 function ShareDetails({
   share,
   settings,
@@ -609,6 +714,7 @@ function ShareDetails({
           )}
         </tbody>
       </table>
+      <div className="group-label">Settings</div>
       <ShareSettingsForm share={share} settings={settings} onChanged={onChanged} />
       <div className="row">
         <button className="btn" disabled={busy} onClick={loadAccounts}>
@@ -629,8 +735,17 @@ function ShareDetails({
         </button>
       </div>
       <ErrorBanner error={error} />
-      {share.type === 'indexd' && <OrphanedSlabsCard share={share} />}
-      {share.type === 'indexd' && <FragmentationCard share={share} />}
+      {share.type === 'indexd' && (
+        <>
+          <div className="group-label">Shared folders</div>
+          <GrantsCard share={share} />
+          <div className="group-label">Orphaned slabs</div>
+          <OrphanedSlabsCard share={share} />
+          <div className="group-label">Fragmentation</div>
+          <FragmentationCard share={share} />
+        </>
+      )}
+      {accounts && <div className="group-label">Accounts with access</div>}
       {accounts &&
         (accounts.length === 0 ? (
           <p className="muted">No accounts have access to this share.</p>

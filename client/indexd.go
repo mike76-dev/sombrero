@@ -729,6 +729,18 @@ func (ic *IndexdClient) IsEmpty(ctx context.Context, acc stores.Account, path st
 	return ic.db.DirectoryEmpty(acc, ic.share, path)
 }
 
+// PathSecurity reports who owns the path and who holds grants on it, for the
+// security descriptors.
+func (ic *IndexdClient) PathSecurity(ctx context.Context, path string) (stores.PathSecurity, error) {
+	return ic.db.PathSecurity(ic.share, path)
+}
+
+// PathAccess reports what the account may do at the path, for the handle's
+// access rights.
+func (ic *IndexdClient) PathAccess(ctx context.Context, acc stores.Account, path string) (stores.PathAccess, error) {
+	return ic.db.PathAccess(acc, ic.share, path)
+}
+
 // List lists the contents of a directory.
 func (ic *IndexdClient) List(ctx context.Context, acc stores.Account, path string) (ois []ObjectInfo, err error) {
 	oms, err := ic.db.ListObjects(acc, ic.share, path)

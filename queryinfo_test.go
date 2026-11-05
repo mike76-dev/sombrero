@@ -6,8 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/client"
+	"github.com/mike76-dev/sombrero/ntlm"
 	"github.com/mike76-dev/sombrero/smb2"
+	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/utils"
 )
 
@@ -548,6 +551,63 @@ func TestAnAnonymousSessionIsAskedWhoOwnsAFile(t *testing.T) {
 	}
 }
 
+// TestASecurityDescriptorNamesTheOwnerAndGrants is the query against a backend that knows its
+// owners: the descriptor names the account that owns the path, whoever asks, and carries one
+// DACL entry for the owner and one per granted workgroup.
+func TestASecurityDescriptorNamesTheOwnerAndGrants(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.put("proj/file", 64)
+
+	// The store is asked about the whole path, not the file's name alone.
+	ownerWG, granteeWG := uuid.New(), uuid.New()
+	h.files.pathSecurity = func(path string) (stores.PathSecurity, error) {
+		if path != "proj/file" {
+			return stores.PathSecurity{}, stores.ErrNotFound
+		}
+		return stores.PathSecurity{
+			OwnerUser:      "owner",
+			OwnerWorkgroup: ownerWG,
+			Grants: []stores.Grant{{
+				Workgroup: stores.Workgroup{UUID: granteeWG},
+				Level:     stores.LevelWrite,
+			}},
+		}, nil
+	}
+
+	cl := h.dial("alice")
+	created, _ := cl.create("proj/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+	fid := createdFileID(created)
+
+	msg := queryInfoRequest(cl.mid+1, cl.ss.sessionID, cl.tc.treeID, fid, smb2.INFO_SECURITY, 0, 4096)
+	binary.LittleEndian.PutUint32(msg[smb2.SMB2HeaderSize+16:smb2.SMB2HeaderSize+20],
+		smb2.OWNER_SECURITY_INFORMATION|smb2.GROUP_SECURITY_INFORMATION|smb2.DACL_SECURITY_INFORMATION)
+	cl.mid++
+
+	resp, err := cl.send(msg)
+	if err != nil {
+		t.Fatalf("the query failed: %v", err)
+	}
+	if status := resp.Header().Status(); status != smb2.STATUS_OK {
+		t.Fatalf("the query was answered %#x, want the descriptor", status)
+	}
+	sd := queriedInfo(t, resp.Encode())
+
+	// The owner SID carries the four domain sub-authorities and the RID, both
+	// derived from the owning account's names, not the asker's.
+	if n := sd[21]; n != 5 {
+		t.Fatalf("the owner carries %d sub-authorities, want 5", n)
+	}
+	rid, _ := ntlm.Identity("owner", ownerWG.String())
+	if got := binary.LittleEndian.Uint32(sd[44:48]); got != rid {
+		t.Errorf("the owner RID is %d, want %d", got, rid)
+	}
+
+	daclOffset := binary.LittleEndian.Uint32(sd[16:20])
+	if count := binary.LittleEndian.Uint32(sd[daclOffset+4 : daclOffset+8]); count != 2 {
+		t.Errorf("the DACL holds %d entries, want the owner's and the grant's", count)
+	}
+}
+
 // TestASecurityDescriptorTooBigForTheBufferIsRefused is the query whose buffer will not hold the
 // answer. A security descriptor is never sent in part, so the client is told how much room it needs
 // and asks again — and [MS-SMB2] 3.3.5.20.3 names the one status this must not carry:
@@ -618,9 +678,17 @@ func TestQueryingAttributesNeedsReadAttributes(t *testing.T) {
 			h.files.put("file", 1024)
 
 			cl := h.dial("alice")
-			cl.tc.maximalAccess = tt.access
+			// The handle takes its rights from the share's security table, so
+			// that is where the principal is cut down to the access under test.
+			h.share.fileSecurity[h.workgroup+"/alice"] = tt.access
 
-			created, _ := cl.create("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN)
+			created, err := cl.createAccessing("file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, tt.access, nil)
+			if err != nil {
+				t.Fatalf("the create did not come back: %v", err)
+			}
+			if status := smb2.Header(created).Status(); status != smb2.STATUS_OK {
+				t.Fatalf("the create was answered %#x", status)
+			}
 			fid := createdFileID(created)
 
 			buf := cl.queryInfo(fid, tt.class, 4096)

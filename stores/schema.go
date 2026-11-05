@@ -55,6 +55,37 @@ var migrations = []migration{
 	{name: "forget how far a slab was filled", sql: `
 		DROP TABLE slabs
 	`},
+	{name: "share folders with other workgroups", sql: `
+		CREATE TABLE grants (
+			share_name TEXT NOT NULL,
+			directory_id BIGINT NOT NULL,
+			workgroup INT NOT NULL REFERENCES workgroups(id) ON DELETE CASCADE,
+			level SMALLINT NOT NULL,
+			CONSTRAINT grants_share_fk FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
+			CONSTRAINT grants_directory_fk FOREIGN KEY (share_name, directory_id) REFERENCES directories(share_name, id) ON DELETE CASCADE,
+			CONSTRAINT grants_connection_fk FOREIGN KEY (workgroup, share_name) REFERENCES connections(workgroup, share_name) ON DELETE CASCADE,
+			CONSTRAINT grants_unique UNIQUE (share_name, directory_id, workgroup),
+			CONSTRAINT grants_level CHECK (level BETWEEN 0 AND 3)
+		);
+		CREATE INDEX idx_grants_workgroup ON grants (workgroup);
+		CREATE INDEX idx_grants_connection ON grants (workgroup, share_name)
+	`},
+	{name: "look grants up from the queries", sql: `
+		CREATE FUNCTION granted_level(TEXT, INT, TEXT) RETURNS SMALLINT AS $$
+    SELECT MAX(g.level)
+    FROM grants g
+    JOIN directories d ON d.share_name = g.share_name AND d.id = g.directory_id
+    WHERE g.share_name = $1 AND g.workgroup = $2
+    AND (d.full_path = $3 OR starts_with($3, d.full_path || '/'))
+$$ LANGUAGE SQL STABLE;
+		CREATE FUNCTION owns_ancestor(TEXT, INT, TEXT) RETURNS BOOLEAN AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM directories d
+        WHERE d.share_name = $1 AND d.account = $2
+        AND (d.full_path = $3 OR starts_with($3, d.full_path || '/'))
+    )
+$$ LANGUAGE SQL STABLE
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

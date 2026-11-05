@@ -45,6 +45,8 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 				AND d.full_path = $3
 				AND (d.account = c.id
 				OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+				OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+				OR owns_ancestor(d.share_name, c.id, d.full_path)
 			)
 		`
 		const query = `
@@ -70,6 +72,8 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 						WHERE a.id = d.account
 							AND (a.workgroup = c.workgroup OR a.workgroup = anonymous_workgroup())
 					))
+					OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+					OR owns_ancestor(d.share_name, c.id, d.full_path)
 				)
 
 			UNION ALL
@@ -95,6 +99,8 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 						od.private = FALSE
 						AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 					)
+					OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+					OR owns_ancestor(o.share_name, c.id, o.full_path)
 				)
 
 			ORDER BY full_path
@@ -157,6 +163,8 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 				AND d.full_path = $3
 				AND (d.account = c.id
 				OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+				OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+				OR owns_ancestor(d.share_name, c.id, d.full_path)
 			)
 		`
 		const query = `
@@ -176,6 +184,8 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 						AND (
 							d.account = c.id
 							OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+							OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+							OR owns_ancestor(d.share_name, c.id, d.full_path)
 						)
 				)
 				OR EXISTS (
@@ -194,6 +204,8 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 								od.private = FALSE
 								AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 							)
+							OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+							OR owns_ancestor(o.share_name, c.id, o.full_path)
 						)
 				)
 			) AS is_empty
@@ -278,6 +290,8 @@ func (db *Database) Object(acc Account, shareName, path string) (object ObjectMe
 					AND (
 						d.account = c.id
 						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+						OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+						OR owns_ancestor(d.share_name, c.id, d.full_path)
 					)
 
 				UNION ALL
@@ -303,6 +317,8 @@ func (db *Database) Object(acc Account, shareName, path string) (object ObjectMe
 							od.private = FALSE
 							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
+						OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+						OR owns_ancestor(o.share_name, c.id, o.full_path)
 					)
 			) t
 			LIMIT 1
@@ -373,6 +389,8 @@ func (db *Database) CreateDirectory(acc Account, share string, path string, priv
 					AND (
 						d.account = c.id
 						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+						OR granted_level(d.share_name, c.workgroup, d.full_path) >= 1
+						OR owns_ancestor(d.share_name, c.id, d.full_path)
 					)
 
 				UNION ALL
@@ -464,11 +482,19 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 			src AS (
 				SELECT o.id
 				FROM objects o
+				LEFT JOIN directories od
+					ON od.share_name = o.share_name
+					AND od.id = o.directory_id
 				CROSS JOIN caller c
 				WHERE o.share_name = $1
 					AND o.full_path = $2
 					AND o.temporary = FALSE
-					AND o.account = c.id
+					AND (o.account = c.id
+						OR (od.read_only = FALSE AND (
+							granted_level(o.share_name, c.workgroup, o.full_path) >= 2
+							OR owns_ancestor(o.share_name, c.id, o.full_path)
+						))
+					)
 			),
 			dst_parent AS (
 				SELECT d.id, d.full_path, d.read_only
@@ -480,6 +506,8 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 					AND (
 						d.account = c.id
 						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+						OR granted_level(d.share_name, c.workgroup, d.full_path) >= 1
+						OR owns_ancestor(d.share_name, c.id, d.full_path)
 					)
 
 				UNION ALL
@@ -592,11 +620,19 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 			src AS (
 				SELECT o.id, o.full_path
 				FROM objects o
+				LEFT JOIN directories od
+					ON od.share_name = o.share_name
+					AND od.id = o.directory_id
 				CROSS JOIN caller c
 				WHERE o.share_name = $1
 					AND o.full_path = $2
 					AND o.temporary = FALSE
-					AND o.account = c.id
+					AND (o.account = c.id
+						OR (od.read_only = FALSE AND (
+							granted_level(o.share_name, c.workgroup, o.full_path) >= 2
+							OR owns_ancestor(o.share_name, c.id, o.full_path)
+						))
+					)
 			),
 			dst_parent AS (
 				SELECT d.id, d.full_path
@@ -608,6 +644,8 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 					AND (
 						d.account = c.id
 						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+						OR granted_level(d.share_name, c.workgroup, d.full_path) >= 1
+						OR owns_ancestor(d.share_name, c.id, d.full_path)
 					)
 
 				UNION ALL
@@ -781,6 +819,10 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 							AND d.read_only = FALSE
 							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
+						OR (d.read_only = FALSE AND (
+							granted_level(d.share_name, c.workgroup, d.full_path) >= 2
+							OR owns_ancestor(d.share_name, c.id, d.full_path)
+						))
 					)
 			),
 			dst_parent AS (
@@ -793,6 +835,8 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 					AND (
 						d.account = c.id
 						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+						OR granted_level(d.share_name, c.workgroup, d.full_path) >= 1
+						OR owns_ancestor(d.share_name, c.id, d.full_path)
 					)
 
 				UNION ALL
@@ -932,6 +976,10 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 							AND od.read_only = FALSE
 							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
+						OR (od.read_only = FALSE AND (
+							granted_level(o.share_name, c.workgroup, o.full_path) >= 2
+							OR owns_ancestor(o.share_name, c.id, o.full_path)
+						))
 					)
 			)
 			SELECT DISTINCT m.buffer_id, m.slab_key
@@ -982,6 +1030,10 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 							AND od.read_only = FALSE
 							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
+						OR (od.read_only = FALSE AND (
+							granted_level(o.share_name, c.workgroup, o.full_path) >= 2
+							OR owns_ancestor(o.share_name, c.id, o.full_path)
+						))
 					)
 			),
 			deleted_objects AS (
@@ -1064,6 +1116,10 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 							AND d.read_only = FALSE
 							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
+						OR (d.read_only = FALSE AND (
+							granted_level(d.share_name, c.workgroup, d.full_path) >= 2
+							OR owns_ancestor(d.share_name, c.id, d.full_path)
+						))
 					)
 			),
 			-- A file still being uploaded into the directory goes with it, and its
@@ -1112,6 +1168,10 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 							AND d.read_only = FALSE
 							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
+						OR (d.read_only = FALSE AND (
+							granted_level(d.share_name, c.workgroup, d.full_path) >= 2
+							OR owns_ancestor(d.share_name, c.id, d.full_path)
+						))
 					)
 			),
 			delete_files AS (

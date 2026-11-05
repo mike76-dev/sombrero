@@ -8,6 +8,8 @@ import type {
   ConnectStatusResponse,
   DefragmentResponse,
   FragmentationResponse,
+  GrantInfo,
+  GrantLevel,
   ImportProbeResponse,
   ImportRequest,
   ImportSortRequest,
@@ -130,6 +132,28 @@ export const removePolicy = (share: string, username: string, workgroup: string)
     method: 'DELETE',
     query: { username, workgroup },
   })
+
+// Folder grants (indexd shares only)
+
+export const listShareGrants = (share: string, path?: string) =>
+  request<GrantInfo[] | null>(`/share/${encodeURIComponent(share)}/grants`, {
+    query: { path: path || undefined },
+  })
+
+export const setGrant = (share: string, path: string, workgroup: string, level: GrantLevel) =>
+  request(`/share/${encodeURIComponent(share)}/grant`, {
+    method: 'PUT',
+    query: { path, workgroup, level },
+  })
+
+export const removeGrant = (share: string, path: string, workgroup: string) =>
+  request(`/share/${encodeURIComponent(share)}/grant`, {
+    method: 'DELETE',
+    query: { path, workgroup },
+  })
+
+export const listWorkgroupGrants = (id: string) =>
+  request<GrantInfo[] | null>(`/workgroup/${encodeURIComponent(id)}/grants`)
 
 // Workgroups
 

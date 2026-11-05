@@ -453,6 +453,8 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 					AND (
 						d.account = c.id
 						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+						OR granted_level(d.share_name, c.workgroup, d.full_path) >= 1
+						OR owns_ancestor(d.share_name, c.id, d.full_path)
 					)
 
 				UNION ALL
@@ -1599,6 +1601,8 @@ func (db *Database) GetMetadata(acc Account, share, path string, offset, length 
 							od.private = FALSE
 							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
 						)
+						OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+						OR owns_ancestor(o.share_name, c.id, o.full_path)
 					)
 			),
 			clipped AS (
