@@ -337,6 +337,32 @@ The call replaces the whole list, so passing an empty list removes all shared fo
 
 Changing the list also applies to the folders that already exist: a folder whose name starts matching an entry becomes shared, a folder that no longer matches any entry becomes private again, and a folder that stays matched picks up the new flags.
 
+## Granting Folders to Other Workgroups
+Shared folders stay within one workgroup. To let the accounts of another workgroup into a folder, grant it to them. A grant names a folder of an `indexd` share, the workgroup it is granted to, and one of four levels:
+
+| Level | What the accounts of the granted workgroup may do in the folder |
+| --- | --- |
+| `read` | See the folder and read its files. |
+| `write` | Also add files and folders, and overwrite, rename and delete their own. |
+| `delete` | Also overwrite, rename and delete the files and folders of others. |
+| `admin` | The same as `delete` on the share; the level is reserved for managing the grant itself. |
+
+The workgroup has to be connected to the share before a folder can be granted to it. A grant covers the whole subtree under its folder, and where several grants apply to a path, the highest level wins. Whatever a granted account puts into the folder stays visible to, and deletable by, the owner of the folder. A read-only shared folder keeps protecting its files whatever the level: only the account that placed a file there may change it.
+
+A grant widens where the accounts may act, not what they may do. Each account still works within its policy on the share, so an account whose policy has no write permission cannot write into a granted folder either, whatever the level.
+
+To grant a folder, run:
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/grant?path=/Projects&workgroup=<WORKGROUP>&level=write"
+```
+where `<WORKGROUP>` is the UUID or the name of the workgroup. Running the call again with another level changes the grant in place. To revoke it, run:
+```Bash
+curl -u "":<API_PASSWORD> -X DELETE "http://127.0.0.1:9999/api/share/shared-indexd/grant?path=/Projects&workgroup=<WORKGROUP>"
+```
+`GET /api/share/<SHARE>/grants` lists the grants of a share (add `?path=` for one folder), and `GET /api/workgroup/<WORKGROUP>/grants` lists the folders granted to a workgroup. All of this is also available in the web UI: on the Shares page under each share, and on the Workgroups page.
+
+The grants are what the clients see in the security descriptors of the files: the owner of a file and each granted workgroup appear as entries in the Security tab of Windows Explorer, with access matching the level. The identities are the server's own and do not resolve to names, and the descriptors cannot be edited from there; grants are managed through the API or the web UI.
+
 ## Guest and Anonymous Access
 A share is reached only by the accounts its policies name, unless it is told to offer one of the two ways in below. Those are two different concepts, and both are turned off by default.
 

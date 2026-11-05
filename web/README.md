@@ -12,7 +12,7 @@ Each of the things above has a page of its own, and the **Setup wizard** page wa
 
 ### Workgroups
 
-A workgroup is a group of accounts that share a connection to a share, and with it the storage quota of that connection. Create one with or without a name (a named workgroup should only be created, if you're absolutely sure that no other workgroup with that name will ever be created, to avoid name collisions); the UUID is what identifies it, and the page shows it with a copy button. Each workgroup lists its public folders, which every member of the workgroup can see (see [Shared Folders](../README.md#shared-folders) for the details). A public folder can be read-only, in which case only the account that uploaded a file may overwrite or delete it. Deleting a workgroup deletes its accounts too.
+A workgroup is a group of accounts that share a connection to a share, and with it the storage quota of that connection. Create one with or without a name (a named workgroup should only be created, if you're absolutely sure that no other workgroup with that name will ever be created, to avoid name collisions); the UUID is what identifies it, and the page shows it with a copy button. Each workgroup lists its public folders, which every member of the workgroup can see (see [Shared Folders](../README.md#shared-folders) for the details). A public folder can be read-only, in which case only the account that uploaded a file may overwrite or delete it. Each workgroup can also show the folders of other workgroups that are granted to it, with the share and the level of each grant. Deleting a workgroup deletes its accounts too.
 
 ### Accounts
 
@@ -25,6 +25,8 @@ A share is a `renterd` bucket or an `indexd` account that clients see as a netwo
 The list of registered shares shows, for each share, which workgroups are connected and which policies are in place. Two things can be switched on per share: guest access, for the passwordless accounts of a workgroup, and anonymous access, for clients that present no credentials at all and reach only the share's public folder. Anonymous access also has to be allowed in the server config. An `indexd` share can also be left out of the backups that cost something (see [Backups](../README.md#backups)). An `indexd` share offers two maintenance tasks on top: a scan for orphaned slabs, which the share pays for while no file uses them, and a check for fragmented slabs, with the option to repack them (see [Slab Fragmentation](../README.md#slab-fragmentation)).
 
 An access policy grants an account of a workgroup read, write, delete and execute permission on a share.
+
+Under each `indexd` share, the shared folders section lists the folders of the share that are granted to other workgroups, with the level of each grant, and lets you grant a folder to a connected workgroup at one of the four levels, or revoke it (see [Granting Folders to Other Workgroups](../README.md#granting-folders-to-other-workgroups)).
 
 ### Connections
 
