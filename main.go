@@ -183,7 +183,7 @@ func main() {
 	a := api.NewAPI(ctx, db, server, cfg, version)
 	var fileAPI http.Handler
 	if cfg.Files.Enabled {
-		fileAPI = files.New(db)
+		fileAPI = files.New(db, server)
 	}
 	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, fileAPI, cfg.API.Password, cfg.Debug)}
 	go apiSrv.Serve(lAPI)

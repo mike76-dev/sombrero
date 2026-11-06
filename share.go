@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
@@ -595,6 +596,57 @@ func (s *server) ShareConnections(name string) (map[string]client.Client, map[st
 	}
 
 	return conns, failed, nil
+}
+
+// ShareClient returns the client the workgroup reaches the share through. A
+// renterd share has one client for everybody; on an indexd share it is the
+// workgroup's own connection, started from its stored app key where it is not
+// running, the way a tree connect does it.
+func (s *server) ShareClient(share stores.Share, workgroup string) (client.Client, error) {
+	sh, err := s.ensureShare(share)
+	if err != nil {
+		return nil, err
+	}
+	if sh.backend != "indexd" {
+		return sh.client, nil
+	}
+
+	sh.mu.Lock()
+	conn, ok := sh.indexdConns[workgroup]
+	sh.mu.Unlock()
+	if ok {
+		return conn.client, nil
+	}
+
+	u, err := uuid.Parse(workgroup)
+	if err != nil {
+		return nil, errShareUnavailable
+	}
+	wg, err := s.store.FindWorkgroup(u)
+	if err != nil {
+		return nil, err
+	}
+	if wg.ID == 0 {
+		return nil, errShareUnavailable
+	}
+	connected, appKey, err := s.store.IsConnected(wg, share)
+	if err != nil {
+		return nil, err
+	}
+	if !connected {
+		return nil, errShareUnavailable
+	}
+	if err := s.AddConnection(wg, share, appKey); err != nil {
+		return nil, err
+	}
+
+	sh.mu.Lock()
+	conn, ok = sh.indexdConns[workgroup]
+	sh.mu.Unlock()
+	if !ok {
+		return nil, errShareUnavailable
+	}
+	return conn.client, nil
 }
 
 // startShareConnections starts a client for every workgroup connected to the

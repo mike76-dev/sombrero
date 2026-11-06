@@ -13,14 +13,27 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/julienschmidt/httprouter"
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 )
 
-// Store is the part of the store the file API reads the accounts from.
+// Store is the part of the store the file API reads the accounts and the
+// shares from.
 type Store interface {
 	FindAccount(username, workgroup string) (stores.Account, error)
 	FindWorkgroup(u uuid.UUID) (stores.Workgroup, error)
 	FindWorkgroupByName(name string) (stores.Workgroup, error)
+	GetShare(name string) (stores.Share, error)
+	GetShares(acc stores.Account) ([]stores.Share, error)
+	GetAccessRights(share stores.Share, acc stores.Account) (stores.AccessRights, error)
+}
+
+// Server is as much of the SMB server as the file API needs: the way to the
+// storage behind each share.
+type Server interface {
+	// ShareClient returns the client the workgroup reaches the share through,
+	// starting its connection where it is not running.
+	ShareClient(share stores.Share, workgroup string) (client.Client, error)
 }
 
 const (
@@ -66,6 +79,7 @@ type session struct {
 type Handler struct {
 	router *httprouter.Router
 	store  Store
+	server Server
 
 	mu       sync.Mutex
 	sessions map[string]session
@@ -74,18 +88,34 @@ type Handler struct {
 	now func() time.Time
 }
 
-// New returns a file API handler reading the accounts from the store.
-func New(store Store) *Handler {
+// New returns a file API handler reading the accounts and the shares from the
+// store and reaching the shares through the server.
+func New(store Store, srv Server) *Handler {
 	h := &Handler{
 		router:   httprouter.New(),
 		store:    store,
+		server:   srv,
 		sessions: make(map[string]session),
 		now:      time.Now,
 	}
 	h.router.POST("/login", h.loginHandler)
 	h.router.POST("/logout", h.logoutHandler)
 	h.router.GET("/me", h.meHandler)
+	h.router.GET("/shares", h.withSession(h.sharesHandler))
+	h.router.GET("/share/:name/list", h.withSession(h.listHandler))
 	return h
+}
+
+// withSession wraps a handler that needs a logged-in account.
+func (h *Handler) withSession(next func(http.ResponseWriter, *http.Request, httprouter.Params, session)) httprouter.Handle {
+	return func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		s, ok := h.authenticate(req)
+		if !ok {
+			writeError(w, "not logged in", http.StatusUnauthorized)
+			return
+		}
+		next(w, req, ps, s)
+	}
 }
 
 // ServeHTTP implements http.Handler.

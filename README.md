@@ -380,6 +380,12 @@ The response names the account and its workgroup, and the session comes back in 
 curl -b cookies.txt "http://127.0.0.1:9999/files/me"
 curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/logout"
 ```
+A logged-in account sees what it would see over SMB. `GET /files/shares` lists the shares its policies admit it to, each with its read, write, delete and execute rights there; a guest account sees only the shares that allow guest access. `GET /files/share/<SHARE>/list?path=/Projects` lists a folder, the root of the share without a path, with the name, size and times of every file and folder the account may see, the [granted folders](#granting-folders-to-other-workgroups) included:
+```Bash
+curl -b cookies.txt "http://127.0.0.1:9999/files/shares"
+curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/list?path=/Projects"
+```
+
 Failed logins from the same host are throttled like the API's. Reaching the file API from another machine is the same as reaching the API: through an SSH tunnel or a reverse proxy with TLS (see [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)), since the session cookie travels in the clear otherwise.
 
 ## Guest and Anonymous Access

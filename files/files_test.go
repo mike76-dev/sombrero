@@ -27,14 +27,56 @@ func ntHashOf(password string) []byte {
 }
 
 // mockStore implements Store with optional per-method overrides. Without
-// one, it holds the workgroup "partners" with the accounts alice and a guest.
+// one, it holds the workgroup "partners" with the accounts alice and a guest,
+// and the shares docs (alice: read, write, delete) and pub (everybody: read).
 type mockStore struct {
 	findAccount         func(string, string) (stores.Account, error)
 	findWorkgroup       func(uuid.UUID) (stores.Workgroup, error)
 	findWorkgroupByName func(string) (stores.Workgroup, error)
+	getShare            func(string) (stores.Share, error)
+	getShares           func(stores.Account) ([]stores.Share, error)
+	getAccessRights     func(stores.Share, stores.Account) (stores.AccessRights, error)
 }
 
 var partners = stores.Workgroup{ID: 7, UUID: testUUID, Name: "partners"}
+
+func (m *mockStore) GetShare(name string) (stores.Share, error) {
+	if m.getShare != nil {
+		return m.getShare(name)
+	}
+	switch name {
+	case "docs":
+		return docs, nil
+	case "pub":
+		return pub, nil
+	case "private":
+		return stores.Share{Name: "private", Type: "indexd"}, nil
+	}
+	return stores.Share{}, nil
+}
+
+func (m *mockStore) GetShares(acc stores.Account) ([]stores.Share, error) {
+	if m.getShares != nil {
+		return m.getShares(acc)
+	}
+	return []stores.Share{docs, pub}, nil
+}
+
+func (m *mockStore) GetAccessRights(share stores.Share, acc stores.Account) (stores.AccessRights, error) {
+	if m.getAccessRights != nil {
+		return m.getAccessRights(share, acc)
+	}
+	ar := stores.AccessRights{ShareName: share.Name, AccountID: acc.ID}
+	switch {
+	case share.Name == "docs" && acc.Username == "alice":
+		ar.ReadAccess, ar.WriteAccess, ar.DeleteAccess = true, true, true
+	case share.Name == "docs", share.Name == "pub":
+		ar.ReadAccess = true
+	default:
+		return stores.AccessRights{}, nil
+	}
+	return ar, nil
+}
 
 func (m *mockStore) FindAccount(u, w string) (stores.Account, error) {
 	if m.findAccount != nil {
@@ -103,7 +145,7 @@ func decodeIdentity(t *testing.T, w *httptest.ResponseRecorder) Identity {
 // TestLoginStartsASession verifies the life of a session: the login names
 // the account, the cookie it sets answers GET /me, and the logout ends it.
 func TestLoginStartsASession(t *testing.T) {
-	h := New(&mockStore{})
+	h := New(&mockStore{}, &mockServer{})
 
 	w := login(h, "partners", "alice", "hunter2")
 	if w.Code != http.StatusOK {
@@ -151,7 +193,7 @@ func TestLoginStartsASession(t *testing.T) {
 // TestLoginNamesTheWorkgroupEitherWay verifies that the UUID does as well as
 // the name, and that a login through TLS gets a Secure cookie.
 func TestLoginNamesTheWorkgroupEitherWay(t *testing.T) {
-	h := New(&mockStore{})
+	h := New(&mockStore{}, &mockServer{})
 	w := login(h, testUUID.String(), "alice", "hunter2")
 	if w.Code != http.StatusOK {
 		t.Fatalf("login by UUID: want %d, got %d (%s)", http.StatusOK, w.Code, w.Body.String())
@@ -173,7 +215,7 @@ func TestLoginNamesTheWorkgroupEitherWay(t *testing.T) {
 // TestLoginRefusals verifies that every wrong credential is refused with the
 // same answer, and that a request that is no login at all is told so.
 func TestLoginRefusals(t *testing.T) {
-	h := New(&mockStore{})
+	h := New(&mockStore{}, &mockServer{})
 	tests := []struct {
 		name string
 		body string
@@ -208,11 +250,11 @@ func TestLoginRefusals(t *testing.T) {
 // TestLoginReportsStoreErrors verifies that a store that cannot answer is an
 // internal error rather than a refusal.
 func TestLoginReportsStoreErrors(t *testing.T) {
-	byName := New(&mockStore{findWorkgroupByName: func(string) (stores.Workgroup, error) { return stores.Workgroup{}, errStore }})
+	byName := New(&mockStore{findWorkgroupByName: func(string) (stores.Workgroup, error) { return stores.Workgroup{}, errStore }}, &mockServer{})
 	if w := login(byName, "partners", "alice", "hunter2"); w.Code != http.StatusInternalServerError {
 		t.Errorf("workgroup lookup failing: want %d, got %d", http.StatusInternalServerError, w.Code)
 	}
-	account := New(&mockStore{findAccount: func(string, string) (stores.Account, error) { return stores.Account{}, errStore }})
+	account := New(&mockStore{findAccount: func(string, string) (stores.Account, error) { return stores.Account{}, errStore }}, &mockServer{})
 	if w := login(account, "partners", "alice", "hunter2"); w.Code != http.StatusInternalServerError {
 		t.Errorf("account lookup failing: want %d, got %d", http.StatusInternalServerError, w.Code)
 	}
@@ -221,7 +263,7 @@ func TestLoginReportsStoreErrors(t *testing.T) {
 // TestGuestLogsInWithoutAPassword verifies that a guest account is one over
 // the file API too: the empty password, and only that, gets in.
 func TestGuestLogsInWithoutAPassword(t *testing.T) {
-	h := New(&mockStore{})
+	h := New(&mockStore{}, &mockServer{})
 	if w := login(h, "partners", "guest", ""); w.Code != http.StatusOK {
 		t.Errorf("guest login: want %d, got %d (%s)", http.StatusOK, w.Code, w.Body.String())
 	}
@@ -233,7 +275,7 @@ func TestGuestLogsInWithoutAPassword(t *testing.T) {
 // TestSessionsExpire verifies that a session is good for its lifetime and
 // no longer, and that an expired one is forgotten.
 func TestSessionsExpire(t *testing.T) {
-	h := New(&mockStore{})
+	h := New(&mockStore{}, &mockServer{})
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	h.now = func() time.Time { return now }
 
