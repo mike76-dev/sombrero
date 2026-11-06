@@ -42,6 +42,57 @@ type mockClient struct {
 	written   []sentPart
 	finished  []api.MultipartCompletedPart
 	aborted   []string
+
+	// The housekeeping hooks and what the client was asked to do.
+	mkdirErr  error
+	deleteErr error
+	renameErr error
+	empty     func(string) (bool, error)
+	made      []string
+	deleted   []deletion
+	renamed   []renaming
+}
+
+// deletion and renaming are what the mock client was asked to delete or move.
+type deletion struct {
+	path  string
+	batch bool
+}
+
+type renaming struct {
+	from, to       string
+	isDir, replace bool
+}
+
+func (m *mockClient) MakeDirectory(_ context.Context, _ stores.Account, p string) error {
+	if m.mkdirErr != nil {
+		return m.mkdirErr
+	}
+	m.made = append(m.made, p)
+	return nil
+}
+
+func (m *mockClient) Delete(_ context.Context, _ stores.Account, p string, batch bool) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	m.deleted = append(m.deleted, deletion{p, batch})
+	return nil
+}
+
+func (m *mockClient) Rename(_ context.Context, _ stores.Account, from, to string, isDir, replace bool) error {
+	if m.renameErr != nil {
+		return m.renameErr
+	}
+	m.renamed = append(m.renamed, renaming{from, to, isDir, replace})
+	return nil
+}
+
+func (m *mockClient) IsEmpty(_ context.Context, _ stores.Account, p string) (bool, error) {
+	if m.empty != nil {
+		return m.empty(p)
+	}
+	return true, nil
 }
 
 // sentPart is one part the mock client was given.

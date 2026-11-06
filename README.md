@@ -366,35 +366,42 @@ curl -u "":<API_PASSWORD> -X DELETE "http://127.0.0.1:9999/api/share/shared-inde
 The grants are what the clients see in the security descriptors of the files: the owner of a file and each granted workgroup appear as entries in the Security tab of Windows Explorer, with access matching the level. The identities are the server's own and do not resolve to names, and the descriptors cannot be edited from there; grants are managed through the API or the web UI.
 
 ## File API
-The file API is the way into the shares for programs and web apps rather than SMB clients. The same accounts log in with the same passwords and hold the same rights, the [granted folders](#granting-folders-to-other-workgroups) included. It is off unless the config file turns it on:
+The file API provides HTTP access to the shares for programs and web applications. The accounts are the same as for SMB, with the same passwords and the same rights, including the [granted folders](#granting-folders-to-other-workgroups). The file API is disabled unless it is enabled in the config file:
 ```YAML
 files:
   enabled: true
 ```
-It needs the Normal mode and is served at the API address under `/files`, next to the web UI. Unlike the API, it does not take the API password: each call carries the session of an account, started by logging in with the workgroup (by name or UUID), the username and the password:
+It requires the Normal mode and is served at the API address under `/files`, alongside the web UI. Unlike the API, it is not protected by the API password. Instead, each call carries the session of an account. A session is started by logging in with the workgroup (by name or UUID), the username and the password:
 ```Bash
 curl -c cookies.txt -X POST "http://127.0.0.1:9999/files/login" -d '{"workgroup":"<WORKGROUP>","username":"<USERNAME>","password":"<PASSWORD>"}'
 ```
-The response names the account and its workgroup, and the session comes back in a cookie that is good for 24 hours. `GET /files/me` gives the same answer while the session lasts, and `POST /files/logout` ends it:
+The response identifies the account and its workgroup, and the session is returned in a cookie that is valid for 24 hours. `GET /files/me` returns the same information while the session is valid, and `POST /files/logout` terminates the session:
 ```Bash
 curl -b cookies.txt "http://127.0.0.1:9999/files/me"
 curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/logout"
 ```
-A logged-in account sees what it would see over SMB. `GET /files/shares` lists the shares its policies admit it to, each with its read, write, delete and execute rights there; a guest account sees only the shares that allow guest access. `GET /files/share/<SHARE>/list?path=/Projects` lists a folder, the root of the share without a path, with the name, size and times of every file and folder the account may see, the [granted folders](#granting-folders-to-other-workgroups) included:
+A logged-in account sees exactly what it would see over SMB. `GET /files/shares` lists the shares that the account's policies grant access to, with the read, write, delete and execute rights of the account on each; a guest account sees only the shares that allow guest access. `GET /files/share/<SHARE>/list?path=/Projects` lists a folder (the root of the share if no path is given) with the name, size and timestamps of every file and folder visible to the account, including the [granted folders](#granting-folders-to-other-workgroups):
 ```Bash
 curl -b cookies.txt "http://127.0.0.1:9999/files/shares"
 curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/list?path=/Projects"
 ```
-`GET /files/share/<SHARE>/file?path=/Projects/plan.pdf` downloads a file. It is sent as an attachment unless `inline=1` is added, in which case a browser shows what it can; ranges are honoured, so a viewer may seek in a video or a PDF without fetching the rest:
+`GET /files/share/<SHARE>/file?path=/Projects/plan.pdf` downloads a file. The file is sent as an attachment unless `inline=1` is added, in which case a browser displays it if it is able to. Range requests are supported, so that a viewer can seek in a video or a PDF without downloading the entire file:
 ```Bash
 curl -b cookies.txt -o plan.pdf "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
 ```
-`PUT` to the same address stores the request body as that file, over the one that was there, if any, and answers with the name, size and times of the new file. The body goes to the share a part at a time, so there is no limit on the size. An empty body is refused, since the network stores nothing empty:
+`PUT` to the same address stores the request body as the file at that path, replacing an existing file, and returns the name, size and timestamps of the new file. The body is transferred to the share in parts, so the file size is not limited. An empty body is rejected, because the network cannot store an empty file:
 ```Bash
 curl -b cookies.txt -X PUT --data-binary @plan.pdf "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
 ```
+The remaining calls manage folders and names. `POST /files/share/<SHARE>/folder?path=/Projects/2026` creates a folder. `DELETE` on `.../file` or `.../folder` with a path removes a file or a folder; a folder that is not empty is removed only if `recursive=1` is added. `POST /files/share/<SHARE>/rename?path=/Projects/plan.pdf&to=/Archive/plan.pdf` moves or renames a file or a folder; an existing destination is replaced only if `replace=1` is added. These calls are subject to the rights of the account at the respective path, in the same way as over SMB: creating or moving an item into a folder requires write access to that folder, deleting or moving an item requires the right to delete it, and the files of other accounts in a read-only folder remain protected:
+```Bash
+curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/share/<SHARE>/folder?path=/Projects/2026"
+curl -b cookies.txt -X DELETE "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
+curl -b cookies.txt -X DELETE "http://127.0.0.1:9999/files/share/<SHARE>/folder?path=/Projects/2026&recursive=1"
+curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/share/<SHARE>/rename?path=/Projects/plan.pdf&to=/Archive/plan.pdf"
+```
 
-Failed logins from the same host are throttled like the API's. Reaching the file API from another machine is the same as reaching the API: through an SSH tunnel or a reverse proxy with TLS (see [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)), since the session cookie travels in the clear otherwise.
+Failed logins from the same host are throttled in the same way as for the API. Reaching the file API from another machine is subject to the same recommendations as reaching the API: use an SSH tunnel or a reverse proxy with TLS (see [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)), because the session cookie is otherwise transmitted in plain text.
 
 ## Guest and Anonymous Access
 A share is reached only by the accounts its policies name, unless it is told to offer one of the two ways in below. Those are two different concepts, and both are turned off by default.
