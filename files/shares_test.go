@@ -3,6 +3,7 @@ package files
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,9 +24,27 @@ var (
 // embedded interface is nil, so any other call panics.
 type mockClient struct {
 	client.Client
-	list   func(string) ([]client.ObjectInfo, error)
-	object func(string) (client.ObjectInfo, error)
-	listed []string
+	list    func(string) ([]client.ObjectInfo, error)
+	object  func(string) (client.ObjectInfo, error)
+	read    func(string, uint64, uint64, io.Writer) error
+	storage func() (client.StorageInfo, error)
+	listed  []string
+	reads   [][2]uint64
+}
+
+func (m *mockClient) Read(_ context.Context, _ stores.Account, p string, offset, length uint64, w io.Writer) error {
+	m.reads = append(m.reads, [2]uint64{offset, length})
+	if m.read != nil {
+		return m.read(p, offset, length, w)
+	}
+	return stores.ErrNotFound
+}
+
+func (m *mockClient) Storage(context.Context) (client.StorageInfo, error) {
+	if m.storage != nil {
+		return m.storage()
+	}
+	return client.StorageInfo{MinShards: 1, TotalShards: 3}, nil
 }
 
 func (m *mockClient) List(_ context.Context, _ stores.Account, p string) ([]client.ObjectInfo, error) {

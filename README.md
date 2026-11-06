@@ -385,6 +385,10 @@ A logged-in account sees what it would see over SMB. `GET /files/shares` lists t
 curl -b cookies.txt "http://127.0.0.1:9999/files/shares"
 curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/list?path=/Projects"
 ```
+`GET /files/share/<SHARE>/file?path=/Projects/plan.pdf` downloads a file. It is sent as an attachment unless `inline=1` is added, in which case a browser shows what it can; ranges are honoured, so a viewer may seek in a video or a PDF without fetching the rest:
+```Bash
+curl -b cookies.txt -o plan.pdf "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
+```
 
 Failed logins from the same host are throttled like the API's. Reaching the file API from another machine is the same as reaching the API: through an SSH tunnel or a reverse proxy with TLS (see [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)), since the session cookie travels in the clear otherwise.
 

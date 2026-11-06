@@ -3,6 +3,7 @@
 package files
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -84,25 +85,29 @@ type Handler struct {
 	mu       sync.Mutex
 	sessions map[string]session
 
-	// now is the clock, replaceable by the tests.
-	now func() time.Time
+	// now is the clock, and chunkSize how much of a file a download fetches
+	// at a time; both replaceable by the tests.
+	now       func() time.Time
+	chunkSize func(context.Context, client.Client) uint64
 }
 
 // New returns a file API handler reading the accounts and the shares from the
 // store and reaching the shares through the server.
 func New(store Store, srv Server) *Handler {
 	h := &Handler{
-		router:   httprouter.New(),
-		store:    store,
-		server:   srv,
-		sessions: make(map[string]session),
-		now:      time.Now,
+		router:    httprouter.New(),
+		store:     store,
+		server:    srv,
+		sessions:  make(map[string]session),
+		now:       time.Now,
+		chunkSize: storageChunk,
 	}
 	h.router.POST("/login", h.loginHandler)
 	h.router.POST("/logout", h.logoutHandler)
 	h.router.GET("/me", h.meHandler)
 	h.router.GET("/shares", h.withSession(h.sharesHandler))
 	h.router.GET("/share/:name/list", h.withSession(h.listHandler))
+	h.router.GET("/share/:name/file", h.withSession(h.fileHandler))
 	return h
 }
 
