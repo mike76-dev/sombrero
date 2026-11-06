@@ -15,7 +15,6 @@ import (
 	"github.com/julienschmidt/httprouter"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
-	proto "go.sia.tech/core/rhp/v4"
 )
 
 // fileHandler handles the GET /share/:name/file calls, sending the file the
@@ -36,7 +35,7 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		return
 	}
 
-	c, err := h.server.ShareClient(share, s.account.Workgroup)
+	c, partSize, err := h.server.ShareClient(share, s.account.Workgroup)
 	if err != nil {
 		log.Printf("file API: share %s unavailable to workgroup %s: %v", share.Name, s.account.Workgroup, err)
 		writeError(w, "share unavailable", http.StatusServiceUnavailable)
@@ -71,19 +70,9 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": name}))
 
-	rd := &objectReader{ctx: ctx, client: c, account: s.account, path: key, size: oi.Size, chunk: h.chunkSize(ctx, c)}
+	// The chunk follows the share's part size the way the SMB read cache's does.
+	rd := &objectReader{ctx: ctx, client: c, account: s.account, path: key, size: oi.Size, chunk: h.chunkSize(partSize)}
 	http.ServeContent(w, req, "", oi.ModifiedAt, rd)
-}
-
-// storageChunk is how much of a file is fetched at a time: the SMB layer's
-// chunk for the share's slab size, or its smallest where the backend will not
-// say.
-func storageChunk(ctx context.Context, c client.Client) uint64 {
-	si, err := c.Storage(ctx)
-	if err != nil || si.MinShards <= 0 {
-		return client.ReadChunkSize(0)
-	}
-	return client.ReadChunkSize(uint64(si.MinShards) * proto.SectorSize)
 }
 
 // objectReader reads a file off its share a chunk at a time, which is what

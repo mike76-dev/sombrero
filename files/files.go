@@ -3,7 +3,6 @@
 package files
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -33,8 +32,9 @@ type Store interface {
 // storage behind each share.
 type Server interface {
 	// ShareClient returns the client the workgroup reaches the share through,
-	// starting its connection where it is not running.
-	ShareClient(share stores.Share, workgroup string) (client.Client, error)
+	// starting its connection where it is not running, and the size of the
+	// parts the share takes an upload in.
+	ShareClient(share stores.Share, workgroup string) (client.Client, uint64, error)
 }
 
 const (
@@ -86,9 +86,9 @@ type Handler struct {
 	sessions map[string]session
 
 	// now is the clock, and chunkSize how much of a file a download fetches
-	// at a time; both replaceable by the tests.
+	// at a time for the share's part size; both replaceable by the tests.
 	now       func() time.Time
-	chunkSize func(context.Context, client.Client) uint64
+	chunkSize func(partSize uint64) uint64
 }
 
 // New returns a file API handler reading the accounts and the shares from the
@@ -100,7 +100,7 @@ func New(store Store, srv Server) *Handler {
 		server:    srv,
 		sessions:  make(map[string]session),
 		now:       time.Now,
-		chunkSize: storageChunk,
+		chunkSize: client.ReadChunkSize,
 	}
 	h.router.POST("/login", h.loginHandler)
 	h.router.POST("/logout", h.logoutHandler)
@@ -108,6 +108,7 @@ func New(store Store, srv Server) *Handler {
 	h.router.GET("/shares", h.withSession(h.sharesHandler))
 	h.router.GET("/share/:name/list", h.withSession(h.listHandler))
 	h.router.GET("/share/:name/file", h.withSession(h.fileHandler))
+	h.router.PUT("/share/:name/file", h.withSession(h.uploadHandler))
 	return h
 }
 
@@ -254,8 +255,14 @@ func identityOf(acc stores.Account, wg stores.Workgroup) Identity {
 
 // writeJSON writes a JSON object to the response body.
 func writeJSON(w http.ResponseWriter, obj any) {
+	writeJSONStatus(w, http.StatusOK, obj)
+}
+
+// writeJSONStatus writes a JSON object to the response body under the given
+// status code.
+func writeJSONStatus(w http.ResponseWriter, code int, obj any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(obj); err != nil {
 		log.Printf("file API: failed to encode response: %v", err)
 	}

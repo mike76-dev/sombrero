@@ -62,7 +62,7 @@ func download(h http.Handler, from *httptest.ResponseRecorder, query string, hea
 func TestDownloadingAFile(t *testing.T) {
 	mc := readingClient()
 	h, w := loggedIn(t, &mockStore{}, &mockServer{client: mc}, "alice", "hunter2")
-	h.chunkSize = func(context.Context, client.Client) uint64 { return 32 }
+	h.chunkSize = func(uint64) uint64 { return 32 }
 
 	r := download(h, w, "path=/readme.txt", nil)
 	if r.Code != http.StatusOK {
@@ -104,7 +104,7 @@ func TestDownloadingAFile(t *testing.T) {
 func TestDownloadingARange(t *testing.T) {
 	mc := readingClient()
 	h, w := loggedIn(t, &mockStore{}, &mockServer{client: mc}, "alice", "hunter2")
-	h.chunkSize = func(context.Context, client.Client) uint64 { return 32 }
+	h.chunkSize = func(uint64) uint64 { return 32 }
 
 	r := download(h, w, "path=/readme.txt", map[string]string{"Range": "bytes=40-59"})
 	if r.Code != http.StatusPartialContent {
@@ -178,19 +178,5 @@ func TestObjectReaderReportsShortReads(t *testing.T) {
 	rd = &objectReader{ctx: context.Background(), client: failing, path: "x", size: 10, chunk: 10}
 	if _, err := io.ReadAll(rd); !errors.Is(err, errStore) {
 		t.Errorf("want the backend's error, got %v", err)
-	}
-}
-
-// TestStorageChunk verifies that the chunk follows the share's slab size, and
-// falls back to the smallest where the backend does not say.
-func TestStorageChunk(t *testing.T) {
-	const mib = 1024 * 1024
-	ten := &mockClient{storage: func() (client.StorageInfo, error) { return client.StorageInfo{MinShards: 10}, nil }}
-	if got := storageChunk(context.Background(), ten); got != 10*mib {
-		t.Errorf("10 data shards: want a chunk of 10 MiB, got %d", got/mib)
-	}
-	down := &mockClient{storage: func() (client.StorageInfo, error) { return client.StorageInfo{}, errStore }}
-	if got := storageChunk(context.Background(), down); got != 8*mib {
-		t.Errorf("backend not answering: want a chunk of 8 MiB, got %d", got/mib)
 	}
 }

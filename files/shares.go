@@ -92,7 +92,7 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		return
 	}
 
-	c, err := h.server.ShareClient(share, s.account.Workgroup)
+	c, _, err := h.server.ShareClient(share, s.account.Workgroup)
 	if err != nil {
 		log.Printf("file API: share %s unavailable to workgroup %s: %v", share.Name, s.account.Workgroup, err)
 		writeError(w, "share unavailable", http.StatusServiceUnavailable)

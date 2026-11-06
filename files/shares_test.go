@@ -3,6 +3,8 @@ package files
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
+	"go.sia.tech/renterd/v2/api"
 )
 
 // The shares of the mock store: docs takes no guests, pub does.
@@ -24,12 +27,28 @@ var (
 // embedded interface is nil, so any other call panics.
 type mockClient struct {
 	client.Client
-	list    func(string) ([]client.ObjectInfo, error)
-	object  func(string) (client.ObjectInfo, error)
-	read    func(string, uint64, uint64, io.Writer) error
-	storage func() (client.StorageInfo, error)
-	listed  []string
-	reads   [][2]uint64
+	list       func(string) ([]client.ObjectInfo, error)
+	object     func(string) (client.ObjectInfo, error)
+	read       func(string, uint64, uint64, io.Writer) error
+	pathAccess func(string) (stores.PathAccess, error)
+	listed     []string
+	reads      [][2]uint64
+
+	// The upload hooks and what the client saw of one.
+	startErr  error
+	writeErr  error
+	finishErr error
+	started   []string
+	written   []sentPart
+	finished  []api.MultipartCompletedPart
+	aborted   []string
+}
+
+// sentPart is one part the mock client was given.
+type sentPart struct {
+	number int
+	offset uint64
+	data   []byte
 }
 
 func (m *mockClient) Read(_ context.Context, _ stores.Account, p string, offset, length uint64, w io.Writer) error {
@@ -40,11 +59,44 @@ func (m *mockClient) Read(_ context.Context, _ stores.Account, p string, offset,
 	return stores.ErrNotFound
 }
 
-func (m *mockClient) Storage(context.Context) (client.StorageInfo, error) {
-	if m.storage != nil {
-		return m.storage()
+func (m *mockClient) PathAccess(_ context.Context, _ stores.Account, p string) (stores.PathAccess, error) {
+	if m.pathAccess != nil {
+		return m.pathAccess(p)
 	}
-	return client.StorageInfo{MinShards: 1, TotalShards: 3}, nil
+	return stores.PathAccess{Write: true, Delete: true}, nil
+}
+
+func (m *mockClient) StartUpload(_ context.Context, _ stores.Account, p string) (string, error) {
+	if m.startErr != nil {
+		return "", m.startErr
+	}
+	m.started = append(m.started, p)
+	return "upload-1", nil
+}
+
+func (m *mockClient) Write(_ context.Context, r io.Reader, _, _ string, number int, offset, length uint64) (string, error) {
+	if m.writeErr != nil {
+		return "", m.writeErr
+	}
+	data, err := io.ReadAll(r)
+	if err != nil || uint64(len(data)) != length {
+		return "", errors.New("short part")
+	}
+	m.written = append(m.written, sentPart{number: number, offset: offset, data: data})
+	return fmt.Sprintf("etag-%d", number), nil
+}
+
+func (m *mockClient) FinishUpload(_ context.Context, _, _ string, parts []api.MultipartCompletedPart) error {
+	if m.finishErr != nil {
+		return m.finishErr
+	}
+	m.finished = parts
+	return nil
+}
+
+func (m *mockClient) AbortUpload(_ context.Context, p, _ string) error {
+	m.aborted = append(m.aborted, p)
+	return nil
 }
 
 func (m *mockClient) List(_ context.Context, _ stores.Account, p string) ([]client.ObjectInfo, error) {
@@ -64,12 +116,13 @@ func (m *mockClient) Object(_ context.Context, _ stores.Account, p string) (clie
 
 // mockServer hands out one client for every share, or fails to.
 type mockServer struct {
-	client client.Client
-	err    error
+	client   client.Client
+	partSize uint64
+	err      error
 }
 
-func (m *mockServer) ShareClient(stores.Share, string) (client.Client, error) {
-	return m.client, m.err
+func (m *mockServer) ShareClient(stores.Share, string) (client.Client, uint64, error) {
+	return m.client, m.partSize, m.err
 }
 
 // loggedIn returns a handler over the store and the server with a session of

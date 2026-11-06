@@ -389,6 +389,10 @@ curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/list?path=/Projec
 ```Bash
 curl -b cookies.txt -o plan.pdf "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
 ```
+`PUT` to the same address stores the request body as that file, over the one that was there, if any, and answers with the name, size and times of the new file. The body goes to the share a part at a time, so there is no limit on the size. An empty body is refused, since the network stores nothing empty:
+```Bash
+curl -b cookies.txt -X PUT --data-binary @plan.pdf "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
+```
 
 Failed logins from the same host are throttled like the API's. Reaching the file API from another machine is the same as reaching the API: through an SSH tunnel or a reverse proxy with TLS (see [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)), since the session cookie travels in the clear otherwise.
 

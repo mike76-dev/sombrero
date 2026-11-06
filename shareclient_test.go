@@ -29,25 +29,25 @@ func TestShareClient(t *testing.T) {
 	srv := newServerState(ctx, store, stores.Config{})
 
 	own := newFakeClient()
-	indexd := &share{name: "docs", backend: "indexd", indexdConns: map[string]*indexdConn{wg.String(): {client: own}}}
+	indexd := &share{name: "docs", backend: "indexd", indexdConns: map[string]*indexdConn{wg.String(): {client: own, maxUploadSize: 40 << 20}}}
 	srv.shareList[indexd.name] = indexd
 
 	shared := newFakeClient()
-	renterd := &share{name: "pub", backend: "renterd", client: shared}
+	renterd := &share{name: "pub", backend: "renterd", client: shared, maxUploadSize: 4 << 20}
 	srv.shareList[renterd.name] = renterd
 
-	if c, err := srv.ShareClient(stores.Share{Name: "docs"}, wg.String()); err != nil || c != own {
-		t.Errorf("indexd share: want the workgroup's client, got %v (%v)", c, err)
+	if c, part, err := srv.ShareClient(stores.Share{Name: "docs"}, wg.String()); err != nil || c != own || part != 40<<20 {
+		t.Errorf("indexd share: want the workgroup's client with its part size, got %v, %d (%v)", c, part, err)
 	}
-	if c, err := srv.ShareClient(stores.Share{Name: "pub"}, wg.String()); err != nil || c != shared {
-		t.Errorf("renterd share: want the share's client, got %v (%v)", c, err)
+	if c, part, err := srv.ShareClient(stores.Share{Name: "pub"}, wg.String()); err != nil || c != shared || part != 4<<20 {
+		t.Errorf("renterd share: want the share's client with its part size, got %v, %d (%v)", c, part, err)
 	}
 
 	// A workgroup with no connection to the share, stored or running, gets none.
-	if _, err := srv.ShareClient(stores.Share{Name: "docs"}, uuid.NewString()); !errors.Is(err, errShareUnavailable) {
+	if _, _, err := srv.ShareClient(stores.Share{Name: "docs"}, uuid.NewString()); !errors.Is(err, errShareUnavailable) {
 		t.Errorf("unconnected workgroup: want %v, got %v", errShareUnavailable, err)
 	}
-	if _, err := srv.ShareClient(stores.Share{Name: "docs"}, "not-a-uuid"); !errors.Is(err, errShareUnavailable) {
+	if _, _, err := srv.ShareClient(stores.Share{Name: "docs"}, "not-a-uuid"); !errors.Is(err, errShareUnavailable) {
 		t.Errorf("malformed workgroup: want %v, got %v", errShareUnavailable, err)
 	}
 }
