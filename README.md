@@ -126,6 +126,8 @@ backup:                       # optional: catalogs of what the shares hold, to r
   keep: 7                     # optional: how many catalogs to keep, per connection and per place; defaults to 7
   inlineCap: 262144           # optional: the largest piece of a file still waiting in the database that a catalog carries itself,
                               # in bytes, so that the file is complete in the backup; defaults to 262144
+files:                        # optional: the file API, which lets the accounts reach their shares over HTTP (see below)
+  enabled: false              # off unless set; needs the Normal mode
 ```
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash
@@ -362,6 +364,23 @@ curl -u "":<API_PASSWORD> -X DELETE "http://127.0.0.1:9999/api/share/shared-inde
 `GET /api/share/<SHARE>/grants` lists the grants of a share (add `?path=` for one folder), and `GET /api/workgroup/<WORKGROUP>/grants` lists the folders granted to a workgroup. All of this is also available in the web UI: on the Shares page under each share, and on the Workgroups page.
 
 The grants are what the clients see in the security descriptors of the files: the owner of a file and each granted workgroup appear as entries in the Security tab of Windows Explorer, with access matching the level. The identities are the server's own and do not resolve to names, and the descriptors cannot be edited from there; grants are managed through the API or the web UI.
+
+## File API
+The file API is the way into the shares for programs and web apps rather than SMB clients. The same accounts log in with the same passwords and hold the same rights, the [granted folders](#granting-folders-to-other-workgroups) included. It is off unless the config file turns it on:
+```YAML
+files:
+  enabled: true
+```
+It needs the Normal mode and is served at the API address under `/files`, next to the web UI. Unlike the API, it does not take the API password: each call carries the session of an account, started by logging in with the workgroup (by name or UUID), the username and the password:
+```Bash
+curl -c cookies.txt -X POST "http://127.0.0.1:9999/files/login" -d '{"workgroup":"<WORKGROUP>","username":"<USERNAME>","password":"<PASSWORD>"}'
+```
+The response names the account and its workgroup, and the session comes back in a cookie that is good for 24 hours. `GET /files/me` gives the same answer while the session lasts, and `POST /files/logout` ends it:
+```Bash
+curl -b cookies.txt "http://127.0.0.1:9999/files/me"
+curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/logout"
+```
+Failed logins from the same host are throttled like the API's. Reaching the file API from another machine is the same as reaching the API: through an SSH tunnel or a reverse proxy with TLS (see [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)), since the session cookie travels in the clear otherwise.
 
 ## Guest and Anonymous Access
 A share is reached only by the accounts its policies name, unless it is told to offer one of the two ways in below. Those are two different concepts, and both are turned off by default.

@@ -18,7 +18,7 @@ func TestHTTPHandlerRouting(t *testing.T) {
 		seen = req.URL.Path
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := newHTTPHandler(context.Background(), stub, "hunter2", false)
+	h := newHTTPHandler(context.Background(), stub, nil, "hunter2", false)
 
 	get := func(path, password string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -87,7 +87,7 @@ func TestHTTPHandlerServesTheProfilesInDebugOnly(t *testing.T) {
 		return w
 	}
 
-	debug := newHTTPHandler(context.Background(), stub, "hunter2", true)
+	debug := newHTTPHandler(context.Background(), stub, nil, "hunter2", true)
 	if w := get(debug, "/api/debug/pprof/goroutine?debug=1", "hunter2"); w.Code != http.StatusOK {
 		t.Errorf("the goroutine profile was answered %d, want it served", w.Code)
 	}
@@ -103,9 +103,49 @@ func TestHTTPHandlerServesTheProfilesInDebugOnly(t *testing.T) {
 	}
 
 	// Off, the path reaches the API instead, which knows nothing of it.
-	plain := newHTTPHandler(context.Background(), stub, "hunter2", false)
+	plain := newHTTPHandler(context.Background(), stub, nil, "hunter2", false)
 	if w := get(plain, "/api/debug/pprof/goroutine?debug=1", "hunter2"); w.Code != http.StatusNoContent {
 		t.Errorf("without the debug mode the profile path was answered %d, want it left to the API", w.Code)
+	}
+}
+
+// TestHTTPHandlerMountsTheFileAPIOnlyWhenGiven verifies that a server without
+// the file API serves nothing under /files but the UI, and that one with it
+// reaches it there, prefix taken off and without the API password.
+func TestHTTPHandlerMountsTheFileAPIOnlyWhenGiven(t *testing.T) {
+	apiStub := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	var seen string
+	filesStub := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		seen = req.URL.Path
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	post := func(h http.Handler, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+
+	off := newHTTPHandler(context.Background(), apiStub, nil, "hunter2", false)
+	if w := post(off, "/files/login"); w.Code == http.StatusAccepted || w.Code == http.StatusUnauthorized || w.Code == http.StatusNoContent {
+		t.Errorf("without the file API, /files/login was answered %d, want it left to the UI", w.Code)
+	}
+
+	on := newHTTPHandler(context.Background(), apiStub, filesStub, "hunter2", false)
+	if w := post(on, "/files/login"); w.Code != http.StatusAccepted {
+		t.Errorf("with the file API, /files/login was answered %d, want %d", w.Code, http.StatusAccepted)
+	}
+	if seen != "/login" {
+		t.Errorf("want the file API to see %q, got %q", "/login", seen)
+	}
+
+	// The API keeps its password either way.
+	if w := post(on, "/api/bans"); w.Code != http.StatusUnauthorized {
+		t.Errorf("the API next to the file API was answered %d without a password, want %d", w.Code, http.StatusUnauthorized)
 	}
 }
 
@@ -115,7 +155,7 @@ func TestHTTPHandlerRatelimitsOnlyTheAPI(t *testing.T) {
 	stub := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := newHTTPHandler(context.Background(), stub, "hunter2", false)
+	h := newHTTPHandler(context.Background(), stub, nil, "hunter2", false)
 
 	for i := range 500 {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)

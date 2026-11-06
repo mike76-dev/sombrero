@@ -17,6 +17,7 @@ import (
 
 	"github.com/mike76-dev/sombrero/api"
 	"github.com/mike76-dev/sombrero/client"
+	"github.com/mike76-dev/sombrero/files"
 	"github.com/mike76-dev/sombrero/stores"
 	"github.com/mike76-dev/sombrero/web"
 	sdk "go.sia.tech/siastorage"
@@ -27,11 +28,13 @@ const version = "3.2.0-alpha.1"
 var storesDir = flag.String("dir", ".", "directory for storing persistent data")
 var printVersion = flag.Bool("version", false, "print the version and exit")
 
-// newHTTPHandler wires the API and the web UI together. The API lives under
-// /api, behind the password and the ratelimiter. The web UI is served from
+// newHTTPHandler wires the API, the file API and the web UI together. The API
+// lives under /api, behind the password and the ratelimiter. The file API,
+// where there is one, lives under /files with its own ratelimiter and no API
+// password: its calls carry an account's session. The web UI is served from
 // the root: it holds nothing secret, and asking for the password itself
 // beats leaving it to the browser's basic auth prompt.
-func newHTTPHandler(ctx context.Context, a http.Handler, password string, debug bool) http.Handler {
+func newHTTPHandler(ctx context.Context, a, files http.Handler, password string, debug bool) http.Handler {
 	inner := a
 
 	// The profiles go behind the password with the rest of the API, and only in the debug mode:
@@ -49,6 +52,9 @@ func newHTTPHandler(ctx context.Context, a http.Handler, password string, debug 
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", api.Ratelimit(ctx)(api.BasicAuth(password)(inner))))
+	if files != nil {
+		mux.Handle("/files/", http.StripPrefix("/files", api.Ratelimit(ctx)(files)))
+	}
 	mux.Handle("/", web.Handler())
 	return mux
 }
@@ -175,9 +181,16 @@ func main() {
 	}
 	defer lAPI.Close()
 	a := api.NewAPI(ctx, db, server, cfg, version)
-	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, cfg.API.Password, cfg.Debug)}
+	var fileAPI http.Handler
+	if cfg.Files.Enabled {
+		fileAPI = files.New(db)
+	}
+	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, fileAPI, cfg.API.Password, cfg.Debug)}
 	go apiSrv.Serve(lAPI)
 	log.Printf("API and web UI: listening at http://%s ...\n", lAPI.Addr())
+	if cfg.Files.Enabled {
+		log.Printf("File API: serving at http://%s/files ...\n", lAPI.Addr())
+	}
 
 	go func() {
 		func() {

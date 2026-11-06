@@ -313,6 +313,12 @@ func (b BackupConfig) Inline() uint64 {
 	return b.InlineCap
 }
 
+// FilesConfig switches on the file API, which lets the accounts reach their
+// shares over HTTP with the rights they hold over SMB. Off unless Enabled.
+type FilesConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+}
+
 type Config struct {
 	Debug          bool       `yaml:"debug"`
 	Mode           ServerMode `yaml:"mode"`
@@ -328,6 +334,7 @@ type Config struct {
 	Database DatabaseConfig `yaml:"database,omitempty"`
 	Indexd   IndexdConfig   `yaml:"indexd,omitempty"`
 	Backup   BackupConfig   `yaml:"backup,omitempty"`
+	Files    FilesConfig    `yaml:"files,omitempty"`
 }
 
 // BufferAge is how long the leftover data of a share may wait: what MaxBufferAge
@@ -388,6 +395,12 @@ func ReadConfig(dir string) (cfg Config, err error) {
 		if err != nil {
 			return
 		}
+	}
+
+	// Per-folder rights live in the database, which the Lite mode has none of.
+	if cfg.Files.Enabled && cfg.Mode == ModeLite {
+		err = fmt.Errorf("the file API needs the Normal mode: the Lite mode has no folder rights to serve it with")
+		return
 	}
 
 	return

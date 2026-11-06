@@ -365,6 +365,41 @@ func TestReadConfigRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+// TestReadConfigFilesSection verifies that the file API is off unless the
+// config turns it on, and that the Lite mode cannot.
+func TestReadConfigFilesSection(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "sombrero.yml"), []byte(body), 0600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	write("api:\n  password: hunter2\n")
+	cfg, err := ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if cfg.Files.Enabled {
+		t.Fatal("want the file API off by default, got it on")
+	}
+
+	write("mode: normal\napi:\n  password: hunter2\nfiles:\n  enabled: true\n")
+	cfg, err = ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if !cfg.Files.Enabled {
+		t.Fatal("want the file API on, got it off")
+	}
+
+	write("mode: lite\napi:\n  password: hunter2\nfiles:\n  enabled: true\n")
+	if _, err := ReadConfig(dir); err == nil {
+		t.Fatal("ReadConfig with the file API in the Lite mode: want an error, got none")
+	}
+}
+
 // TestReadConfigDefaultsAPIAddress verifies that a config that says nothing
 // about the API address gets localhost rather than every interface, since
 // net.Listen treats an empty address as a wildcard bind on a random port.
