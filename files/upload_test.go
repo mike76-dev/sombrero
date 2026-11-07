@@ -74,6 +74,26 @@ func TestUploadingAFile(t *testing.T) {
 	if len(mc.written) != 1 || string(mc.written[0].data) != "hi" || len(mc.finished) != 1 {
 		t.Errorf("a small file: want one part, got %v finished as %v", mc.written, mc.finished)
 	}
+
+	// A body sent under curl's form content type is a file all the same.
+	mc.written, mc.finished = nil, nil
+	req := httptest.NewRequest(http.MethodPut, "/share/docs/file?path=/form.bin", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range w.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	r = httptest.NewRecorder()
+	h.ServeHTTP(r, req)
+	if r.Code != http.StatusCreated {
+		t.Fatalf("a form-typed body: want %d, got %d (%s)", http.StatusCreated, r.Code, r.Body.String())
+	}
+	joined = nil
+	for _, part := range mc.written {
+		joined = append(joined, part.data...)
+	}
+	if !bytes.Equal(joined, body) {
+		t.Errorf("a form-typed body: want %d bytes stored, got %d", len(body), len(joined))
+	}
 }
 
 // TestUploadRefusals verifies what is refused before anything is stored, and

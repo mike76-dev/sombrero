@@ -29,7 +29,7 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		return
 	}
 
-	p, ok := cleanPath(req.FormValue("path"))
+	p, ok := cleanPath(req.URL.Query().Get("path"))
 	if !ok || p == "/" {
 		writeError(w, "invalid path", http.StatusBadRequest)
 		return
@@ -64,7 +64,7 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		ctype = "application/octet-stream"
 	}
 	disposition := "attachment"
-	if req.FormValue("inline") != "" {
+	if req.URL.Query().Get("inline") != "" {
 		disposition = "inline"
 	}
 	w.Header().Set("Content-Type", ctype)

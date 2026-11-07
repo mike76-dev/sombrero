@@ -29,7 +29,8 @@ func (h *Handler) uploadHandler(w http.ResponseWriter, req *http.Request, ps htt
 		return
 	}
 
-	p, ok := cleanPath(req.FormValue("path"))
+	// The query, never FormValue: a form-typed body would be read as a form.
+	p, ok := cleanPath(req.URL.Query().Get("path"))
 	if !ok || p == "/" {
 		writeError(w, "invalid path", http.StatusBadRequest)
 		return

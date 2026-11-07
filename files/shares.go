@@ -86,7 +86,7 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		return
 	}
 
-	p, ok := cleanPath(req.FormValue("path"))
+	p, ok := cleanPath(req.URL.Query().Get("path"))
 	if !ok {
 		writeError(w, "invalid path", http.StatusBadRequest)
 		return

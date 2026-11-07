@@ -70,7 +70,7 @@ func (h *Handler) folderHandler(w http.ResponseWriter, req *http.Request, ps htt
 		writeError(w, "access denied", http.StatusForbidden)
 		return
 	}
-	p, ok := cleanPath(req.FormValue("path"))
+	p, ok := cleanPath(req.URL.Query().Get("path"))
 	if !ok || p == "/" {
 		writeError(w, "invalid path", http.StatusBadRequest)
 		return
@@ -130,7 +130,7 @@ func (h *Handler) deleteHandler(w http.ResponseWriter, req *http.Request, ps htt
 		writeError(w, "access denied", http.StatusForbidden)
 		return
 	}
-	p, ok := cleanPath(req.FormValue("path"))
+	p, ok := cleanPath(req.URL.Query().Get("path"))
 	if !ok || p == "/" {
 		writeError(w, "invalid path", http.StatusBadRequest)
 		return
@@ -163,7 +163,7 @@ func (h *Handler) deleteHandler(w http.ResponseWriter, req *http.Request, ps htt
 	}
 
 	ctx := req.Context()
-	if dir && req.FormValue("recursive") == "" {
+	if dir && req.URL.Query().Get("recursive") == "" {
 		empty, err := c.IsEmpty(ctx, s.account, t.key+"/")
 		if err != nil {
 			log.Printf("file API: failed to look into %s on %s: %v", p, share.Name, err)
@@ -200,12 +200,12 @@ func (h *Handler) renameHandler(w http.ResponseWriter, req *http.Request, ps htt
 		writeError(w, "access denied", http.StatusForbidden)
 		return
 	}
-	from, ok := cleanPath(req.FormValue("path"))
+	from, ok := cleanPath(req.URL.Query().Get("path"))
 	if !ok || from == "/" {
 		writeError(w, "invalid path", http.StatusBadRequest)
 		return
 	}
-	to, ok := cleanPath(req.FormValue("to"))
+	to, ok := cleanPath(req.URL.Query().Get("to"))
 	if !ok || to == "/" || to == from || strings.HasPrefix(to, from+"/") {
 		writeError(w, "invalid destination", http.StatusBadRequest)
 		return
@@ -237,7 +237,7 @@ func (h *Handler) renameHandler(w http.ResponseWriter, req *http.Request, ps htt
 		writeError(w, "access denied", http.StatusForbidden)
 		return
 	}
-	replace := req.FormValue("replace") != ""
+	replace := req.URL.Query().Get("replace") != ""
 	if dst.exists {
 		switch {
 		case !replace:
