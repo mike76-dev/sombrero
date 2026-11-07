@@ -358,6 +358,50 @@ func TestFoldersCarryTheVersions(t *testing.T) {
 	}
 }
 
+// TestExpireVersions verifies that the versions past the age go, on every
+// share, with their slabs staged for unpinning, and none with no age set.
+func TestExpireVersions(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Count: 10})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	own := types.Hash256{1}
+	plantPiece(t, db, share, acc, "doc.txt", own, 0, 400)
+	replaceFile(t, db, share, acc, "doc.txt", 300)
+	replaceFile(t, db, share, acc, "doc.txt", 200)
+
+	versions, err := db.Versions(share, "doc.txt")
+	if err != nil || len(versions) != 2 {
+		t.Fatalf("want two versions, got %+v, %v", versions, err)
+	}
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE versions SET replaced_at = NOW() - INTERVAL '40 days' WHERE object_id = $1`, int64(versions[1].ID))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("aging the version: %v", err)
+	}
+
+	if n, err := db.ExpireVersions(0); err != nil || n != 0 {
+		t.Errorf("ExpireVersions(0): want nothing dropped, got %d, %v", n, err)
+	}
+	n, err := db.ExpireVersions(30 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("ExpireVersions: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("want one version dropped, got %d", n)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 1 || sizes[0] != 300 {
+		t.Errorf("want the newer version left, got %v", sizes)
+	}
+	if n := pendingUnpins(t, db); n != 1 {
+		t.Errorf("want the expired version's slab staged for unpinning, got %d staged", n)
+	}
+}
+
 // TestDeleteVersions verifies that one version goes by its ID and the rest at
 // once, each releasing what only it held, and the file stays.
 func TestDeleteVersions(t *testing.T) {

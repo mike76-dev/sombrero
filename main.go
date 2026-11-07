@@ -71,6 +71,30 @@ func plainDuration(d time.Duration) string {
 	}
 }
 
+// versionExpiryInterval is how often the versions past their age are dropped.
+const versionExpiryInterval = time.Hour
+
+// expireVersions drops the versions older than the age, now and then every
+// interval, until the context ends.
+func expireVersions(ctx context.Context, db *stores.Database, age time.Duration) {
+	ticker := time.NewTicker(versionExpiryInterval)
+	defer ticker.Stop()
+
+	for {
+		if n, err := db.ExpireVersions(age); err != nil {
+			log.Printf("failed to expire versions: %v", err)
+		} else if n > 0 {
+			log.Printf("Versioning: dropped %d versions older than %v", n, age)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func main() {
 	// Parse command-line args.
 	flag.Parse()
@@ -158,6 +182,9 @@ func main() {
 		gap, session, count, age := cfg.Versioning.Retention()
 		pg.SetVersioning(stores.VersionPolicy{Keep: true, Gap: gap, MaxSession: session, Count: count})
 		log.Printf("Versioning: keeping up to %d versions per file for %v, one per editing session (gap %v, at most %v)", count, age, gap, session)
+		if age > 0 {
+			go expireVersions(ctx, pg, age)
+		}
 	}
 
 	// Start listening on the SMB port 445.

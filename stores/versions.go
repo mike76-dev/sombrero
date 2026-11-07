@@ -208,23 +208,32 @@ func recordVersions(ctx context.Context, tx pgx.Tx, ids []int64, account uint64)
 	return nil
 }
 
+// versionRow names a version to drop: the object holding it, and the
+// workgroup whose connection pinned its slabs.
+type versionRow struct {
+	id        int64
+	workgroup int
+}
+
 // dropVersions deletes the versions the rows name, as IDs and workgroups, with
 // their metadata and the buffers only they used. It returns the slabs only
 // they referenced, staged for unpinning under the workgroup that pinned them.
-func dropVersions(ctx context.Context, tx pgx.Tx, share string, rows pgx.Rows) (slabs []types.Hash256, err error) {
-	byWorkgroup := make(map[int][]int64)
-	for rows.Next() {
-		var id int64
-		var workgroup int
-		if err := rows.Scan(&id, &workgroup); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("failed to read the versions to drop: %w", err)
-		}
-		byWorkgroup[workgroup] = append(byWorkgroup[workgroup], id)
+func dropVersions(ctx context.Context, tx pgx.Tx, share string, rows pgx.Rows) ([]types.Hash256, error) {
+	victims, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (v versionRow, err error) {
+		err = row.Scan(&v.id, &v.workgroup)
+		return
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the versions to drop: %w", err)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("failed to iterate the versions to drop: %w", err)
+	return dropVersionRows(ctx, tx, share, victims)
+}
+
+// dropVersionRows is dropVersions for versions already read.
+func dropVersionRows(ctx context.Context, tx pgx.Tx, share string, victims []versionRow) (slabs []types.Hash256, err error) {
+	byWorkgroup := make(map[int][]int64)
+	for _, v := range victims {
+		byWorkgroup[v.workgroup] = append(byWorkgroup[v.workgroup], v.id)
 	}
 
 	for workgroup, ids := range byWorkgroup {
@@ -273,6 +282,49 @@ func dropVersions(ctx context.Context, tx pgx.Tx, share string, rows pgx.Rows) (
 		slabs = append(slabs, released...)
 	}
 	return slabs, nil
+}
+
+// ExpireVersions drops the versions replaced longer ago than the age, on every
+// share, and returns how many went. Their slabs are staged for unpinning, which
+// the connections pick up. A zero age keeps the versions for good.
+func (db *Database) ExpireVersions(age time.Duration) (dropped int, err error) {
+	if age <= 0 {
+		return 0, nil
+	}
+
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const expired = `
+			SELECT o.share_name, o.id, o.workgroup
+			FROM versions v
+			JOIN objects o ON o.id = v.object_id
+			WHERE v.replaced_at < NOW() - make_interval(secs => $1)
+		`
+
+		rows, err := tx.Query(ctx, expired, age.Seconds())
+		if err != nil {
+			return fmt.Errorf("failed to find the expired versions: %w", err)
+		}
+		byShare := make(map[string][]versionRow)
+		_, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (share string, err error) {
+			var v versionRow
+			if err = row.Scan(&share, &v.id, &v.workgroup); err == nil {
+				byShare[share] = append(byShare[share], v)
+			}
+			return
+		})
+		if err != nil {
+			return fmt.Errorf("failed to read the expired versions: %w", err)
+		}
+
+		for share, victims := range byShare {
+			if _, err := dropVersionRows(ctx, tx, share, victims); err != nil {
+				return err
+			}
+			dropped += len(victims)
+		}
+		return nil
+	})
+	return
 }
 
 // Versions lists the versions of the file at the path, newest first. The
