@@ -3,6 +3,7 @@ package stores
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -42,6 +43,12 @@ func ntHash(password string) []byte {
 	h := md4.New()
 	h.Write(utils.EncodeStringToBytes(password))
 	return h.Sum(nil)
+}
+
+// CheckPassword reports whether the password is the account's. The NT hash is
+// all that is stored, so the candidate is hashed the same way and compared.
+func (acc Account) CheckPassword(password string) bool {
+	return subtle.ConstantTimeCompare(ntHash(password), acc.NTHash) == 1
 }
 
 // Passwordless reports whether the account is one that anybody can log in as,
