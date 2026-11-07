@@ -2,6 +2,7 @@ package stores
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -9,6 +10,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"go.sia.tech/core/types"
 )
+
+// ErrUploadInFlight is returned where a file cannot be replaced because
+// somebody else is writing it.
+var ErrUploadInFlight = errors.New("the file is being written")
 
 // VersionPolicy is what FinalizeUpload keeps of the file it replaces.
 type VersionPolicy struct {
@@ -325,6 +330,144 @@ func (db *Database) ExpireVersions(age time.Duration) (dropped int, err error) {
 		return nil
 	})
 	return
+}
+
+// RestoreVersion makes the version the contents of the file again, as a
+// replacement like any other: what it replaces is kept under the policy, and
+// the slabs released are returned, staged for unpinning. The version stays,
+// sharing its slabs with the file; what it holds in buffers is copied.
+func (db *Database) RestoreVersion(acc Account, share, path string, id uint64) (slabs []types.Hash256, err error) {
+	path = normalizePath(path)
+
+	var exists bool
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT EXISTS (
+				SELECT 1
+				FROM versions v
+				JOIN objects o ON o.id = v.object_id
+				WHERE o.id = $1
+					AND o.share_name = $2
+					AND o.full_path = $3
+			)
+		`
+		return tx.QueryRow(ctx, query, int64(id), share, path).Scan(&exists)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up the version: %w", err)
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+
+	uploadID, err := db.CreateUpload(acc, share, path)
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrUploadInFlight
+	} else if err != nil {
+		return nil, err
+	}
+
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return copyVersionContents(ctx, tx, uploadID, int64(id))
+	})
+	if err != nil {
+		if _, rerr := db.RemoveUpload(uploadID); rerr != nil {
+			return nil, fmt.Errorf("%w (and the upload could not be removed: %v)", err, rerr)
+		}
+		return nil, err
+	}
+	return db.FinalizeUpload(uploadID)
+}
+
+// copyVersionContents gives the staged upload the pieces of the version: the
+// slab pieces as they are, and the buffered ones as buffers of their own,
+// queued for upload like a fresh write.
+func copyVersionContents(ctx context.Context, tx pgx.Tx, uploadID string, versionID int64) error {
+	uid, err := hex.DecodeString(uploadID)
+	if err != nil {
+		return err
+	}
+
+	const target = `
+		SELECT u.id, u.object_id, o.share_name
+		FROM uploads u
+		JOIN objects o ON o.id = u.object_id
+		WHERE u.upload_id = $1
+	`
+
+	var tuid, oid int64
+	var share string
+	if err := tx.QueryRow(ctx, target, uid).Scan(&tuid, &oid, &share); err != nil {
+		return fmt.Errorf("failed to find the upload: %w", err)
+	}
+
+	const pieces = `
+		SELECT obj_offset, slab_key, buffer_id, data_offset, data_length
+		FROM metadata
+		WHERE object_id = $1
+		ORDER BY obj_offset
+	`
+
+	type piece struct {
+		at, off, length int64
+		key             []byte
+		buffer          *int64
+	}
+	rows, err := tx.Query(ctx, pieces, versionID)
+	if err != nil {
+		return fmt.Errorf("failed to read the version's pieces: %w", err)
+	}
+	ps, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (p piece, err error) {
+		err = row.Scan(&p.at, &p.key, &p.buffer, &p.off, &p.length)
+		return
+	})
+	if err != nil {
+		return fmt.Errorf("failed to read the version's pieces: %w", err)
+	}
+
+	for _, p := range ps {
+		if p.key != nil {
+			const copySlab = `
+				INSERT INTO metadata (object_id, obj_offset, slab_key, data_offset, data_length)
+				VALUES ($1, $2, $3, $4, $5)
+			`
+			if _, err := tx.Exec(ctx, copySlab, oid, p.at, p.key, p.off, p.length); err != nil {
+				return fmt.Errorf("failed to copy a slab piece: %w", err)
+			}
+			continue
+		}
+
+		const copyBuffer = `
+			INSERT INTO buffers (share_name, data)
+			SELECT $1, SUBSTRING(data FROM $2::INT + 1 FOR $3::INT)
+			FROM buffers
+			WHERE id = $4
+			RETURNING id
+		`
+		var bid int64
+		if err := tx.QueryRow(ctx, copyBuffer, share, p.off, p.length, *p.buffer).Scan(&bid); err != nil {
+			return fmt.Errorf("failed to copy a buffer: %w", err)
+		}
+
+		const copyPiece = `
+			INSERT INTO metadata (object_id, obj_offset, upload_id, buffer_id, data_offset, data_length)
+			VALUES ($1, $2, $3, $4, 0, $5)
+			RETURNING id
+		`
+		var mid int64
+		if err := tx.QueryRow(ctx, copyPiece, oid, p.at, tuid, bid, p.length).Scan(&mid); err != nil {
+			return fmt.Errorf("failed to copy a buffered piece: %w", err)
+		}
+
+		const queue = `
+			INSERT INTO upload_jobs (upload_id, metadata_id)
+			VALUES ($1, $2)
+		`
+		if _, err := tx.Exec(ctx, queue, tuid, mid); err != nil {
+			return fmt.Errorf("failed to queue the buffered piece: %w", err)
+		}
+	}
+	return nil
 }
 
 // Versions lists the versions of the file at the path, newest first. The

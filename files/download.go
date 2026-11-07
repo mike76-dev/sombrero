@@ -2,7 +2,6 @@ package files
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/julienschmidt/httprouter"
-	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 )
 
@@ -71,19 +69,25 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": name}))
 
 	// The chunk follows the share's part size the way the SMB read cache's does.
-	rd := &objectReader{ctx: ctx, client: c, account: s.account, path: key, size: oi.Size, chunk: h.chunkSize(partSize)}
+	rd := &objectReader{
+		fetch: func(offset, length uint64, w io.Writer) error {
+			return c.Read(ctx, s.account, key, offset, length, w)
+		},
+		path:  key,
+		size:  oi.Size,
+		chunk: h.chunkSize(partSize),
+	}
 	http.ServeContent(w, req, "", oi.ModifiedAt, rd)
 }
 
 // objectReader reads a file off its share a chunk at a time, which is what
 // lets a download be served without holding the whole file.
 type objectReader struct {
-	ctx     context.Context
-	client  client.Client
-	account stores.Account
-	path    string
-	size    uint64
-	chunk   uint64
+	// fetch reads a range of the file into the writer, from wherever it is.
+	fetch func(offset, length uint64, w io.Writer) error
+	path  string
+	size  uint64
+	chunk uint64
 
 	pos   int64
 	buf   []byte
@@ -101,7 +105,7 @@ func (r *objectReader) Read(p []byte) (int, error) {
 		n := min(r.chunk, r.size-start)
 		var b bytes.Buffer
 		b.Grow(int(n))
-		if err := r.client.Read(r.ctx, r.account, r.path, start, n, &b); err != nil {
+		if err := r.fetch(start, n, &b); err != nil {
 			log.Printf("file API: failed to read %s at %d: %v", r.path, start, err)
 			return 0, err
 		}

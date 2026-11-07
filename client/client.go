@@ -168,6 +168,14 @@ type Versioner interface {
 
 	// ReadVersion reads a range of the version with the ID into w.
 	ReadVersion(ctx context.Context, acc stores.Account, path string, id uint64, offset, length uint64, w io.Writer) error
+
+	// RestoreVersion makes the version the contents of the file again, keeping
+	// the contents it replaces as the policy says.
+	RestoreVersion(ctx context.Context, acc stores.Account, path string, id uint64) error
+
+	// DeleteVersions removes the version with the ID, or every version of the
+	// file with a zero ID.
+	DeleteVersions(ctx context.Context, acc stores.Account, path string, id uint64) error
 }
 
 // sizeFromSeeker tries to find out the size of a file.

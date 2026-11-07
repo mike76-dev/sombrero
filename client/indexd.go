@@ -890,6 +890,60 @@ func (ic *IndexdClient) ReadVersion(ctx context.Context, acc stores.Account, pat
 	return ic.readSlices(ctx, slabs, offset, length, buf)
 }
 
+// RestoreVersion implements client.Versioner. The restore is a replacement of
+// the file, so the slabs it releases are unpinned as after any other.
+func (ic *IndexdClient) RestoreVersion(ctx context.Context, acc stores.Account, path string, id uint64) error {
+	pa, err := ic.db.PathAccess(acc, ic.share, path)
+	if err != nil {
+		return err
+	}
+	if !pa.Write {
+		return stores.ErrAccessDenied
+	}
+
+	replaced := ic.slabsOf(path, false)
+	slabs, err := ic.db.RestoreVersion(acc, ic.share, path, id)
+	if err != nil {
+		return err
+	}
+	ic.retag(replaced)
+
+	select {
+	case ic.packChan <- struct{}{}:
+	default:
+	}
+
+	if len(slabs) > 0 && ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after restoring a version of %s: %v", path, err)
+		}
+	}
+	return nil
+}
+
+// DeleteVersions implements client.Versioner. Deleting versions takes the
+// right to delete the file.
+func (ic *IndexdClient) DeleteVersions(ctx context.Context, acc stores.Account, path string, id uint64) error {
+	pa, err := ic.db.PathAccess(acc, ic.share, path)
+	if err != nil {
+		return err
+	}
+	if !pa.Delete {
+		return stores.ErrAccessDenied
+	}
+
+	slabs, err := ic.db.DeleteVersions(ic.share, path, id)
+	if err != nil {
+		return err
+	}
+	if len(slabs) > 0 && ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after deleting versions of %s: %v", path, err)
+		}
+	}
+	return nil
+}
+
 // readSlices fetches the slices of a range, clipped to it, and writes them out in order.
 func (ic *IndexdClient) readSlices(ctx context.Context, slabs []stores.SlabSlice, offset, length uint64, buf io.Writer) error {
 	end := offset + length

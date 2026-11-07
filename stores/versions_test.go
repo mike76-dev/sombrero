@@ -402,6 +402,78 @@ func TestExpireVersions(t *testing.T) {
 	}
 }
 
+// TestRestoreVersion verifies that a restored version becomes the file again,
+// sharing its slabs and copying its buffers, with what it replaced kept.
+func TestRestoreVersion(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Count: 10})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	own := types.Hash256{1}
+	plantPiece(t, db, share, acc, "doc.txt", own, 0, 400)
+	replaceFile(t, db, share, acc, "doc.txt", 300)
+	versions, err := db.Versions(share, "doc.txt")
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("want the one version, got %+v, %v", versions, err)
+	}
+	jobs := pendingJobs(t, db)
+
+	// The slab version comes back sharing its slab, and the buffered contents become a version.
+	slabs, err := db.RestoreVersion(acc, share, "doc.txt", versions[0].ID)
+	if err != nil {
+		t.Fatalf("RestoreVersion: %v", err)
+	}
+	if len(slabs) != 0 {
+		t.Errorf("want nothing released, got %v", slabs)
+	}
+	if obj, err := db.Object(acc, share, "doc.txt"); err != nil || obj.Size != 400 {
+		t.Errorf("want the file at 400 bytes, got %+v, %v", obj, err)
+	}
+	if md, err := db.GetMetadata(acc, share, "doc.txt", 0, 400); err != nil || len(md) != 1 || md[0].Key != own {
+		t.Errorf("want the file made of the version's slab, got %+v, %v", md, err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 300 || sizes[1] != 400 {
+		t.Errorf("want the replaced contents kept ahead of the version, got %v", sizes)
+	}
+	if n := bufferedBytes(t, db); n != 300 {
+		t.Errorf("want the buffers as they were, got %d bytes", n)
+	}
+
+	// A buffered version comes back as a copy of its bytes, queued for upload.
+	versions, _ = db.Versions(share, "doc.txt")
+	if _, err := db.RestoreVersion(acc, share, "doc.txt", versions[0].ID); err != nil {
+		t.Fatalf("RestoreVersion of the buffered version: %v", err)
+	}
+	if obj, err := db.Object(acc, share, "doc.txt"); err != nil || obj.Size != 300 {
+		t.Errorf("want the file at 300 bytes, got %+v, %v", obj, err)
+	}
+	if n := bufferedBytes(t, db); n != 600 {
+		t.Errorf("want the version's buffer copied, got %d bytes", n)
+	}
+	if n := pendingJobs(t, db); n != jobs+1 {
+		t.Errorf("want the copy queued for upload, got %d jobs rather than %d", n, jobs+1)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 3 || sizes[0] != 400 {
+		t.Errorf("want the slab contents kept as the newest version, got %v", sizes)
+	}
+
+	// A version the file does not have, and a file somebody else is writing.
+	if _, err := db.RestoreVersion(acc, share, "doc.txt", 999999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an unknown version: want %v, got %v", ErrNotFound, err)
+	}
+	if _, err := db.RestoreVersion(acc, share, "other.txt", versions[0].ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a version under another path: want %v, got %v", ErrNotFound, err)
+	}
+	if _, err := db.CreateUpload(acc, share, "doc.txt"); err != nil {
+		t.Fatalf("CreateUpload: %v", err)
+	}
+	if _, err := db.RestoreVersion(acc, share, "doc.txt", versions[0].ID); !errors.Is(err, ErrUploadInFlight) {
+		t.Errorf("a file being written: want %v, got %v", ErrUploadInFlight, err)
+	}
+}
+
 // TestDeleteVersions verifies that one version goes by its ID and the rest at
 // once, each releasing what only it held, and the file stays.
 func TestDeleteVersions(t *testing.T) {

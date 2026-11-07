@@ -158,6 +158,35 @@ func (fc *fakeClient) Versions(_ context.Context, _ stores.Account, path string)
 	return infos, nil
 }
 
+// RestoreVersion implements client.Versioner: the version's data becomes the file's.
+func (fc *fakeClient) RestoreVersion(_ context.Context, _ stores.Account, path string, id uint64) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	for _, v := range fc.versions[path] {
+		if v.info.ID == id {
+			fc.contents[path] = v.data
+			return nil
+		}
+	}
+	return errNoObject
+}
+
+// DeleteVersions implements client.Versioner.
+func (fc *fakeClient) DeleteVersions(_ context.Context, _ stores.Account, path string, id uint64) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	var kept []fakeVersion
+	for _, v := range fc.versions[path] {
+		if id != 0 && v.info.ID != id {
+			kept = append(kept, v)
+		}
+	}
+	fc.versions[path] = kept
+	return nil
+}
+
 // ReadVersion implements client.Versioner.
 func (fc *fakeClient) ReadVersion(_ context.Context, _ stores.Account, path string, id uint64, offset, length uint64, w io.Writer) error {
 	fc.mu.Lock()
