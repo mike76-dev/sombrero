@@ -17,8 +17,8 @@ import (
 	"github.com/mike76-dev/sombrero/stores"
 )
 
-// fileHandler handles the GET /share/:name/file calls, sending the file the
-// path query names. Ranges are honoured, so a viewer may seek in it.
+// fileHandler handles the GET and HEAD /share/:name/file calls, sending the
+// file the path query names. Ranges are honoured, so a viewer may seek in it.
 func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params, s session) {
 	share, r, ok := h.shareFor(w, s, ps.ByName("name"))
 	if !ok {

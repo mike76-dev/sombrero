@@ -97,6 +97,24 @@ func TestDownloadingAFile(t *testing.T) {
 	if got := r.Header().Get("Content-Disposition"); got != `inline; filename=readme.txt` {
 		t.Errorf("inline: want the inline disposition, got %q", got)
 	}
+
+	// A HEAD request describes the file without fetching any of it.
+	mc.reads = nil
+	req := httptest.NewRequest(http.MethodHead, "/share/docs/file?path=/readme.txt", nil)
+	for _, c := range w.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	r = httptest.NewRecorder()
+	h.ServeHTTP(r, req)
+	if r.Code != http.StatusOK || r.Body.Len() != 0 {
+		t.Errorf("HEAD: want %d and no body, got %d and %d bytes", http.StatusOK, r.Code, r.Body.Len())
+	}
+	if got := r.Header().Get("Content-Length"); got != "100" {
+		t.Errorf("HEAD: want the length, got %q", got)
+	}
+	if len(mc.reads) != 0 {
+		t.Errorf("HEAD: want nothing read, got %v", mc.reads)
+	}
 }
 
 // TestDownloadingARange verifies that a range is served from where it starts,
