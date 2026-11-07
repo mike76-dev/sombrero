@@ -332,9 +332,9 @@ func (db *Database) ExpireVersions(age time.Duration) (dropped int, err error) {
 	return
 }
 
-// RestoreVersion makes the version the contents of the file again, as a
-// replacement like any other: what it replaces is kept under the policy, and
-// the slabs released are returned, staged for unpinning. The version stays,
+// RestoreVersion makes the version the contents of the file again. What it
+// replaces is always kept as a version, a restore being no autosave, and the
+// slabs released are returned, staged for unpinning. The version stays,
 // sharing its slabs with the file; what it holds in buffers is copied.
 func (db *Database) RestoreVersion(acc Account, share, path string, id uint64) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
@@ -376,7 +376,7 @@ func (db *Database) RestoreVersion(acc Account, share, path string, id uint64) (
 		}
 		return nil, err
 	}
-	return db.FinalizeUpload(uploadID)
+	return db.finalizeUpload(uploadID, true)
 }
 
 // copyVersionContents gives the staged upload the pieces of the version: the

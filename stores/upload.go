@@ -1360,6 +1360,12 @@ func (db *Database) RequeueUploadJob(uploadID, metadataID uint64) error {
 // A file that was there under the name is replaced, and the slabs only it
 // referenced are returned, staged for the caller to unpin.
 func (db *Database) FinalizeUpload(uploadID string) (slabs []types.Hash256, err error) {
+	return db.finalizeUpload(uploadID, false)
+}
+
+// finalizeUpload is FinalizeUpload; a deliberate replacement, such as a
+// restore, keeps the file it replaces whatever editing session is under way.
+func (db *Database) finalizeUpload(uploadID string, deliberate bool) (slabs []types.Hash256, err error) {
 	id, err := hex.DecodeString(uploadID)
 	if err != nil {
 		return nil, err
@@ -1448,9 +1454,11 @@ func (db *Database) FinalizeUpload(uploadID string) (slabs []types.Hash256, err 
 			// and gives up its storage otherwise.
 			var bids []uint64
 			var keys [][]byte
-			keep, err := db.keepsVersion(ctx, tx, share, path, aid)
-			if err != nil {
-				return err
+			keep := deliberate && db.versioning.Keep
+			if !keep {
+				if keep, err = db.keepsVersion(ctx, tx, share, path, aid); err != nil {
+					return err
+				}
 			}
 			if keep {
 				if err := keepVersion(ctx, tx, oid, aid); err != nil {

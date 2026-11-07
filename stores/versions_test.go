@@ -474,6 +474,37 @@ func TestRestoreVersion(t *testing.T) {
 	}
 }
 
+// TestRestoreVersionKeepsTheLatestSave verifies that a restore within the
+// editing session keeps the save it replaces, where another save would not.
+func TestRestoreVersionKeepsTheLatestSave(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Gap: 10 * time.Minute, MaxSession: time.Hour, Count: 10})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	plantPiece(t, db, share, acc, "doc.txt", types.Hash256{1}, 0, 400)
+	replaceFile(t, db, share, acc, "doc.txt", 300)
+	replaceFile(t, db, share, acc, "doc.txt", 200)
+	versions, err := db.Versions(share, "doc.txt")
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("want the one version from before the session, got %+v, %v", versions, err)
+	}
+
+	if _, err := db.RestoreVersion(acc, share, "doc.txt", versions[0].ID); err != nil {
+		t.Fatalf("RestoreVersion: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 200 {
+		t.Errorf("want the latest save kept by the restore, got %v", sizes)
+	}
+
+	// The session continues from the restore: the next save leaves no version.
+	replaceFile(t, db, share, acc, "doc.txt", 100)
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 200 {
+		t.Errorf("want the save after the restore within the session, got %v", sizes)
+	}
+}
+
 // TestDeleteVersions verifies that one version goes by its ID and the rest at
 // once, each releasing what only it held, and the file stays.
 func TestDeleteVersions(t *testing.T) {
