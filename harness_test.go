@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -103,6 +104,16 @@ type fakeClient struct {
 	// pathAccess answers the per-path rights lookup, when a test sets it;
 	// without it every path allows everything, like renterd.
 	pathAccess func(path string) (stores.PathAccess, error)
+
+	// The previous versions of the files, newest first, which make the fake a client.Versioner.
+	versions      map[string][]fakeVersion
+	nextVersionID uint64
+}
+
+// fakeVersion is a previous version of a file and what it held.
+type fakeVersion struct {
+	info client.VersionInfo
+	data []byte
 }
 
 // stagedPart is a part the backend has taken and not yet put into an object.
@@ -115,7 +126,57 @@ func newFakeClient() *fakeClient {
 		objects:  make(map[string]client.ObjectInfo),
 		contents: make(map[string][]byte),
 		uploads:  make(map[string]map[int]stagedPart),
+		versions: make(map[string][]fakeVersion),
 	}
+}
+
+// putVersion gives a file a previous version, last written at the time and holding the data.
+func (fc *fakeClient) putVersion(path string, modified time.Time, data []byte) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.nextVersionID++
+	info := client.VersionInfo{ID: fc.nextVersionID, Size: uint64(len(data)), ModifiedAt: modified, ReplacedAt: modified}
+	fc.versions[path] = append(fc.versions[path], fakeVersion{info: info, data: data})
+	slices.SortFunc(fc.versions[path], func(a, b fakeVersion) int {
+		return b.info.ModifiedAt.Compare(a.info.ModifiedAt)
+	})
+}
+
+// Versions implements client.Versioner.
+func (fc *fakeClient) Versions(_ context.Context, _ stores.Account, path string) ([]client.VersionInfo, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if _, found := fc.objects[path]; !found {
+		return nil, errNoObject
+	}
+	var infos []client.VersionInfo
+	for _, v := range fc.versions[path] {
+		infos = append(infos, v.info)
+	}
+	return infos, nil
+}
+
+// ReadVersion implements client.Versioner.
+func (fc *fakeClient) ReadVersion(_ context.Context, _ stores.Account, path string, id uint64, offset, length uint64, w io.Writer) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	for _, v := range fc.versions[path] {
+		if v.info.ID != id {
+			continue
+		}
+		if offset >= uint64(len(v.data)) {
+			return nil
+		}
+		if offset+length > uint64(len(v.data)) {
+			length = uint64(len(v.data)) - offset
+		}
+		_, err := w.Write(v.data[offset : offset+length])
+		return err
+	}
+	return errNoObject
 }
 
 // put makes a file appear in the store, as if it had been uploaded out of band.

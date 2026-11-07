@@ -151,6 +151,25 @@ type AccessChecker interface {
 	PathAccess(ctx context.Context, acc stores.Account, path string) (stores.PathAccess, error)
 }
 
+// VersionInfo describes a previous version of a file: when its contents were
+// last written, and when and by whom they were replaced.
+type VersionInfo struct {
+	ID         uint64
+	Size       uint64
+	ModifiedAt time.Time
+	ReplacedAt time.Time
+	ReplacedBy string
+}
+
+// Versioner is a client whose shares keep the previous versions of files.
+type Versioner interface {
+	// Versions lists the versions of the file the account may read, newest first.
+	Versions(ctx context.Context, acc stores.Account, path string) ([]VersionInfo, error)
+
+	// ReadVersion reads a range of the version with the ID into w.
+	ReadVersion(ctx context.Context, acc stores.Account, path string, id uint64, offset, length uint64, w io.Writer) error
+}
+
 // sizeFromSeeker tries to find out the size of a file.
 func sizeFromSeeker(r io.Reader) (int64, error) {
 	s, ok := r.(io.Seeker)

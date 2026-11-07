@@ -859,7 +859,39 @@ func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path strin
 	if err != nil {
 		return err
 	}
+	return ic.readSlices(ctx, slabs, offset, length, buf)
+}
 
+// Versions implements client.Versioner: the versions of a file the account may read.
+func (ic *IndexdClient) Versions(ctx context.Context, acc stores.Account, path string) ([]VersionInfo, error) {
+	if _, err := ic.db.Object(acc, ic.share, path); err != nil {
+		return nil, err
+	}
+	versions, err := ic.db.Versions(ic.share, path)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]VersionInfo, 0, len(versions))
+	for _, v := range versions {
+		infos = append(infos, VersionInfo{ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, ReplacedAt: v.ReplacedAt, ReplacedBy: v.ReplacedBy})
+	}
+	return infos, nil
+}
+
+// ReadVersion implements client.Versioner.
+func (ic *IndexdClient) ReadVersion(ctx context.Context, acc stores.Account, path string, id uint64, offset, length uint64, buf io.Writer) error {
+	if _, err := ic.db.Object(acc, ic.share, path); err != nil {
+		return err
+	}
+	slabs, err := ic.db.VersionMetadata(ic.share, path, id, offset, length)
+	if err != nil {
+		return err
+	}
+	return ic.readSlices(ctx, slabs, offset, length, buf)
+}
+
+// readSlices fetches the slices of a range, clipped to it, and writes them out in order.
+func (ic *IndexdClient) readSlices(ctx context.Context, slabs []stores.SlabSlice, offset, length uint64, buf io.Writer) error {
 	end := offset + length
 
 	parts := make([][]byte, len(slabs))

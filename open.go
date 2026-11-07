@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"runtime/debug"
 	"slices"
@@ -493,6 +494,10 @@ type open struct {
 	// timestamps, the attributes and the upload carrying it to the backend. Never nil.
 	file *fileState
 
+	// version is set on an open of a previous version of the file, which is read from the
+	// version rather than from the file, and shares nothing with the opens on the file.
+	version *versionOpen
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -598,6 +603,51 @@ func expandGeneric(access uint32) uint32 {
 	}
 
 	return access
+}
+
+// versionOpen says which previous version an open is of: the version's ID, and
+// the path of the file it is a version of.
+type versionOpen struct {
+	id   uint64
+	path string
+}
+
+// readOnlyAccess is all a previous version grants: it is there to be read.
+const readOnlyAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_EA | smb2.FILE_EXECUTE |
+	smb2.FILE_READ_ATTRIBUTES | smb2.READ_CONTROL | smb2.SYNCHRONIZE
+
+// readRange reads a range of what the open is on: the previous version it was
+// opened as of, or the file at the path.
+func (op *open) readRange(acc stores.Account, path string, offset, length uint64, w io.Writer) error {
+	if op.version != nil {
+		versioner := op.treeConnect.client.(client.Versioner)
+		return versioner.ReadVersion(op.ctx, acc, op.version.path, op.version.id, offset, length, w)
+	}
+	return op.treeConnect.client.Read(op.ctx, acc, path, offset, length, w)
+}
+
+// snapshots lists the times the previous versions of the file go by, newest
+// first. A folder, a version and a share that keeps none have none.
+func (op *open) snapshots(acc stores.Account) ([]time.Time, error) {
+	versioner, ok := op.treeConnect.client.(client.Versioner)
+	if !ok || op.version != nil || op.file.isDirectory() {
+		return nil, nil
+	}
+	versions, err := versioner.Versions(op.ctx, acc, op.pathName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Two versions within the same second would go by one name, so the newer keeps it.
+	var times []time.Time
+	for _, v := range versions {
+		t := v.ModifiedAt.UTC().Truncate(time.Second)
+		if len(times) > 0 && t.Equal(times[len(times)-1]) {
+			continue
+		}
+		times = append(times, t)
+	}
+	return times, nil
 }
 
 // grantedFor returns the access an open is given: what the share allows the user, narrowed to
@@ -1916,7 +1966,7 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64, after 
 
 		var buf bytes.Buffer
 		err := recoverAsError("reading "+path, func() error {
-			return op.treeConnect.client.Read(op.ctx, acc, path, chunkOffset, toRead, &buf)
+			return op.readRange(acc, path, chunkOffset, toRead, &buf)
 		})
 
 		op.mu.Lock()

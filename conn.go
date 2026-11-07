@@ -1148,6 +1148,14 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 		}
 
+		// A previous version is asked for by a timewarp token or by a snapshot name leading
+		// the path. The rights are weighed on the file as it is now, under the path alone.
+		snapshot, path, ok := snapshotOf(path, contexts)
+		if !ok {
+			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+			return resp, ss, nil
+		}
+
 		if !validPath(path) {
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 			return resp, ss, nil
@@ -1193,6 +1201,10 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 					return resp, ss, nil
 				}
 			}
+			// A previous version is there to be read, whatever the file allows.
+			if !snapshot.IsZero() {
+				fs &= readOnlyAccess
+			}
 			if !held || !grantAccess(cr, fs) {
 				c.server.mu.Lock()
 				c.server.stats.PermErrors++
@@ -1233,9 +1245,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		// covers the file it is opening again, and it has nothing to give up.
 		asking := c.askedBy(own, lr)
 
-		if !c.server.needsBreakWait(tc.share, path, nil, asking, sharedOK) {
-			c.server.tellHoldersOn(tc.share, path, nil, asking, sharedOK)
-			resp, _ := c.createFile(req, cr, ss, tc, acc, contexts, path, lr, pm)
+		// A previous version is opened under its snapshot name, apart from the file as it is
+		// now: whoever holds the file has nothing to give up for it.
+		openPath := snapshotPath(snapshot, path)
+
+		if !c.server.needsBreakWait(tc.share, openPath, nil, asking, sharedOK) {
+			c.server.tellHoldersOn(tc.share, openPath, nil, asking, sharedOK)
+			resp, _ := c.createFile(req, cr, ss, tc, acc, contexts, path, snapshot, lr, pm)
 			return resp, ss, nil
 		}
 
@@ -1257,9 +1273,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 		go func() {
 			defer c.recoverConnection("creating a file")
 
-			c.server.breakHoldersOn(tc.share, path, nil, asking, sharedOK)
+			c.server.breakHoldersOn(tc.share, openPath, nil, asking, sharedOK)
 
-			resp, made := c.createFile(req, cr, ss, tc, acc, contexts, path, lr, pm)
+			resp, made := c.createFile(req, cr, ss, tc, acc, contexts, path, snapshot, lr, pm)
 
 			c.awaitInterim(interim)
 
@@ -2385,6 +2401,36 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			resp := &smb2.IoctlResponse{}
 			resp.FromRequest(ir)
 			resp.Generate(ir.CtlCode(), id, 0, op.getResumeKey())
+			return resp, ss, nil
+
+		case smb2.FSCTL_SRV_ENUMERATE_SNAPSHOTS:
+			// The previous versions of the file, by the names they are opened under. A
+			// client asks with room for the count first, then with room for the names
+			// ([MS-SMB2] 3.3.5.15.1).
+			op, status := c.findOpen(ss, id, req)
+			if status != smb2.STATUS_OK {
+				resp := smb2.NewErrorResponse(ir, status, 0, nil)
+				return resp, ss, nil
+			}
+			if ir.MaxOutputResponse() < 16 {
+				resp := smb2.NewErrorResponse(ir, smb2.STATUS_INVALID_PARAMETER, 0, nil)
+				return resp, ss, nil
+			}
+			acc, err := c.server.store.FindAccount(ss.userName, ss.workgroup)
+			if err != nil {
+				resp := smb2.NewErrorResponse(ir, smb2.STATUS_USER_SESSION_DELETED, 0, nil)
+				return resp, ss, nil
+			}
+			snapshots, err := op.snapshots(acc)
+			if err != nil {
+				log.Printf("Couldn't list the versions of %s: %v\n", op.pathName, err)
+				resp := smb2.NewErrorResponse(ir, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil)
+				return resp, ss, nil
+			}
+
+			resp := &smb2.IoctlResponse{}
+			resp.FromRequest(ir)
+			resp.Generate(ir.CtlCode(), id, 0, smb2.SnapshotArray(snapshots, ir.MaxOutputResponse()))
 			return resp, ss, nil
 
 		case smb2.FSCTL_CREATE_OR_GET_OBJECT_ID:
@@ -3944,13 +3990,17 @@ func (s *server) reapConnections() {
 // It is kept apart from the dispatcher because a create that has to revoke somebody else's
 // oplock first can only finish once the break is over, which is too long to keep the
 // connection waiting, so it runs on a goroutine of its own.
-func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *session, tc *treeConnect, acc stores.Account, contexts map[uint32][]byte, path string, lr *smb2.LeaseRequest, pm uint32) (smb2.GenericResponse, *open) {
+func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *session, tc *treeConnect, acc stores.Account, contexts map[uint32][]byte, path string, snapshot time.Time, lr *smb2.LeaseRequest, pm uint32) (smb2.GenericResponse, *open) {
+	// A previous version is opened under its snapshot name: its own handle, its own sharing
+	// and caching, and nothing of the state the opens on the file share.
+	openPath := snapshotPath(snapshot, path)
+
 	// A lease key is bound to the file it was first used for. Naming the same key on another
 	// file is the one thing a client may not do with one, and is settled before the open is
 	// made, so that a refusal leaves nothing behind.
 	var own *lease
 	if lr != nil {
-		l, matches := c.server.leaseFor([16]byte(c.clientGuid), *lr, path)
+		l, matches := c.server.leaseFor([16]byte(c.clientGuid), *lr, openPath)
 		if !matches {
 			return smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil), nil
 		}
@@ -3963,9 +4013,9 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	// ([MS-SMB2] 2.2.13).
 	if tc.share.name != "ipc$" {
 		access := grantedFor(cr.DesiredAccess(), pm)
-		if other := c.server.sharingViolation(tc.share, path, access, cr.ShareAccess()); other != nil {
+		if other := c.server.sharingViolation(tc.share, openPath, access, cr.ShareAccess()); other != nil {
 			if c.server.debug {
-				log.Println(describeSharingViolation(path, access, cr.ShareAccess(), other))
+				log.Println(describeSharingViolation(openPath, access, cr.ShareAccess(), other))
 			}
 			return smb2.NewErrorResponse(cr, smb2.STATUS_SHARING_VIOLATION, 0, nil), nil
 		}
@@ -3976,6 +4026,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	var result uint32
 	var restored, stored bool
 	var known *fileState
+	var version *versionOpen
 	var op *open
 	var err error
 	if tc.share.name == "ipc$" { // A named pipe is being created
@@ -3993,6 +4044,31 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			resp := smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil)
 			return resp, nil
 		}
+	} else if !snapshot.IsZero() {
+		// A previous version is only ever opened, never made, and only where the share keeps
+		// versions and the file has one going by that name.
+		versioner, kept := tc.client.(client.Versioner)
+		if cr.CreateDisposition() != smb2.FILE_OPEN && cr.CreateDisposition() != smb2.FILE_OPEN_IF {
+			cancel()
+			return smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil), nil
+		}
+		var v client.VersionInfo
+		var found bool
+		if kept {
+			v, found, err = versionAt(ctx, versioner, acc, path, snapshot)
+		}
+		if err != nil && !errors.Is(err, stores.ErrNotFound) {
+			cancel()
+			log.Printf("Couldn't look up the versions of %s: %v\n", path, err)
+			return smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil), nil
+		}
+		if !found {
+			cancel()
+			return smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil), nil
+		}
+		info = client.ObjectInfo{Key: "/" + openPath, Size: v.Size, CreatedAt: v.ModifiedAt, ModifiedAt: v.ModifiedAt}
+		result = smb2.FILE_OPENED
+		version = &versionOpen{id: v.ID, path: path}
 	} else {
 		info, err = tc.client.Object(ctx, acc, path)
 		if err != nil && errors.Is(err, context.DeadlineExceeded) {
@@ -4173,12 +4249,14 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		resp := smb2.NewErrorResponse(cr, smb2.STATUS_INVALID_PARAMETER, 0, nil)
 		return resp, nil
 	}
+	op.version = version
 
 	// The state answers for the file for as long as it is open, and the share is where every handle
 	// on it finds the one state. A file the store has an object for is answered for by the store
 	// again once the last handle goes; one it has nothing for is known by this and by nothing else.
+	// A previous version is its own handle's alone, and is left out of it.
 	attr := op.file.attributesNow()
-	if tc.share.name != "ipc$" && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 {
+	if tc.share.name != "ipc$" && attr&smb2.FILE_ATTRIBUTE_DIRECTORY == 0 && version == nil {
 		if stored {
 			op.file.markStored()
 		}
@@ -4246,7 +4324,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		// honest, and a named pipe has nothing behind it worth caching at all.
 		granted := uint32(smb2.SMB2_LEASE_NONE)
 		if leaseGrantable(lr.LeaseState) && tc.share.name != "ipc$" && !isDir {
-			granted = c.server.grantLease(op, own, lr.LeaseState, tc, path)
+			granted = c.server.grantLease(op, own, lr.LeaseState, tc, openPath)
 		}
 		if granted != smb2.SMB2_LEASE_NONE {
 			oplockLevel = smb2.OPLOCK_LEVEL_LEASE
@@ -4263,7 +4341,7 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		respContexts[smb2.CREATE_REQUEST_LEASE] = smb2.HandleCreateRequestLease(*lr, granted, own.currentEpoch())
 
 	case oplockEligible(cr.RequestedOplockLevel(), tc, isDir):
-		oplockLevel = c.server.grantOplock(op, cr.RequestedOplockLevel(), tc, path)
+		oplockLevel = c.server.grantOplock(op, cr.RequestedOplockLevel(), tc, openPath)
 	}
 
 	// The open is finished, caching promise and all, so it can now answer for the create that
@@ -4298,6 +4376,50 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 	}
 
 	return resp, op
+}
+
+// snapshotOf finds the previous version a create asks for: the time in its timewarp token, or
+// the one named by the snapshot token leading the path. The path comes back without the token.
+func snapshotOf(path string, contexts map[uint32][]byte) (at time.Time, live string, ok bool) {
+	live = path
+	if first, rest, _ := strings.Cut(path, "/"); strings.HasPrefix(first, "@GMT-") {
+		t, valid := smb2.ParseSnapshotToken(first)
+		if !valid {
+			return time.Time{}, "", false
+		}
+		at, live = t, rest
+	}
+	if ctx, found := contexts[smb2.CREATE_TIMEWARP_TOKEN]; found {
+		t, valid := smb2.ParseTimewarpToken(ctx)
+		if !valid {
+			return time.Time{}, "", false
+		}
+		at = t
+	}
+	return at, live, true
+}
+
+// snapshotPath is the path a previous version is opened under: the snapshot token ahead of the
+// file's path, or the path alone for the file as it is.
+func snapshotPath(snapshot time.Time, path string) string {
+	if snapshot.IsZero() {
+		return path
+	}
+	return smb2.SnapshotToken(snapshot) + "/" + path
+}
+
+// versionAt finds the version of the file whose snapshot name is the time.
+func versionAt(ctx context.Context, versioner client.Versioner, acc stores.Account, path string, at time.Time) (client.VersionInfo, bool, error) {
+	versions, err := versioner.Versions(ctx, acc, path)
+	if err != nil {
+		return client.VersionInfo{}, false, err
+	}
+	for _, v := range versions {
+		if v.ModifiedAt.UTC().Truncate(time.Second).Equal(at) {
+			return v, true, nil
+		}
+	}
+	return client.VersionInfo{}, false, nil
 }
 
 // securityInfo answers a security query with the real owner and grants where
