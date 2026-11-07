@@ -128,6 +128,12 @@ backup:                       # optional: catalogs of what the shares hold, to r
                               # in bytes, so that the file is complete in the backup; defaults to 262144
 files:                        # optional: the file API, which lets the accounts reach their shares over HTTP (see below)
   enabled: false              # off unless set; needs the Normal mode
+versioning:                   # optional: keeps the previous contents of replaced files (see below)
+  enabled: false              # off unless set; needs the Normal mode
+  gap: 10m                    # optional: saves closer together than this belong to one editing session and leave one version; defaults to 10m, "never" keeps every single save
+  maxSession: 1h              # optional: an editing session longer than this leaves a version at the next save; defaults to 1h, "never" leaves one per session
+  maxVersions: 10             # optional: how many versions of a file are kept; defaults to 10
+  maxAge: 720h                # optional: how long a version is kept; defaults to 720h (30 days), "never" keeps them forever
 ```
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash

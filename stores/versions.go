@@ -1,0 +1,304 @@
+package stores
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"go.sia.tech/core/types"
+)
+
+// VersionPolicy is what FinalizeUpload keeps of the file it replaces.
+type VersionPolicy struct {
+	// Keep says whether replaced files are kept as versions at all.
+	Keep bool
+
+	// Gap is the pause between two saves by the same account that separates
+	// editing sessions, each leaving one version; zero keeps every save.
+	Gap time.Duration
+
+	// MaxSession is how long a session may run before a save leaves a version
+	// anyway; zero puts no cap on it.
+	MaxSession time.Duration
+
+	// Count is how many versions of a file are kept, the oldest dropped first.
+	Count int
+}
+
+// Version is a previous content of a file, held by a hidden object of its own.
+type Version struct {
+	ID         uint64
+	Size       uint64
+	ModifiedAt time.Time
+	ReplacedAt time.Time
+	ReplacedBy string
+}
+
+// SetVersioning sets what a replaced file leaves behind.
+func (db *Database) SetVersioning(p VersionPolicy) {
+	db.versioning = p
+}
+
+// keepsVersion says whether the file about to be replaced is kept: the policy
+// must say so, and the save must not continue the editing session that left
+// the newest version, which it does when it is the same account's, within the
+// gap of the session's last save and within the cap of its start.
+func (db *Database) keepsVersion(ctx context.Context, tx pgx.Tx, share, path string, account uint64) (bool, error) {
+	p := db.versioning
+	if !p.Keep {
+		return false, nil
+	}
+	if p.Gap <= 0 {
+		return true, nil
+	}
+
+	const query = `
+		SELECT v.object_id,
+			COALESCE(v.replaced_by = $3, FALSE)
+			AND v.session_until > NOW() - make_interval(secs => $4)
+			AND ($5 <= 0 OR v.replaced_at > NOW() - make_interval(secs => $5))
+		FROM versions v
+		JOIN objects o ON o.id = v.object_id
+		WHERE o.share_name = $1
+			AND o.full_path = $2
+		ORDER BY v.replaced_at DESC, o.id DESC
+		LIMIT 1
+	`
+
+	var vid uint64
+	var continues bool
+	err := tx.QueryRow(ctx, query, share, path, account, p.Gap.Seconds(), p.MaxSession.Seconds()).Scan(&vid, &continues)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
+	} else if err != nil {
+		return false, fmt.Errorf("failed to look up the last version: %w", err)
+	}
+	if !continues {
+		return true, nil
+	}
+
+	const extend = `
+		UPDATE versions
+		SET session_until = NOW()
+		WHERE object_id = $1
+	`
+
+	if _, err := tx.Exec(ctx, extend, vid); err != nil {
+		return false, fmt.Errorf("failed to extend the editing session: %w", err)
+	}
+	return false, nil
+}
+
+// keepVersion moves the contents of the file onto a hidden row of their own
+// and records it as a version replaced by the account.
+func keepVersion(ctx context.Context, tx pgx.Tx, oid, account uint64) error {
+	const copyRow = `
+		INSERT INTO objects (share_name, directory_id, name, full_path, size, account, workgroup, created_at, modified_at, temporary)
+		SELECT share_name, directory_id, name, full_path, size, account, workgroup, created_at, modified_at, TRUE
+		FROM objects
+		WHERE id = $1
+		RETURNING id
+	`
+
+	var vid uint64
+	if err := tx.QueryRow(ctx, copyRow, oid).Scan(&vid); err != nil {
+		return fmt.Errorf("failed to keep the replaced file: %w", err)
+	}
+
+	const moveContents = `
+		UPDATE metadata
+		SET object_id = $1
+		WHERE object_id = $2
+	`
+
+	if _, err := tx.Exec(ctx, moveContents, vid, oid); err != nil {
+		return fmt.Errorf("failed to move the contents of the replaced file: %w", err)
+	}
+
+	const record = `
+		INSERT INTO versions (object_id, replaced_by)
+		VALUES ($1, $2)
+	`
+
+	if _, err := tx.Exec(ctx, record, vid, account); err != nil {
+		return fmt.Errorf("failed to record the version: %w", err)
+	}
+	return nil
+}
+
+// pruneVersions drops the versions of the file beyond the count the policy
+// keeps, oldest first, and returns the slabs only they referenced.
+func (db *Database) pruneVersions(ctx context.Context, tx pgx.Tx, share, path string) ([]types.Hash256, error) {
+	count := db.versioning.Count
+	if count <= 0 {
+		count = DefaultVersionCount
+	}
+
+	const extra = `
+		SELECT o.id, o.workgroup
+		FROM versions v
+		JOIN objects o ON o.id = v.object_id
+		WHERE o.share_name = $1
+			AND o.full_path = $2
+		ORDER BY v.replaced_at DESC, o.id DESC
+		OFFSET $3
+	`
+
+	rows, err := tx.Query(ctx, extra, share, path, count)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find the versions to drop: %w", err)
+	}
+	return dropVersions(ctx, tx, share, rows)
+}
+
+// DeleteVersions removes the version of the file at the path with the given
+// ID, or every version of it with a zero ID, and returns the slabs released.
+func (db *Database) DeleteVersions(share, path string, id uint64) (slabs []types.Hash256, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const named = `
+			SELECT o.id, o.workgroup
+			FROM versions v
+			JOIN objects o ON o.id = v.object_id
+			WHERE o.share_name = $1
+				AND o.full_path = $2
+				AND ($3 = 0 OR o.id = $3)
+		`
+
+		rows, err := tx.Query(ctx, named, share, path, int64(id))
+		if err != nil {
+			return fmt.Errorf("failed to find the versions: %w", err)
+		}
+		slabs, err = dropVersions(ctx, tx, share, rows)
+		return err
+	})
+	return
+}
+
+// dropVersions deletes the versions the rows name, as IDs and workgroups, with
+// their metadata and the buffers only they used. It returns the slabs only
+// they referenced, staged for unpinning under the workgroup that pinned them.
+func dropVersions(ctx context.Context, tx pgx.Tx, share string, rows pgx.Rows) (slabs []types.Hash256, err error) {
+	byWorkgroup := make(map[int][]int64)
+	for rows.Next() {
+		var id int64
+		var workgroup int
+		if err := rows.Scan(&id, &workgroup); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("failed to read the versions to drop: %w", err)
+		}
+		byWorkgroup[workgroup] = append(byWorkgroup[workgroup], id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate the versions to drop: %w", err)
+	}
+
+	for workgroup, ids := range byWorkgroup {
+		const collect = `
+			SELECT DISTINCT m.buffer_id, m.slab_key
+			FROM metadata m
+			WHERE m.object_id = ANY($1::BIGINT[])
+		`
+
+		rows, err := tx.Query(ctx, collect, ids)
+		if err != nil {
+			return nil, fmt.Errorf("failed to collect the storage of the versions: %w", err)
+		}
+		bids, keys, err := collectStorage(rows)
+		if err != nil {
+			return nil, err
+		}
+
+		const remove = `
+			DELETE FROM objects
+			WHERE id = ANY($1::BIGINT[])
+		`
+
+		if _, err := tx.Exec(ctx, remove, ids); err != nil {
+			return nil, fmt.Errorf("failed to drop the versions: %w", err)
+		}
+
+		for _, bid := range bids {
+			if _, err := tx.Exec(ctx, `
+				DELETE FROM buffers b
+				WHERE b.id = $1
+					AND NOT EXISTS (
+						SELECT 1
+						FROM metadata m
+						WHERE m.buffer_id = b.id
+					)
+			`, bid); err != nil {
+				return nil, fmt.Errorf("failed to delete orphaned buffer: %w", err)
+			}
+		}
+
+		released, err := unreferencedSlabs(ctx, tx, share, workgroup, keys)
+		if err != nil {
+			return nil, err
+		}
+		slabs = append(slabs, released...)
+	}
+	return slabs, nil
+}
+
+// Versions lists the versions of the file at the path, newest first. The
+// caller answers for the account's right to read the file.
+func (db *Database) Versions(share, path string) (versions []Version, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT o.id, o.size, o.modified_at, v.replaced_at, COALESCE(a.account_name, '')
+			FROM versions v
+			JOIN objects o ON o.id = v.object_id
+			LEFT JOIN accounts a ON a.id = v.replaced_by
+			WHERE o.share_name = $1
+				AND o.full_path = $2
+			ORDER BY v.replaced_at DESC, o.id DESC
+		`
+
+		rows, err := tx.Query(ctx, query, share, path)
+		if err != nil {
+			return fmt.Errorf("failed to list versions: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var v Version
+			if err := rows.Scan(&v.ID, &v.Size, &v.ModifiedAt, &v.ReplacedAt, &v.ReplacedBy); err != nil {
+				return fmt.Errorf("failed to scan version: %w", err)
+			}
+			versions = append(versions, v)
+		}
+		return rows.Err()
+	})
+	return
+}
+
+// VersionMetadata retrieves the metadata of the version of the file at the
+// path that intersects the given range, clipped the way GetMetadata clips it.
+func (db *Database) VersionMetadata(share, path string, id uint64, offset, length uint64) (slabs []SlabSlice, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			WITH target AS (
+				SELECT o.id
+				FROM objects o
+				JOIN versions v ON v.object_id = o.id
+				WHERE o.share_name = $1
+					AND o.full_path = $2
+					AND o.id = $3
+			),
+		` + clippedMetadata
+
+		rows, err := tx.Query(ctx, query, share, path, int64(id), int64(offset), int64(length))
+		if err != nil {
+			return fmt.Errorf("failed to query version metadata: %v", err)
+		}
+		slabs, err = scanSlabSlices(rows)
+		return err
+	})
+	return
+}

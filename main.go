@@ -153,6 +153,13 @@ func main() {
 	}
 	defer db.Close()
 
+	// The config refuses versioning in the Lite mode, so the store is the database here.
+	if pg, ok := db.(*stores.Database); ok && cfg.Versioning.Enabled {
+		gap, session, count, age := cfg.Versioning.Retention()
+		pg.SetVersioning(stores.VersionPolicy{Keep: true, Gap: gap, MaxSession: session, Count: count})
+		log.Printf("Versioning: keeping up to %d versions per file for %v, one per editing session (gap %v, at most %v)", count, age, gap, session)
+	}
+
 	// Start listening on the SMB port 445.
 	l, err := net.Listen("tcp", ":445")
 	if err != nil {
