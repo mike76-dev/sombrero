@@ -158,23 +158,54 @@ func (db *Database) pruneVersions(ctx context.Context, tx pgx.Tx, share, path st
 func (db *Database) DeleteVersions(share, path string, id uint64) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const named = `
-			SELECT o.id, o.workgroup
-			FROM versions v
-			JOIN objects o ON o.id = v.object_id
-			WHERE o.share_name = $1
-				AND o.full_path = $2
-				AND ($3 = 0 OR o.id = $3)
-		`
-
-		rows, err := tx.Query(ctx, named, share, path, int64(id))
-		if err != nil {
-			return fmt.Errorf("failed to find the versions: %w", err)
-		}
-		slabs, err = dropVersions(ctx, tx, share, rows)
+		slabs, err = dropVersionsAt(ctx, tx, share, path, id)
 		return err
 	})
 	return
+}
+
+// dropVersionsAt drops the version of the file at the path with the given ID,
+// or every version of it with a zero ID, and returns the slabs released.
+func dropVersionsAt(ctx context.Context, tx pgx.Tx, share, path string, id uint64) ([]types.Hash256, error) {
+	const named = `
+		SELECT o.id, o.workgroup
+		FROM versions v
+		JOIN objects o ON o.id = v.object_id
+		WHERE o.share_name = $1
+			AND o.full_path = $2
+			AND ($3 = 0 OR o.id = $3)
+	`
+
+	rows, err := tx.Query(ctx, named, share, path, int64(id))
+	if err != nil {
+		return nil, fmt.Errorf("failed to find the versions: %w", err)
+	}
+	return dropVersions(ctx, tx, share, rows)
+}
+
+// recordVersions turns the visible files with the given IDs into versions
+// replaced by the account, where they stand.
+func recordVersions(ctx context.Context, tx pgx.Tx, ids []int64, account uint64) error {
+	const hide = `
+		UPDATE objects
+		SET temporary = TRUE
+		WHERE id = ANY($1::BIGINT[])
+	`
+
+	if _, err := tx.Exec(ctx, hide, ids); err != nil {
+		return fmt.Errorf("failed to hide the replaced files: %w", err)
+	}
+
+	const record = `
+		INSERT INTO versions (object_id, replaced_by)
+		SELECT u.id, $2
+		FROM UNNEST($1::BIGINT[]) AS u(id)
+	`
+
+	if _, err := tx.Exec(ctx, record, ids, account); err != nil {
+		return fmt.Errorf("failed to record the versions: %w", err)
+	}
+	return nil
 }
 
 // dropVersions deletes the versions the rows name, as IDs and workgroups, with

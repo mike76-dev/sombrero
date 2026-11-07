@@ -473,101 +473,33 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 			}
 		}
 
-		const collectQuery = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $6
-			),
-			src AS (
-				SELECT o.id
-				FROM objects o
-				LEFT JOIN directories od
-					ON od.share_name = o.share_name
-					AND od.id = o.directory_id
-				CROSS JOIN caller c
-				WHERE o.share_name = $1
-					AND o.full_path = $2
-					AND o.temporary = FALSE
-					AND (o.account = c.id
-						OR (od.read_only = FALSE AND (
-							granted_level(o.share_name, c.workgroup, o.full_path) >= 2
-							OR owns_ancestor(o.share_name, c.id, o.full_path)
-						))
-					)
-			),
-			dst_parent AS (
-				SELECT d.id, d.full_path, d.read_only
-				FROM directories d
-				JOIN accounts owner ON owner.id = d.account
-				CROSS JOIN caller c
-				WHERE d.share_name = $1
-					AND d.full_path = $3
-					AND (
-						d.account = c.id
-						OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
-						OR granted_level(d.share_name, c.workgroup, d.full_path) >= 1
-						OR owns_ancestor(d.share_name, c.id, d.full_path)
-					)
-
-				UNION ALL
-
-				SELECT NULL::bigint, '/', FALSE
-				FROM caller
-				WHERE $3 = '/'
-			),
-			target AS (
-				SELECT
-					s.id AS src_id,
-					p.id AS new_parent_id,
-					p.read_only AS new_parent_read_only,
-					$4::text AS new_name,
-					$5::text AS new_path
-				FROM src s
-				JOIN dst_parent p ON TRUE
-				WHERE $5 <> $2
-			),
-			check_no_dir_conflict AS (
-				SELECT t.new_path, t.new_parent_read_only
-				FROM target t
-				WHERE NOT EXISTS (
-					SELECT 1
-					FROM directories d
-					WHERE d.share_name = $1
-						AND d.full_path = t.new_path
-				)
-			),
-			doomed_target AS (
-				SELECT o.id
-				FROM objects o
-				JOIN target t ON o.full_path = t.new_path
-				JOIN check_no_dir_conflict n ON TRUE
-				CROSS JOIN caller c
-				WHERE o.share_name = $1
-					AND o.temporary = FALSE
-					AND $7::boolean
-					AND (o.account = c.id OR t.new_parent_read_only = FALSE)
-			)
-			SELECT DISTINCT m.buffer_id, m.slab_key
-			FROM doomed_target dt
-			JOIN metadata m ON m.object_id = dt.id
-		`
-
-		rows, err := tx.Query(ctx, collectQuery, share, oldPath, dir, name, newPath, acc.ID, force)
-		if err != nil {
-			return fmt.Errorf("failed to collect information for renaming file: %v", err)
-		}
-		bids, keys, err := collectStorage(rows)
-		if err != nil {
-			return err
-		}
-
-		if force {
-			const deleteQuery = `
+		// The file renamed over, if there is one the caller may replace. It is
+		// deleted in a statement of its own, ahead of the unique index the rename
+		// has to pass, or kept as a version where the policy says.
+		var doomed []int64
+		if force && oldPath != newPath {
+			const doomedQuery = `
 				WITH caller AS (
 					SELECT id, workgroup
 					FROM accounts
-					WHERE id = $4
+					WHERE id = $5
+				),
+				src AS (
+					SELECT o.id
+					FROM objects o
+					LEFT JOIN directories od
+						ON od.share_name = o.share_name
+						AND od.id = o.directory_id
+					CROSS JOIN caller c
+					WHERE o.share_name = $1
+						AND o.full_path = $2
+						AND o.temporary = FALSE
+						AND (o.account = c.id
+							OR (od.read_only = FALSE AND (
+								granted_level(o.share_name, c.workgroup, o.full_path) >= 2
+								OR owns_ancestor(o.share_name, c.id, o.full_path)
+							))
+						)
 				),
 				dst_parent AS (
 					SELECT d.id, d.full_path, d.read_only
@@ -575,39 +507,87 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 					JOIN accounts owner ON owner.id = d.account
 					CROSS JOIN caller c
 					WHERE d.share_name = $1
-						AND d.full_path = $2
+						AND d.full_path = $3
 						AND (
 							d.account = c.id
 							OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+							OR granted_level(d.share_name, c.workgroup, d.full_path) >= 1
+							OR owns_ancestor(d.share_name, c.id, d.full_path)
 						)
 
 					UNION ALL
 
 					SELECT NULL::bigint, '/', FALSE
 					FROM caller
-					WHERE $2 = '/'
+					WHERE $3 = '/'
 				),
-				check_no_dir_conflict AS (
-					SELECT c.id AS caller_id, p.read_only
-					FROM dst_parent p
-					CROSS JOIN caller c
+				target AS (
+					SELECT
+						p.read_only AS new_parent_read_only,
+						$4::text AS new_path
+					FROM src s
+					JOIN dst_parent p ON TRUE
 					WHERE NOT EXISTS (
 						SELECT 1
 						FROM directories d
 						WHERE d.share_name = $1
-							AND d.full_path = $3
+							AND d.full_path = $4
 					)
 				)
-				DELETE FROM objects o
-				USING check_no_dir_conflict n
+				SELECT o.id
+				FROM objects o
+				JOIN target t ON o.full_path = t.new_path
+				CROSS JOIN caller c
 				WHERE o.share_name = $1
-					AND o.full_path = $3
 					AND o.temporary = FALSE
-					AND (o.account = n.caller_id OR n.read_only = FALSE)
+					AND (o.account = c.id OR t.new_parent_read_only = FALSE)
 			`
 
-			if _, err := tx.Exec(ctx, deleteQuery, share, dir, newPath, acc.ID); err != nil {
-				return fmt.Errorf("failed to delete existing destination file: %w", err)
+			rows, err := tx.Query(ctx, doomedQuery, share, oldPath, dir, newPath, acc.ID)
+			if err != nil {
+				return fmt.Errorf("failed to find the file renamed over: %w", err)
+			}
+			if doomed, err = pgx.CollectRows(rows, pgx.RowTo[int64]); err != nil {
+				return fmt.Errorf("failed to read the file renamed over: %w", err)
+			}
+		}
+
+		var bids []uint64
+		var keys [][]byte
+		var kept bool
+		if len(doomed) > 0 {
+			keep, err := db.keepsVersion(ctx, tx, share, newPath, uint64(acc.ID))
+			if err != nil {
+				return err
+			}
+			if keep {
+				if err := recordVersions(ctx, tx, doomed, uint64(acc.ID)); err != nil {
+					return err
+				}
+				kept = true
+			} else {
+				const collectDoomed = `
+					SELECT DISTINCT m.buffer_id, m.slab_key
+					FROM metadata m
+					WHERE m.object_id = ANY($1::BIGINT[])
+				`
+
+				rows, err := tx.Query(ctx, collectDoomed, doomed)
+				if err != nil {
+					return fmt.Errorf("failed to collect the storage of the file renamed over: %w", err)
+				}
+				if bids, keys, err = collectStorage(rows); err != nil {
+					return err
+				}
+
+				const deleteDoomed = `
+					DELETE FROM objects
+					WHERE id = ANY($1::BIGINT[])
+				`
+
+				if _, err := tx.Exec(ctx, deleteDoomed, doomed); err != nil {
+					return fmt.Errorf("failed to delete existing destination file: %w", err)
+				}
 			}
 		}
 
@@ -689,6 +669,29 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 			return fmt.Errorf("failed to rename file: %v", err)
 		}
 
+		// The versions of the file follow it to where it now is.
+		const moveVersions = `
+			UPDATE objects o
+			SET directory_id = f.directory_id,
+				name = f.name,
+				full_path = f.full_path
+			FROM objects f, versions v
+			WHERE f.id = $3
+				AND v.object_id = o.id
+				AND o.share_name = $1
+				AND o.full_path = $2
+		`
+
+		if _, err := tx.Exec(ctx, moveVersions, share, oldPath, id); err != nil {
+			return fmt.Errorf("failed to move the versions: %w", err)
+		}
+
+		if kept {
+			if slabs, err = db.pruneVersions(ctx, tx, share, newPath); err != nil {
+				return err
+			}
+		}
+
 		for _, bid := range bids {
 			if _, err := tx.Exec(ctx, `
 				DELETE FROM buffers b
@@ -712,8 +715,12 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 		if err := tx.QueryRow(ctx, `SELECT workgroup FROM accounts WHERE id = $1`, acc.ID).Scan(&workgroup); err != nil {
 			return fmt.Errorf("failed to resolve workgroup: %w", err)
 		}
-		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
-		return err
+		released, err := unreferencedSlabs(ctx, tx, share, workgroup, keys)
+		if err != nil {
+			return err
+		}
+		slabs = append(slabs, released...)
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -1055,6 +1062,12 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 			return ErrNotFound
 		}
 
+		// The versions of the file go with it.
+		released, err := dropVersionsAt(ctx, tx, share, path, 0)
+		if err != nil {
+			return err
+		}
+
 		for _, bid := range bids {
 			if _, err := tx.Exec(ctx, `
 				DELETE FROM buffers b
@@ -1078,8 +1091,11 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 			return fmt.Errorf("failed to resolve workgroup: %w", err)
 		}
 
-		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
-		return err
+		if slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys); err != nil {
+			return err
+		}
+		slabs = append(slabs, released...)
+		return nil
 	})
 
 	if err != nil {
