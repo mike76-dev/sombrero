@@ -409,6 +409,32 @@ curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/share/<SHARE>/rename?pa
 
 Failed logins from the same host are throttled in the same way as for the API. Reaching the file API from another machine is subject to the same recommendations as reaching the API: use an SSH tunnel or a reverse proxy with TLS (see [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)), because the session cookie is otherwise transmitted in plain text.
 
+## Previous Versions
+The server is able to retain the previous contents of a file when the file is replaced, so that an earlier state may be examined or restored after an undesired change. Versioning is disabled unless it is enabled in the config file:
+```YAML
+versioning:
+  enabled: true
+  gap: 10m
+  maxSession: 1h
+  maxVersions: 10
+  maxAge: 720h
+```
+Versioning requires the Normal mode and is available on `indexd` shares only. A version is created whenever the contents of an existing file are replaced: when the file is written over SMB or uploaded through the file API, and when another file is renamed or moved over it, which is the manner in which most editors save a document. The previous contents are retained as a version, together with the time of the replacement and the account that performed it. A version does not consume additional storage on the network, apart from the parts of the file that were changed by the replacement, because the slabs are shared between the file and its versions.
+
+Not every replacement produces a version, as an editor that saves automatically would otherwise produce a version every few minutes. Consecutive replacements performed by the same account are considered one editing session for as long as the interval between them does not exceed `gap`, and a session produces a single version, namely the contents the file had before the session began. A session that has exceeded `maxSession` in duration is concluded by the next replacement, which produces a version of its own. Setting either parameter to `never` disables the respective rule: `gap: never` retains a version of every replacement, and `maxSession: never` imposes no limit on the duration of a session. A replacement performed by a different account always concludes the session. When the number of versions of a file exceeds `maxVersions`, the oldest versions are removed. A version older than `maxAge` is removed by a job that runs once an hour. Setting either parameter to `never` disables the respective limit.
+
+The versions accompany the file: they are moved with it when it is renamed or moved, and they are removed with it when it is deleted. Restoring a version replaces the current contents of the file with those of the version; the replaced contents are retained as a version under the rules described above, so that a restoration may in turn be reverted. Folders have no previous versions, therefore a deleted file cannot be recovered from the versions of the folder that contained it.
+
+Windows clients present the versions in the Previous Versions tab of the file properties in Windows Explorer, each with the date of its last modification, and allow them to be opened, copied or restored from there. The versions are also accessible at the `@GMT-YYYY.MM.DD-HH.MM.SS` paths defined by the SMB protocol, with the timestamp in UTC; this is the mechanism the Previous Versions tab relies upon. A version is read-only: it may be read, but neither written to nor deleted through its path.
+
+The [file API](#file-api) provides access to the versions as well. `GET /files/share/<SHARE>/versions?path=/Projects/plan.pdf` lists the versions of a file, newest first, each with its identifier, size, modification time, the time of its replacement and the account that performed the replacement. `GET /files/share/<SHARE>/version?path=/Projects/plan.pdf&id=<ID>` downloads a version in the same manner as a file, including range requests and `inline=1`. `POST /files/share/<SHARE>/restore?path=/Projects/plan.pdf&id=<ID>` restores a version and returns the name, size and timestamps of the file; the call requires the right to write the file. `DELETE /files/share/<SHARE>/versions?path=/Projects/plan.pdf&id=<ID>` removes one version, or all versions of the file if `id` is omitted; both forms require the right to delete the file. A file whose versions are not retained, for instance a file on a `renterd` share, is listed with an empty set of versions:
+```Bash
+curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/versions?path=/Projects/plan.pdf"
+curl -b cookies.txt -o plan-old.pdf "http://127.0.0.1:9999/files/share/<SHARE>/version?path=/Projects/plan.pdf&id=<ID>"
+curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/share/<SHARE>/restore?path=/Projects/plan.pdf&id=<ID>"
+curl -b cookies.txt -X DELETE "http://127.0.0.1:9999/files/share/<SHARE>/versions?path=/Projects/plan.pdf&id=<ID>"
+```
+
 ## Guest and Anonymous Access
 A share is reached only by the accounts its policies name, unless it is told to offer one of the two ways in below. Those are two different concepts, and both are turned off by default.
 
