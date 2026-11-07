@@ -308,6 +308,52 @@ func TestListingAFolder(t *testing.T) {
 	}
 }
 
+// TestListingTellsTheRights verifies that a listing carries what the account
+// may do in the folder: the policy at the root, narrowed below it.
+func TestListingTellsTheRights(t *testing.T) {
+	mc := managedClient()
+	mc.list = func(string) ([]client.ObjectInfo, error) { return nil, nil }
+	h, w := loggedIn(t, &mockStore{}, &mockServer{client: mc}, "alice", "hunter2")
+
+	rightsOf := func(share, p string) FolderRights {
+		r := call(h, http.MethodGet, "/share/"+share+"/list?path="+p, "", w)
+		if r.Code != http.StatusOK {
+			t.Fatalf("listing %s on %s: want %d, got %d (%s)", p, share, http.StatusOK, r.Code, r.Body.String())
+		}
+		var got Listing
+		json.NewDecoder(r.Body).Decode(&got)
+		return got.Rights
+	}
+	tests := []struct {
+		name  string
+		share string
+		path  string
+		want  FolderRights
+	}{
+		{"the root", "docs", "/", FolderRights{Write: true, Delete: true}},
+		{"a folder of the account's", "docs", "/Projects", FolderRights{Write: true, Delete: true}},
+		{"a read-only folder", "docs", "/Archive", FolderRights{}},
+		{"a read-only share", "pub", "/", FolderRights{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rightsOf(tt.share, tt.path); got != tt.want {
+				t.Errorf("want %+v, got %+v", tt.want, got)
+			}
+		})
+	}
+
+	// A client without folder rights leaves the policy as it is.
+	plain := struct{ client.Client }{mc}
+	ph, pw := loggedIn(t, &mockStore{}, &mockServer{client: plain}, "alice", "hunter2")
+	r := call(ph, http.MethodGet, "/share/docs/list?path=/Archive", "", pw)
+	var got Listing
+	json.NewDecoder(r.Body).Decode(&got)
+	if got.Rights != (FolderRights{Write: true, Delete: true}) {
+		t.Errorf("without folder rights: want the policy, got %+v", got.Rights)
+	}
+}
+
 // TestListingRefusals verifies the answers for what cannot be listed: a share
 // that is not there or not the account's, a path that is not a folder or
 // climbs out, and a share whose storage cannot be reached.

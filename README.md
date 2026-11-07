@@ -380,7 +380,7 @@ The response identifies the account and its workgroup, and the session is return
 curl -b cookies.txt "http://127.0.0.1:9999/files/me"
 curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/logout"
 ```
-A logged-in account sees exactly what it would see over SMB. `GET /files/shares` lists the shares that the account's policies grant access to, with the read, write, delete and execute rights of the account on each; a guest account sees only the shares that allow guest access. `GET /files/share/<SHARE>/list?path=/Projects` lists a folder (the root of the share if no path is given) with the name, size and timestamps of every file and folder visible to the account, including the [granted folders](#granting-folders-to-other-workgroups):
+A logged-in account sees exactly what it would see over SMB. `GET /files/shares` lists the shares that the account's policies grant access to, with the read, write, delete and execute rights of the account on each; a guest account sees only the shares that allow guest access. `GET /files/share/<SHARE>/list?path=/Projects` lists a folder (the root of the share if no path is given) with the name, size and timestamps of every file and folder visible to the account, including the [granted folders](#granting-folders-to-other-workgroups). The listing also states whether the account may write and delete in the folder: the rights of the share policy, narrowed by the grant level in a folder of another workgroup. A client reads them again on entering a subfolder, because a folder may be granted at a higher level than its parent:
 ```Bash
 curl -b cookies.txt "http://127.0.0.1:9999/files/shares"
 curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/list?path=/Projects"

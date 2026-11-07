@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/julienschmidt/httprouter"
+	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
 )
 
@@ -39,12 +40,20 @@ type Entry struct {
 	ModifiedAt time.Time `json:"modifiedAt"`
 }
 
+// FolderRights is what the account may do with the contents of a folder it
+// lists: the share's policy narrowed by the rights at the folder.
+type FolderRights struct {
+	Write  bool `json:"write"`
+	Delete bool `json:"delete"`
+}
+
 // Listing is the response of GET /share/:name/list: what the account sees in
-// the folder.
+// the folder, and what it may do there.
 type Listing struct {
-	Share   string  `json:"share"`
-	Path    string  `json:"path"`
-	Entries []Entry `json:"entries"`
+	Share   string       `json:"share"`
+	Path    string       `json:"path"`
+	Rights  FolderRights `json:"rights"`
+	Entries []Entry      `json:"entries"`
 }
 
 // sharesHandler handles the GET /shares calls: the shares the account can
@@ -121,6 +130,22 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		listPath = strings.TrimPrefix(p, "/") + "/"
 	}
 
+	// The rights at the root are the policy's: the root belongs to everyone.
+	rights := FolderRights{Write: r.Write, Delete: r.Delete}
+	if ac, ok := c.(client.AccessChecker); ok && p != "/" {
+		pa, err := ac.PathAccess(ctx, s.account, strings.TrimPrefix(p, "/"))
+		if errors.Is(err, stores.ErrNotFound) {
+			writeError(w, "folder not found", http.StatusNotFound)
+			return
+		} else if err != nil {
+			log.Printf("file API: failed to check the rights at %s on %s: %v", p, share.Name, err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		rights.Write = rights.Write && pa.Write
+		rights.Delete = rights.Delete && pa.Delete
+	}
+
 	ois, err := c.List(ctx, s.account, listPath)
 	if err != nil {
 		log.Printf("file API: failed to list %s on %s: %v", p, share.Name, err)
@@ -146,7 +171,7 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 			ModifiedAt: oi.ModifiedAt,
 		})
 	}
-	writeJSON(w, Listing{Share: share.Name, Path: p, Entries: entries})
+	writeJSON(w, Listing{Share: share.Name, Path: p, Rights: rights, Entries: entries})
 }
 
 // shareFor finds the share a call names and what the account holds on it,
