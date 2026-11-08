@@ -505,6 +505,103 @@ func TestRestoreVersionKeepsTheLatestSave(t *testing.T) {
 	}
 }
 
+// TestSwapSaveKeepsAVersion verifies that an editor saving by renaming the file
+// away, renaming a new one into its place and deleting the old one leaves a
+// version, under the session rule, and that the history survives the swap.
+func TestSwapSaveKeepsAVersion(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Gap: 10 * time.Minute, MaxSession: time.Hour, Count: 10})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	plantPiece(t, db, share, acc, "doc.txt", types.Hash256{1}, 0, 400)
+
+	swapSave := func(size int) []types.Hash256 {
+		t.Helper()
+		plantBufferedFile(t, db, share, acc, "~new.tmp", size, false)
+		if _, err := db.RenameFile(acc, share, "doc.txt", "~old.tmp", false); err != nil {
+			t.Fatalf("RenameFile away: %v", err)
+		}
+		if _, err := db.RenameFile(acc, share, "~new.tmp", "doc.txt", false); err != nil {
+			t.Fatalf("RenameFile into place: %v", err)
+		}
+		slabs, err := db.DeleteFile(acc, share, "~old.tmp")
+		if err != nil {
+			t.Fatalf("DeleteFile of the old file: %v", err)
+		}
+		return slabs
+	}
+
+	if slabs := swapSave(300); len(slabs) != 0 {
+		t.Errorf("the slab of the version was released: %v", slabs)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 1 || sizes[0] != 400 {
+		t.Errorf("want the file swapped out kept, got %v", sizes)
+	}
+	if obj, err := db.Object(acc, share, "doc.txt"); err != nil || obj.Size != 300 {
+		t.Errorf("want the file at 300 bytes, got %+v, %v", obj, err)
+	}
+	if _, err := db.Object(acc, share, "~old.tmp"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("want the old name gone, got %v", err)
+	}
+
+	// The next save of the session adds no version, but the history stays.
+	swapSave(200)
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 1 || sizes[0] != 400 {
+		t.Errorf("want the session's saves collapsed, got %v", sizes)
+	}
+	if n := bufferedBytes(t, db); n != 200 {
+		t.Errorf("want the replaced contents gone, got %d bytes buffered", n)
+	}
+
+	// A save after a pause leaves a version of its own.
+	ageSession(t, db, 30*time.Minute, 20*time.Minute)
+	swapSave(100)
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 200 {
+		t.Errorf("want the state before the pause kept, got %v", sizes)
+	}
+
+	// Deleted long after it was renamed away, the file takes its history with it.
+	plantBufferedFile(t, db, share, acc, "~new.tmp", 50, false)
+	if _, err := db.RenameFile(acc, share, "doc.txt", "~old.tmp", false); err != nil {
+		t.Fatalf("RenameFile away: %v", err)
+	}
+	if _, err := db.RenameFile(acc, share, "~new.tmp", "doc.txt", false); err != nil {
+		t.Fatalf("RenameFile into place: %v", err)
+	}
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE displaced SET at = NOW() - interval '10 minutes'`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("ageing the displaced rows: %v", err)
+	}
+	if _, err := db.DeleteFile(acc, share, "~old.tmp"); err != nil {
+		t.Fatalf("DeleteFile long after: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 0 {
+		t.Errorf("want no versions on the new file, got %v", sizes)
+	}
+	if n := bufferedBytes(t, db); n != 50 {
+		t.Errorf("want only the new file buffered, got %d bytes", n)
+	}
+
+	// A file renamed away from a name nothing has taken is simply deleted.
+	if _, err := db.RenameFile(acc, share, "doc.txt", "gone.txt", false); err != nil {
+		t.Fatalf("RenameFile: %v", err)
+	}
+	if _, err := db.DeleteFile(acc, share, "gone.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	if _, err := db.Object(acc, share, "doc.txt"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("want nothing under the old name, got %v", err)
+	}
+	if n := bufferedBytes(t, db); n != 0 {
+		t.Errorf("want nothing buffered, got %d bytes", n)
+	}
+}
+
 // TestDeleteVersions verifies that one version goes by its ID and the rest at
 // once, each releasing what only it held, and the file stays.
 func TestDeleteVersions(t *testing.T) {

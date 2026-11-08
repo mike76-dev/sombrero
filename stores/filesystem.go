@@ -686,6 +686,21 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 			return fmt.Errorf("failed to move the versions: %w", err)
 		}
 
+		// Where the file came from is noted: deleted soon, with the name taken
+		// by another file, it will have been the save of an editor that swaps.
+		if db.versioning.Keep {
+			const displace = `
+				INSERT INTO displaced (object_id, path)
+				VALUES ($1, $2)
+				ON CONFLICT (object_id) DO UPDATE
+				SET path = EXCLUDED.path, at = NOW()
+			`
+
+			if _, err := tx.Exec(ctx, displace, id, oldPath); err != nil {
+				return fmt.Errorf("failed to note the file's old name: %w", err)
+			}
+		}
+
 		if kept {
 			if slabs, err = db.pruneVersions(ctx, tx, share, newPath); err != nil {
 				return err
@@ -950,45 +965,27 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const collectQuery = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $3
-			),
-			target AS (
-				SELECT o.id
-				FROM objects o
-				JOIN accounts owner ON owner.id = o.account
-				LEFT JOIN directories od
-					ON od.share_name = o.share_name
-					AND od.id = o.directory_id
-				CROSS JOIN caller c
-				WHERE o.share_name = $1
-					AND o.full_path = $2
-					AND (
-						o.temporary = FALSE
-						OR NOT EXISTS (
-							SELECT 1
-							FROM objects v
-							WHERE v.share_name = $1
-								AND v.full_path = $2
-								AND v.temporary = FALSE
-						)
-					)
-					AND (
-						o.account = c.id
-						OR (
-							od.private = FALSE
-							AND od.read_only = FALSE
-							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
-						)
-						OR (od.read_only = FALSE AND (
-							granted_level(o.share_name, c.workgroup, o.full_path) >= 2
-							OR owns_ancestor(o.share_name, c.id, o.full_path)
-						))
-					)
-			)
+		// A file renamed away from a name another file has taken since, and
+		// deleted soon after, is an editor's swap save: it replaced that file.
+		origin, err := displacedOrigin(ctx, tx, share, path)
+		if err != nil {
+			return err
+		}
+		if origin != "" {
+			if err := moveVersionsTo(ctx, tx, share, path, origin); err != nil {
+				return err
+			}
+			keep, err := db.keepsVersion(ctx, tx, share, origin, uint64(acc.ID))
+			if err != nil {
+				return err
+			}
+			if keep {
+				slabs, err = db.absorbFile(ctx, tx, share, path, origin, acc)
+				return err
+			}
+		}
+
+		const collectQuery = deletableFile + `
 			SELECT DISTINCT m.buffer_id, m.slab_key
 			FROM metadata m
 			JOIN target t ON m.object_id = t.id
@@ -1004,45 +1001,7 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 			return err
 		}
 
-		const deleteQuery = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $3
-			),
-			target AS (
-				SELECT o.id
-				FROM objects o
-				JOIN accounts owner ON owner.id = o.account
-				LEFT JOIN directories od
-					ON od.share_name = o.share_name
-					AND od.id = o.directory_id
-				CROSS JOIN caller c
-				WHERE o.share_name = $1
-					AND o.full_path = $2
-					AND (
-						o.temporary = FALSE
-						OR NOT EXISTS (
-							SELECT 1
-							FROM objects v
-							WHERE v.share_name = $1
-								AND v.full_path = $2
-								AND v.temporary = FALSE
-						)
-					)
-					AND (
-						o.account = c.id
-						OR (
-							od.private = FALSE
-							AND od.read_only = FALSE
-							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
-						)
-						OR (od.read_only = FALSE AND (
-							granted_level(o.share_name, c.workgroup, o.full_path) >= 2
-							OR owns_ancestor(o.share_name, c.id, o.full_path)
-						))
-					)
-			),
+		const deleteQuery = deletableFile + `,
 			deleted_objects AS (
 				DELETE FROM objects o
 				USING target t
@@ -1102,6 +1061,153 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 		return nil, err
 	}
 	return
+}
+
+// deletableFile opens the queries of DeleteFile: the CTE target is the file at
+// the path ($1, $2) the caller ($3) may delete, an upload in flight included
+// where no visible file is there.
+const deletableFile = `
+	WITH caller AS (
+		SELECT id, workgroup
+		FROM accounts
+		WHERE id = $3
+	),
+	target AS (
+		SELECT o.id
+		FROM objects o
+		JOIN accounts owner ON owner.id = o.account
+		LEFT JOIN directories od
+			ON od.share_name = o.share_name
+			AND od.id = o.directory_id
+		CROSS JOIN caller c
+		WHERE o.share_name = $1
+			AND o.full_path = $2
+			AND (
+				o.temporary = FALSE
+				OR NOT EXISTS (
+					SELECT 1
+					FROM objects v
+					WHERE v.share_name = $1
+						AND v.full_path = $2
+						AND v.temporary = FALSE
+				)
+			)
+			AND (
+				o.account = c.id
+				OR (
+					od.private = FALSE
+					AND od.read_only = FALSE
+					AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
+				)
+				OR (od.read_only = FALSE AND (
+					granted_level(o.share_name, c.workgroup, o.full_path) >= 2
+					OR owns_ancestor(o.share_name, c.id, o.full_path)
+				))
+			)
+	)
+`
+
+// displacedWindow is how soon after being renamed away a file has to be
+// deleted for the deletion to count as replacing the file now under its name.
+const displacedWindow = 5 * time.Minute
+
+// displacedOrigin returns the name the file at the path was renamed away from
+// within the window, if another visible file has it now, and "" otherwise.
+func displacedOrigin(ctx context.Context, tx pgx.Tx, share, path string) (string, error) {
+	const query = `
+		SELECT d.path
+		FROM displaced d
+		JOIN objects o ON o.id = d.object_id
+		WHERE o.share_name = $1
+			AND o.full_path = $2
+			AND o.temporary = FALSE
+			AND d.at > NOW() - make_interval(secs => $3)
+			AND EXISTS (
+				SELECT 1
+				FROM objects f
+				WHERE f.share_name = $1
+					AND f.full_path = d.path
+					AND f.temporary = FALSE
+			)
+	`
+
+	var origin string
+	err := tx.QueryRow(ctx, query, share, path, displacedWindow.Seconds()).Scan(&origin)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	} else if err != nil {
+		return "", fmt.Errorf("failed to look up the file's old name: %w", err)
+	}
+	return origin, nil
+}
+
+// moveVersionsTo moves the versions at the path under the visible file at the
+// destination.
+func moveVersionsTo(ctx context.Context, tx pgx.Tx, share, path, dest string) error {
+	const query = `
+		UPDATE objects o
+		SET directory_id = f.directory_id,
+			name = f.name,
+			full_path = f.full_path
+		FROM objects f, versions v
+		WHERE f.share_name = $1
+			AND f.full_path = $3
+			AND f.temporary = FALSE
+			AND v.object_id = o.id
+			AND o.share_name = $1
+			AND o.full_path = $2
+	`
+
+	if _, err := tx.Exec(ctx, query, share, path, dest); err != nil {
+		return fmt.Errorf("failed to move the versions: %w", err)
+	}
+	return nil
+}
+
+// absorbFile makes the file at the path, which the caller deletes, a version
+// of the file at the origin, and returns the slabs the pruning releases.
+func (db *Database) absorbFile(ctx context.Context, tx pgx.Tx, share, path, origin string, acc Account) ([]types.Hash256, error) {
+	const targets = deletableFile + `
+		SELECT t.id
+		FROM target t
+	`
+
+	rows, err := tx.Query(ctx, targets, share, path, acc.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find the file: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the file: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, ErrNotFound
+	}
+
+	if err := recordVersions(ctx, tx, ids, uint64(acc.ID)); err != nil {
+		return nil, err
+	}
+
+	const move = `
+		UPDATE objects o
+		SET directory_id = f.directory_id,
+			name = f.name,
+			full_path = f.full_path
+		FROM objects f
+		WHERE f.share_name = $1
+			AND f.full_path = $2
+			AND f.temporary = FALSE
+			AND o.id = ANY($3::BIGINT[])
+	`
+
+	if _, err := tx.Exec(ctx, move, share, origin, ids); err != nil {
+		return nil, fmt.Errorf("failed to move the version under its name: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM displaced WHERE object_id = ANY($1::BIGINT[])`, ids); err != nil {
+		return nil, fmt.Errorf("failed to forget the file's old name: %w", err)
+	}
+	return db.pruneVersions(ctx, tx, share, origin)
 }
 
 // DeleteDirectory deletes a directory and all its contents. It returns the keys

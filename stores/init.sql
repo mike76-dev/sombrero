@@ -235,3 +235,11 @@ CREATE TABLE versions (
     session_until TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX idx_versions_replaced ON versions (replaced_at);
+
+-- A file renamed away from a name, noted so that deleting it soon after,
+-- once another file has taken the name, counts as replacing that file.
+CREATE TABLE displaced (
+    object_id BIGINT PRIMARY KEY REFERENCES objects(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

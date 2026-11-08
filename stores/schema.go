@@ -95,6 +95,13 @@ $$ LANGUAGE SQL STABLE
 		);
 		CREATE INDEX idx_versions_replaced ON versions (replaced_at)
 	`},
+	{name: "note the files renamed away from their names", sql: `
+		CREATE TABLE displaced (
+			object_id BIGINT PRIMARY KEY REFERENCES objects(id) ON DELETE CASCADE,
+			path TEXT NOT NULL,
+			at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.
