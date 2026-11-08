@@ -2450,6 +2450,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			return resp, ss, nil
 
 		default: // Other FSCTL codes are not supported yet
+			if c.server.debug {
+				log.Printf("Unsupported FSCTL 0x%08x from %s", ir.CtlCode(), c.clientName)
+			}
 			resp := smb2.NewErrorResponse(ir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
 			return resp, ss, nil
 		}
@@ -2792,8 +2795,12 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			switch qir.FileInfoClass() {
 			case smb2.FileAllInformation:
 				info = op.fileAllInformation()
+			case smb2.FileBasicInformation:
+				info = op.fileBasicInformation()
 			case smb2.FileStandardInformation:
 				info = op.fileStandardInformation()
+			case smb2.FileAttributeTagInformation:
+				info = op.fileAttributeTagInformation()
 			case smb2.FileNetworkOpenInformation:
 				info = op.fileNetworkOpenInformation()
 			case smb2.FileNormalizedNameInformation:
@@ -2811,6 +2818,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			case smb2.FileStreamInformation:
 				info = op.fileStreamInformation()
 			default: // Other classes are not supported yet
+				if c.server.debug {
+					log.Printf("Unsupported file info class %d queried from %s", qir.FileInfoClass(), c.clientName)
+				}
 				resp := smb2.NewErrorResponse(qir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
 				return resp, ss, nil
 			}
@@ -2852,6 +2862,9 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			case smb2.FileFsObjectIdInformation:
 				info = smb2.FileFsObjectIDInfo(tc.volumeID)
 			default: // Other classes are not supported yet
+				if c.server.debug {
+					log.Printf("Unsupported filesystem info class %d queried from %s", qir.FileInfoClass(), c.clientName)
+				}
 				resp := smb2.NewErrorResponse(qir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
 				return resp, ss, nil
 			}
@@ -3191,11 +3204,17 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 				op.file.setAllocated(binary.LittleEndian.Uint64(buf))
 
 			default:
+				if c.server.debug {
+					log.Printf("Unsupported file info class %d set from %s", sir.FileInfoClass(), c.clientName)
+				}
 				resp := smb2.NewErrorResponse(sir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
 				return resp, ss, nil
 			}
 
 		default:
+			if c.server.debug {
+				log.Printf("Unsupported info type %d set from %s", sir.InfoType(), c.clientName)
+			}
 			resp := smb2.NewErrorResponse(sir, smb2.STATUS_NOT_SUPPORTED, 0, nil)
 			return resp, ss, nil
 		}

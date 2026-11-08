@@ -1461,6 +1461,30 @@ func (op *open) fileAllInformation() []byte {
 	return fai.Encode()
 }
 
+// fileBasicInformation generates a FileBasicInfo structure, the times and
+// attributes as FileAllInfo carries them.
+func (op *open) fileBasicInformation() []byte {
+	_, _, _, modified, attributes := op.file.stat()
+	fbi := smb2.FileBasicInfo{
+		CreationTime:   modified,
+		LastAccessTime: modified,
+		LastWriteTime:  modified,
+		ChangeTime:     modified,
+		FileAttributes: attributes,
+	}
+	return fbi.Encode()
+}
+
+// fileAttributeTagInformation generates a FileAttributeTagInfo structure. No
+// file here is a reparse point, so the tag is zero.
+func (op *open) fileAttributeTagInformation() []byte {
+	_, _, _, _, attributes := op.file.stat()
+	fati := smb2.FileAttributeTagInfo{
+		FileAttributes: attributes,
+	}
+	return fati.Encode()
+}
+
 // fileStandardInformation generates a FileStandardInfo structure.
 func (op *open) fileStandardInformation() []byte {
 	var size, alloc uint64
