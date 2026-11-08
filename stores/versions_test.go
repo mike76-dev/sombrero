@@ -642,6 +642,11 @@ func TestEmptyFileKeepsTheVersions(t *testing.T) {
 		t.Errorf("want the contents kept ahead of the version, got %v", sizes)
 	}
 
+	// The versions are read while the file is gone, by the right the path grants.
+	if _, err := db.PathAccess(acc, share, "doc.txt"); err != nil {
+		t.Errorf("PathAccess with the file emptied: %v", err)
+	}
+
 	// The file written afterwards has the versions; emptied again within the
 	// session, its contents go, and the versions stay.
 	replaceFile(t, db, share, acc, "doc.txt", 200)

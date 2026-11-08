@@ -863,8 +863,9 @@ func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path strin
 }
 
 // Versions implements client.Versioner: the versions of a file the account may read.
+// The path decides the right, as the file is gone while an overwrite is under way.
 func (ic *IndexdClient) Versions(ctx context.Context, acc stores.Account, path string) ([]VersionInfo, error) {
-	if _, err := ic.db.Object(acc, ic.share, path); err != nil {
+	if _, err := ic.db.PathAccess(acc, ic.share, path); err != nil {
 		return nil, err
 	}
 	versions, err := ic.db.Versions(ic.share, path)
@@ -880,7 +881,7 @@ func (ic *IndexdClient) Versions(ctx context.Context, acc stores.Account, path s
 
 // ReadVersion implements client.Versioner.
 func (ic *IndexdClient) ReadVersion(ctx context.Context, acc stores.Account, path string, id uint64, offset, length uint64, buf io.Writer) error {
-	if _, err := ic.db.Object(acc, ic.share, path); err != nil {
+	if _, err := ic.db.PathAccess(acc, ic.share, path); err != nil {
 		return err
 	}
 	slabs, err := ic.db.VersionMetadata(ic.share, path, id, offset, length)
