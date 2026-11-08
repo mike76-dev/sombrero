@@ -199,18 +199,18 @@ type emptying struct {
 	deliberate bool
 }
 
-// restoration is one file reported written from a version: its path, and the version.
+// restoration is one file reported written from a version: its path, and the candidates.
 type restoration struct {
 	path string
-	id   uint64
+	ids  []uint64
 }
 
 // MarkRestored implements client.Versioner.
-func (fc *fakeClient) MarkRestored(_ context.Context, path string, id uint64) error {
+func (fc *fakeClient) MarkRestored(_ context.Context, path string, ids []uint64) error {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 
-	fc.restorations = append(fc.restorations, restoration{path: path, id: id})
+	fc.restorations = append(fc.restorations, restoration{path: path, ids: slices.Clone(ids)})
 	return nil
 }
 

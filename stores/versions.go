@@ -119,9 +119,9 @@ func (db *Database) keepsReplaced(ctx context.Context, tx pgx.Tx, share, path st
 	return !restored, nil
 }
 
-// markRestored notes that the file holds the version unchanged, which a later
-// restore need not keep. A file of another size holds something else.
-func markRestored(ctx context.Context, tx pgx.Tx, share, path string, id uint64) error {
+// markRestored notes that the file holds unchanged the one of the versions
+// that is of its size, which a later restore need not keep; none: ErrNotFound.
+func markRestored(ctx context.Context, tx pgx.Tx, share, path string, ids []uint64) error {
 	const query = `
 		UPDATE objects o
 		SET restored_from = v.id
@@ -130,24 +130,32 @@ func markRestored(ctx context.Context, tx pgx.Tx, share, path string, id uint64)
 		WHERE o.share_name = $1
 			AND o.full_path = $2
 			AND o.temporary = FALSE
-			AND v.id = $3
+			AND v.id = ANY($3::BIGINT[])
 			AND v.share_name = o.share_name
 			AND v.full_path = o.full_path
 			AND v.size = o.size
 	`
 
-	if _, err := tx.Exec(ctx, query, share, path, int64(id)); err != nil {
+	candidates := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		candidates = append(candidates, int64(id))
+	}
+	tag, err := tx.Exec(ctx, query, share, path, candidates)
+	if err != nil {
 		return fmt.Errorf("failed to note the restored version: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
 
 // MarkRestored is markRestored for a file written over SMB from one of its
 // versions. The caller answers for the account's right to write the file.
-func (db *Database) MarkRestored(share, path string, id uint64) error {
+func (db *Database) MarkRestored(share, path string, ids []uint64) error {
 	path = normalizePath(path)
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		return markRestored(ctx, tx, share, path, id)
+		return markRestored(ctx, tx, share, path, ids)
 	})
 }
 
@@ -515,7 +523,7 @@ func (db *Database) RestoreVersion(acc Account, share, path string, id uint64) (
 		return nil, err
 	}
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		return markRestored(ctx, tx, share, path, id)
+		return markRestored(ctx, tx, share, path, []uint64{id})
 	})
 	return slabs, err
 }

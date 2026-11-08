@@ -1168,8 +1168,8 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 }
 
 // MarkRestored implements client.Versioner.
-func (ic *IndexdClient) MarkRestored(ctx context.Context, path string, id uint64) error {
-	return ic.db.MarkRestored(ic.share, path, id)
+func (ic *IndexdClient) MarkRestored(ctx context.Context, path string, ids []uint64) error {
+	return ic.db.MarkRestored(ic.share, path, ids)
 }
 
 // EmptyFile implements client.Versioner. The contents go the way a deleted

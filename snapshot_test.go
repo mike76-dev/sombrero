@@ -218,10 +218,18 @@ func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
 	h.files.putData("dir/file", []byte("now"))
 	at := time.Date(2026, 11, 5, 17, 30, 0, 0, time.UTC)
 	h.files.putVersion("dir/file", at, []byte("before"))
+	earlier := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	h.files.putVersion("dir/file", earlier, []byte("long ago"))
 
+	// Explorer keeps handles on more than one version open while it restores one of them.
 	alice := h.dial("alice")
+	buf, _ := alice.createAccessing(smb2.SnapshotToken(earlier)+"/dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the earlier version: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	other := createdFileID(buf)
 	name := smb2.SnapshotToken(at) + "/dir/file"
-	buf, _ := alice.createAccessing(name, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, nil)
+	buf, _ = alice.createAccessing(name, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, nil)
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
 		t.Fatalf("opening the version: Status = %#x, want %#x", status, smb2.STATUS_OK)
 	}
@@ -241,6 +249,16 @@ func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
 		t.Errorf("the version read as %q, want %q", got, "before")
 	}
 
+	// A handle opened and closed on the file meanwhile, as Explorer does to look at it, does
+	// not unmake the restore.
+	buf, _ = alice.createAccessing("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the file beside the restore: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	if _, err := alice.closeHandle(createdFileID(buf)); err != nil {
+		t.Fatalf("closing the handle beside the restore: %v", err)
+	}
+
 	if _, err := alice.write(live, 0, []byte("after")); err != nil {
 		t.Fatalf("writing the file: %v", err)
 	}
@@ -249,6 +267,9 @@ func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
 	}
 	if _, err := alice.closeHandle(version); err != nil {
 		t.Fatalf("closing the version: %v", err)
+	}
+	if _, err := alice.closeHandle(other); err != nil {
+		t.Fatalf("closing the earlier version: %v", err)
 	}
 
 	h.files.mu.Lock()
@@ -260,7 +281,7 @@ func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
 	if contents != "after" {
 		t.Errorf("the file holds %q, want %q", contents, "after")
 	}
-	if len(versions) != 2 || string(versions[0].data) != "now" {
+	if len(versions) != 3 || string(versions[0].data) != "now" {
 		t.Errorf("want the overwritten contents kept as the newest version, got %d versions", len(versions))
 	}
 
@@ -270,15 +291,16 @@ func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
 		t.Errorf("want one deliberate emptying of the file, got %+v", emptyings)
 	}
 
-	// The file written is reported as holding the version that was open.
-	var opened uint64
+	// The file written is reported as holding one of the versions that were open.
+	var opened []uint64
 	for _, v := range versions {
-		if string(v.data) == "before" {
-			opened = v.info.ID
+		if d := string(v.data); d == "before" || d == "long ago" {
+			opened = append(opened, v.info.ID)
 		}
 	}
-	if len(restorations) != 1 || restorations[0] != (restoration{path: "dir/file", id: opened}) {
-		t.Errorf("want the file noted as restored from version %d, got %+v", opened, restorations)
+	slices.Sort(opened)
+	if len(restorations) != 1 || restorations[0].path != "dir/file" || !slices.Equal(restorations[0].ids, opened) {
+		t.Errorf("want the file noted as restored from one of the versions %v, got %+v", opened, restorations)
 	}
 	buf, _ = alice.createAccessing("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE_IF, writeAccess, nil)
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {

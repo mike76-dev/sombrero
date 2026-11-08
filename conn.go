@@ -4280,6 +4280,12 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			op.file.markStored()
 		}
 		tc.persistFile(path, op.file)
+
+		// A handle opened with no version of the file open is nobody's restore, and whatever a
+		// restore noted on the file before it is stale.
+		if len(c.server.openVersionsOf(tc.share, path)) == 0 {
+			op.file.restoring(nil)
+		}
 	}
 
 	// A create that overwrites or supersedes the file empties it then and there, as NTFS does: the

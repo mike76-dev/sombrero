@@ -845,8 +845,9 @@ type fileState struct {
 	// cannot be done under mu.
 	startingMu sync.Mutex
 
-	// restoredFrom is the version an overwrite is restoring, until the upload carrying it is in.
-	restoredFrom uint64
+	// restoredFrom are the versions the file may be being restored from: the ones open at the
+	// overwrite, cleared by a handle opened on the file with no version of it open.
+	restoredFrom []uint64
 }
 
 // writesCond returns what waits for the writes in flight, making it if this is the first waiter.
@@ -1085,23 +1086,21 @@ func (fs *fileState) empty() {
 	fs.generation++
 }
 
-// restoring notes the version an overwrite of the file is restoring, or with zero that none is.
-func (fs *fileState) restoring(id uint64) {
+// restoring notes the versions an overwrite of the file may be restoring, or with none that it is
+// no restore.
+func (fs *fileState) restoring(ids []uint64) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	fs.restoredFrom = id
+	fs.restoredFrom = ids
 }
 
-// takeRestoring is the version the upload just finished was restoring, cleared on the way out.
-func (fs *fileState) takeRestoring() uint64 {
+// restoringNow lists the versions the file may be being restored from.
+func (fs *fileState) restoringNow() []uint64 {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	id := fs.restoredFrom
-	fs.restoredFrom = 0
-
-	return id
+	return slices.Clone(fs.restoredFrom)
 }
 
 // uploadNow is the upload the file is being written through, if there is one.
@@ -1329,9 +1328,6 @@ func (op *open) releaseFile() {
 	// The ranges the open had claimed go first, and go however the open came to an end: this is
 	// where a close, a tree disconnect, a logoff and a durable handle nobody reclaimed all meet.
 	op.file.releaseLocks(op)
-
-	// A restore that wrote nothing leaves no version for the next upload to be taken for.
-	op.file.restoring(0)
 
 	if !op.file.detach() {
 		return
@@ -2145,6 +2141,9 @@ func (op *open) startUpload() error {
 		slots:      make(chan struct{}, partsInFlight(op.treeConnect.maxUploadSize)),
 		writers:    make(map[*open]struct{}),
 	})
+	if op.session.connection.server.debug {
+		log.Printf("Upload of %s started", path)
+	}
 
 	return nil
 }
@@ -2381,13 +2380,10 @@ func (op *open) emptyFile(acc stores.Account) error {
 	// A share that keeps versions keeps the contents as one; the rest lose the object. An
 	// overwrite made while a version of the file is open is a restore, kept whatever the session.
 	var err error
-	var restoring uint64
+	var restoring []uint64
 	if v, kept := op.treeConnect.client.(client.Versioner); kept {
-		id, found := op.session.connection.server.openVersionOf(op.treeConnect.share, path)
-		if found {
-			restoring = id
-		}
-		err = v.EmptyFile(ctx, acc, path, found)
+		restoring = op.session.connection.server.openVersionsOf(op.treeConnect.share, path)
+		err = v.EmptyFile(ctx, acc, path, len(restoring) > 0)
 	} else {
 		err = op.treeConnect.client.Delete(ctx, acc, path, false)
 	}
@@ -2398,6 +2394,9 @@ func (op *open) emptyFile(acc stores.Account) error {
 	op.file.empty()
 	op.file.markUnstored()
 	op.file.restoring(restoring)
+	if op.session.connection.server.debug {
+		log.Printf("Emptied %s, restoring one of the versions %v", path, restoring)
+	}
 
 	return nil
 }
@@ -2612,10 +2611,14 @@ func (op *open) flush() error {
 		return err
 	}
 
+	if op.session.connection.server.debug {
+		log.Printf("Upload of %s finished at %d bytes, restoring one of the versions %v", u.path, finalSize, op.file.restoringNow())
+	}
+
 	// A file written from one of its versions holds that version, which the store is told.
-	if id := op.file.takeRestoring(); id != 0 {
+	if ids := op.file.restoringNow(); len(ids) > 0 {
 		if v, ok := op.treeConnect.client.(client.Versioner); ok {
-			if err := v.MarkRestored(op.ctx, u.path, id); err != nil {
+			if err := v.MarkRestored(op.ctx, u.path, ids); err != nil {
 				log.Printf("Couldn't note the version %s was restored from: %v\n", u.path, err)
 			}
 		}
@@ -2646,6 +2649,9 @@ func (op *open) cancelUpload() bool {
 	u.mu.Unlock()
 
 	_ = op.treeConnect.client.AbortUpload(op.ctx, u.path, uploadID)
+	if op.session.connection.server.debug {
+		log.Printf("Upload of %s called off", u.path)
+	}
 
 	return true
 }

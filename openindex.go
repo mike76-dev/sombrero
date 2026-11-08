@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/mike76-dev/sombrero/smb2"
@@ -255,9 +256,9 @@ func (s *server) moveOpensOnFile(sh *share, path, newName string) []*open {
 	return moved
 }
 
-// openVersionOf finds a previous version of the file that is open, by its ID. The opens of
-// versions are indexed under their snapshot names, so the share's buckets are walked for them.
-func (s *server) openVersionOf(sh *share, path string) (uint64, bool) {
+// openVersionsOf lists the previous versions of the file that are open, by ID and in order. The
+// opens of versions are indexed under their snapshot names, so the share's buckets are walked.
+func (s *server) openVersionsOf(sh *share, path string) []uint64 {
 	s.openIndexMu.Lock()
 	var candidates []*open
 	for key, bucket := range s.opensByFile {
@@ -270,16 +271,18 @@ func (s *server) openVersionOf(sh *share, path string) (uint64, bool) {
 	}
 	s.openIndexMu.Unlock()
 
+	var ids []uint64
 	for _, op := range candidates {
 		op.mu.Lock()
 		v := op.version
 		op.mu.Unlock()
 		if v != nil && v.path == path {
-			return v.id, true
+			ids = append(ids, v.id)
 		}
 	}
+	slices.Sort(ids)
 
-	return 0, false
+	return slices.Compact(ids)
 }
 
 // opensOn collects the opens of a file, other than the one given. The bucket is copied before

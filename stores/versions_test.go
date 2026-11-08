@@ -518,9 +518,9 @@ func TestRestoredVersionIsNotKeptAgain(t *testing.T) {
 	}
 	first := versions[0].ID
 
-	// Written over SMB, the file is marked only at the version's size.
-	if err := db.MarkRestored(share, "doc.txt", first); err != nil {
-		t.Fatalf("MarkRestored: %v", err)
+	// Written over SMB, the file is marked with the one of the versions that is of its size.
+	if err := db.MarkRestored(share, "doc.txt", []uint64{first}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("MarkRestored at another size: want %v, got %v", ErrNotFound, err)
 	}
 	if _, err := db.EmptyFile(acc, share, "doc.txt", true); err != nil {
 		t.Fatalf("EmptyFile: %v", err)
@@ -529,8 +529,9 @@ func TestRestoredVersionIsNotKeptAgain(t *testing.T) {
 		t.Errorf("want the 300 bytes kept, being no version's, got %v", sizes)
 	}
 	replaceFile(t, db, share, acc, "doc.txt", 400)
-	if err := db.MarkRestored(share, "doc.txt", first); err != nil {
-		t.Fatalf("MarkRestored at the version's size: %v", err)
+	both, _ := db.Versions(share, "doc.txt")
+	if err := db.MarkRestored(share, "doc.txt", []uint64{both[0].ID, both[1].ID}); err != nil {
+		t.Fatalf("MarkRestored among two versions: %v", err)
 	}
 	if _, err := db.EmptyFile(acc, share, "doc.txt", true); err != nil {
 		t.Fatalf("EmptyFile of the restored version: %v", err)
