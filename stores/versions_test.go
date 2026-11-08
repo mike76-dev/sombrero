@@ -320,6 +320,19 @@ func TestRenameOverKeepsAVersion(t *testing.T) {
 	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 1 {
 		t.Errorf("want the earlier version untouched, got %v", sizes)
 	}
+
+	// A file hidden as a version while its upload still lingers does not stand
+	// in the way of writing the file in place.
+	db.SetVersioning(VersionPolicy{Keep: true, Gap: 10 * time.Minute, Count: 10})
+	ageSession(t, db, 30*time.Minute, 20*time.Minute)
+	plantBufferedFile(t, db, share, acc, "tmp.txt", 75, false)
+	if _, err := db.RenameFile(acc, share, "tmp.txt", "doc.txt", true); err != nil {
+		t.Fatalf("RenameFile over the buffered file: %v", err)
+	}
+	replaceFile(t, db, share, acc, "doc.txt", 50)
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 100 {
+		t.Errorf("want the buffered file kept and the file written over, got %v", sizes)
+	}
 }
 
 // TestFoldersCarryTheVersions verifies that versions move with their folder
@@ -599,6 +612,50 @@ func TestSwapSaveKeepsAVersion(t *testing.T) {
 	}
 	if n := bufferedBytes(t, db); n != 0 {
 		t.Errorf("want nothing buffered, got %d bytes", n)
+	}
+}
+
+// TestEmptyFileKeepsTheVersions verifies that emptying a file for an overwrite
+// keeps its contents as a version under the session rule, and its versions.
+func TestEmptyFileKeepsTheVersions(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Gap: 10 * time.Minute, MaxSession: time.Hour, Count: 10})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	plantPiece(t, db, share, acc, "doc.txt", types.Hash256{1}, 0, 400)
+	replaceFile(t, db, share, acc, "doc.txt", 300)
+	ageSession(t, db, 30*time.Minute, 20*time.Minute)
+
+	slabs, err := db.EmptyFile(acc, share, "doc.txt")
+	if err != nil {
+		t.Fatalf("EmptyFile: %v", err)
+	}
+	if len(slabs) != 0 {
+		t.Errorf("want nothing released, got %v", slabs)
+	}
+	if _, err := db.Object(acc, share, "doc.txt"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("want the file gone from the share, got %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 300 {
+		t.Errorf("want the contents kept ahead of the version, got %v", sizes)
+	}
+
+	// The file written afterwards has the versions; emptied again within the
+	// session, its contents go, and the versions stay.
+	replaceFile(t, db, share, acc, "doc.txt", 200)
+	if _, err := db.EmptyFile(acc, share, "doc.txt"); err != nil {
+		t.Fatalf("EmptyFile within the session: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 300 {
+		t.Errorf("want the versions as they were, got %v", sizes)
+	}
+	if n := bufferedBytes(t, db); n != 300 {
+		t.Errorf("want the emptied contents gone, got %d bytes buffered", n)
+	}
+	if _, err := db.EmptyFile(acc, share, "doc.txt"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("emptying what is not there: want %v, got %v", ErrNotFound, err)
 	}
 }
 

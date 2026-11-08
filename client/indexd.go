@@ -1166,6 +1166,25 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 	return nil
 }
 
+// EmptyFile implements client.Versioner. The contents go the way a deleted
+// file's do, with what only they held unpinned, and the versions stay.
+func (ic *IndexdClient) EmptyFile(ctx context.Context, acc stores.Account, path string) error {
+	touched := ic.slabsOf(path, false)
+	slabs, err := ic.db.EmptyFile(acc, ic.share, path)
+	if err != nil {
+		return err
+	}
+
+	ic.retag(touched)
+
+	if len(slabs) > 0 && ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after emptying %s: %v", path, err)
+		}
+	}
+	return nil
+}
+
 // MakeDirectory creates a new directory in the specified path.
 // If the directory name matches one of the workgroup's public folders, it is created as
 // non-private so that all workgroup members can see files placed inside it, and it inherits

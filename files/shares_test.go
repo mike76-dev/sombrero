@@ -59,6 +59,7 @@ type mockClient struct {
 	dropVersionsErr error
 	restored        []versionRef
 	versionsDropped []versionRef
+	emptied         []string
 }
 
 // versionRef is a version the mock client was asked to restore or delete.
@@ -94,6 +95,11 @@ func (m *mockClient) DeleteVersions(_ context.Context, _ stores.Account, p strin
 		return m.dropVersionsErr
 	}
 	m.versionsDropped = append(m.versionsDropped, versionRef{p, id})
+	return nil
+}
+
+func (m *mockClient) EmptyFile(_ context.Context, _ stores.Account, p string) error {
+	m.emptied = append(m.emptied, p)
 	return nil
 }
 

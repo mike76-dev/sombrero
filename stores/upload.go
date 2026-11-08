@@ -465,7 +465,8 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 			),
 			-- Only an upload whose object is still temporary is in flight. Once it
 			-- has been finalized, its uploads entry may linger until the buffered
-			-- slabs have made it to the Sia network, and must not block the path.
+			-- slabs have made it to the Sia network, and must not block the path,
+			-- nor may the file it finalized once that is hidden as a version.
 			no_existing_upload AS (
 				SELECT 1
 				FROM parent p
@@ -473,9 +474,11 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 					SELECT 1
 					FROM uploads u
 					JOIN objects o ON o.id = u.object_id
+					LEFT JOIN versions v ON v.object_id = o.id
 					WHERE o.share_name = $1
 						AND o.full_path = $4
 						AND o.temporary = TRUE
+						AND v.object_id IS NULL
 				)
 			),
 			not_read_only AS (

@@ -187,6 +187,20 @@ func (fc *fakeClient) DeleteVersions(_ context.Context, _ stores.Account, path s
 	return nil
 }
 
+// EmptyFile implements client.Versioner: the contents become a version, and the
+// object goes the way Delete takes it.
+func (fc *fakeClient) EmptyFile(ctx context.Context, acc stores.Account, path string) error {
+	fc.mu.Lock()
+	oi, found := fc.objects[path]
+	data := fc.contents[path]
+	fc.mu.Unlock()
+	if !found {
+		return stores.ErrNotFound
+	}
+	fc.putVersion(path, oi.ModifiedAt, data)
+	return fc.Delete(ctx, acc, path, false)
+}
+
 // ReadVersion implements client.Versioner.
 func (fc *fakeClient) ReadVersion(_ context.Context, _ stores.Account, path string, id uint64, offset, length uint64, w io.Writer) error {
 	fc.mu.Lock()

@@ -209,3 +209,55 @@ func TestIntegrationAPreviousVersionOpens(t *testing.T) {
 		t.Errorf("the version opened by token at %d bytes, want 6", size)
 	}
 }
+
+// TestIntegrationOverwritingKeepsTheVersions verifies that a create overwriting
+// a file leaves its versions readable, and makes the overwritten contents one.
+func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
+	h := newSMBTest(t)
+	h.files.putData("dir/file", []byte("now"))
+	at := time.Date(2026, 11, 5, 17, 30, 0, 0, time.UTC)
+	h.files.putVersion("dir/file", at, []byte("before"))
+
+	alice := h.dial("alice")
+	name := smb2.SnapshotToken(at) + "/dir/file"
+	buf, _ := alice.createAccessing(name, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the version: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	version := createdFileID(buf)
+
+	buf, _ = alice.createAccessing("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE_IF, writeAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("overwriting the file: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	live := createdFileID(buf)
+
+	buf, err := alice.readOver(version, 16, 0)
+	if err != nil {
+		t.Fatalf("reading the version after the overwrite: %v", err)
+	}
+	if got := string(readData(t, buf)); got != "before" {
+		t.Errorf("the version read as %q, want %q", got, "before")
+	}
+
+	if _, err := alice.write(live, 0, []byte("after")); err != nil {
+		t.Fatalf("writing the file: %v", err)
+	}
+	if _, err := alice.closeHandle(live); err != nil {
+		t.Fatalf("closing the file: %v", err)
+	}
+	if _, err := alice.closeHandle(version); err != nil {
+		t.Fatalf("closing the version: %v", err)
+	}
+
+	h.files.mu.Lock()
+	contents := string(h.files.contents["dir/file"])
+	versions := h.files.versions["dir/file"]
+	h.files.mu.Unlock()
+	if contents != "after" {
+		t.Errorf("the file holds %q, want %q", contents, "after")
+	}
+	if len(versions) != 2 || string(versions[0].data) != "now" {
+		t.Errorf("want the overwritten contents kept as the newest version, got %d versions", len(versions))
+	}
+}

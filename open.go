@@ -2353,7 +2353,14 @@ func (op *open) emptyFile(acc stores.Account) error {
 	ctx, path := op.ctx, op.pathName
 	op.mu.Unlock()
 
-	if err := op.treeConnect.client.Delete(ctx, acc, path, false); err != nil && !errors.Is(err, stores.ErrNotFound) {
+	// A share that keeps versions keeps the contents as one; the rest lose the object.
+	var err error
+	if v, kept := op.treeConnect.client.(client.Versioner); kept {
+		err = v.EmptyFile(ctx, acc, path)
+	} else {
+		err = op.treeConnect.client.Delete(ctx, acc, path, false)
+	}
+	if err != nil && !errors.Is(err, stores.ErrNotFound) {
 		return err
 	}
 
