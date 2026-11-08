@@ -480,8 +480,9 @@ func TestRestoreVersion(t *testing.T) {
 	if n := pendingJobs(t, db); n != jobs+1 {
 		t.Errorf("want the copy queued for upload, got %d jobs rather than %d", n, jobs+1)
 	}
-	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 3 || sizes[0] != 400 {
-		t.Errorf("want the slab contents kept as the newest version, got %v", sizes)
+	// The file held the slab version unchanged, which is kept already, so nothing is added.
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 300 {
+		t.Errorf("want no version added for a restored version, got %v", sizes)
 	}
 
 	// A version the file does not have, and a file somebody else is writing.
@@ -496,6 +497,69 @@ func TestRestoreVersion(t *testing.T) {
 	}
 	if _, err := db.RestoreVersion(acc, share, "doc.txt", versions[0].ID); !errors.Is(err, ErrUploadInFlight) {
 		t.Errorf("a file being written: want %v, got %v", ErrUploadInFlight, err)
+	}
+}
+
+// TestRestoredVersionIsNotKeptAgain verifies that a file holding a restored
+// version unchanged adds no version when replaced deliberately, until it is
+// edited or the version is gone.
+func TestRestoredVersionIsNotKeptAgain(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Gap: 10 * time.Minute, Count: 10})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	plantPiece(t, db, share, acc, "doc.txt", types.Hash256{1}, 0, 400)
+	replaceFile(t, db, share, acc, "doc.txt", 300)
+	versions, err := db.Versions(share, "doc.txt")
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("want the one version, got %+v, %v", versions, err)
+	}
+	first := versions[0].ID
+
+	// Written over SMB, the file is marked only at the version's size.
+	if err := db.MarkRestored(share, "doc.txt", first); err != nil {
+		t.Fatalf("MarkRestored: %v", err)
+	}
+	if _, err := db.EmptyFile(acc, share, "doc.txt", true); err != nil {
+		t.Fatalf("EmptyFile: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 300 {
+		t.Errorf("want the 300 bytes kept, being no version's, got %v", sizes)
+	}
+	replaceFile(t, db, share, acc, "doc.txt", 400)
+	if err := db.MarkRestored(share, "doc.txt", first); err != nil {
+		t.Fatalf("MarkRestored at the version's size: %v", err)
+	}
+	if _, err := db.EmptyFile(acc, share, "doc.txt", true); err != nil {
+		t.Fatalf("EmptyFile of the restored version: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 {
+		t.Errorf("want nothing added for the restored version, got %v", sizes)
+	}
+
+	// Restored through the API and edited since, the file is kept again.
+	if _, err := db.RestoreVersion(acc, share, "doc.txt", first); err != nil {
+		t.Fatalf("RestoreVersion: %v", err)
+	}
+	replaceFile(t, db, share, acc, "doc.txt", 200)
+	if _, err := db.RestoreVersion(acc, share, "doc.txt", first); err != nil {
+		t.Fatalf("RestoreVersion after an edit: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 3 || sizes[0] != 200 {
+		t.Errorf("want the edited contents kept, got %v", sizes)
+	}
+
+	// With the version it holds gone, the file is the only copy, and is kept.
+	if _, err := db.DeleteVersions(share, "doc.txt", first); err != nil {
+		t.Fatalf("DeleteVersions: %v", err)
+	}
+	if _, err := db.EmptyFile(acc, share, "doc.txt", true); err != nil {
+		t.Fatalf("EmptyFile with the version gone: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 3 || sizes[0] != 400 {
+		t.Errorf("want the only copy kept, got %v", sizes)
 	}
 }
 

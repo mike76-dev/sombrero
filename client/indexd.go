@@ -1167,6 +1167,11 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 	return nil
 }
 
+// MarkRestored implements client.Versioner.
+func (ic *IndexdClient) MarkRestored(ctx context.Context, path string, id uint64) error {
+	return ic.db.MarkRestored(ic.share, path, id)
+}
+
 // EmptyFile implements client.Versioner. The contents go the way a deleted
 // file's do, with what only they held unpinned, and the versions stay.
 func (ic *IndexdClient) EmptyFile(ctx context.Context, acc stores.Account, path string, deliberate bool) error {

@@ -96,6 +96,61 @@ func (db *Database) keepsVersion(ctx context.Context, tx pgx.Tx, share, path str
 	return false, nil
 }
 
+// keepsReplaced says whether the contents being replaced are kept: a deliberate replacement
+// keeps them unless the file holds a restored version untouched; others follow the session rule.
+func (db *Database) keepsReplaced(ctx context.Context, tx pgx.Tx, share, path string, ids []int64, account uint64, deliberate bool) (bool, error) {
+	if !deliberate || !db.versioning.Keep {
+		return db.keepsVersion(ctx, tx, share, path, account)
+	}
+
+	const query = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM objects o
+			JOIN versions v ON v.object_id = o.restored_from
+			WHERE o.id = ANY($1::BIGINT[])
+		)
+	`
+
+	var restored bool
+	if err := tx.QueryRow(ctx, query, ids).Scan(&restored); err != nil {
+		return false, fmt.Errorf("failed to look up what the file was restored from: %w", err)
+	}
+	return !restored, nil
+}
+
+// markRestored notes that the file holds the version unchanged, which a later
+// restore need not keep. A file of another size holds something else.
+func markRestored(ctx context.Context, tx pgx.Tx, share, path string, id uint64) error {
+	const query = `
+		UPDATE objects o
+		SET restored_from = v.id
+		FROM objects v
+		JOIN versions ON versions.object_id = v.id
+		WHERE o.share_name = $1
+			AND o.full_path = $2
+			AND o.temporary = FALSE
+			AND v.id = $3
+			AND v.share_name = o.share_name
+			AND v.full_path = o.full_path
+			AND v.size = o.size
+	`
+
+	if _, err := tx.Exec(ctx, query, share, path, int64(id)); err != nil {
+		return fmt.Errorf("failed to note the restored version: %w", err)
+	}
+	return nil
+}
+
+// MarkRestored is markRestored for a file written over SMB from one of its
+// versions. The caller answers for the account's right to write the file.
+func (db *Database) MarkRestored(share, path string, id uint64) error {
+	path = normalizePath(path)
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return markRestored(ctx, tx, share, path, id)
+	})
+}
+
 // keepVersion moves the contents of the file onto a hidden row of their own
 // and records it as a version replaced by the account.
 func keepVersion(ctx context.Context, tx pgx.Tx, oid, account uint64) error {
@@ -195,11 +250,9 @@ func (db *Database) EmptyFile(acc Account, share, path string, deliberate bool) 
 			return ErrNotFound
 		}
 
-		keep := deliberate && db.versioning.Keep
-		if !keep {
-			if keep, err = db.keepsVersion(ctx, tx, share, path, uint64(acc.ID)); err != nil {
-				return err
-			}
+		keep, err := db.keepsReplaced(ctx, tx, share, path, ids, uint64(acc.ID), deliberate)
+		if err != nil {
+			return err
 		}
 		if keep {
 			if err := recordVersions(ctx, tx, ids, uint64(acc.ID)); err != nil {
@@ -415,9 +468,9 @@ func (db *Database) ExpireVersions(age time.Duration) (dropped int, err error) {
 }
 
 // RestoreVersion makes the version the contents of the file again. What it
-// replaces is always kept as a version, a restore being no autosave, and the
-// slabs released are returned, staged for unpinning. The version stays,
-// sharing its slabs with the file; what it holds in buffers is copied.
+// replaces is kept as a version, a restore being no autosave, unless it is a
+// restored version itself, and the slabs released are returned, staged for
+// unpinning. The version stays, sharing its slabs; its buffers are copied.
 func (db *Database) RestoreVersion(acc Account, share, path string, id uint64) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 
@@ -458,7 +511,13 @@ func (db *Database) RestoreVersion(acc Account, share, path string, id uint64) (
 		}
 		return nil, err
 	}
-	return db.finalizeUpload(uploadID, true)
+	if slabs, err = db.finalizeUpload(uploadID, true); err != nil {
+		return nil, err
+	}
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return markRestored(ctx, tx, share, path, id)
+	})
+	return slabs, err
 }
 
 // copyVersionContents gives the staged upload the pieces of the version: the

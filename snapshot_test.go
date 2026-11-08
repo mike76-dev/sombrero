@@ -255,6 +255,7 @@ func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
 	contents := string(h.files.contents["dir/file"])
 	versions := h.files.versions["dir/file"]
 	emptyings := slices.Clone(h.files.emptyings)
+	restorations := slices.Clone(h.files.restorations)
 	h.files.mu.Unlock()
 	if contents != "after" {
 		t.Errorf("the file holds %q, want %q", contents, "after")
@@ -268,6 +269,17 @@ func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
 	if len(emptyings) != 1 || emptyings[0] != (emptying{path: "dir/file", deliberate: true}) {
 		t.Errorf("want one deliberate emptying of the file, got %+v", emptyings)
 	}
+
+	// The file written is reported as holding the version that was open.
+	var opened uint64
+	for _, v := range versions {
+		if string(v.data) == "before" {
+			opened = v.info.ID
+		}
+	}
+	if len(restorations) != 1 || restorations[0] != (restoration{path: "dir/file", id: opened}) {
+		t.Errorf("want the file noted as restored from version %d, got %+v", opened, restorations)
+	}
 	buf, _ = alice.createAccessing("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE_IF, writeAccess, nil)
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
 		t.Fatalf("overwriting the file again: Status = %#x, want %#x", status, smb2.STATUS_OK)
@@ -277,8 +289,12 @@ func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
 	}
 	h.files.mu.Lock()
 	emptyings = slices.Clone(h.files.emptyings)
+	restorations = slices.Clone(h.files.restorations)
 	h.files.mu.Unlock()
 	if len(emptyings) != 2 || emptyings[1] != (emptying{path: "dir/file", deliberate: false}) {
 		t.Errorf("want a plain emptying to follow, got %+v", emptyings)
+	}
+	if len(restorations) != 1 {
+		t.Errorf("want no restoration noted for a plain overwrite, got %+v", restorations)
 	}
 }

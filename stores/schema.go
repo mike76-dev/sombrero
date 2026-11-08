@@ -102,6 +102,9 @@ $$ LANGUAGE SQL STABLE
 			at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)
 	`},
+	{name: "note the version a file was restored from", sql: `
+		ALTER TABLE objects ADD COLUMN restored_from BIGINT REFERENCES objects(id) ON DELETE SET NULL
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

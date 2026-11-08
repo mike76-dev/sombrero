@@ -65,7 +65,9 @@ type fakeClient struct {
 	parentsPath string
 
 	// emptyings are the files emptied ahead of an overwrite, and whether each was deliberate.
-	emptyings []emptying
+	// restorations are the files reported written from a version, with the version.
+	emptyings    []emptying
+	restorations []restoration
 
 	// readGate holds up every read until a test lets it go, so that a test can arrange for
 	// something to happen to the handle while a read on it is still being worked on.
@@ -195,6 +197,21 @@ func (fc *fakeClient) DeleteVersions(_ context.Context, _ stores.Account, path s
 type emptying struct {
 	path       string
 	deliberate bool
+}
+
+// restoration is one file reported written from a version: its path, and the version.
+type restoration struct {
+	path string
+	id   uint64
+}
+
+// MarkRestored implements client.Versioner.
+func (fc *fakeClient) MarkRestored(_ context.Context, path string, id uint64) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.restorations = append(fc.restorations, restoration{path: path, id: id})
+	return nil
 }
 
 // EmptyFile implements client.Versioner: the contents become a version, and the

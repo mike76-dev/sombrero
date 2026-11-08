@@ -110,6 +110,7 @@ CREATE TABLE objects (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     modified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     temporary BOOLEAN NOT NULL DEFAULT FALSE,
+    restored_from BIGINT REFERENCES objects(id) ON DELETE SET NULL,
     FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
     FOREIGN KEY (share_name, directory_id) REFERENCES directories(share_name, id) ON DELETE CASCADE
 );

@@ -1457,11 +1457,9 @@ func (db *Database) finalizeUpload(uploadID string, deliberate bool) (slabs []ty
 			// and gives up its storage otherwise.
 			var bids []uint64
 			var keys [][]byte
-			keep := deliberate && db.versioning.Keep
-			if !keep {
-				if keep, err = db.keepsVersion(ctx, tx, share, path, aid); err != nil {
-					return err
-				}
+			keep, err := db.keepsReplaced(ctx, tx, share, path, []int64{int64(oid)}, aid, deliberate)
+			if err != nil {
+				return err
 			}
 			if keep {
 				if err := keepVersion(ctx, tx, oid, aid); err != nil {
@@ -1521,6 +1519,7 @@ func (db *Database) finalizeUpload(uploadID string, deliberate bool) (slabs []ty
 				SET
 					account = $2,
 					modified_at = NOW(),
+					restored_from = NULL,
 					size = COALESCE((
 						SELECT SUM(data_length)
 						FROM metadata

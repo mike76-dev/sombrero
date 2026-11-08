@@ -103,6 +103,10 @@ func (m *mockClient) EmptyFile(_ context.Context, _ stores.Account, p string, _ 
 	return nil
 }
 
+func (m *mockClient) MarkRestored(_ context.Context, _ string, _ uint64) error {
+	return nil
+}
+
 // deletion and renaming are what the mock client was asked to delete or move.
 type deletion struct {
 	path  string

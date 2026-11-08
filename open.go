@@ -844,6 +844,9 @@ type fileState struct {
 	// startingMu serializes the start of an upload, which takes a call to the backend and so
 	// cannot be done under mu.
 	startingMu sync.Mutex
+
+	// restoredFrom is the version an overwrite is restoring, until the upload carrying it is in.
+	restoredFrom uint64
 }
 
 // writesCond returns what waits for the writes in flight, making it if this is the first waiter.
@@ -1082,6 +1085,25 @@ func (fs *fileState) empty() {
 	fs.generation++
 }
 
+// restoring notes the version an overwrite of the file is restoring, or with zero that none is.
+func (fs *fileState) restoring(id uint64) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.restoredFrom = id
+}
+
+// takeRestoring is the version the upload just finished was restoring, cleared on the way out.
+func (fs *fileState) takeRestoring() uint64 {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	id := fs.restoredFrom
+	fs.restoredFrom = 0
+
+	return id
+}
+
 // uploadNow is the upload the file is being written through, if there is one.
 func (fs *fileState) uploadNow() *upload {
 	fs.mu.Lock()
@@ -1307,6 +1329,9 @@ func (op *open) releaseFile() {
 	// The ranges the open had claimed go first, and go however the open came to an end: this is
 	// where a close, a tree disconnect, a logoff and a durable handle nobody reclaimed all meet.
 	op.file.releaseLocks(op)
+
+	// A restore that wrote nothing leaves no version for the next upload to be taken for.
+	op.file.restoring(0)
 
 	if !op.file.detach() {
 		return
@@ -2356,9 +2381,13 @@ func (op *open) emptyFile(acc stores.Account) error {
 	// A share that keeps versions keeps the contents as one; the rest lose the object. An
 	// overwrite made while a version of the file is open is a restore, kept whatever the session.
 	var err error
+	var restoring uint64
 	if v, kept := op.treeConnect.client.(client.Versioner); kept {
-		restoring := op.session.connection.server.versionIsOpen(op.treeConnect.share, path)
-		err = v.EmptyFile(ctx, acc, path, restoring)
+		id, found := op.session.connection.server.openVersionOf(op.treeConnect.share, path)
+		if found {
+			restoring = id
+		}
+		err = v.EmptyFile(ctx, acc, path, found)
 	} else {
 		err = op.treeConnect.client.Delete(ctx, acc, path, false)
 	}
@@ -2368,6 +2397,7 @@ func (op *open) emptyFile(acc stores.Account) error {
 
 	op.file.empty()
 	op.file.markUnstored()
+	op.file.restoring(restoring)
 
 	return nil
 }
@@ -2580,6 +2610,15 @@ func (op *open) flush() error {
 
 	if err := op.treeConnect.client.FinishUpload(op.ctx, u.path, uploadID, parts); err != nil {
 		return err
+	}
+
+	// A file written from one of its versions holds that version, which the store is told.
+	if id := op.file.takeRestoring(); id != 0 {
+		if v, ok := op.treeConnect.client.(client.Versioner); ok {
+			if err := v.MarkRestored(op.ctx, u.path, id); err != nil {
+				log.Printf("Couldn't note the version %s was restored from: %v\n", u.path, err)
+			}
+		}
 	}
 
 	op.file.finishUpload(u, finalSize)

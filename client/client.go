@@ -181,6 +181,10 @@ type Versioner interface {
 	// keeping them as the policy says, or whatever the session when deliberate,
 	// with the versions of the file in place.
 	EmptyFile(ctx context.Context, acc stores.Account, path string, deliberate bool) error
+
+	// MarkRestored notes that the file was written from the version and holds
+	// it unchanged, so that a restore replacing it keeps nothing.
+	MarkRestored(ctx context.Context, path string, id uint64) error
 }
 
 // sizeFromSeeker tries to find out the size of a file.

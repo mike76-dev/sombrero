@@ -255,9 +255,9 @@ func (s *server) moveOpensOnFile(sh *share, path, newName string) []*open {
 	return moved
 }
 
-// versionIsOpen says whether a previous version of the file is open. The opens of versions are
-// indexed under their snapshot names, so the share's buckets are walked for them.
-func (s *server) versionIsOpen(sh *share, path string) bool {
+// openVersionOf finds a previous version of the file that is open, by its ID. The opens of
+// versions are indexed under their snapshot names, so the share's buckets are walked for them.
+func (s *server) openVersionOf(sh *share, path string) (uint64, bool) {
 	s.openIndexMu.Lock()
 	var candidates []*open
 	for key, bucket := range s.opensByFile {
@@ -272,14 +272,14 @@ func (s *server) versionIsOpen(sh *share, path string) bool {
 
 	for _, op := range candidates {
 		op.mu.Lock()
-		match := op.version != nil && op.version.path == path
+		v := op.version
 		op.mu.Unlock()
-		if match {
-			return true
+		if v != nil && v.path == path {
+			return v.id, true
 		}
 	}
 
-	return false
+	return 0, false
 }
 
 // opensOn collects the opens of a file, other than the one given. The bucket is copied before
