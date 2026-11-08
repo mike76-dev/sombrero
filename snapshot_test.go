@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"slices"
 	"testing"
 	"time"
 
@@ -253,11 +254,31 @@ func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {
 	h.files.mu.Lock()
 	contents := string(h.files.contents["dir/file"])
 	versions := h.files.versions["dir/file"]
+	emptyings := slices.Clone(h.files.emptyings)
 	h.files.mu.Unlock()
 	if contents != "after" {
 		t.Errorf("the file holds %q, want %q", contents, "after")
 	}
 	if len(versions) != 2 || string(versions[0].data) != "now" {
 		t.Errorf("want the overwritten contents kept as the newest version, got %d versions", len(versions))
+	}
+
+	// Overwritten while a version of it was open, the file was being restored, and its contents
+	// are kept whatever the session; overwritten with no version open, it is left to the policy.
+	if len(emptyings) != 1 || emptyings[0] != (emptying{path: "dir/file", deliberate: true}) {
+		t.Errorf("want one deliberate emptying of the file, got %+v", emptyings)
+	}
+	buf, _ = alice.createAccessing("dir/file", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE_IF, writeAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("overwriting the file again: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	if _, err := alice.closeHandle(createdFileID(buf)); err != nil {
+		t.Fatalf("closing the file: %v", err)
+	}
+	h.files.mu.Lock()
+	emptyings = slices.Clone(h.files.emptyings)
+	h.files.mu.Unlock()
+	if len(emptyings) != 2 || emptyings[1] != (emptying{path: "dir/file", deliberate: false}) {
+		t.Errorf("want a plain emptying to follow, got %+v", emptyings)
 	}
 }

@@ -654,8 +654,7 @@ func (db *Database) RenameFile(acc Account, share string, oldPath, newPath strin
 			SET
 				directory_id = t.new_parent_id,
 				name = t.new_name,
-				full_path = t.new_path,
-				modified_at = NOW()
+				full_path = t.new_path
 			FROM target t
 			WHERE o.id = t.src_id
 			RETURNING o.id
@@ -896,8 +895,7 @@ func (db *Database) RenameDirectory(acc Account, share string, oldPath, newPath 
 			update_files AS (
 				UPDATE objects o
 				SET
-					full_path = t.new_path || substring(o.full_path FROM length(t.old_path) + 1),
-					modified_at = NOW()
+					full_path = t.new_path || substring(o.full_path FROM length(t.old_path) + 1)
 				FROM target t
 				WHERE o.share_name = $1
 					AND starts_with(o.full_path, t.old_path || '/')

@@ -1169,9 +1169,9 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 
 // EmptyFile implements client.Versioner. The contents go the way a deleted
 // file's do, with what only they held unpinned, and the versions stay.
-func (ic *IndexdClient) EmptyFile(ctx context.Context, acc stores.Account, path string) error {
+func (ic *IndexdClient) EmptyFile(ctx context.Context, acc stores.Account, path string, deliberate bool) error {
 	touched := ic.slabsOf(path, false)
-	slabs, err := ic.db.EmptyFile(acc, ic.share, path)
+	slabs, err := ic.db.EmptyFile(acc, ic.share, path, deliberate)
 	if err != nil {
 		return err
 	}

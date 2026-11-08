@@ -98,7 +98,7 @@ func (m *mockClient) DeleteVersions(_ context.Context, _ stores.Account, p strin
 	return nil
 }
 
-func (m *mockClient) EmptyFile(_ context.Context, _ stores.Account, p string) error {
+func (m *mockClient) EmptyFile(_ context.Context, _ stores.Account, p string, _ bool) error {
 	m.emptied = append(m.emptied, p)
 	return nil
 }

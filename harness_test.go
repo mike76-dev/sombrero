@@ -64,6 +64,9 @@ type fakeClient struct {
 	// parentsPath is the path the "." and ".." entries of a listing were last asked about.
 	parentsPath string
 
+	// emptyings are the files emptied ahead of an overwrite, and whether each was deliberate.
+	emptyings []emptying
+
 	// readGate holds up every read until a test lets it go, so that a test can arrange for
 	// something to happen to the handle while a read on it is still being worked on.
 	// readsBegun counts the reads that reached the backend, held up or not.
@@ -187,10 +190,18 @@ func (fc *fakeClient) DeleteVersions(_ context.Context, _ stores.Account, path s
 	return nil
 }
 
+// emptying is one file emptied ahead of an overwrite: its path, and whether the
+// server took the overwrite for a restore.
+type emptying struct {
+	path       string
+	deliberate bool
+}
+
 // EmptyFile implements client.Versioner: the contents become a version, and the
 // object goes the way Delete takes it.
-func (fc *fakeClient) EmptyFile(ctx context.Context, acc stores.Account, path string) error {
+func (fc *fakeClient) EmptyFile(ctx context.Context, acc stores.Account, path string, deliberate bool) error {
 	fc.mu.Lock()
+	fc.emptyings = append(fc.emptyings, emptying{path: path, deliberate: deliberate})
 	oi, found := fc.objects[path]
 	data := fc.contents[path]
 	fc.mu.Unlock()

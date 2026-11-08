@@ -2353,10 +2353,12 @@ func (op *open) emptyFile(acc stores.Account) error {
 	ctx, path := op.ctx, op.pathName
 	op.mu.Unlock()
 
-	// A share that keeps versions keeps the contents as one; the rest lose the object.
+	// A share that keeps versions keeps the contents as one; the rest lose the object. An
+	// overwrite made while a version of the file is open is a restore, kept whatever the session.
 	var err error
 	if v, kept := op.treeConnect.client.(client.Versioner); kept {
-		err = v.EmptyFile(ctx, acc, path)
+		restoring := op.session.connection.server.versionIsOpen(op.treeConnect.share, path)
+		err = v.EmptyFile(ctx, acc, path, restoring)
 	} else {
 		err = op.treeConnect.client.Delete(ctx, acc, path, false)
 	}

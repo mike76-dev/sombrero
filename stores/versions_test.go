@@ -247,6 +247,13 @@ func TestRenameFileMovesTheVersions(t *testing.T) {
 	if err := db.CreateDirectory(acc, share, "docs", false, false); err != nil {
 		t.Fatalf("CreateDirectory: %v", err)
 	}
+	written := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE objects SET modified_at = $1 WHERE full_path = '/doc.txt' AND temporary = FALSE`, written)
+		return err
+	}); err != nil {
+		t.Fatalf("dating the file: %v", err)
+	}
 
 	if _, err := db.RenameFile(acc, share, "doc.txt", "docs/notes.txt", false); err != nil {
 		t.Fatalf("RenameFile: %v", err)
@@ -254,6 +261,11 @@ func TestRenameFileMovesTheVersions(t *testing.T) {
 	versions, err := db.Versions(share, "docs/notes.txt")
 	if err != nil || len(versions) != 1 || versions[0].Size != 400 {
 		t.Fatalf("want the version under the new name, got %+v, %v", versions, err)
+	}
+
+	// A rename is no change to the contents, so the file keeps the time they were written.
+	if o, err := db.Object(acc, share, "docs/notes.txt"); err != nil || !o.ModifiedAt.Equal(written) {
+		t.Errorf("want the modified time kept through the rename, got %v, %v", o.ModifiedAt, err)
 	}
 	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 0 {
 		t.Errorf("want nothing left under the old name, got %v", sizes)
@@ -628,7 +640,7 @@ func TestEmptyFileKeepsTheVersions(t *testing.T) {
 	replaceFile(t, db, share, acc, "doc.txt", 300)
 	ageSession(t, db, 30*time.Minute, 20*time.Minute)
 
-	slabs, err := db.EmptyFile(acc, share, "doc.txt")
+	slabs, err := db.EmptyFile(acc, share, "doc.txt", false)
 	if err != nil {
 		t.Fatalf("EmptyFile: %v", err)
 	}
@@ -650,7 +662,7 @@ func TestEmptyFileKeepsTheVersions(t *testing.T) {
 	// The file written afterwards has the versions; emptied again within the
 	// session, its contents go, and the versions stay.
 	replaceFile(t, db, share, acc, "doc.txt", 200)
-	if _, err := db.EmptyFile(acc, share, "doc.txt"); err != nil {
+	if _, err := db.EmptyFile(acc, share, "doc.txt", false); err != nil {
 		t.Fatalf("EmptyFile within the session: %v", err)
 	}
 	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 300 {
@@ -659,8 +671,17 @@ func TestEmptyFileKeepsTheVersions(t *testing.T) {
 	if n := bufferedBytes(t, db); n != 300 {
 		t.Errorf("want the emptied contents gone, got %d bytes buffered", n)
 	}
-	if _, err := db.EmptyFile(acc, share, "doc.txt"); !errors.Is(err, ErrNotFound) {
+	if _, err := db.EmptyFile(acc, share, "doc.txt", false); !errors.Is(err, ErrNotFound) {
 		t.Errorf("emptying what is not there: want %v, got %v", ErrNotFound, err)
+	}
+
+	// A deliberate emptying, which a restore makes, keeps the contents within the session too.
+	replaceFile(t, db, share, acc, "doc.txt", 100)
+	if _, err := db.EmptyFile(acc, share, "doc.txt", true); err != nil {
+		t.Fatalf("EmptyFile deliberately: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 3 || sizes[0] != 100 {
+		t.Errorf("want the contents kept whatever the session, got %v", sizes)
 	}
 }
 

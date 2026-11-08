@@ -171,8 +171,9 @@ func (db *Database) DeleteVersions(share, path string, id uint64) (slabs []types
 
 // EmptyFile removes the contents of the file ahead of their replacement, as a
 // create that overwrites it does: they are kept as a version where the policy
-// says, the versions of the file stay, and the slabs released are returned.
-func (db *Database) EmptyFile(acc Account, share, path string) (slabs []types.Hash256, err error) {
+// says, or whatever the session when the emptying is deliberate, the versions
+// of the file stay, and the slabs released are returned.
+func (db *Database) EmptyFile(acc Account, share, path string, deliberate bool) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const targets = deletableFile + `
@@ -194,9 +195,11 @@ func (db *Database) EmptyFile(acc Account, share, path string) (slabs []types.Ha
 			return ErrNotFound
 		}
 
-		keep, err := db.keepsVersion(ctx, tx, share, path, uint64(acc.ID))
-		if err != nil {
-			return err
+		keep := deliberate && db.versioning.Keep
+		if !keep {
+			if keep, err = db.keepsVersion(ctx, tx, share, path, uint64(acc.ID)); err != nil {
+				return err
+			}
 		}
 		if keep {
 			if err := recordVersions(ctx, tx, ids, uint64(acc.ID)); err != nil {

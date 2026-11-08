@@ -178,8 +178,9 @@ type Versioner interface {
 	DeleteVersions(ctx context.Context, acc stores.Account, path string, id uint64) error
 
 	// EmptyFile removes the contents of the file ahead of their replacement,
-	// keeping them as the policy says, with the versions of the file in place.
-	EmptyFile(ctx context.Context, acc stores.Account, path string) error
+	// keeping them as the policy says, or whatever the session when deliberate,
+	// with the versions of the file in place.
+	EmptyFile(ctx context.Context, acc stores.Account, path string, deliberate bool) error
 }
 
 // sizeFromSeeker tries to find out the size of a file.
