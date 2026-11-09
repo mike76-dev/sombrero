@@ -540,6 +540,79 @@ func TestListObjectsAt(t *testing.T) {
 	if objects, err := db.ListObjectsAt(acc, share, "elsewhere", ago(5)); err != nil || len(objects) != 0 {
 		t.Errorf("listing a folder not there: want nothing, got %v, %v", objects, err)
 	}
+
+	// A file resolves at a time to the same copy the listing shows: a version, or the file itself.
+	v, err := db.ObjectAt(acc, share, "docs/doc.txt", ago(5))
+	if err != nil || v.ID == 0 || v.Size != 300 || !v.ReplacedAt.Equal(ago(2)) {
+		t.Errorf("doc.txt halfway: want the version of 300 bytes replaced 2 hours ago, got %+v, %v", v, err)
+	}
+	v, err = db.ObjectAt(acc, share, "docs/doc.txt", base)
+	if err != nil || v.ID != 0 || v.Size != 200 {
+		t.Errorf("doc.txt now: want the file itself, got %+v, %v", v, err)
+	}
+	if v, err := db.ObjectAt(acc, share, "docs/gone.txt", ago(5)); err != nil || v.Size != 500 {
+		t.Errorf("gone.txt halfway: want the deleted contents, got %+v, %v", v, err)
+	}
+	if _, err := db.ObjectAt(acc, share, "docs/gone.txt", ago(3)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("gone.txt after the deletion: want %v, got %v", ErrNotFound, err)
+	}
+	if _, err := db.ObjectAt(acc, share, "docs/new.txt", ago(5)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("new.txt before it was made: want %v, got %v", ErrNotFound, err)
+	}
+
+	// The folder has a previous state at every time a version under it was written, by the second.
+	want := []time.Time{ago(6), ago(8), ago(10)}
+	for _, dir := range []string{"docs", ""} {
+		times, err := db.Snapshots(share, dir)
+		if err != nil {
+			t.Fatalf("Snapshots(%q): %v", dir, err)
+		}
+		if len(times) != len(want) {
+			t.Fatalf("Snapshots(%q): want %v, got %v", dir, want, times)
+		}
+		for i := range want {
+			if !times[i].Equal(want[i]) {
+				t.Errorf("Snapshots(%q)[%d]: want %v, got %v", dir, i, want[i], times[i])
+			}
+		}
+	}
+	if times, err := db.Snapshots(share, "docs/sub"); err != nil || len(times) != 0 {
+		t.Errorf("Snapshots(docs/sub): want none, got %v, %v", times, err)
+	}
+}
+
+// TestEmptiedFolderIsEmpty verifies that a folder whose files were deleted
+// counts as empty for all the versions they left, and goes with them.
+func TestEmptiedFolderIsEmpty(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Count: 10})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	if err := db.CreateDirectory(acc, share, "docs", false, false); err != nil {
+		t.Fatalf("CreateDirectory: %v", err)
+	}
+	own := types.Hash256{1}
+	plantPiece(t, db, share, acc, "docs/doc.txt", own, 0, 400)
+	if empty, err := db.DirectoryEmpty(acc, share, "docs"); err != nil || empty {
+		t.Fatalf("a folder with a file: want not empty, got %v, %v", empty, err)
+	}
+	if _, err := db.DeleteFile(acc, share, "docs/doc.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	if empty, err := db.DirectoryEmpty(acc, share, "docs"); err != nil || !empty {
+		t.Fatalf("a folder with a deleted file: want empty, got %v, %v", empty, err)
+	}
+
+	slabs, err := db.DeleteDirectory(acc, share, "docs")
+	if err != nil {
+		t.Fatalf("DeleteDirectory: %v", err)
+	}
+	assertSlabs(t, "DeleteDirectory(docs)", slabs, []types.Hash256{own})
+	if sizes := versionSizes(t, db, share, "docs/doc.txt"); len(sizes) != 0 {
+		t.Errorf("want the versions gone with the folder, got %v", sizes)
+	}
 }
 
 // TestExpireVersions verifies that the versions past the age go, on every
@@ -720,6 +793,23 @@ func TestRestoredVersionIsNotKeptAgain(t *testing.T) {
 	}
 	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 3 || sizes[0] != 400 {
 		t.Errorf("want the only copy kept, got %v", sizes)
+	}
+
+	// Written back from the copy that stood as the file, which the emptying made the newest
+	// version, the file is marked with that version by a zero ID.
+	replaceFile(t, db, share, acc, "doc.txt", 400)
+	if err := db.MarkRestored(share, "doc.txt", []uint64{0}); err != nil {
+		t.Fatalf("MarkRestored with the newest version: %v", err)
+	}
+	if _, err := db.EmptyFile(acc, share, "doc.txt", true); err != nil {
+		t.Fatalf("EmptyFile of the copy written back: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 3 {
+		t.Errorf("want nothing added for the copy written back, got %v", sizes)
+	}
+	replaceFile(t, db, share, acc, "doc.txt", 100)
+	if err := db.MarkRestored(share, "doc.txt", []uint64{0}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("MarkRestored with the newest version of another size: want %v, got %v", ErrNotFound, err)
 	}
 }
 

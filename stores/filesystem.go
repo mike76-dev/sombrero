@@ -152,27 +152,10 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 }
 
 // DirectoryEmpty returns true if the specified directory contains no objects.
+// The versions of files deleted from it do not count: they go with it.
 func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty bool, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const dirQuery = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $1
-			)
-			SELECT d.id
-			FROM directories d
-			JOIN accounts owner ON owner.id = d.account
-			CROSS JOIN caller c
-			WHERE d.share_name = $2
-				AND d.full_path = $3
-				AND (d.account = c.id
-				OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
-				OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
-				OR owns_ancestor(d.share_name, c.id, d.full_path)
-			)
-		`
 		const query = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -204,6 +187,11 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 					CROSS JOIN caller c
 					WHERE o.share_name = $1
 						AND o.directory_id IS NOT DISTINCT FROM $2
+						AND NOT EXISTS (
+							SELECT 1
+							FROM versions v
+							WHERE v.object_id = o.id
+						)
 						AND (
 							o.account = c.id
 							OR (
@@ -217,19 +205,9 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 			) AS is_empty
 		`
 
-		var parentID any
-		if path == "/" {
-			parentID = nil
-		} else {
-			var parentDir *int64
-			if err := tx.QueryRow(ctx, dirQuery, acc.ID, shareName, path).Scan(&parentDir); err != nil {
-				if err == pgx.ErrNoRows {
-					return nil
-				} else {
-					return fmt.Errorf("failed to query directory: %v", err)
-				}
-			}
-			parentID = uint64(*parentDir)
+		parentID, found, err := listedDirectory(ctx, tx, acc, shareName, path)
+		if err != nil || !found {
+			return err
 		}
 
 		if err := tx.QueryRow(ctx, query, shareName, parentID, acc.ID).Scan(&empty); err != nil {

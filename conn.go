@@ -2617,9 +2617,13 @@ func (c *connection) processRequest(req *smb2.Request) (smb2.GenericResponse, *s
 			}
 
 			// The "." and ".." of the listing are the directory being searched and the one above
-			// it, which is the path of the handle rather than the pattern it is searched with.
+			// it, which is the path of the handle rather than the pattern it is searched with,
+			// and the folder as it is for a snapshot of it.
 			op.mu.Lock()
 			dirPath := op.pathName
+			if op.version != nil {
+				dirPath = op.version.path
+			}
 			op.mu.Unlock()
 
 			dir, parentDir, err := tc.client.Parents(op.ctx, acc, dirPath)
@@ -4064,30 +4068,44 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			return resp, nil
 		}
 	} else if !snapshot.IsZero() {
-		// A previous version is only ever opened, never made, and only where the share keeps
-		// versions and the file has one going by that name.
+		// A previous state is only ever opened, never made, and only where the share keeps
+		// versions: a folder as it was at the time, if it was there by then, or the copy of a
+		// file that stood at the time, which may be a version or the file as it is.
 		versioner, kept := tc.client.(client.Versioner)
 		if cr.CreateDisposition() != smb2.FILE_OPEN && cr.CreateDisposition() != smb2.FILE_OPEN_IF {
 			cancel()
 			return smb2.NewErrorResponse(cr, smb2.STATUS_ACCESS_DENIED, 0, nil), nil
 		}
-		var v client.VersionInfo
-		var found bool
-		if kept {
-			v, found, err = versionAt(ctx, versioner, acc, path, snapshot)
-		}
-		if err != nil && !errors.Is(err, stores.ErrNotFound) {
-			cancel()
-			log.Printf("Couldn't look up the versions of %s: %v\n", path, err)
-			return smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil), nil
-		}
-		if !found {
+		if !kept {
 			cancel()
 			return smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil), nil
 		}
-		info = client.ObjectInfo{Key: "/" + openPath, Size: v.Size, CreatedAt: v.ModifiedAt, ModifiedAt: v.ModifiedAt}
+		info, err = tc.client.Object(ctx, acc, path)
+		if errors.Is(err, context.DeadlineExceeded) {
+			cancel()
+			return smb2.NewErrorResponse(cr, smb2.STATUS_IO_TIMEOUT, 0, nil), nil
+		}
+		if err == nil && strings.HasSuffix(info.Key, "/") {
+			if info.CreatedAt.Truncate(time.Second).After(snapshot) {
+				cancel()
+				return smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil), nil
+			}
+			info.Key = "/" + strings.TrimSuffix(openPath, "/") + "/"
+			version = &versionOpen{path: path, at: snapshot}
+		} else {
+			v, err := versioner.ObjectAt(ctx, acc, path, snapshot)
+			if errors.Is(err, stores.ErrNotFound) {
+				cancel()
+				return smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil), nil
+			} else if err != nil {
+				cancel()
+				log.Printf("Couldn't look up the versions of %s: %v\n", path, err)
+				return smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil), nil
+			}
+			info = client.ObjectInfo{Key: "/" + openPath, Size: v.Size, CreatedAt: v.ModifiedAt, ModifiedAt: v.ModifiedAt}
+			version = &versionOpen{id: v.ID, path: path, at: snapshot}
+		}
 		result = smb2.FILE_OPENED
-		version = &versionOpen{id: v.ID, path: path}
 	} else {
 		info, err = tc.client.Object(ctx, acc, path)
 		if err != nil && errors.Is(err, context.DeadlineExceeded) {
@@ -4282,9 +4300,14 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 		tc.persistFile(path, op.file)
 
 		// A handle opened with no version of the file open is nobody's restore, and whatever a
-		// restore noted on the file before it is stale.
-		if len(c.server.openVersionsOf(tc.share, path)) == 0 {
+		// restore noted on the file before it is stale. A file made while one is open is being
+		// written from it, as one overwritten would be.
+		ids := c.server.openVersionsOf(tc.share, path)
+		switch {
+		case len(ids) == 0:
 			op.file.restoring(nil)
+		case result == smb2.FILE_CREATED:
+			op.file.restoring(ids)
 		}
 	}
 
@@ -4431,20 +4454,6 @@ func snapshotPath(snapshot time.Time, path string) string {
 		return path
 	}
 	return smb2.SnapshotToken(snapshot) + "/" + path
-}
-
-// versionAt finds the version of the file whose snapshot name is the time.
-func versionAt(ctx context.Context, versioner client.Versioner, acc stores.Account, path string, at time.Time) (client.VersionInfo, bool, error) {
-	versions, err := versioner.Versions(ctx, acc, path)
-	if err != nil {
-		return client.VersionInfo{}, false, err
-	}
-	for _, v := range versions {
-		if v.ModifiedAt.UTC().Truncate(time.Second).Equal(at) {
-			return v, true, nil
-		}
-	}
-	return client.VersionInfo{}, false, nil
 }
 
 // securityInfo answers a security query with the real owner and grants where

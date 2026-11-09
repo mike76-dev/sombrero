@@ -184,8 +184,19 @@ type Versioner interface {
 
 	// MarkRestored notes that the file was written from one of the versions,
 	// the one of its size, and holds it unchanged, so that a restore replacing
-	// it keeps nothing.
+	// it keeps nothing. A zero ID names the newest version, the contents that
+	// stood as the file when the restore began.
 	MarkRestored(ctx context.Context, path string, ids []uint64) error
+
+	// Snapshots lists the times the folder has previous states at, newest first.
+	Snapshots(ctx context.Context, acc stores.Account, path string) ([]time.Time, error)
+
+	// ListAt lists the folder as it was at the time, deleted files included.
+	ListAt(ctx context.Context, acc stores.Account, path string, at time.Time) ([]ObjectInfo, error)
+
+	// ObjectAt finds the copy of the file that stood at the time: a version, or
+	// the file as it is now, with a zero ID.
+	ObjectAt(ctx context.Context, acc stores.Account, path string, at time.Time) (VersionInfo, error)
 }
 
 // sizeFromSeeker tries to find out the size of a file.

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -122,6 +123,8 @@ func (db *Database) keepsReplaced(ctx context.Context, tx pgx.Tx, share, path st
 // markRestored notes that the file holds unchanged the one of the versions
 // that is of its size, which a later restore need not keep; none: ErrNotFound.
 func markRestored(ctx context.Context, tx pgx.Tx, share, path string, ids []uint64) error {
+	// A zero ID names the newest version: the contents that stood as the file
+	// when the restore began, which its first write has made a version since.
 	const query = `
 		UPDATE objects o
 		SET restored_from = v.id
@@ -130,10 +133,16 @@ func markRestored(ctx context.Context, tx pgx.Tx, share, path string, ids []uint
 		WHERE o.share_name = $1
 			AND o.full_path = $2
 			AND o.temporary = FALSE
-			AND v.id = ANY($3::BIGINT[])
 			AND v.share_name = o.share_name
 			AND v.full_path = o.full_path
 			AND v.size = o.size
+			AND (v.id = ANY($3::BIGINT[]) OR 0 = ANY($3::BIGINT[]) AND versions.replaced_at = (
+				SELECT MAX(newest.replaced_at)
+				FROM versions newest
+				JOIN objects n ON n.id = newest.object_id
+				WHERE n.share_name = o.share_name
+					AND n.full_path = o.full_path
+			))
 	`
 
 	candidates := make([]int64, 0, len(ids))
@@ -657,6 +666,45 @@ func (db *Database) Versions(share, path string) (versions []Version, err error)
 	return
 }
 
+// filesAt picks, for each path the scope covers, the copy of the file that
+// stood at the time $4 among the file as it is and its versions: one there by
+// then and not replaced by then, with the contents of the time where they
+// were kept, and the nearest kept after it otherwise. Times go by the second,
+// as the snapshot names do. $1 is the share and $3 the account asking.
+func filesAt(scope string) string {
+	return `
+		SELECT DISTINCT ON (o.full_path)
+			o.full_path,
+			o.id,
+			o.size,
+			o.created_at,
+			o.modified_at,
+			v.replaced_at
+		FROM objects o
+		LEFT JOIN versions v ON v.object_id = o.id
+		JOIN accounts owner ON owner.id = o.account
+		LEFT JOIN directories od
+			ON od.share_name = o.share_name
+			AND od.id = o.directory_id
+		CROSS JOIN caller c
+		WHERE o.share_name = $1
+			AND ` + scope + `
+			AND (o.temporary = FALSE OR v.object_id IS NOT NULL)
+			AND date_trunc('second', o.created_at) <= $4
+			AND (v.replaced_at IS NULL OR v.replaced_at > $4)
+			AND (
+				o.account = c.id
+				OR (
+					od.private = FALSE
+					AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
+				)
+				OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+				OR owns_ancestor(o.share_name, c.id, o.full_path)
+			)
+		ORDER BY o.full_path, date_trunc('second', o.modified_at) <= $4 DESC, v.replaced_at NULLS LAST, o.id
+	`
+}
+
 // ListObjectsAt lists the directory as it was at the time: the folders made
 // by then, and the files there by then with the contents they held, which are
 // the versions replaced since, deleted files among them. A file whose state
@@ -664,7 +712,7 @@ func (db *Database) Versions(share, path string) (versions []Version, err error)
 func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.Time) (objects []ObjectMeta, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const query = `
+		query := `
 			WITH caller AS (
 				SELECT id, workgroup
 				FROM accounts
@@ -680,7 +728,7 @@ func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.T
 			CROSS JOIN caller c
 			WHERE d.share_name = $1
 				AND d.parent_id IS NOT DISTINCT FROM $2
-				AND d.created_at <= $4
+				AND date_trunc('second', d.created_at) <= $4
 				AND (d.account = c.id
 					OR (d.private = FALSE AND EXISTS (
 						SELECT 1
@@ -695,35 +743,7 @@ func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.T
 			UNION ALL
 
 			SELECT full_path, size, created_at, modified_at, FALSE AS is_dir
-			FROM (
-				SELECT DISTINCT ON (o.full_path)
-					o.full_path,
-					o.size,
-					o.created_at,
-					o.modified_at
-				FROM objects o
-				LEFT JOIN versions v ON v.object_id = o.id
-				JOIN accounts owner ON owner.id = o.account
-				LEFT JOIN directories od
-					ON od.share_name = o.share_name
-					AND od.id = o.directory_id
-				CROSS JOIN caller c
-				WHERE o.share_name = $1
-					AND o.directory_id IS NOT DISTINCT FROM $2
-					AND (o.temporary = FALSE OR v.object_id IS NOT NULL)
-					AND o.created_at <= $4
-					AND (v.replaced_at IS NULL OR v.replaced_at > $4)
-					AND (
-						o.account = c.id
-						OR (
-							od.private = FALSE
-							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
-						)
-						OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
-						OR owns_ancestor(o.share_name, c.id, o.full_path)
-					)
-				ORDER BY o.full_path, o.modified_at <= $4 DESC, v.replaced_at NULLS LAST, o.id
-			) f
+			FROM (` + filesAt(`o.directory_id IS NOT DISTINCT FROM $2`) + `) f
 
 			ORDER BY full_path
 		`
@@ -747,6 +767,63 @@ func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.T
 			objects = append(objects, obj)
 		}
 		return rows.Err()
+	})
+	return
+}
+
+// ObjectAt finds the copy of the file at the path that stood at the time, as
+// ListObjectsAt picks it: a version, or the file as it is now with a zero ID.
+// The caller answers for the account's right to read the file.
+func (db *Database) ObjectAt(acc Account, shareName, path string, at time.Time) (version Version, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		query := `
+			WITH caller AS (
+				SELECT id, workgroup
+				FROM accounts
+				WHERE id = $3
+			)
+			SELECT id, size, created_at, modified_at, replaced_at
+			FROM (` + filesAt(`o.full_path = $2`) + `) f
+		`
+		var id int64
+		var created time.Time
+		var replaced *time.Time
+		err := tx.QueryRow(ctx, query, shareName, path, acc.ID, at).Scan(&id, &version.Size, &created, &version.ModifiedAt, &replaced)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return fmt.Errorf("failed to find the file at the time: %w", err)
+		}
+		if replaced != nil {
+			version.ID, version.ReplacedAt = uint64(id), *replaced
+		}
+		return nil
+	})
+	return
+}
+
+// Snapshots lists the times the folder has previous states at, newest first:
+// the times the versions of the files under it, at any depth, were last
+// written, by the second. The caller answers for the right to the folder.
+func (db *Database) Snapshots(shareName, path string) (times []time.Time, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT DISTINCT date_trunc('second', o.modified_at) AS at
+			FROM objects o
+			JOIN versions v ON v.object_id = o.id
+			WHERE o.share_name = $1
+				AND starts_with(o.full_path, $2)
+			ORDER BY at DESC
+		`
+		prefix := strings.TrimSuffix(path, "/") + "/"
+		rows, err := tx.Query(ctx, query, shareName, prefix)
+		if err != nil {
+			return fmt.Errorf("failed to list the snapshots: %w", err)
+		}
+		times, err = pgx.CollectRows(rows, pgx.RowTo[time.Time])
+		return err
 	})
 	return
 }

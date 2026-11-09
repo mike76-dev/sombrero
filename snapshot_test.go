@@ -211,6 +211,167 @@ func TestIntegrationAPreviousVersionOpens(t *testing.T) {
 	}
 }
 
+// openSnapshotDir opens a folder as it was at the time, for reading.
+func (cl *testClient) openSnapshotDir(at time.Time, dir string) ([]byte, error) {
+	cl.mid++
+	msg := createRequestWithOptions(cl.mid, cl.ss.sessionID, cl.tc.treeID, smb2.SnapshotToken(at)+"/"+dir,
+		smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, smb2.FILE_DIRECTORY_FILE, nil)
+	resp, err := cl.send(msg)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Encode(), nil
+}
+
+// TestIntegrationAFolderOpensAsItWas verifies that a folder lists the times of its
+// previous states, opens as it was at one of them, and lists what stood there then:
+// the files as they were, deleted files among them, and nothing made later.
+func TestIntegrationAFolderOpensAsItWas(t *testing.T) {
+	h := newSMBTest(t)
+	first := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	then := time.Date(2026, 11, 5, 17, 30, 0, 0, time.UTC)
+	h.files.putDirMade("dir", first)
+	h.files.putData("dir/file", []byte("now"))
+	h.files.putVersionReplaced("dir/file", then, then.Add(time.Hour), []byte("before"))
+	h.files.putVersionReplaced("dir/gone", first, then.Add(2*time.Hour), []byte("bye"))
+	h.files.putDataMade("dir/same", first, []byte("same"))
+	h.files.putData("dir/plain", []byte("x"))
+	h.files.putDir("dir/sub")
+
+	alice := h.dial("alice")
+	fid := createdFileID(alice.openDir("dir"))
+	out := ioctlOutput(t, alice, fid, smb2.FSCTL_SRV_ENUMERATE_SNAPSHOTS, 65536)
+	_, _, _, names := snapshotArray(t, out)
+	want := []string{smb2.SnapshotToken(then), smb2.SnapshotToken(first)}
+	if !slices.Equal(names, want) {
+		t.Errorf("the folder's snapshots are %q, want %q", names, want)
+	}
+
+	// At the time, the folder held the version of the file, the file deleted since, and the
+	// file unchanged since.
+	buf, err := alice.openSnapshotDir(then, "dir")
+	if err != nil {
+		t.Fatalf("opening the folder as it was: %v", err)
+	}
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the folder as it was: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	listed := listedNames(t, alice.queryDirectory(createdFileID(buf), "*"))
+	slices.Sort(listed)
+	if want := []string{".", "..", "file", "gone", "same"}; !slices.Equal(listed, want) {
+		t.Errorf("the folder as it was lists %q, want %q", listed, want)
+	}
+
+	// What it held then reads as it was, and what it did not hold is not there.
+	for _, tt := range []struct{ name, data string }{{"dir/file", "before"}, {"dir/gone", "bye"}, {"dir/same", "same"}} {
+		buf, _ := alice.createAccessing(smb2.SnapshotToken(then)+"/"+tt.name, smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, nil)
+		if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+			t.Fatalf("opening %s as it was: Status = %#x, want %#x", tt.name, status, smb2.STATUS_OK)
+		}
+		buf, _ = alice.readOver(createdFileID(buf), 16, 0)
+		if got := string(readData(t, buf)); got != tt.data {
+			t.Errorf("%s as it was reads %q, want %q", tt.name, got, tt.data)
+		}
+	}
+	buf, _ = alice.createAccessing(smb2.SnapshotToken(then)+"/dir/plain", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OBJECT_NAME_NOT_FOUND {
+		t.Errorf("a file made since: Status = %#x, want %#x", status, smb2.STATUS_OBJECT_NAME_NOT_FOUND)
+	}
+	buf, _ = alice.openSnapshotDir(then, "dir/sub")
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OBJECT_NAME_NOT_FOUND {
+		t.Errorf("a folder made since: Status = %#x, want %#x", status, smb2.STATUS_OBJECT_NAME_NOT_FOUND)
+	}
+
+	// Earlier still, only the deleted file stood there, and the folder itself was not yet made.
+	buf, _ = alice.openSnapshotDir(first, "dir")
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the folder as it first was: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	listed = listedNames(t, alice.queryDirectory(createdFileID(buf), "*"))
+	slices.Sort(listed)
+	if want := []string{".", "..", "gone", "same"}; !slices.Equal(listed, want) {
+		t.Errorf("the folder as it first was lists %q, want %q", listed, want)
+	}
+	buf, _ = alice.openSnapshotDir(first.Add(-time.Hour), "dir")
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OBJECT_NAME_NOT_FOUND {
+		t.Errorf("the folder before it was made: Status = %#x, want %#x", status, smb2.STATUS_OBJECT_NAME_NOT_FOUND)
+	}
+
+	// Nothing is made in a folder as it was.
+	buf, _ = alice.createAccessing(smb2.SnapshotToken(then)+"/dir/new", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE, writeAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_ACCESS_DENIED {
+		t.Errorf("making a file in a folder as it was: Status = %#x, want %#x", status, smb2.STATUS_ACCESS_DENIED)
+	}
+
+	// Restoring the folder copies the file unchanged since over itself: its copy of the time
+	// still reads once the overwrite has made it a version, and the write is noted as a restore.
+	buf, _ = alice.createAccessing(smb2.SnapshotToken(then)+"/dir/same", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the unchanged file as it was: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	source := createdFileID(buf)
+	buf, _ = alice.createAccessing("dir/same", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OVERWRITE_IF, writeAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("overwriting the unchanged file: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	live := createdFileID(buf)
+	buf, err = alice.readOver(source, 16, 0)
+	if err != nil {
+		t.Fatalf("reading the copy of the time after the overwrite: %v", err)
+	}
+	if got := string(readData(t, buf)); got != "same" {
+		t.Errorf("the copy of the time reads %q after the overwrite, want %q", got, "same")
+	}
+	if _, err := alice.write(live, 0, []byte("same")); err != nil {
+		t.Fatalf("writing the file back: %v", err)
+	}
+	if _, err := alice.closeHandle(live); err != nil {
+		t.Fatalf("closing the file: %v", err)
+	}
+	if _, err := alice.closeHandle(source); err != nil {
+		t.Fatalf("closing the copy of the time: %v", err)
+	}
+	h.files.mu.Lock()
+	emptyings := slices.Clone(h.files.emptyings)
+	restorations := slices.Clone(h.files.restorations)
+	h.files.mu.Unlock()
+	if len(emptyings) != 1 || emptyings[0] != (emptying{path: "dir/same", deliberate: true}) {
+		t.Errorf("want one deliberate emptying of the file, got %+v", emptyings)
+	}
+	if len(restorations) != 1 || restorations[0].path != "dir/same" || !slices.Equal(restorations[0].ids, []uint64{0}) {
+		t.Errorf("want the file noted as restored from the copy that stood as it, got %+v", restorations)
+	}
+
+	// A deleted file is restored by being made anew while its copy of the time is open, and is
+	// noted as restored from it like a file overwritten.
+	buf, _ = alice.createAccessing(smb2.SnapshotToken(then)+"/dir/gone", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_OPEN, readAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("opening the deleted file as it was: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	source = createdFileID(buf)
+	buf, _ = alice.createAccessing("dir/gone", smb2.OPLOCK_LEVEL_NONE, smb2.FILE_CREATE, writeAccess, nil)
+	if status := smb2.Header(buf).Status(); status != smb2.STATUS_OK {
+		t.Fatalf("making the deleted file anew: Status = %#x, want %#x", status, smb2.STATUS_OK)
+	}
+	live = createdFileID(buf)
+	if _, err := alice.write(live, 0, []byte("bye")); err != nil {
+		t.Fatalf("writing the deleted file anew: %v", err)
+	}
+	if _, err := alice.closeHandle(live); err != nil {
+		t.Fatalf("closing the file: %v", err)
+	}
+	if _, err := alice.closeHandle(source); err != nil {
+		t.Fatalf("closing the copy of the time: %v", err)
+	}
+	h.files.mu.Lock()
+	gone := h.files.versions["dir/gone"][0].info.ID
+	restorations = slices.Clone(h.files.restorations)
+	h.files.mu.Unlock()
+	if len(restorations) != 2 || restorations[1].path != "dir/gone" || !slices.Equal(restorations[1].ids, []uint64{gone}) {
+		t.Errorf("want the file made anew noted as restored from its version, got %+v", restorations)
+	}
+}
+
 // TestIntegrationOverwritingKeepsTheVersions verifies that a create overwriting
 // a file leaves its versions readable, and makes the overwritten contents one.
 func TestIntegrationOverwritingKeepsTheVersions(t *testing.T) {

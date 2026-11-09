@@ -135,13 +135,19 @@ func newFakeClient() *fakeClient {
 	}
 }
 
-// putVersion gives a file a previous version, last written at the time and holding the data.
+// putVersion gives a file a previous version, last written at the time and holding the data,
+// and replaced a moment after it was written.
 func (fc *fakeClient) putVersion(path string, modified time.Time, data []byte) {
+	fc.putVersionReplaced(path, modified, modified.Add(time.Millisecond), data)
+}
+
+// putVersionReplaced is putVersion for a version that stood until it was replaced at the time.
+func (fc *fakeClient) putVersionReplaced(path string, modified, replaced time.Time, data []byte) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 
 	fc.nextVersionID++
-	info := client.VersionInfo{ID: fc.nextVersionID, Size: uint64(len(data)), ModifiedAt: modified, ReplacedAt: modified}
+	info := client.VersionInfo{ID: fc.nextVersionID, Size: uint64(len(data)), ModifiedAt: modified, ReplacedAt: replaced}
 	fc.versions[path] = append(fc.versions[path], fakeVersion{info: info, data: data})
 	slices.SortFunc(fc.versions[path], func(a, b fakeVersion) int {
 		return b.info.ModifiedAt.Compare(a.info.ModifiedAt)
@@ -225,7 +231,7 @@ func (fc *fakeClient) EmptyFile(ctx context.Context, acc stores.Account, path st
 	if !found {
 		return stores.ErrNotFound
 	}
-	fc.putVersion(path, oi.ModifiedAt, data)
+	fc.putVersionReplaced(path, oi.ModifiedAt, time.Now(), data)
 	return fc.Delete(ctx, acc, path, false)
 }
 
@@ -248,6 +254,105 @@ func (fc *fakeClient) ReadVersion(_ context.Context, _ stores.Account, path stri
 		return err
 	}
 	return errNoObject
+}
+
+// Snapshots implements client.Versioner: the times the versions under the folder were written.
+func (fc *fakeClient) Snapshots(_ context.Context, _ stores.Account, dir string) ([]time.Time, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	var times []time.Time
+	for path, versions := range fc.versions {
+		if dir != "" && !strings.HasPrefix(path, dir+"/") {
+			continue
+		}
+		for _, v := range versions {
+			if t := v.info.ModifiedAt.UTC().Truncate(time.Second); !slices.Contains(times, t) {
+				times = append(times, t)
+			}
+		}
+	}
+	slices.SortFunc(times, func(a, b time.Time) int { return b.Compare(a) })
+	return times, nil
+}
+
+// copyAt picks the copy of the file that stood at the time the way the store does: a version
+// written by then and replaced after it, else the file as it is if there by then, else the
+// earliest replaced version that stood after it. The lock is held by the caller.
+func (fc *fakeClient) copyAt(path string, at time.Time) (client.VersionInfo, bool) {
+	// A version was made when the file was, which is its own time where the file is gone.
+	oi, live := fc.objects[path]
+	var fallback client.VersionInfo
+	var found bool
+	for _, v := range fc.versions[path] {
+		if !v.info.ReplacedAt.After(at) {
+			continue
+		}
+		if !v.info.ModifiedAt.UTC().Truncate(time.Second).After(at) {
+			return v.info, true
+		}
+		made := v.info.ModifiedAt
+		if live {
+			made = oi.CreatedAt
+		}
+		if made.UTC().Truncate(time.Second).After(at) {
+			continue
+		}
+		if !found || v.info.ReplacedAt.Before(fallback.ReplacedAt) {
+			fallback, found = v.info, true
+		}
+	}
+	if live && !oi.CreatedAt.UTC().Truncate(time.Second).After(at) {
+		return client.VersionInfo{Size: oi.Size, ModifiedAt: oi.ModifiedAt}, true
+	}
+	return fallback, found
+}
+
+// ObjectAt implements client.Versioner.
+func (fc *fakeClient) ObjectAt(_ context.Context, _ stores.Account, path string, at time.Time) (client.VersionInfo, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if v, found := fc.copyAt(path, at); found {
+		return v, nil
+	}
+	return client.VersionInfo{}, stores.ErrNotFound
+}
+
+// ListAt implements client.Versioner: the folders made by the time, and the files that stood then.
+func (fc *fakeClient) ListAt(_ context.Context, _ stores.Account, dir string, at time.Time) ([]client.ObjectInfo, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	inDir := func(path string) bool {
+		parent := ""
+		if i := strings.LastIndex(path, "/"); i >= 0 {
+			parent = path[:i]
+		}
+		return path != "" && parent == dir
+	}
+	var ois []client.ObjectInfo
+	files := make(map[string]struct{})
+	for path, oi := range fc.objects {
+		switch {
+		case !inDir(path):
+		case !strings.HasSuffix(oi.Key, "/"):
+			files[path] = struct{}{}
+		case !oi.CreatedAt.UTC().Truncate(time.Second).After(at):
+			ois = append(ois, oi)
+		}
+	}
+	for path := range fc.versions {
+		if inDir(path) {
+			files[path] = struct{}{}
+		}
+	}
+	for path := range files {
+		if v, found := fc.copyAt(path, at); found {
+			ois = append(ois, client.ObjectInfo{Key: "/" + path, Size: v.Size, CreatedAt: v.ModifiedAt, ModifiedAt: v.ModifiedAt})
+		}
+	}
+	return ois, nil
 }
 
 // put makes a file appear in the store, as if it had been uploaded out of band.
@@ -310,6 +415,30 @@ func (fc *fakeClient) putDir(path string) {
 		CreatedAt:  now,
 		ModifiedAt: now,
 	}
+}
+
+// putDataMade is putData for a file made and last written at the time.
+func (fc *fakeClient) putDataMade(path string, made time.Time, data []byte) {
+	fc.putData(path, data)
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	oi := fc.objects[path]
+	oi.CreatedAt, oi.ModifiedAt = made, made
+	fc.objects[path] = oi
+}
+
+// putDirMade is putDir for a directory made at the time.
+func (fc *fakeClient) putDirMade(path string, made time.Time) {
+	fc.putDir(path)
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	oi := fc.objects[path]
+	oi.CreatedAt, oi.ModifiedAt = made, made
+	fc.objects[path] = oi
 }
 
 // putSizedDir makes a directory appear in the store whose key carries a size, which is what a query

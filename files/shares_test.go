@@ -107,6 +107,18 @@ func (m *mockClient) MarkRestored(_ context.Context, _ string, _ []uint64) error
 	return nil
 }
 
+func (m *mockClient) Snapshots(_ context.Context, _ stores.Account, _ string) ([]time.Time, error) {
+	return nil, nil
+}
+
+func (m *mockClient) ListAt(_ context.Context, _ stores.Account, _ string, _ time.Time) ([]client.ObjectInfo, error) {
+	return nil, nil
+}
+
+func (m *mockClient) ObjectAt(_ context.Context, _ stores.Account, _ string, _ time.Time) (client.VersionInfo, error) {
+	return client.VersionInfo{}, stores.ErrNotFound
+}
+
 // deletion and renaming are what the mock client was asked to delete or move.
 type deletion struct {
 	path  string
