@@ -2141,9 +2141,6 @@ func (op *open) startUpload() error {
 		slots:      make(chan struct{}, partsInFlight(op.treeConnect.maxUploadSize)),
 		writers:    make(map[*open]struct{}),
 	})
-	if op.session.connection.server.debug {
-		log.Printf("Upload of %s started", path)
-	}
 
 	return nil
 }
@@ -2394,9 +2391,6 @@ func (op *open) emptyFile(acc stores.Account) error {
 	op.file.empty()
 	op.file.markUnstored()
 	op.file.restoring(restoring)
-	if op.session.connection.server.debug {
-		log.Printf("Emptied %s, restoring one of the versions %v", path, restoring)
-	}
 
 	return nil
 }
@@ -2611,10 +2605,6 @@ func (op *open) flush() error {
 		return err
 	}
 
-	if op.session.connection.server.debug {
-		log.Printf("Upload of %s finished at %d bytes, restoring one of the versions %v", u.path, finalSize, op.file.restoringNow())
-	}
-
 	// A file written from one of its versions holds that version, which the store is told.
 	if ids := op.file.restoringNow(); len(ids) > 0 {
 		if v, ok := op.treeConnect.client.(client.Versioner); ok {
@@ -2649,9 +2639,6 @@ func (op *open) cancelUpload() bool {
 	u.mu.Unlock()
 
 	_ = op.treeConnect.client.AbortUpload(op.ctx, u.path, uploadID)
-	if op.session.connection.server.debug {
-		log.Printf("Upload of %s called off", u.path)
-	}
 
 	return true
 }
