@@ -969,6 +969,7 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 		if err != nil {
 			return err
 		}
+		retain := db.versioning.Keep
 		if origin != "" {
 			if err := moveVersionsTo(ctx, tx, share, path, origin); err != nil {
 				return err
@@ -979,6 +980,17 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 			}
 			if keep {
 				slabs, err = db.absorbFile(ctx, tx, share, path, origin, acc)
+				return err
+			}
+			// Within the session, the old file is a save's leftovers and goes outright.
+			retain = false
+		}
+
+		// A share that keeps versions deletes a file by emptying it: the contents
+		// become a version, and the versions stay for the folder to show it by.
+		if retain {
+			slabs, err = db.emptyFile(ctx, tx, share, path, acc, true)
+			if !errors.Is(err, ErrNotFound) {
 				return err
 			}
 		}
@@ -1019,10 +1031,12 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 			return ErrNotFound
 		}
 
-		// The versions of the file go with it.
-		released, err := dropVersionsAt(ctx, tx, share, path, 0)
-		if err != nil {
-			return err
+		// The versions of the file go with it where none are kept.
+		var released []types.Hash256
+		if !db.versioning.Keep {
+			if released, err = dropVersionsAt(ctx, tx, share, path, 0); err != nil {
+				return err
+			}
 		}
 
 		for _, bid := range bids {
@@ -1063,7 +1077,7 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 
 // deletableFile opens the queries of DeleteFile: the CTE target is the file at
 // the path ($1, $2) the caller ($3) may delete, an upload in flight included
-// where no visible file is there.
+// where no visible file is there, and a version never.
 const deletableFile = `
 	WITH caller AS (
 		SELECT id, workgroup
@@ -1082,12 +1096,19 @@ const deletableFile = `
 			AND o.full_path = $2
 			AND (
 				o.temporary = FALSE
-				OR NOT EXISTS (
-					SELECT 1
-					FROM objects v
-					WHERE v.share_name = $1
-						AND v.full_path = $2
-						AND v.temporary = FALSE
+				OR (
+					NOT EXISTS (
+						SELECT 1
+						FROM versions kept
+						WHERE kept.object_id = o.id
+					)
+					AND NOT EXISTS (
+						SELECT 1
+						FROM objects v
+						WHERE v.share_name = $1
+							AND v.full_path = $2
+							AND v.temporary = FALSE
+					)
 				)
 			)
 			AND (

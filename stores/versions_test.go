@@ -206,9 +206,9 @@ func TestVersionCountDropsTheOldest(t *testing.T) {
 	}
 }
 
-// TestDeleteFileTakesTheVersions verifies that deleting a file releases what
-// its versions held too.
-func TestDeleteFileTakesTheVersions(t *testing.T) {
+// TestDeleteFileKeepsTheVersions verifies that a share keeping versions deletes
+// a file by making it one, and that a share keeping none releases it all.
+func TestDeleteFileKeepsTheVersions(t *testing.T) {
 	ctx := context.Background()
 	db := NewTestStore(t, ctx)
 	defer db.Close()
@@ -223,12 +223,47 @@ func TestDeleteFileTakesTheVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteFile: %v", err)
 	}
+	if len(slabs) != 0 {
+		t.Errorf("want nothing released, got %v", slabs)
+	}
+	if _, err := db.Object(acc, share, "doc.txt"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("want the file gone from the share, got %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 300 {
+		t.Errorf("want the deleted contents kept ahead of the version, got %v", sizes)
+	}
+	if n := bufferedBytes(t, db); n != 300 {
+		t.Errorf("want the deleted contents still buffered, got %d bytes", n)
+	}
+	if _, err := db.DeleteFile(acc, share, "doc.txt"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleting what is gone: want %v, got %v", ErrNotFound, err)
+	}
+
+	// A restored version left untouched is a version already: the file goes, the versions stay.
+	versions, _ := db.Versions(share, "doc.txt")
+	if _, err := db.RestoreVersion(acc, share, "doc.txt", versions[1].ID); err != nil {
+		t.Fatalf("RestoreVersion: %v", err)
+	}
+	if slabs, err := db.DeleteFile(acc, share, "doc.txt"); err != nil || len(slabs) != 0 {
+		t.Fatalf("DeleteFile of the restored version: %v, %v", slabs, err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 2 || sizes[0] != 300 {
+		t.Errorf("want the versions as they were, got %v", sizes)
+	}
+
+	// With the policy off, the file and its versions go together.
+	db.SetVersioning(VersionPolicy{})
+	replaceFile(t, db, share, acc, "doc.txt", 200)
+	slabs, err = db.DeleteFile(acc, share, "doc.txt")
+	if err != nil {
+		t.Fatalf("DeleteFile with the policy off: %v", err)
+	}
 	assertSlabs(t, "DeleteFile(doc.txt)", slabs, []types.Hash256{own})
 	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 0 {
 		t.Errorf("want the versions gone with the file, got %v", sizes)
 	}
 	if n := bufferedBytes(t, db); n != 0 {
-		t.Errorf("want the file's buffer gone, got %d bytes", n)
+		t.Errorf("want every buffer gone, got %d bytes", n)
 	}
 }
 
@@ -652,7 +687,7 @@ func TestSwapSaveKeepsAVersion(t *testing.T) {
 		t.Errorf("want the state before the pause kept, got %v", sizes)
 	}
 
-	// Deleted long after it was renamed away, the file takes its history with it.
+	// Deleted long after it was renamed away, the file is kept under its own name, with its history.
 	plantBufferedFile(t, db, share, acc, "~new.tmp", 50, false)
 	if _, err := db.RenameFile(acc, share, "doc.txt", "~old.tmp", false); err != nil {
 		t.Fatalf("RenameFile away: %v", err)
@@ -673,11 +708,14 @@ func TestSwapSaveKeepsAVersion(t *testing.T) {
 	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 0 {
 		t.Errorf("want no versions on the new file, got %v", sizes)
 	}
-	if n := bufferedBytes(t, db); n != 50 {
-		t.Errorf("want only the new file buffered, got %d bytes", n)
+	if sizes := versionSizes(t, db, share, "~old.tmp"); len(sizes) != 3 || sizes[0] != 100 {
+		t.Errorf("want the deleted file kept with its history, got %v", sizes)
+	}
+	if n := bufferedBytes(t, db); n != 350 {
+		t.Errorf("want the new file and the kept contents buffered, got %d bytes", n)
 	}
 
-	// A file renamed away from a name nothing has taken is simply deleted.
+	// A file renamed away from a name nothing has taken is deleted like any other: kept.
 	if _, err := db.RenameFile(acc, share, "doc.txt", "gone.txt", false); err != nil {
 		t.Fatalf("RenameFile: %v", err)
 	}
@@ -687,8 +725,11 @@ func TestSwapSaveKeepsAVersion(t *testing.T) {
 	if _, err := db.Object(acc, share, "doc.txt"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("want nothing under the old name, got %v", err)
 	}
-	if n := bufferedBytes(t, db); n != 0 {
-		t.Errorf("want nothing buffered, got %d bytes", n)
+	if sizes := versionSizes(t, db, share, "gone.txt"); len(sizes) != 1 || sizes[0] != 50 {
+		t.Errorf("want the deleted file kept, got %v", sizes)
+	}
+	if n := bufferedBytes(t, db); n != 350 {
+		t.Errorf("want nothing released, got %d bytes buffered", n)
 	}
 }
 

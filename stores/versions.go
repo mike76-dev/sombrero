@@ -239,77 +239,82 @@ func (db *Database) DeleteVersions(share, path string, id uint64) (slabs []types
 func (db *Database) EmptyFile(acc Account, share, path string, deliberate bool) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const targets = deletableFile + `
-			SELECT t.id
-			FROM target t
-			JOIN objects o ON o.id = t.id
-			WHERE o.temporary = FALSE
-		`
-
-		rows, err := tx.Query(ctx, targets, share, path, acc.ID)
-		if err != nil {
-			return fmt.Errorf("failed to find the file: %w", err)
-		}
-		ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
-		if err != nil {
-			return fmt.Errorf("failed to read the file: %w", err)
-		}
-		if len(ids) == 0 {
-			return ErrNotFound
-		}
-
-		keep, err := db.keepsReplaced(ctx, tx, share, path, ids, uint64(acc.ID), deliberate)
-		if err != nil {
-			return err
-		}
-		if keep {
-			if err := recordVersions(ctx, tx, ids, uint64(acc.ID)); err != nil {
-				return err
-			}
-			slabs, err = db.pruneVersions(ctx, tx, share, path)
-			return err
-		}
-
-		const collect = `
-			SELECT DISTINCT m.buffer_id, m.slab_key
-			FROM metadata m
-			WHERE m.object_id = ANY($1::BIGINT[])
-		`
-
-		rows, err = tx.Query(ctx, collect, ids)
-		if err != nil {
-			return fmt.Errorf("failed to collect the storage of the file: %w", err)
-		}
-		bids, keys, err := collectStorage(rows)
-		if err != nil {
-			return err
-		}
-
-		if _, err := tx.Exec(ctx, `DELETE FROM objects WHERE id = ANY($1::BIGINT[])`, ids); err != nil {
-			return fmt.Errorf("failed to delete the file: %w", err)
-		}
-		for _, bid := range bids {
-			if _, err := tx.Exec(ctx, `
-				DELETE FROM buffers b
-				WHERE b.id = $1
-					AND NOT EXISTS (
-						SELECT 1
-						FROM metadata m
-						WHERE m.buffer_id = b.id
-					)
-			`, bid); err != nil {
-				return fmt.Errorf("failed to delete orphaned buffer: %w", err)
-			}
-		}
-
-		var workgroup int
-		if err := tx.QueryRow(ctx, `SELECT workgroup FROM accounts WHERE id = $1`, acc.ID).Scan(&workgroup); err != nil {
-			return fmt.Errorf("failed to resolve workgroup: %w", err)
-		}
-		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
+		slabs, err = db.emptyFile(ctx, tx, share, path, acc, deliberate)
 		return err
 	})
 	return
+}
+
+// emptyFile is EmptyFile within a transaction, which deleting a file on a share
+// that keeps versions comes down to as well.
+func (db *Database) emptyFile(ctx context.Context, tx pgx.Tx, share, path string, acc Account, deliberate bool) ([]types.Hash256, error) {
+	const targets = deletableFile + `
+		SELECT t.id
+		FROM target t
+		JOIN objects o ON o.id = t.id
+		WHERE o.temporary = FALSE
+	`
+
+	rows, err := tx.Query(ctx, targets, share, path, acc.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find the file: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the file: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, ErrNotFound
+	}
+
+	keep, err := db.keepsReplaced(ctx, tx, share, path, ids, uint64(acc.ID), deliberate)
+	if err != nil {
+		return nil, err
+	}
+	if keep {
+		if err := recordVersions(ctx, tx, ids, uint64(acc.ID)); err != nil {
+			return nil, err
+		}
+		return db.pruneVersions(ctx, tx, share, path)
+	}
+
+	const collect = `
+		SELECT DISTINCT m.buffer_id, m.slab_key
+		FROM metadata m
+		WHERE m.object_id = ANY($1::BIGINT[])
+	`
+
+	rows, err = tx.Query(ctx, collect, ids)
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect the storage of the file: %w", err)
+	}
+	bids, keys, err := collectStorage(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM objects WHERE id = ANY($1::BIGINT[])`, ids); err != nil {
+		return nil, fmt.Errorf("failed to delete the file: %w", err)
+	}
+	for _, bid := range bids {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM buffers b
+			WHERE b.id = $1
+				AND NOT EXISTS (
+					SELECT 1
+					FROM metadata m
+					WHERE m.buffer_id = b.id
+				)
+		`, bid); err != nil {
+			return nil, fmt.Errorf("failed to delete orphaned buffer: %w", err)
+		}
+	}
+
+	var workgroup int
+	if err := tx.QueryRow(ctx, `SELECT workgroup FROM accounts WHERE id = $1`, acc.ID).Scan(&workgroup); err != nil {
+		return nil, fmt.Errorf("failed to resolve workgroup: %w", err)
+	}
+	return unreferencedSlabs(ctx, tx, share, workgroup, keys)
 }
 
 // dropVersionsAt drops the version of the file at the path with the given ID,
