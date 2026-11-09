@@ -184,6 +184,16 @@ func (h *Handler) deleteHandler(w http.ResponseWriter, req *http.Request, ps htt
 		writeError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// A deleted file is kept as a version where the share keeps them; purge takes the versions too.
+	if versioner, kept := c.(client.Versioner); kept && !dir && req.URL.Query().Get("purge") != "" {
+		err := versioner.DeleteVersions(ctx, s.account, t.key, 0)
+		if err != nil && !errors.Is(err, stores.ErrNotFound) {
+			log.Printf("file API: failed to delete the versions of %s on %s: %v", p, share.Name, err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

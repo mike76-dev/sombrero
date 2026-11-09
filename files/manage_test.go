@@ -109,14 +109,23 @@ func TestDeleting(t *testing.T) {
 	if r := manage(h, w, http.MethodDelete, "file?path=/readme.txt"); r.Code != http.StatusNoContent {
 		t.Errorf("deleting a file: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
 	}
+	if len(mc.versionsDropped) != 0 {
+		t.Errorf("want the versions left by a plain deletion, got %v", mc.versionsDropped)
+	}
+	if r := manage(h, w, http.MethodDelete, "file?path=/readme.txt&purge=1"); r.Code != http.StatusNoContent {
+		t.Errorf("deleting a file with its versions: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
+	}
+	if len(mc.versionsDropped) != 1 || mc.versionsDropped[0] != (versionRef{"readme.txt", 0}) {
+		t.Errorf("want every version of the file dropped, got %v", mc.versionsDropped)
+	}
 	if r := manage(h, w, http.MethodDelete, "folder?path=/Projects"); r.Code != http.StatusConflict {
 		t.Errorf("deleting a full folder: want %d, got %d", http.StatusConflict, r.Code)
 	}
 	if r := manage(h, w, http.MethodDelete, "folder?path=/Projects&recursive=1"); r.Code != http.StatusNoContent {
 		t.Errorf("deleting a full folder recursively: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
 	}
-	want := []deletion{{"readme.txt", false}, {"Projects", true}}
-	if len(mc.deleted) != len(want) || mc.deleted[0] != want[0] || mc.deleted[1] != want[1] {
+	want := []deletion{{"readme.txt", false}, {"readme.txt", false}, {"Projects", true}}
+	if len(mc.deleted) != len(want) || mc.deleted[0] != want[0] || mc.deleted[1] != want[1] || mc.deleted[2] != want[2] {
 		t.Errorf("want the deletions %v, got %v", want, mc.deleted)
 	}
 
@@ -138,7 +147,7 @@ func TestDeleting(t *testing.T) {
 			}
 		})
 	}
-	if len(mc.deleted) != 2 {
+	if len(mc.deleted) != 3 {
 		t.Errorf("want nothing else deleted, got %v", mc.deleted)
 	}
 
