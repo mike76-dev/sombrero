@@ -977,6 +977,21 @@ func (fbi FileBasicInfo) Encode() []byte {
 	return buf
 }
 
+// FileAttributeTagInfo is the output buffer structure for the FileAttributeTagInformation
+// info class ([MS-FSCC] 2.4.6): the attributes, and the tag of a reparse point.
+type FileAttributeTagInfo struct {
+	FileAttributes uint32
+	ReparseTag     uint32
+}
+
+// Encode marshals the FileAttributeTagInfo structure into a byte sequence.
+func (fati FileAttributeTagInfo) Encode() []byte {
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint32(buf[:4], fati.FileAttributes)
+	binary.LittleEndian.PutUint32(buf[4:8], fati.ReparseTag)
+	return buf
+}
+
 // Decode unmarshals the buffer into a FileBasicInfo structure.
 func (fbi *FileBasicInfo) Decode(buf []byte) error {
 	if len(buf) < 40 {

@@ -65,7 +65,8 @@ var ErrSlabChanged = errors.New("slab pieces have changed")
 
 // slabPiecesQuery gathers the live pieces of one slab, in the order in which
 // they sit in it. A full slab uploaded mid-write clears the upload from the
-// metadata, so the temporary object is what marks a piece as in flight.
+// metadata, so the temporary object is what marks a piece as in flight, unless
+// the object is a version, which is as settled as a file.
 const slabPiecesQuery = `
 	SELECT
 		m.id,
@@ -73,9 +74,10 @@ const slabPiecesQuery = `
 		m.obj_offset,
 		m.data_offset,
 		m.data_length,
-		o.temporary OR m.upload_id IS NOT NULL
+		(o.temporary AND v.object_id IS NULL) OR m.upload_id IS NOT NULL
 	FROM metadata m
 	JOIN objects o ON o.id = m.object_id
+	LEFT JOIN versions v ON v.object_id = o.id
 	WHERE m.slab_key = $1
 		AND o.share_name = $2
 		AND o.workgroup = $3

@@ -151,6 +151,43 @@ type AccessChecker interface {
 	PathAccess(ctx context.Context, acc stores.Account, path string) (stores.PathAccess, error)
 }
 
+// VersionInfo describes a previous version of a file: when its contents were
+// last written, and when and by whom they were replaced.
+type VersionInfo struct {
+	ID         uint64
+	Size       uint64
+	ModifiedAt time.Time
+	ReplacedAt time.Time
+	ReplacedBy string
+}
+
+// Versioner is a client whose shares keep the previous versions of files.
+type Versioner interface {
+	// Versions lists the versions of the file the account may read, newest first.
+	Versions(ctx context.Context, acc stores.Account, path string) ([]VersionInfo, error)
+
+	// ReadVersion reads a range of the version with the ID into w.
+	ReadVersion(ctx context.Context, acc stores.Account, path string, id uint64, offset, length uint64, w io.Writer) error
+
+	// RestoreVersion makes the version the contents of the file again, keeping
+	// the contents it replaces as the policy says.
+	RestoreVersion(ctx context.Context, acc stores.Account, path string, id uint64) error
+
+	// DeleteVersions removes the version with the ID, or every version of the
+	// file with a zero ID.
+	DeleteVersions(ctx context.Context, acc stores.Account, path string, id uint64) error
+
+	// EmptyFile removes the contents of the file ahead of their replacement,
+	// keeping them as the policy says, or whatever the session when deliberate,
+	// with the versions of the file in place.
+	EmptyFile(ctx context.Context, acc stores.Account, path string, deliberate bool) error
+
+	// MarkRestored notes that the file was written from one of the versions,
+	// the one of its size, and holds it unchanged, so that a restore replacing
+	// it keeps nothing.
+	MarkRestored(ctx context.Context, path string, ids []uint64) error
+}
+
 // sizeFromSeeker tries to find out the size of a file.
 func sizeFromSeeker(r io.Reader) (int64, error) {
 	s, ok := r.(io.Seeker)

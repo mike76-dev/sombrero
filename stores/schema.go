@@ -86,6 +86,25 @@ $$ LANGUAGE SQL STABLE;
     )
 $$ LANGUAGE SQL STABLE
 	`},
+	{name: "keep the previous versions of files", sql: `
+		CREATE TABLE versions (
+			object_id BIGINT PRIMARY KEY REFERENCES objects(id) ON DELETE CASCADE,
+			replaced_by INT REFERENCES accounts(id) ON DELETE SET NULL,
+			replaced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			session_until TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX idx_versions_replaced ON versions (replaced_at)
+	`},
+	{name: "note the files renamed away from their names", sql: `
+		CREATE TABLE displaced (
+			object_id BIGINT PRIMARY KEY REFERENCES objects(id) ON DELETE CASCADE,
+			path TEXT NOT NULL,
+			at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`},
+	{name: "note the version a file was restored from", sql: `
+		ALTER TABLE objects ADD COLUMN restored_from BIGINT REFERENCES objects(id) ON DELETE SET NULL
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

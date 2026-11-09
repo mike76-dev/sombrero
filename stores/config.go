@@ -193,14 +193,14 @@ func (i *CheckInterval) UnmarshalYAML(value *yaml.Node) error {
 
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return fmt.Errorf("unknown check interval: %q", s)
+		return fmt.Errorf("unknown duration: %q", s)
 	}
 	if d < 0 {
-		return fmt.Errorf("check interval must not be negative: %q", s)
+		return fmt.Errorf("a duration must not be negative: %q", s)
 	}
 	// Zero would read as the default rather than as what it says.
 	if d == 0 {
-		return fmt.Errorf("a check interval of %q does not turn the check off, use \"never\" for that", s)
+		return fmt.Errorf("a duration of %q does not mean never, use \"never\" for that", s)
 	}
 
 	*i = CheckInterval(d)
@@ -319,6 +319,44 @@ type FilesConfig struct {
 	Enabled bool `yaml:"enabled,omitempty"`
 }
 
+// The defaults of the versioning.
+const (
+	DefaultVersionGap     = 10 * time.Minute
+	DefaultVersionSession = time.Hour
+	DefaultVersionCount   = 10
+	DefaultVersionAge     = 30 * 24 * time.Hour
+)
+
+// VersioningConfig keeps the previous contents of a file when it is replaced,
+// for the clients to go back to. Off unless Enabled.
+type VersioningConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// Gap is the pause between two saves by the same account that separates
+	// editing sessions, each leaving one version; "never" keeps every save.
+	Gap CheckInterval `yaml:"gap,omitempty"`
+
+	// MaxSession is how long a session may run before a save leaves a version
+	// anyway; "never" leaves one per session however long.
+	MaxSession CheckInterval `yaml:"maxSession,omitempty"`
+
+	// MaxVersions is how many versions of a file are kept, the oldest dropped first.
+	MaxVersions int `yaml:"maxVersions,omitempty"`
+
+	// MaxAge is how long a version is kept once replaced; "never" keeps them for good.
+	MaxAge CheckInterval `yaml:"maxAge,omitempty"`
+}
+
+// Retention returns the rules with the defaults filled in. A zero gap keeps
+// every save, a zero session length puts no cap, and a zero age keeps for good.
+func (v VersioningConfig) Retention() (gap, session time.Duration, count int, age time.Duration) {
+	count = v.MaxVersions
+	if count <= 0 {
+		count = DefaultVersionCount
+	}
+	return v.Gap.Interval(DefaultVersionGap), v.MaxSession.Interval(DefaultVersionSession), count, v.MaxAge.Interval(DefaultVersionAge)
+}
+
 type Config struct {
 	Debug          bool       `yaml:"debug"`
 	Mode           ServerMode `yaml:"mode"`
@@ -335,6 +373,8 @@ type Config struct {
 	Indexd   IndexdConfig   `yaml:"indexd,omitempty"`
 	Backup   BackupConfig   `yaml:"backup,omitempty"`
 	Files    FilesConfig    `yaml:"files,omitempty"`
+
+	Versioning VersioningConfig `yaml:"versioning,omitempty"`
 }
 
 // BufferAge is how long the leftover data of a share may wait: what MaxBufferAge
@@ -401,6 +441,18 @@ func ReadConfig(dir string) (cfg Config, err error) {
 	if cfg.Files.Enabled && cfg.Mode == ModeLite {
 		err = fmt.Errorf("the file API needs the Normal mode: the Lite mode has no folder rights to serve it with")
 		return
+	}
+
+	if cfg.Versioning.Enabled {
+		switch {
+		case cfg.Mode == ModeLite:
+			err = fmt.Errorf("versioning needs the Normal mode: the Lite mode has no database to keep versions in")
+		case cfg.Versioning.MaxVersions < 0:
+			err = fmt.Errorf("maxVersions must be at least 1, got %d", cfg.Versioning.MaxVersions)
+		}
+		if err != nil {
+			return
+		}
 	}
 
 	return

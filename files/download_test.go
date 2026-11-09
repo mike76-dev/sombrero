@@ -2,7 +2,6 @@ package files
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -183,17 +182,17 @@ func TestDownloadRefusals(t *testing.T) {
 // less than asked for fails the read rather than passing a truncated file off
 // as whole.
 func TestObjectReaderReportsShortReads(t *testing.T) {
-	short := &mockClient{read: func(_ string, _, length uint64, w io.Writer) error {
+	short := func(_, length uint64, w io.Writer) error {
 		_, err := w.Write(make([]byte, length-1))
 		return err
-	}}
-	rd := &objectReader{ctx: context.Background(), client: short, path: "x", size: 10, chunk: 10}
+	}
+	rd := &objectReader{fetch: short, path: "x", size: 10, chunk: 10}
 	if _, err := io.ReadAll(rd); err == nil || !strings.Contains(err.Error(), "want 10") {
 		t.Errorf("want a short read reported, got %v", err)
 	}
 
-	failing := &mockClient{read: func(string, uint64, uint64, io.Writer) error { return errStore }}
-	rd = &objectReader{ctx: context.Background(), client: failing, path: "x", size: 10, chunk: 10}
+	failing := func(uint64, uint64, io.Writer) error { return errStore }
+	rd = &objectReader{fetch: failing, path: "x", size: 10, chunk: 10}
 	if _, err := io.ReadAll(rd); !errors.Is(err, errStore) {
 		t.Errorf("want the backend's error, got %v", err)
 	}

@@ -51,6 +51,60 @@ type mockClient struct {
 	made      []string
 	deleted   []deletion
 	renamed   []renaming
+
+	// The version hooks and what the client was asked to do with versions.
+	versions        func(string) ([]client.VersionInfo, error)
+	readVersion     func(string, uint64, uint64, uint64, io.Writer) error
+	restoreErr      error
+	dropVersionsErr error
+	restored        []versionRef
+	versionsDropped []versionRef
+	emptied         []string
+}
+
+// versionRef is a version the mock client was asked to restore or delete.
+type versionRef struct {
+	path string
+	id   uint64
+}
+
+func (m *mockClient) Versions(_ context.Context, _ stores.Account, p string) ([]client.VersionInfo, error) {
+	if m.versions != nil {
+		return m.versions(p)
+	}
+	return nil, nil
+}
+
+func (m *mockClient) ReadVersion(_ context.Context, _ stores.Account, p string, id, offset, length uint64, w io.Writer) error {
+	if m.readVersion != nil {
+		return m.readVersion(p, id, offset, length, w)
+	}
+	return stores.ErrNotFound
+}
+
+func (m *mockClient) RestoreVersion(_ context.Context, _ stores.Account, p string, id uint64) error {
+	if m.restoreErr != nil {
+		return m.restoreErr
+	}
+	m.restored = append(m.restored, versionRef{p, id})
+	return nil
+}
+
+func (m *mockClient) DeleteVersions(_ context.Context, _ stores.Account, p string, id uint64) error {
+	if m.dropVersionsErr != nil {
+		return m.dropVersionsErr
+	}
+	m.versionsDropped = append(m.versionsDropped, versionRef{p, id})
+	return nil
+}
+
+func (m *mockClient) EmptyFile(_ context.Context, _ stores.Account, p string, _ bool) error {
+	m.emptied = append(m.emptied, p)
+	return nil
+}
+
+func (m *mockClient) MarkRestored(_ context.Context, _ string, _ []uint64) error {
+	return nil
 }
 
 // deletion and renaming are what the mock client was asked to delete or move.

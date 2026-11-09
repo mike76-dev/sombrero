@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -63,6 +64,11 @@ type fakeClient struct {
 	// parentsPath is the path the "." and ".." entries of a listing were last asked about.
 	parentsPath string
 
+	// emptyings are the files emptied ahead of an overwrite, and whether each was deliberate.
+	// restorations are the files reported written from a version, with the version.
+	emptyings    []emptying
+	restorations []restoration
+
 	// readGate holds up every read until a test lets it go, so that a test can arrange for
 	// something to happen to the handle while a read on it is still being worked on.
 	// readsBegun counts the reads that reached the backend, held up or not.
@@ -103,6 +109,16 @@ type fakeClient struct {
 	// pathAccess answers the per-path rights lookup, when a test sets it;
 	// without it every path allows everything, like renterd.
 	pathAccess func(path string) (stores.PathAccess, error)
+
+	// The previous versions of the files, newest first, which make the fake a client.Versioner.
+	versions      map[string][]fakeVersion
+	nextVersionID uint64
+}
+
+// fakeVersion is a previous version of a file and what it held.
+type fakeVersion struct {
+	info client.VersionInfo
+	data []byte
 }
 
 // stagedPart is a part the backend has taken and not yet put into an object.
@@ -115,7 +131,123 @@ func newFakeClient() *fakeClient {
 		objects:  make(map[string]client.ObjectInfo),
 		contents: make(map[string][]byte),
 		uploads:  make(map[string]map[int]stagedPart),
+		versions: make(map[string][]fakeVersion),
 	}
+}
+
+// putVersion gives a file a previous version, last written at the time and holding the data.
+func (fc *fakeClient) putVersion(path string, modified time.Time, data []byte) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.nextVersionID++
+	info := client.VersionInfo{ID: fc.nextVersionID, Size: uint64(len(data)), ModifiedAt: modified, ReplacedAt: modified}
+	fc.versions[path] = append(fc.versions[path], fakeVersion{info: info, data: data})
+	slices.SortFunc(fc.versions[path], func(a, b fakeVersion) int {
+		return b.info.ModifiedAt.Compare(a.info.ModifiedAt)
+	})
+}
+
+// Versions implements client.Versioner.
+func (fc *fakeClient) Versions(_ context.Context, _ stores.Account, path string) ([]client.VersionInfo, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if _, found := fc.objects[path]; !found {
+		return nil, errNoObject
+	}
+	var infos []client.VersionInfo
+	for _, v := range fc.versions[path] {
+		infos = append(infos, v.info)
+	}
+	return infos, nil
+}
+
+// RestoreVersion implements client.Versioner: the version's data becomes the file's.
+func (fc *fakeClient) RestoreVersion(_ context.Context, _ stores.Account, path string, id uint64) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	for _, v := range fc.versions[path] {
+		if v.info.ID == id {
+			fc.contents[path] = v.data
+			return nil
+		}
+	}
+	return errNoObject
+}
+
+// DeleteVersions implements client.Versioner.
+func (fc *fakeClient) DeleteVersions(_ context.Context, _ stores.Account, path string, id uint64) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	var kept []fakeVersion
+	for _, v := range fc.versions[path] {
+		if id != 0 && v.info.ID != id {
+			kept = append(kept, v)
+		}
+	}
+	fc.versions[path] = kept
+	return nil
+}
+
+// emptying is one file emptied ahead of an overwrite: its path, and whether the
+// server took the overwrite for a restore.
+type emptying struct {
+	path       string
+	deliberate bool
+}
+
+// restoration is one file reported written from a version: its path, and the candidates.
+type restoration struct {
+	path string
+	ids  []uint64
+}
+
+// MarkRestored implements client.Versioner.
+func (fc *fakeClient) MarkRestored(_ context.Context, path string, ids []uint64) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.restorations = append(fc.restorations, restoration{path: path, ids: slices.Clone(ids)})
+	return nil
+}
+
+// EmptyFile implements client.Versioner: the contents become a version, and the
+// object goes the way Delete takes it.
+func (fc *fakeClient) EmptyFile(ctx context.Context, acc stores.Account, path string, deliberate bool) error {
+	fc.mu.Lock()
+	fc.emptyings = append(fc.emptyings, emptying{path: path, deliberate: deliberate})
+	oi, found := fc.objects[path]
+	data := fc.contents[path]
+	fc.mu.Unlock()
+	if !found {
+		return stores.ErrNotFound
+	}
+	fc.putVersion(path, oi.ModifiedAt, data)
+	return fc.Delete(ctx, acc, path, false)
+}
+
+// ReadVersion implements client.Versioner.
+func (fc *fakeClient) ReadVersion(_ context.Context, _ stores.Account, path string, id uint64, offset, length uint64, w io.Writer) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	for _, v := range fc.versions[path] {
+		if v.info.ID != id {
+			continue
+		}
+		if offset >= uint64(len(v.data)) {
+			return nil
+		}
+		if offset+length > uint64(len(v.data)) {
+			length = uint64(len(v.data)) - offset
+		}
+		_, err := w.Write(v.data[offset : offset+length])
+		return err
+	}
+	return errNoObject
 }
 
 // put makes a file appear in the store, as if it had been uploaded out of band.

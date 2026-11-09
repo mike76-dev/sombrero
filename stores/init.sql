@@ -110,6 +110,7 @@ CREATE TABLE objects (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     modified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     temporary BOOLEAN NOT NULL DEFAULT FALSE,
+    restored_from BIGINT REFERENCES objects(id) ON DELETE SET NULL,
     FOREIGN KEY (share_name) REFERENCES shares(share_name) ON DELETE CASCADE,
     FOREIGN KEY (share_name, directory_id) REFERENCES directories(share_name, id) ON DELETE CASCADE
 );
@@ -225,3 +226,21 @@ CREATE TABLE pending_unpins (
     CONSTRAINT pending_unpins_key_length CHECK (octet_length(slab_key) = 32)
 );
 CREATE INDEX idx_pending_unpins_workgroup ON pending_unpins (workgroup);
+
+-- A version is a replaced file kept hidden the way an upload in progress is.
+-- session_until is the latest save of the editing session that replaced it.
+CREATE TABLE versions (
+    object_id BIGINT PRIMARY KEY REFERENCES objects(id) ON DELETE CASCADE,
+    replaced_by INT REFERENCES accounts(id) ON DELETE SET NULL,
+    replaced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    session_until TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_versions_replaced ON versions (replaced_at);
+
+-- A file renamed away from a name, noted so that deleting it soon after,
+-- once another file has taken the name, counts as replacing that file.
+CREATE TABLE displaced (
+    object_id BIGINT PRIMARY KEY REFERENCES objects(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

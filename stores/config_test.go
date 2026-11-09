@@ -400,6 +400,62 @@ func TestReadConfigFilesSection(t *testing.T) {
 	}
 }
 
+// TestReadConfigVersioningSection verifies that versioning is off by default,
+// comes with its defaults filled in, and takes its own rules.
+func TestReadConfigVersioningSection(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "sombrero.yml"), []byte(body), 0600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	write("api:\n  password: hunter2\n")
+	cfg, err := ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if cfg.Versioning.Enabled {
+		t.Fatal("want versioning off by default, got it on")
+	}
+	gap, session, count, age := cfg.Versioning.Retention()
+	if gap != DefaultVersionGap || session != DefaultVersionSession || count != DefaultVersionCount || age != DefaultVersionAge {
+		t.Errorf("want the defaults, got %v, %v, %d, %v", gap, session, count, age)
+	}
+
+	write("api:\n  password: hunter2\nversioning:\n  enabled: true\n  gap: never\n  maxSession: 2h\n  maxVersions: 3\n  maxAge: 48h\n")
+	cfg, err = ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	gap, session, count, age = cfg.Versioning.Retention()
+	if !cfg.Versioning.Enabled || gap != 0 || session != 2*time.Hour || count != 3 || age != 48*time.Hour {
+		t.Errorf("want versioning on keeping every save, 2h sessions, 3 versions and 48h, got %v, %v, %v, %d, %v", cfg.Versioning.Enabled, gap, session, count, age)
+	}
+
+	write("api:\n  password: hunter2\nversioning:\n  enabled: true\n  maxSession: never\n  maxAge: never\n")
+	cfg, err = ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if _, session, _, age := cfg.Versioning.Retention(); session != 0 || age != 0 {
+		t.Errorf("want sessions uncapped and versions kept for good, got %v and %v", session, age)
+	}
+
+	for name, body := range map[string]string{
+		"the Lite mode":     "mode: lite\napi:\n  password: hunter2\nversioning:\n  enabled: true\n",
+		"a negative count":  "api:\n  password: hunter2\nversioning:\n  enabled: true\n  maxVersions: -1\n",
+		"a zero gap":        "api:\n  password: hunter2\nversioning:\n  enabled: true\n  gap: 0s\n",
+		"an unknown period": "api:\n  password: hunter2\nversioning:\n  enabled: true\n  maxAge: 30d\n",
+	} {
+		write(body)
+		if _, err := ReadConfig(dir); err == nil {
+			t.Errorf("ReadConfig with %s: want an error, got none", name)
+		}
+	}
+}
+
 // TestReadConfigDefaultsAPIAddress verifies that a config that says nothing
 // about the API address gets localhost rather than every interface, since
 // net.Listen treats an empty address as a wildcard bind on a random port.

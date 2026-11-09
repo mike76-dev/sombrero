@@ -465,7 +465,8 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 			),
 			-- Only an upload whose object is still temporary is in flight. Once it
 			-- has been finalized, its uploads entry may linger until the buffered
-			-- slabs have made it to the Sia network, and must not block the path.
+			-- slabs have made it to the Sia network, and must not block the path,
+			-- nor may the file it finalized once that is hidden as a version.
 			no_existing_upload AS (
 				SELECT 1
 				FROM parent p
@@ -473,9 +474,11 @@ func (db *Database) CreateUpload(acc Account, share, path string) (uploadID stri
 					SELECT 1
 					FROM uploads u
 					JOIN objects o ON o.id = u.object_id
+					LEFT JOIN versions v ON v.object_id = o.id
 					WHERE o.share_name = $1
 						AND o.full_path = $4
 						AND o.temporary = TRUE
+						AND v.object_id IS NULL
 				)
 			),
 			not_read_only AS (
@@ -1360,6 +1363,12 @@ func (db *Database) RequeueUploadJob(uploadID, metadataID uint64) error {
 // A file that was there under the name is replaced, and the slabs only it
 // referenced are returned, staged for the caller to unpin.
 func (db *Database) FinalizeUpload(uploadID string) (slabs []types.Hash256, err error) {
+	return db.finalizeUpload(uploadID, false)
+}
+
+// finalizeUpload is FinalizeUpload; a deliberate replacement, such as a
+// restore, keeps the file it replaces whatever editing session is under way.
+func (db *Database) finalizeUpload(uploadID string, deliberate bool) (slabs []types.Hash256, err error) {
 	id, err := hex.DecodeString(uploadID)
 	if err != nil {
 		return nil, err
@@ -1444,29 +1453,41 @@ func (db *Database) FinalizeUpload(uploadID string) (slabs []types.Hash256, err 
 				return ErrNotFound
 			}
 		} else {
-			// What the file that is being replaced was made of, noted before it goes.
-			const collectReplaced = `
-				SELECT DISTINCT m.buffer_id, m.slab_key
-				FROM metadata m
-				WHERE m.object_id = $1
-			`
-
-			rows, err := tx.Query(ctx, collectReplaced, oid)
-			if err != nil {
-				return fmt.Errorf("failed to collect the storage of the replaced file: %w", err)
-			}
-			bids, keys, err := collectStorage(rows)
+			// The file being replaced is kept as a version where the policy says,
+			// and gives up its storage otherwise.
+			var bids []uint64
+			var keys [][]byte
+			keep, err := db.keepsReplaced(ctx, tx, share, path, []int64{int64(oid)}, aid, deliberate)
 			if err != nil {
 				return err
 			}
+			if keep {
+				if err := keepVersion(ctx, tx, oid, aid); err != nil {
+					return err
+				}
+			} else {
+				const collectReplaced = `
+					SELECT DISTINCT m.buffer_id, m.slab_key
+					FROM metadata m
+					WHERE m.object_id = $1
+				`
 
-			const deleteVisible = `
-				DELETE FROM metadata
-				WHERE object_id = $1
-			`
+				rows, err := tx.Query(ctx, collectReplaced, oid)
+				if err != nil {
+					return fmt.Errorf("failed to collect the storage of the replaced file: %w", err)
+				}
+				if bids, keys, err = collectStorage(rows); err != nil {
+					return err
+				}
 
-			if _, err := tx.Exec(ctx, deleteVisible, oid); err != nil {
-				return fmt.Errorf("failed to delete old metadata: %w", err)
+				const deleteVisible = `
+					DELETE FROM metadata
+					WHERE object_id = $1
+				`
+
+				if _, err := tx.Exec(ctx, deleteVisible, oid); err != nil {
+					return fmt.Errorf("failed to delete old metadata: %w", err)
+				}
 			}
 
 			const moveMetadata = `
@@ -1498,6 +1519,7 @@ func (db *Database) FinalizeUpload(uploadID string) (slabs []types.Hash256, err 
 				SET
 					account = $2,
 					modified_at = NOW(),
+					restored_from = NULL,
 					size = COALESCE((
 						SELECT SUM(data_length)
 						FROM metadata
@@ -1545,6 +1567,11 @@ func (db *Database) FinalizeUpload(uploadID string) (slabs []types.Hash256, err 
 			// the old one is still referenced and stays pinned.
 			if slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys); err != nil {
 				return err
+			}
+			if keep {
+				if slabs, err = db.pruneVersions(ctx, tx, share, path); err != nil {
+					return err
+				}
 			}
 
 			finalOid = oid
@@ -1605,86 +1632,92 @@ func (db *Database) GetMetadata(acc Account, share, path string, offset, length 
 						OR owns_ancestor(o.share_name, c.id, o.full_path)
 					)
 			),
-			clipped AS (
-				SELECT
-					m.slab_key,
-					m.buffer_id,
-					GREATEST(m.obj_offset, $4::BIGINT) AS obj_offset,
-					m.data_offset + GREATEST(m.obj_offset, $4::BIGINT) - m.obj_offset AS data_offset,
-					LEAST(m.obj_offset + m.data_length, $4::BIGINT + $5::BIGINT) - GREATEST(m.obj_offset, $4::BIGINT) AS data_length
-				FROM metadata m
-				JOIN target t ON t.id = m.object_id
-				WHERE m.obj_offset < $4::BIGINT + $5::BIGINT
-					AND m.obj_offset + m.data_length > $4::BIGINT
-			)
-			SELECT
-				c.obj_offset,
-				c.slab_key,
-				c.data_offset,
-				c.data_length,
-				SUBSTRING(b.data FROM c.data_offset::INT + 1 FOR c.data_length::INT)
-			FROM clipped c
-			LEFT JOIN buffers b ON b.id = c.buffer_id
-			ORDER BY c.obj_offset
-		`
+		` + clippedMetadata
 
 		rows, err := tx.Query(ctx, query, share, path, acc.ID, int64(offset), int64(length))
 		if err != nil {
 			return fmt.Errorf("failed to query object metadata: %v", err)
 		}
-		defer rows.Close()
-
-		var found bool
-		for rows.Next() {
-			found = true
-
-			var (
-				objOffset  uint64
-				slabKey    []byte
-				dataOffset uint64
-				dataLength uint64
-				chunk      []byte
-			)
-
-			if err := rows.Scan(&objOffset, &slabKey, &dataOffset, &dataLength, &chunk); err != nil {
-				return fmt.Errorf("failed to scan object metadata: %v", err)
-			}
-
-			if slabKey == nil {
-				pr := SlabSlice{
-					Offset: dataOffset,
-					Length: dataLength,
-					At:     objOffset,
-					Data:   chunk,
-				}
-				slabs = append(slabs, pr)
-				continue
-			}
-
-			if len(slabKey) != 32 {
-				return fmt.Errorf("invalid key length: %d", len(slabKey))
-			}
-
-			var key types.Hash256
-			copy(key[:], slabKey)
-			slabs = append(slabs, SlabSlice{
-				Key:    key,
-				Offset: dataOffset,
-				Length: dataLength,
-				At:     objOffset,
-			})
-		}
-
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("failed while reading object metadata: %v", err)
-		}
-
-		if found {
-			return nil
-		}
-
-		return ErrNotFound
+		slabs, err = scanSlabSlices(rows)
+		return err
 	})
 
 	return
+}
+
+// clippedMetadata completes a query whose target CTE names one object: the
+// metadata of it within the range $4, $5, clipped to the range.
+const clippedMetadata = `
+	clipped AS (
+		SELECT
+			m.slab_key,
+			m.buffer_id,
+			GREATEST(m.obj_offset, $4::BIGINT) AS obj_offset,
+			m.data_offset + GREATEST(m.obj_offset, $4::BIGINT) - m.obj_offset AS data_offset,
+			LEAST(m.obj_offset + m.data_length, $4::BIGINT + $5::BIGINT) - GREATEST(m.obj_offset, $4::BIGINT) AS data_length
+		FROM metadata m
+		JOIN target t ON t.id = m.object_id
+		WHERE m.obj_offset < $4::BIGINT + $5::BIGINT
+			AND m.obj_offset + m.data_length > $4::BIGINT
+	)
+	SELECT
+		c.obj_offset,
+		c.slab_key,
+		c.data_offset,
+		c.data_length,
+		SUBSTRING(b.data FROM c.data_offset::INT + 1 FOR c.data_length::INT)
+	FROM clipped c
+	LEFT JOIN buffers b ON b.id = c.buffer_id
+	ORDER BY c.obj_offset
+`
+
+// scanSlabSlices reads the rows of a clipped metadata query, ErrNotFound where
+// there are none.
+func scanSlabSlices(rows pgx.Rows) (slabs []SlabSlice, err error) {
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			objOffset  uint64
+			slabKey    []byte
+			dataOffset uint64
+			dataLength uint64
+			chunk      []byte
+		)
+
+		if err := rows.Scan(&objOffset, &slabKey, &dataOffset, &dataLength, &chunk); err != nil {
+			return nil, fmt.Errorf("failed to scan object metadata: %v", err)
+		}
+
+		if slabKey == nil {
+			slabs = append(slabs, SlabSlice{
+				Offset: dataOffset,
+				Length: dataLength,
+				At:     objOffset,
+				Data:   chunk,
+			})
+			continue
+		}
+
+		if len(slabKey) != 32 {
+			return nil, fmt.Errorf("invalid key length: %d", len(slabKey))
+		}
+
+		var key types.Hash256
+		copy(key[:], slabKey)
+		slabs = append(slabs, SlabSlice{
+			Key:    key,
+			Offset: dataOffset,
+			Length: dataLength,
+			At:     objOffset,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed while reading object metadata: %v", err)
+	}
+	if len(slabs) == 0 {
+		return nil, ErrNotFound
+	}
+	return slabs, nil
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"runtime/debug"
 	"slices"
@@ -493,6 +494,10 @@ type open struct {
 	// timestamps, the attributes and the upload carrying it to the backend. Never nil.
 	file *fileState
 
+	// version is set on an open of a previous version of the file, which is read from the
+	// version rather than from the file, and shares nothing with the opens on the file.
+	version *versionOpen
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -598,6 +603,51 @@ func expandGeneric(access uint32) uint32 {
 	}
 
 	return access
+}
+
+// versionOpen says which previous version an open is of: the version's ID, and
+// the path of the file it is a version of.
+type versionOpen struct {
+	id   uint64
+	path string
+}
+
+// readOnlyAccess is all a previous version grants: it is there to be read.
+const readOnlyAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_EA | smb2.FILE_EXECUTE |
+	smb2.FILE_READ_ATTRIBUTES | smb2.READ_CONTROL | smb2.SYNCHRONIZE
+
+// readRange reads a range of what the open is on: the previous version it was
+// opened as of, or the file at the path.
+func (op *open) readRange(acc stores.Account, path string, offset, length uint64, w io.Writer) error {
+	if op.version != nil {
+		versioner := op.treeConnect.client.(client.Versioner)
+		return versioner.ReadVersion(op.ctx, acc, op.version.path, op.version.id, offset, length, w)
+	}
+	return op.treeConnect.client.Read(op.ctx, acc, path, offset, length, w)
+}
+
+// snapshots lists the times the previous versions of the file go by, newest
+// first. A folder, a version and a share that keeps none have none.
+func (op *open) snapshots(acc stores.Account) ([]time.Time, error) {
+	versioner, ok := op.treeConnect.client.(client.Versioner)
+	if !ok || op.version != nil || op.file.isDirectory() {
+		return nil, nil
+	}
+	versions, err := versioner.Versions(op.ctx, acc, op.pathName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Two versions within the same second would go by one name, so the newer keeps it.
+	var times []time.Time
+	for _, v := range versions {
+		t := v.ModifiedAt.UTC().Truncate(time.Second)
+		if len(times) > 0 && t.Equal(times[len(times)-1]) {
+			continue
+		}
+		times = append(times, t)
+	}
+	return times, nil
 }
 
 // grantedFor returns the access an open is given: what the share allows the user, narrowed to
@@ -794,6 +844,10 @@ type fileState struct {
 	// startingMu serializes the start of an upload, which takes a call to the backend and so
 	// cannot be done under mu.
 	startingMu sync.Mutex
+
+	// restoredFrom are the versions the file may be being restored from: the ones open at the
+	// overwrite, cleared by a handle opened on the file with no version of it open.
+	restoredFrom []uint64
 }
 
 // writesCond returns what waits for the writes in flight, making it if this is the first waiter.
@@ -1030,6 +1084,23 @@ func (fs *fileState) empty() {
 	fs.allocated = 0
 	fs.modified = time.Now()
 	fs.generation++
+}
+
+// restoring notes the versions an overwrite of the file may be restoring, or with none that it is
+// no restore.
+func (fs *fileState) restoring(ids []uint64) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.restoredFrom = ids
+}
+
+// restoringNow lists the versions the file may be being restored from.
+func (fs *fileState) restoringNow() []uint64 {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return slices.Clone(fs.restoredFrom)
 }
 
 // uploadNow is the upload the file is being written through, if there is one.
@@ -1409,6 +1480,30 @@ func (op *open) fileAllInformation() []byte {
 	}
 	op.mu.Unlock()
 	return fai.Encode()
+}
+
+// fileBasicInformation generates a FileBasicInfo structure, the times and
+// attributes as FileAllInfo carries them.
+func (op *open) fileBasicInformation() []byte {
+	_, _, _, modified, attributes := op.file.stat()
+	fbi := smb2.FileBasicInfo{
+		CreationTime:   modified,
+		LastAccessTime: modified,
+		LastWriteTime:  modified,
+		ChangeTime:     modified,
+		FileAttributes: attributes,
+	}
+	return fbi.Encode()
+}
+
+// fileAttributeTagInformation generates a FileAttributeTagInfo structure. No
+// file here is a reparse point, so the tag is zero.
+func (op *open) fileAttributeTagInformation() []byte {
+	_, _, _, _, attributes := op.file.stat()
+	fati := smb2.FileAttributeTagInfo{
+		FileAttributes: attributes,
+	}
+	return fati.Encode()
 }
 
 // fileStandardInformation generates a FileStandardInfo structure.
@@ -1916,7 +2011,7 @@ func (op *open) ensureChunk(acc stores.Account, chunkOffset, size uint64, after 
 
 		var buf bytes.Buffer
 		err := recoverAsError("reading "+path, func() error {
-			return op.treeConnect.client.Read(op.ctx, acc, path, chunkOffset, toRead, &buf)
+			return op.readRange(acc, path, chunkOffset, toRead, &buf)
 		})
 
 		op.mu.Lock()
@@ -2279,12 +2374,23 @@ func (op *open) emptyFile(acc stores.Account) error {
 	ctx, path := op.ctx, op.pathName
 	op.mu.Unlock()
 
-	if err := op.treeConnect.client.Delete(ctx, acc, path, false); err != nil && !errors.Is(err, stores.ErrNotFound) {
+	// A share that keeps versions keeps the contents as one; the rest lose the object. An
+	// overwrite made while a version of the file is open is a restore, kept whatever the session.
+	var err error
+	var restoring []uint64
+	if v, kept := op.treeConnect.client.(client.Versioner); kept {
+		restoring = op.session.connection.server.openVersionsOf(op.treeConnect.share, path)
+		err = v.EmptyFile(ctx, acc, path, len(restoring) > 0)
+	} else {
+		err = op.treeConnect.client.Delete(ctx, acc, path, false)
+	}
+	if err != nil && !errors.Is(err, stores.ErrNotFound) {
 		return err
 	}
 
 	op.file.empty()
 	op.file.markUnstored()
+	op.file.restoring(restoring)
 
 	return nil
 }
@@ -2497,6 +2603,15 @@ func (op *open) flush() error {
 
 	if err := op.treeConnect.client.FinishUpload(op.ctx, u.path, uploadID, parts); err != nil {
 		return err
+	}
+
+	// A file written from one of its versions holds that version, which the store is told.
+	if ids := op.file.restoringNow(); len(ids) > 0 {
+		if v, ok := op.treeConnect.client.(client.Versioner); ok {
+			if err := v.MarkRestored(op.ctx, u.path, ids); err != nil {
+				log.Printf("Couldn't note the version %s was restored from: %v\n", u.path, err)
+			}
+		}
 	}
 
 	op.file.finishUpload(u, finalSize)

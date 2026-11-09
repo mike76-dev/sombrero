@@ -21,6 +21,9 @@ type Database struct {
 	cancel context.CancelFunc
 	pool   *pgxpool.Pool
 	shares Shares
+
+	// versioning is what a replaced file leaves behind; set before serving.
+	versioning VersionPolicy
 }
 
 // Shares is the minimal interface of the share manager.

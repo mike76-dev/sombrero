@@ -859,7 +859,94 @@ func (ic *IndexdClient) Read(ctx context.Context, acc stores.Account, path strin
 	if err != nil {
 		return err
 	}
+	return ic.readSlices(ctx, slabs, offset, length, buf)
+}
 
+// Versions implements client.Versioner: the versions of a file the account may read.
+// The path decides the right, as the file is gone while an overwrite is under way.
+func (ic *IndexdClient) Versions(ctx context.Context, acc stores.Account, path string) ([]VersionInfo, error) {
+	if _, err := ic.db.PathAccess(acc, ic.share, path); err != nil {
+		return nil, err
+	}
+	versions, err := ic.db.Versions(ic.share, path)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]VersionInfo, 0, len(versions))
+	for _, v := range versions {
+		infos = append(infos, VersionInfo{ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, ReplacedAt: v.ReplacedAt, ReplacedBy: v.ReplacedBy})
+	}
+	return infos, nil
+}
+
+// ReadVersion implements client.Versioner.
+func (ic *IndexdClient) ReadVersion(ctx context.Context, acc stores.Account, path string, id uint64, offset, length uint64, buf io.Writer) error {
+	if _, err := ic.db.PathAccess(acc, ic.share, path); err != nil {
+		return err
+	}
+	slabs, err := ic.db.VersionMetadata(ic.share, path, id, offset, length)
+	if err != nil {
+		return err
+	}
+	return ic.readSlices(ctx, slabs, offset, length, buf)
+}
+
+// RestoreVersion implements client.Versioner. The restore is a replacement of
+// the file, so the slabs it releases are unpinned as after any other.
+func (ic *IndexdClient) RestoreVersion(ctx context.Context, acc stores.Account, path string, id uint64) error {
+	pa, err := ic.db.PathAccess(acc, ic.share, path)
+	if err != nil {
+		return err
+	}
+	if !pa.Write {
+		return stores.ErrAccessDenied
+	}
+
+	replaced := ic.slabsOf(path, false)
+	slabs, err := ic.db.RestoreVersion(acc, ic.share, path, id)
+	if err != nil {
+		return err
+	}
+	ic.retag(replaced)
+
+	select {
+	case ic.packChan <- struct{}{}:
+	default:
+	}
+
+	if len(slabs) > 0 && ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after restoring a version of %s: %v", path, err)
+		}
+	}
+	return nil
+}
+
+// DeleteVersions implements client.Versioner. Deleting versions takes the
+// right to delete the file.
+func (ic *IndexdClient) DeleteVersions(ctx context.Context, acc stores.Account, path string, id uint64) error {
+	pa, err := ic.db.PathAccess(acc, ic.share, path)
+	if err != nil {
+		return err
+	}
+	if !pa.Delete {
+		return stores.ErrAccessDenied
+	}
+
+	slabs, err := ic.db.DeleteVersions(ic.share, path, id)
+	if err != nil {
+		return err
+	}
+	if len(slabs) > 0 && ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after deleting versions of %s: %v", path, err)
+		}
+	}
+	return nil
+}
+
+// readSlices fetches the slices of a range, clipped to it, and writes them out in order.
+func (ic *IndexdClient) readSlices(ctx context.Context, slabs []stores.SlabSlice, offset, length uint64, buf io.Writer) error {
 	end := offset + length
 
 	parts := make([][]byte, len(slabs))
@@ -1077,6 +1164,30 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 		}
 	}
 
+	return nil
+}
+
+// MarkRestored implements client.Versioner.
+func (ic *IndexdClient) MarkRestored(ctx context.Context, path string, ids []uint64) error {
+	return ic.db.MarkRestored(ic.share, path, ids)
+}
+
+// EmptyFile implements client.Versioner. The contents go the way a deleted
+// file's do, with what only they held unpinned, and the versions stay.
+func (ic *IndexdClient) EmptyFile(ctx context.Context, acc stores.Account, path string, deliberate bool) error {
+	touched := ic.slabsOf(path, false)
+	slabs, err := ic.db.EmptyFile(acc, ic.share, path, deliberate)
+	if err != nil {
+		return err
+	}
+
+	ic.retag(touched)
+
+	if len(slabs) > 0 && ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after emptying %s: %v", path, err)
+		}
+	}
 	return nil
 }
 

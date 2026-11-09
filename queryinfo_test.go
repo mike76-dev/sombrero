@@ -318,6 +318,45 @@ func TestIntegrationQueryEaInformation(t *testing.T) {
 	}
 }
 
+// TestIntegrationQueryBasicInformation is the times and attributes on their own, which is what
+// a client copying a file asks for. They are the ones FileAllInformation leads with.
+func TestIntegrationQueryBasicInformation(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+	fid := h.openedFile(cl, "report.txt", 512)
+
+	info := queriedInfo(t, cl.queryInfo(fid, smb2.FileBasicInformation, 4096))
+	if len(info) != 40 {
+		t.Fatalf("the structure is %d bytes long, want 40", len(info))
+	}
+	all := queriedInfo(t, cl.queryInfo(fid, smb2.FileAllInformation, 4096))
+	if !bytes.Equal(info[:36], all[:36]) {
+		t.Errorf("the basic information is %x, want the %x that leads the whole", info[:36], all[:36])
+	}
+	if attr := binary.LittleEndian.Uint32(info[32:36]); attr != smb2.FILE_ATTRIBUTE_NORMAL {
+		t.Errorf("the file is marked %#x, want an ordinary file", attr)
+	}
+}
+
+// TestIntegrationQueryAttributeTagInformation is the attributes with the reparse tag, which a
+// client copying a file asks for to tell a link from a file. Nothing here is a reparse point.
+func TestIntegrationQueryAttributeTagInformation(t *testing.T) {
+	h := newSMBTest(t)
+	cl := h.dial("alice")
+	fid := h.openedFile(cl, "report.txt", 512)
+
+	info := queriedInfo(t, cl.queryInfo(fid, smb2.FileAttributeTagInformation, 4096))
+	if len(info) != 8 {
+		t.Fatalf("the structure is %d bytes long, want 8", len(info))
+	}
+	if attr := binary.LittleEndian.Uint32(info[:4]); attr != smb2.FILE_ATTRIBUTE_NORMAL {
+		t.Errorf("the file is marked %#x, want an ordinary file", attr)
+	}
+	if tag := binary.LittleEndian.Uint32(info[4:8]); tag != 0 {
+		t.Errorf("the file carries the reparse tag %#x, want none", tag)
+	}
+}
+
 // TestIntegrationQueryStreamInformation is the list of streams of the file. There is only ever
 // the one the file itself is, named the way the unnamed data stream is named.
 func TestIntegrationQueryStreamInformation(t *testing.T) {
@@ -350,7 +389,7 @@ func TestIntegrationQueryInfoRefusesAnUnsupportedClass(t *testing.T) {
 	cl := h.dial("alice")
 	fid := h.openedFile(cl, "report.txt", 512)
 
-	buf := cl.queryInfo(fid, smb2.FileBasicInformation, 4096)
+	buf := cl.queryInfo(fid, smb2.FileCompressionInformation, 4096)
 	if status := smb2.Header(buf).Status(); status != smb2.STATUS_NOT_SUPPORTED {
 		t.Fatalf("the query was answered with %#x, want it refused", status)
 	}
