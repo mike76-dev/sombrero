@@ -27,28 +27,44 @@ type ObjectMeta struct {
 	IsDir      bool
 }
 
+// listedDirectory finds the directory the account may list at the path, nil
+// for the root, reporting whether there is one.
+func listedDirectory(ctx context.Context, tx pgx.Tx, acc Account, shareName, path string) (id any, found bool, err error) {
+	if path == "/" {
+		return nil, true, nil
+	}
+	const query = `
+		WITH caller AS (
+			SELECT id, workgroup
+			FROM accounts
+			WHERE id = $1
+		)
+		SELECT d.id
+		FROM directories d
+		JOIN accounts owner ON owner.id = d.account
+		CROSS JOIN caller c
+		WHERE d.share_name = $2
+			AND d.full_path = $3
+			AND (d.account = c.id
+			OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+			OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+			OR owns_ancestor(d.share_name, c.id, d.full_path)
+		)
+	`
+	var dir int64
+	if err := tx.QueryRow(ctx, query, acc.ID, shareName, path).Scan(&dir); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to query directory: %v", err)
+	}
+	return uint64(dir), true, nil
+}
+
 // ListObjects lists all objects in the specified directory.
 func (db *Database) ListObjects(acc Account, shareName, path string) (objects []ObjectMeta, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const dirQuery = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $1
-			)
-			SELECT d.id
-			FROM directories d
-			JOIN accounts owner ON owner.id = d.account
-			CROSS JOIN caller c
-			WHERE d.share_name = $2
-				AND d.full_path = $3
-				AND (d.account = c.id
-				OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
-				OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
-				OR owns_ancestor(d.share_name, c.id, d.full_path)
-			)
-		`
 		const query = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -106,19 +122,9 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 			ORDER BY full_path
 		`
 
-		var parentID any
-		if path == "/" {
-			parentID = nil
-		} else {
-			var parentDir *int64
-			if err := tx.QueryRow(ctx, dirQuery, acc.ID, shareName, path).Scan(&parentDir); err != nil {
-				if err == pgx.ErrNoRows {
-					return nil
-				} else {
-					return fmt.Errorf("failed to query directory: %v", err)
-				}
-			}
-			parentID = uint64(*parentDir)
+		parentID, found, err := listedDirectory(ctx, tx, acc, shareName, path)
+		if err != nil || !found {
+			return err
 		}
 
 		rows, err := tx.Query(ctx, query, shareName, parentID, acc.ID)

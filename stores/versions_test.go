@@ -418,6 +418,130 @@ func TestFoldersCarryTheVersions(t *testing.T) {
 	}
 }
 
+// dateFile sets when the copy of the file with the size was created and
+// modified, and when the version it is was replaced.
+func dateFile(t *testing.T, db *Database, share, path string, size uint64, created, modified, replaced time.Time) {
+	t.Helper()
+
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		var id int64
+		const date = `
+			UPDATE objects
+			SET created_at = $4, modified_at = $5
+			WHERE share_name = $1 AND full_path = $2 AND size = $3
+			RETURNING id
+		`
+		if err := tx.QueryRow(ctx, date, share, normalizePath(path), int64(size), created, modified).Scan(&id); err != nil {
+			return err
+		}
+		if replaced.IsZero() {
+			return nil
+		}
+		_, err := tx.Exec(ctx, `UPDATE versions SET replaced_at = $2 WHERE object_id = $1`, id, replaced)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("dating %s of %d bytes: %v", path, size, err)
+	}
+}
+
+// TestListObjectsAt verifies that a folder is listed as it was at a time:
+// with the contents the files held then, the files deleted since, the folders
+// made by then, and nothing made later.
+func TestListObjectsAt(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Count: 10})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	for _, dir := range []string{"docs", "docs/sub", "docs/late"} {
+		if err := db.CreateDirectory(acc, share, dir, false, false); err != nil {
+			t.Fatalf("CreateDirectory(%s): %v", dir, err)
+		}
+	}
+	base := time.Now().Truncate(time.Second)
+	ago := func(hours int) time.Time {
+		return base.Add(-time.Duration(hours) * time.Hour)
+	}
+	var none time.Time
+
+	// doc.txt held 400 bytes until 6 hours ago, 300 until 2 hours ago, and 200 since.
+	plantPiece(t, db, share, acc, "docs/doc.txt", types.Hash256{1}, 0, 400)
+	replaceFile(t, db, share, acc, "docs/doc.txt", 300)
+	replaceFile(t, db, share, acc, "docs/doc.txt", 200)
+	dateFile(t, db, share, "docs/doc.txt", 400, ago(10), ago(10), ago(6))
+	dateFile(t, db, share, "docs/doc.txt", 300, ago(10), ago(6), ago(2))
+	dateFile(t, db, share, "docs/doc.txt", 200, ago(10), ago(2), none)
+
+	// gone.txt was made 8 hours ago and deleted 4 hours ago.
+	plantPiece(t, db, share, acc, "docs/gone.txt", types.Hash256{2}, 0, 500)
+	if _, err := db.DeleteFile(acc, share, "docs/gone.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	dateFile(t, db, share, "docs/gone.txt", 500, ago(8), ago(8), ago(4))
+
+	// quick.txt was made 9 hours ago and last saved 3 hours ago, keeping no version.
+	plantPiece(t, db, share, acc, "docs/quick.txt", types.Hash256{3}, 0, 50)
+	dateFile(t, db, share, "docs/quick.txt", 50, ago(9), ago(3), none)
+
+	// new.txt and the folder late appeared an hour ago, the folder sub 7 hours ago.
+	plantPiece(t, db, share, acc, "docs/new.txt", types.Hash256{4}, 0, 100)
+	dateFile(t, db, share, "docs/new.txt", 100, ago(1), ago(1), none)
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE directories SET created_at = $1 WHERE full_path = '/docs/sub'`, ago(7)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE directories SET created_at = $1 WHERE full_path = '/docs/late'`, ago(1))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("dating the folders: %v", err)
+	}
+
+	// An entry is a file with its size and modified time, or a folder with neither.
+	type entry struct {
+		path     string
+		size     uint64
+		modified time.Time
+	}
+	tests := []struct {
+		name string
+		at   time.Time
+		want []entry
+	}{
+		{"before most of it", ago(9), []entry{{"/docs/doc.txt", 400, ago(10)}, {"/docs/quick.txt", 50, ago(3)}}},
+		{"halfway", ago(5), []entry{{"/docs/doc.txt", 300, ago(6)}, {"/docs/gone.txt", 500, ago(8)}, {"/docs/quick.txt", 50, ago(3)}, {"/docs/sub", 0, none}}},
+		{"after the deletion", ago(3), []entry{{"/docs/doc.txt", 300, ago(6)}, {"/docs/quick.txt", 50, ago(3)}, {"/docs/sub", 0, none}}},
+		{"now", base, []entry{{"/docs/doc.txt", 200, ago(2)}, {"/docs/late", 0, none}, {"/docs/new.txt", 100, ago(1)}, {"/docs/quick.txt", 50, ago(3)}, {"/docs/sub", 0, none}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects, err := db.ListObjectsAt(acc, share, "docs", tt.at)
+			if err != nil {
+				t.Fatalf("ListObjectsAt: %v", err)
+			}
+			if len(objects) != len(tt.want) {
+				t.Fatalf("want %d entries %v, got %v", len(tt.want), tt.want, objects)
+			}
+			for i, want := range tt.want {
+				got := objects[i]
+				if got.Path != want.path || got.Size != want.size || got.IsDir != want.modified.IsZero() {
+					t.Errorf("entry %d: want %+v, got %+v", i, want, got)
+				}
+				if !want.modified.IsZero() && !got.ModifiedAt.Equal(want.modified) {
+					t.Errorf("%s: want modified %v, got %v", want.path, want.modified, got.ModifiedAt)
+				}
+			}
+		})
+	}
+
+	// A folder the account does not see, or that is not there, lists nothing.
+	if objects, err := db.ListObjectsAt(acc, share, "elsewhere", ago(5)); err != nil || len(objects) != 0 {
+		t.Errorf("listing a folder not there: want nothing, got %v, %v", objects, err)
+	}
+}
+
 // TestExpireVersions verifies that the versions past the age go, on every
 // share, with their slabs staged for unpinning, and none with no age set.
 func TestExpireVersions(t *testing.T) {

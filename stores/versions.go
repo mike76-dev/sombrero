@@ -657,6 +657,100 @@ func (db *Database) Versions(share, path string) (versions []Version, err error)
 	return
 }
 
+// ListObjectsAt lists the directory as it was at the time: the folders made
+// by then, and the files there by then with the contents they held, which are
+// the versions replaced since, deleted files among them. A file whose state
+// at the time was not kept is listed with the nearest state kept after it.
+func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.Time) (objects []ObjectMeta, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			WITH caller AS (
+				SELECT id, workgroup
+				FROM accounts
+				WHERE id = $3
+			)
+			SELECT
+				d.full_path,
+				0::bigint AS size,
+				d.created_at,
+				d.modified_at,
+				TRUE AS is_dir
+			FROM directories d
+			CROSS JOIN caller c
+			WHERE d.share_name = $1
+				AND d.parent_id IS NOT DISTINCT FROM $2
+				AND d.created_at <= $4
+				AND (d.account = c.id
+					OR (d.private = FALSE AND EXISTS (
+						SELECT 1
+						FROM accounts a
+						WHERE a.id = d.account
+							AND (a.workgroup = c.workgroup OR a.workgroup = anonymous_workgroup())
+					))
+					OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+					OR owns_ancestor(d.share_name, c.id, d.full_path)
+				)
+
+			UNION ALL
+
+			SELECT full_path, size, created_at, modified_at, FALSE AS is_dir
+			FROM (
+				SELECT DISTINCT ON (o.full_path)
+					o.full_path,
+					o.size,
+					o.created_at,
+					o.modified_at
+				FROM objects o
+				LEFT JOIN versions v ON v.object_id = o.id
+				JOIN accounts owner ON owner.id = o.account
+				LEFT JOIN directories od
+					ON od.share_name = o.share_name
+					AND od.id = o.directory_id
+				CROSS JOIN caller c
+				WHERE o.share_name = $1
+					AND o.directory_id IS NOT DISTINCT FROM $2
+					AND (o.temporary = FALSE OR v.object_id IS NOT NULL)
+					AND o.created_at <= $4
+					AND (v.replaced_at IS NULL OR v.replaced_at > $4)
+					AND (
+						o.account = c.id
+						OR (
+							od.private = FALSE
+							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
+						)
+						OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+						OR owns_ancestor(o.share_name, c.id, o.full_path)
+					)
+				ORDER BY o.full_path, o.modified_at <= $4 DESC, v.replaced_at NULLS LAST, o.id
+			) f
+
+			ORDER BY full_path
+		`
+
+		parentID, found, err := listedDirectory(ctx, tx, acc, shareName, path)
+		if err != nil || !found {
+			return err
+		}
+
+		rows, err := tx.Query(ctx, query, shareName, parentID, acc.ID, at)
+		if err != nil {
+			return fmt.Errorf("failed to query the objects at the time: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var obj ObjectMeta
+			if err := rows.Scan(&obj.Path, &obj.Size, &obj.CreatedAt, &obj.ModifiedAt, &obj.IsDir); err != nil {
+				return fmt.Errorf("failed to scan object: %w", err)
+			}
+			objects = append(objects, obj)
+		}
+		return rows.Err()
+	})
+	return
+}
+
 // VersionMetadata retrieves the metadata of the version of the file at the
 // path that intersects the given range, clipped the way GetMetadata clips it.
 func (db *Database) VersionMetadata(share, path string, id uint64, offset, length uint64) (slabs []SlabSlice, err error) {
