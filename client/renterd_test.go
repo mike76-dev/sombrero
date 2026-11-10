@@ -79,6 +79,7 @@ func newFakeRenterd(t *testing.T) *fakeRenterd {
 		f.mu.Unlock()
 
 		if raw != nil {
+			r.Body = io.NopCloser(bytes.NewReader(body))
 			raw(w, r)
 			return
 		}
