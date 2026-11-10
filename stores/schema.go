@@ -105,6 +105,9 @@ $$ LANGUAGE SQL STABLE
 	{name: "note the version a file was restored from", sql: `
 		ALTER TABLE objects ADD COLUMN restored_from BIGINT REFERENCES objects(id) ON DELETE SET NULL
 	`},
+	{name: "exempt kept versions from the limits", sql: `
+		ALTER TABLE versions ADD COLUMN kept BOOLEAN NOT NULL DEFAULT FALSE
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

@@ -228,12 +228,14 @@ CREATE TABLE pending_unpins (
 CREATE INDEX idx_pending_unpins_workgroup ON pending_unpins (workgroup);
 
 -- A version is a replaced file kept hidden the way an upload in progress is.
--- session_until is the latest save of the editing session that replaced it.
+-- session_until is the latest save of the editing session that replaced it;
+-- a kept version is exempt from the count and age limits.
 CREATE TABLE versions (
     object_id BIGINT PRIMARY KEY REFERENCES objects(id) ON DELETE CASCADE,
     replaced_by INT REFERENCES accounts(id) ON DELETE SET NULL,
     replaced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    session_until TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    session_until TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    kept BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX idx_versions_replaced ON versions (replaced_at);
 

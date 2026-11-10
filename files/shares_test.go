@@ -60,8 +60,10 @@ type mockClient struct {
 	objectAt        func(string, time.Time) (client.VersionInfo, error)
 	restoreErr      error
 	dropVersionsErr error
+	keepErr         error
 	restored        []versionRef
 	versionsDropped []versionRef
+	kept            []keeping
 	emptied         []string
 }
 
@@ -69,6 +71,12 @@ type mockClient struct {
 type versionRef struct {
 	path string
 	id   uint64
+}
+
+// keeping is a version the mock client was asked to keep or release.
+type keeping struct {
+	versionRef
+	keep bool
 }
 
 func (m *mockClient) Versions(_ context.Context, _ stores.Account, p string) ([]client.VersionInfo, error) {
@@ -98,6 +106,14 @@ func (m *mockClient) DeleteVersions(_ context.Context, _ stores.Account, p strin
 		return m.dropVersionsErr
 	}
 	m.versionsDropped = append(m.versionsDropped, versionRef{p, id})
+	return nil
+}
+
+func (m *mockClient) KeepVersion(_ context.Context, _ stores.Account, p string, id uint64, keep bool) error {
+	if m.keepErr != nil {
+		return m.keepErr
+	}
+	m.kept = append(m.kept, keeping{versionRef{p, id}, keep})
 	return nil
 }
 

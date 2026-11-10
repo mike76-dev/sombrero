@@ -659,6 +659,83 @@ func TestExpireVersions(t *testing.T) {
 	}
 }
 
+// TestKeptVersionsStay verifies that a kept version is neither counted nor
+// dropped by the limits until it is released, and goes on an explicit delete.
+func TestKeptVersionsStay(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Count: 2})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	plantPiece(t, db, share, acc, "doc.txt", types.Hash256{1}, 0, 400)
+	replaceFile(t, db, share, acc, "doc.txt", 300)
+	replaceFile(t, db, share, acc, "doc.txt", 200)
+
+	versions, err := db.Versions(share, "doc.txt")
+	if err != nil || len(versions) != 2 || versions[0].Kept || versions[1].Kept {
+		t.Fatalf("want two versions, neither kept, got %+v, %v", versions, err)
+	}
+	oldest := versions[1].ID
+	if err := db.KeepVersion(share, "doc.txt", oldest+1000, true); !errors.Is(err, ErrNotFound) {
+		t.Errorf("keeping a version that is not there: want ErrNotFound, got %v", err)
+	}
+	if err := db.KeepVersion(share, "other.txt", oldest, true); !errors.Is(err, ErrNotFound) {
+		t.Errorf("keeping a version under another path: want ErrNotFound, got %v", err)
+	}
+	if err := db.KeepVersion(share, "doc.txt", oldest, true); err != nil {
+		t.Fatalf("KeepVersion: %v", err)
+	}
+	if versions, _ = db.Versions(share, "doc.txt"); len(versions) != 2 || !versions[1].Kept || versions[0].Kept {
+		t.Errorf("want the oldest version listed as kept, got %+v", versions)
+	}
+
+	replaceFile(t, db, share, acc, "doc.txt", 100)
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 3 || sizes[2] != 400 {
+		t.Errorf("want the kept version left out of the count, got %v", sizes)
+	}
+	replaceFile(t, db, share, acc, "doc.txt", 50)
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 3 || sizes[0] != 100 || sizes[1] != 200 || sizes[2] != 400 {
+		t.Errorf("want the version beyond the count dropped around the kept one, got %v", sizes)
+	}
+
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE versions SET replaced_at = NOW() - INTERVAL '40 days'`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("aging the versions: %v", err)
+	}
+	if n, err := db.ExpireVersions(30 * 24 * time.Hour); err != nil || n != 2 {
+		t.Errorf("want the two unkept versions expired, got %d, %v", n, err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 1 || sizes[0] != 400 {
+		t.Errorf("want the kept version left, got %v", sizes)
+	}
+
+	if err := db.KeepVersion(share, "doc.txt", oldest, false); err != nil {
+		t.Fatalf("KeepVersion(false): %v", err)
+	}
+	if n, err := db.ExpireVersions(30 * 24 * time.Hour); err != nil || n != 1 {
+		t.Errorf("want the released version expired, got %d, %v", n, err)
+	}
+
+	replaceFile(t, db, share, acc, "doc.txt", 40)
+	versions, _ = db.Versions(share, "doc.txt")
+	if len(versions) != 1 {
+		t.Fatalf("want one version, got %+v", versions)
+	}
+	if err := db.KeepVersion(share, "doc.txt", versions[0].ID, true); err != nil {
+		t.Fatalf("KeepVersion: %v", err)
+	}
+	if _, err := db.DeleteVersions(share, "doc.txt", versions[0].ID); err != nil {
+		t.Fatalf("DeleteVersions: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 0 {
+		t.Errorf("want the kept version deleted on request, got %v", sizes)
+	}
+}
+
 // TestRestoreVersion verifies that a restored version becomes the file again,
 // sharing its slabs and copying its buffers, with what it replaced kept.
 func TestRestoreVersion(t *testing.T) {

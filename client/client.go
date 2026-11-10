@@ -159,6 +159,7 @@ type VersionInfo struct {
 	ModifiedAt time.Time
 	ReplacedAt time.Time
 	ReplacedBy string
+	Kept       bool
 }
 
 // Versioner is a client whose shares keep the previous versions of files.
@@ -174,8 +175,12 @@ type Versioner interface {
 	RestoreVersion(ctx context.Context, acc stores.Account, path string, id uint64) error
 
 	// DeleteVersions removes the version with the ID, or every version of the
-	// file with a zero ID.
+	// file with a zero ID, kept or not.
 	DeleteVersions(ctx context.Context, acc stores.Account, path string, id uint64) error
+
+	// KeepVersion exempts the version with the ID from the count and age
+	// limits of the policy, or puts it back under them.
+	KeepVersion(ctx context.Context, acc stores.Account, path string, id uint64, keep bool) error
 
 	// EmptyFile removes the contents of the file ahead of their replacement,
 	// keeping them as the policy says, or whatever the session when deliberate,

@@ -17,13 +17,15 @@ import (
 )
 
 // VersionEntry is one previous version of a file: the response of GET
-// /share/:name/versions lists them newest first.
+// /share/:name/versions lists them newest first. A kept version is exempt
+// from the count and age limits of the share.
 type VersionEntry struct {
 	ID         uint64    `json:"id"`
 	Size       uint64    `json:"size"`
 	ModifiedAt time.Time `json:"modifiedAt"`
 	ReplacedAt time.Time `json:"replacedAt"`
 	ReplacedBy string    `json:"replacedBy,omitempty"`
+	Kept       bool      `json:"kept"`
 }
 
 // fileRef is the file a call about versions names, resolved on its share.
@@ -187,7 +189,7 @@ func (h *Handler) versionsHandler(w http.ResponseWriter, req *http.Request, ps h
 			return
 		}
 		for _, v := range versions {
-			entries = append(entries, VersionEntry{ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, ReplacedAt: v.ReplacedAt, ReplacedBy: v.ReplacedBy})
+			entries = append(entries, VersionEntry{ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, ReplacedAt: v.ReplacedAt, ReplacedBy: v.ReplacedBy, Kept: v.Kept})
 		}
 	}
 	writeJSON(w, entries)
@@ -333,9 +335,45 @@ func (h *Handler) snapshotsHandler(w http.ResponseWriter, req *http.Request, ps 
 	writeJSON(w, times)
 }
 
+// keepHandler handles the POST and DELETE /share/:name/keep calls, exempting
+// the version the id query names from the count and age limits of the share,
+// or putting it back under them. Both take the right to write the file.
+func (h *Handler) keepHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params, s session) {
+	f, ok := h.fileOf(w, req, ps, s, Rights{Write: true})
+	if !ok {
+		return
+	}
+	id, ok := versionID(w, req)
+	if !ok {
+		return
+	}
+	if id == 0 {
+		writeError(w, "invalid version", http.StatusBadRequest)
+		return
+	}
+
+	versioner, kept := f.client.(client.Versioner)
+	if !kept {
+		writeError(w, "version not found", http.StatusNotFound)
+		return
+	}
+	err := versioner.KeepVersion(req.Context(), s.account, f.key, id, req.Method == http.MethodPost)
+	switch {
+	case errors.Is(err, stores.ErrNotFound):
+		writeError(w, "version not found", http.StatusNotFound)
+	case errors.Is(err, stores.ErrAccessDenied):
+		writeError(w, "access denied", http.StatusForbidden)
+	case err != nil:
+		log.Printf("file API: failed to mark version %d of %s on %s: %v", id, f.path, f.share.Name, err)
+		writeError(w, "internal error", http.StatusInternalServerError)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 // deleteVersionsHandler handles the DELETE /share/:name/versions calls,
 // removing the version the id query names, or every version of the file
-// without one.
+// without one, kept or not.
 func (h *Handler) deleteVersionsHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params, s session) {
 	f, ok := h.fileOf(w, req, ps, s, Rights{Delete: true})
 	if !ok {
