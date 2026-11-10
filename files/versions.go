@@ -278,8 +278,8 @@ func (h *Handler) restoreHandler(w http.ResponseWriter, req *http.Request, ps ht
 
 // snapshotsHandler handles the GET /share/:name/snapshots calls: the times the
 // folder the path names has previous states at, newest first, which the list
-// call takes as its at query. A share that keeps no versions answers with an
-// empty list.
+// call takes as its at query. The times are in UTC, so that they survive a
+// query string: a zone offset's plus sign would read as a space there.
 func (h *Handler) snapshotsHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params, s session) {
 	share, r, ok := h.shareFor(w, s, ps.ByName("name"))
 	if !ok {
@@ -322,6 +322,9 @@ func (h *Handler) snapshotsHandler(w http.ResponseWriter, req *http.Request, ps 
 			log.Printf("file API: failed to list the snapshots of %s on %s: %v", p, share.Name, err)
 			writeError(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+		for i, t := range times {
+			times[i] = t.UTC()
 		}
 		if times == nil {
 			times = []time.Time{}

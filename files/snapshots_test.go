@@ -32,7 +32,8 @@ func snapshotClient() *mockClient {
 		if p != "Projects" && p != "" {
 			return nil, nil
 		}
-		return []time.Time{versionModified, made}, nil
+		local := time.FixedZone("CET", 3600)
+		return []time.Time{versionModified.In(local), made.In(local)}, nil
 	}
 	mc.listAt = func(p string, at time.Time) ([]client.ObjectInfo, error) {
 		if p != "Projects" || !at.Equal(versionModified) {
@@ -70,10 +71,11 @@ func TestFolderSnapshots(t *testing.T) {
 		if r.Code != http.StatusOK {
 			t.Fatalf("snapshots of %s: want %d, got %d (%s)", p, http.StatusOK, r.Code, r.Body.String())
 		}
-		var got []time.Time
+		var got []string
 		json.NewDecoder(r.Body).Decode(&got)
-		if len(got) != 2 || !got[0].Equal(versionModified) || !got[1].Equal(versionModified.Add(-24*time.Hour)) {
-			t.Errorf("snapshots of %s: want the two times newest first, got %v", p, got)
+		want := []string{versionModified.UTC().Format(time.RFC3339), versionModified.Add(-24 * time.Hour).UTC().Format(time.RFC3339)}
+		if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+			t.Errorf("snapshots of %s: want the two times newest first in UTC %v, got %v", p, want, got)
 		}
 	}
 
