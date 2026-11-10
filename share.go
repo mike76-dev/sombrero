@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -175,7 +176,7 @@ func (s *server) RegisterShare(ss stores.Share) error {
 		sh.indexdConns = make(map[string]*indexdConn)
 		// Clients are initialized per-connection via AddConnection.
 	case "renterd":
-		sh.client = client.NewRenterdClient(ss.ServerName, ss.Password, ss.Bucket)
+		sh.client = s.renterdClient(ss)
 		sh.maxUploadSize = proto.SectorSize
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -270,13 +271,44 @@ func (s *server) UpdateShare(ss stores.Share) error {
 	// A renterd share is reached by its address and bucket alone, so a new one is served from the
 	// next tree connect on. The tree connects already open keep the client they were given.
 	if sh.backend == "renterd" && sh.client != nil && (sh.bucket != ss.Bucket || sh.serverName != ss.ServerName) {
-		sh.client = client.NewRenterdClient(ss.ServerName, ss.Password, ss.Bucket)
+		sh.client = s.renterdClient(ss)
 		sh.bucket = ss.Bucket
 		sh.serverName = ss.ServerName
 	}
 	sh.mu.Unlock()
 
 	return nil
+}
+
+// renterdClient is the client a renterd share is served by, which keeps the
+// previous versions of its files where the database does so for the shares.
+func (s *server) renterdClient(ss stores.Share) client.Client {
+	c := client.NewRenterdClient(ss.ServerName, ss.Password, ss.Bucket)
+	if pg, ok := s.store.(*stores.Database); ok && pg.KeepsVersions() {
+		c = client.WithRenterdVersions(c, pg, ss.Name)
+	}
+	return c
+}
+
+// ExpireRenterdVersions drops the versions of every renterd share replaced
+// longer ago than the age, and returns how many went.
+func (s *server) ExpireRenterdVersions(ctx context.Context, age time.Duration) (dropped int, err error) {
+	shares, err := s.store.GetAllShares()
+	if err != nil {
+		return 0, err
+	}
+	for _, ss := range shares {
+		rv, ok := s.renterdClient(ss).(*client.RenterdVersions)
+		if ss.Type != "renterd" || !ok {
+			continue
+		}
+		n, err := rv.ExpireVersions(ctx, age)
+		if err != nil {
+			return dropped, fmt.Errorf("share %s: %w", ss.Name, err)
+		}
+		dropped += n
+	}
+	return dropped, nil
 }
 
 // RemoveShare removes a share from the SMB server.
