@@ -57,6 +57,12 @@ type ShareFiles interface {
 	Delete(ctx context.Context, acc stores.Account, path string, batch bool) error
 }
 
+// versionPurger is a ShareFiles whose share keeps deleted files as versions,
+// which an old catalog has no use for.
+type versionPurger interface {
+	DeleteVersions(ctx context.Context, acc stores.Account, path string, id uint64) error
+}
+
 // Clients hands out the connections of a share that are running, by workgroup
 // UUID.
 type Clients func(share string) (map[string]ShareFiles, error)
@@ -439,9 +445,17 @@ func (n *Network) prune(ctx context.Context, files ShareFiles, owner stores.Acco
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 
+	purger, keeps := files.(versionPurger)
 	for _, name := range names[min(n.keep, len(names)):] {
 		if err := files.Delete(ctx, owner, path.Join(folder, name), false); err != nil {
 			log.Printf("backup: failed to remove the old catalog %s: %v", name, err)
+			continue
+		}
+		if !keeps {
+			continue
+		}
+		if err := purger.DeleteVersions(ctx, owner, path.Join(folder, name), 0); err != nil && !errors.Is(err, stores.ErrNotFound) {
+			log.Printf("backup: failed to remove the versions of the old catalog %s: %v", name, err)
 		}
 	}
 }

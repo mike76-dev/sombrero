@@ -28,6 +28,15 @@ type fakeShare struct {
 	uploads map[string]string
 	owners  map[string]string
 	cleared []string // who removed which folder
+	purged  []string // the files whose versions were removed
+}
+
+// DeleteVersions makes the fake a share that keeps deleted files as versions.
+func (f *fakeShare) DeleteVersions(_ context.Context, _ stores.Account, p string, _ uint64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.purged = append(f.purged, p)
+	return nil
 }
 
 func newFakeShare() *fakeShare {
@@ -264,6 +273,41 @@ func TestNetworkCountsFromTheCatalogFound(t *testing.T) {
 	}
 	if got := share.catalogs(); len(got) != 2 {
 		t.Fatalf("the share holds %d catalog(s) past the interval, want 2", len(got))
+	}
+}
+
+// TestNetworkPrunesWithTheVersions verifies that an old catalog goes together
+// with the versions a share keeping deleted files would retain of it.
+func TestNetworkPrunesWithTheVersions(t *testing.T) {
+	ctx := context.Background()
+	db, wg, _ := connectedStore(t, ctx)
+
+	share := newFakeShare()
+	n := &Network{
+		db: db,
+		clients: func(string) (map[string]ShareFiles, error) {
+			return map[string]ShareFiles{wg.UUID.String(): share}, nil
+		},
+		interval: time.Millisecond,
+		keep:     1,
+		inline:   1024,
+	}
+	if err := n.WriteAll(ctx); err != nil {
+		t.Fatalf("WriteAll: %v", err)
+	}
+	first := share.catalogs()
+	time.Sleep(2 * time.Millisecond)
+	if err := n.WriteAll(ctx); err != nil {
+		t.Fatalf("WriteAll again: %v", err)
+	}
+	if got := share.catalogs(); len(got) != 1 || len(first) != 1 || got[0] == first[0] {
+		t.Fatalf("the share holds %v after the second run, want the new catalog alone in place of %v", got, first)
+	}
+	share.mu.Lock()
+	purged := share.purged
+	share.mu.Unlock()
+	if len(purged) != 1 || purged[0] != first[0] {
+		t.Errorf("want the versions of %v removed, got %v", first, purged)
 	}
 }
 

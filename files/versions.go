@@ -64,6 +64,18 @@ func (h *Handler) fileOf(w http.ResponseWriter, req *http.Request, ps httprouter
 	key := strings.TrimPrefix(p, "/")
 	oi, err := c.Object(req.Context(), s.account, key)
 	if errors.Is(err, stores.ErrNotFound) {
+		// A deleted file lives on in its versions, where the share keeps them.
+		if v, kept := c.(client.Versioner); kept {
+			versions, verr := v.Versions(req.Context(), s.account, key)
+			switch {
+			case verr != nil && !errors.Is(verr, stores.ErrNotFound):
+				err = verr
+			case verr == nil && len(versions) > 0:
+				oi, err = client.ObjectInfo{Key: p}, nil
+			}
+		}
+	}
+	if errors.Is(err, stores.ErrNotFound) {
 		writeError(w, "file not found", http.StatusNotFound)
 		return fileRef{}, false
 	} else if err != nil {
