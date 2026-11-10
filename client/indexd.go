@@ -879,6 +879,43 @@ func (ic *IndexdClient) Versions(ctx context.Context, acc stores.Account, path s
 	return infos, nil
 }
 
+// Snapshots implements client.Versioner.
+func (ic *IndexdClient) Snapshots(ctx context.Context, acc stores.Account, path string) ([]time.Time, error) {
+	if _, err := ic.db.PathAccess(acc, ic.share, path); err != nil {
+		return nil, err
+	}
+	return ic.db.Snapshots(ic.share, path)
+}
+
+// ListAt implements client.Versioner.
+func (ic *IndexdClient) ListAt(ctx context.Context, acc stores.Account, path string, at time.Time) ([]ObjectInfo, error) {
+	oms, err := ic.db.ListObjectsAt(acc, ic.share, path, at)
+	if err != nil {
+		return nil, err
+	}
+	ois := make([]ObjectInfo, 0, len(oms))
+	for _, om := range oms {
+		oi := ObjectInfo{Key: om.Path, CreatedAt: om.CreatedAt, ModifiedAt: om.ModifiedAt, Size: om.Size}
+		if om.IsDir {
+			oi.Key += "/"
+		}
+		ois = append(ois, oi)
+	}
+	return ois, nil
+}
+
+// ObjectAt implements client.Versioner.
+func (ic *IndexdClient) ObjectAt(ctx context.Context, acc stores.Account, path string, at time.Time) (VersionInfo, error) {
+	if _, err := ic.db.PathAccess(acc, ic.share, path); err != nil {
+		return VersionInfo{}, err
+	}
+	v, err := ic.db.ObjectAt(acc, ic.share, path, at)
+	if err != nil {
+		return VersionInfo{}, err
+	}
+	return VersionInfo{ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, ReplacedAt: v.ReplacedAt}, nil
+}
+
 // ReadVersion implements client.Versioner.
 func (ic *IndexdClient) ReadVersion(ctx context.Context, acc stores.Account, path string, id uint64, offset, length uint64, buf io.Writer) error {
 	if _, err := ic.db.PathAccess(acc, ic.share, path); err != nil {

@@ -19,17 +19,20 @@ var (
 )
 
 // versionedClient is a client whose readme.txt has two versions, the newer
-// one readable.
+// one readable, and whose deleted.txt is gone but for a version.
 func versionedClient() *mockClient {
 	mc := managedClient()
 	mc.versions = func(p string) ([]client.VersionInfo, error) {
-		if p != "readme.txt" {
-			return nil, nil
+		switch p {
+		case "readme.txt":
+			return []client.VersionInfo{
+				{ID: 7, Size: 50, ModifiedAt: versionModified, ReplacedAt: versionModified.Add(time.Hour), ReplacedBy: "alice"},
+				{ID: 3, Size: 20, ModifiedAt: versionModified.Add(-24 * time.Hour), ReplacedAt: versionModified},
+			}, nil
+		case "deleted.txt":
+			return []client.VersionInfo{{ID: 9, Size: 10, ModifiedAt: versionModified, ReplacedAt: versionModified.Add(time.Hour)}}, nil
 		}
-		return []client.VersionInfo{
-			{ID: 7, Size: 50, ModifiedAt: versionModified, ReplacedAt: versionModified.Add(time.Hour), ReplacedBy: "alice"},
-			{ID: 3, Size: 20, ModifiedAt: versionModified.Add(-24 * time.Hour), ReplacedAt: versionModified},
-		}, nil
+		return nil, nil
 	}
 	mc.readVersion = func(p string, id, offset, length uint64, w io.Writer) error {
 		if p != "readme.txt" || id != 7 || offset+length > 50 {
@@ -55,6 +58,14 @@ func TestListingVersions(t *testing.T) {
 	json.NewDecoder(r.Body).Decode(&got)
 	if len(got) != 2 || got[0].ID != 7 || got[0].Size != 50 || got[0].ReplacedBy != "alice" || got[1].ID != 3 {
 		t.Errorf("want the two versions newest first, got %+v", got)
+	}
+
+	// A deleted file is reached through the versions it left.
+	r = manage(h, w, http.MethodGet, "versions?path=/deleted.txt")
+	got = nil
+	json.NewDecoder(r.Body).Decode(&got)
+	if r.Code != http.StatusOK || len(got) != 1 || got[0].ID != 9 {
+		t.Errorf("a deleted file: want its one version, got %d %+v", r.Code, got)
 	}
 
 	tests := []struct {
@@ -208,8 +219,11 @@ func TestDeletingVersions(t *testing.T) {
 	if r := manage(h, w, http.MethodDelete, "versions?path=/readme.txt"); r.Code != http.StatusNoContent {
 		t.Errorf("deleting every version: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
 	}
-	want := []versionRef{{"readme.txt", 3}, {"readme.txt", 0}}
-	if len(mc.versionsDropped) != 2 || mc.versionsDropped[0] != want[0] || mc.versionsDropped[1] != want[1] {
+	if r := manage(h, w, http.MethodDelete, "versions?path=/deleted.txt"); r.Code != http.StatusNoContent {
+		t.Errorf("deleting the versions of a deleted file: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
+	}
+	want := []versionRef{{"readme.txt", 3}, {"readme.txt", 0}, {"deleted.txt", 0}}
+	if len(mc.versionsDropped) != 3 || mc.versionsDropped[0] != want[0] || mc.versionsDropped[1] != want[1] || mc.versionsDropped[2] != want[2] {
 		t.Errorf("want the deletions %v, got %v", want, mc.versionsDropped)
 	}
 
@@ -232,7 +246,7 @@ func TestDeletingVersions(t *testing.T) {
 			}
 		})
 	}
-	if len(mc.versionsDropped) != 2 {
+	if len(mc.versionsDropped) != 3 {
 		t.Errorf("want nothing else deleted, got %v", mc.versionsDropped)
 	}
 }

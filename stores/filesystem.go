@@ -27,28 +27,44 @@ type ObjectMeta struct {
 	IsDir      bool
 }
 
+// listedDirectory finds the directory the account may list at the path, nil
+// for the root, reporting whether there is one.
+func listedDirectory(ctx context.Context, tx pgx.Tx, acc Account, shareName, path string) (id any, found bool, err error) {
+	if path == "/" {
+		return nil, true, nil
+	}
+	const query = `
+		WITH caller AS (
+			SELECT id, workgroup
+			FROM accounts
+			WHERE id = $1
+		)
+		SELECT d.id
+		FROM directories d
+		JOIN accounts owner ON owner.id = d.account
+		CROSS JOIN caller c
+		WHERE d.share_name = $2
+			AND d.full_path = $3
+			AND (d.account = c.id
+			OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
+			OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+			OR owns_ancestor(d.share_name, c.id, d.full_path)
+		)
+	`
+	var dir int64
+	if err := tx.QueryRow(ctx, query, acc.ID, shareName, path).Scan(&dir); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to query directory: %v", err)
+	}
+	return uint64(dir), true, nil
+}
+
 // ListObjects lists all objects in the specified directory.
 func (db *Database) ListObjects(acc Account, shareName, path string) (objects []ObjectMeta, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const dirQuery = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $1
-			)
-			SELECT d.id
-			FROM directories d
-			JOIN accounts owner ON owner.id = d.account
-			CROSS JOIN caller c
-			WHERE d.share_name = $2
-				AND d.full_path = $3
-				AND (d.account = c.id
-				OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
-				OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
-				OR owns_ancestor(d.share_name, c.id, d.full_path)
-			)
-		`
 		const query = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -106,19 +122,9 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 			ORDER BY full_path
 		`
 
-		var parentID any
-		if path == "/" {
-			parentID = nil
-		} else {
-			var parentDir *int64
-			if err := tx.QueryRow(ctx, dirQuery, acc.ID, shareName, path).Scan(&parentDir); err != nil {
-				if err == pgx.ErrNoRows {
-					return nil
-				} else {
-					return fmt.Errorf("failed to query directory: %v", err)
-				}
-			}
-			parentID = uint64(*parentDir)
+		parentID, found, err := listedDirectory(ctx, tx, acc, shareName, path)
+		if err != nil || !found {
+			return err
 		}
 
 		rows, err := tx.Query(ctx, query, shareName, parentID, acc.ID)
@@ -146,27 +152,10 @@ func (db *Database) ListObjects(acc Account, shareName, path string) (objects []
 }
 
 // DirectoryEmpty returns true if the specified directory contains no objects.
+// The versions of files deleted from it do not count: they go with it.
 func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty bool, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const dirQuery = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $1
-			)
-			SELECT d.id
-			FROM directories d
-			JOIN accounts owner ON owner.id = d.account
-			CROSS JOIN caller c
-			WHERE d.share_name = $2
-				AND d.full_path = $3
-				AND (d.account = c.id
-				OR (d.private = FALSE AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup()))
-				OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
-				OR owns_ancestor(d.share_name, c.id, d.full_path)
-			)
-		`
 		const query = `
 			WITH caller AS (
 				SELECT id, workgroup
@@ -198,6 +187,11 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 					CROSS JOIN caller c
 					WHERE o.share_name = $1
 						AND o.directory_id IS NOT DISTINCT FROM $2
+						AND NOT EXISTS (
+							SELECT 1
+							FROM versions v
+							WHERE v.object_id = o.id
+						)
 						AND (
 							o.account = c.id
 							OR (
@@ -211,19 +205,9 @@ func (db *Database) DirectoryEmpty(acc Account, shareName, path string) (empty b
 			) AS is_empty
 		`
 
-		var parentID any
-		if path == "/" {
-			parentID = nil
-		} else {
-			var parentDir *int64
-			if err := tx.QueryRow(ctx, dirQuery, acc.ID, shareName, path).Scan(&parentDir); err != nil {
-				if err == pgx.ErrNoRows {
-					return nil
-				} else {
-					return fmt.Errorf("failed to query directory: %v", err)
-				}
-			}
-			parentID = uint64(*parentDir)
+		parentID, found, err := listedDirectory(ctx, tx, acc, shareName, path)
+		if err != nil || !found {
+			return err
 		}
 
 		if err := tx.QueryRow(ctx, query, shareName, parentID, acc.ID).Scan(&empty); err != nil {
@@ -969,6 +953,7 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 		if err != nil {
 			return err
 		}
+		retain := db.versioning.Keep
 		if origin != "" {
 			if err := moveVersionsTo(ctx, tx, share, path, origin); err != nil {
 				return err
@@ -979,6 +964,17 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 			}
 			if keep {
 				slabs, err = db.absorbFile(ctx, tx, share, path, origin, acc)
+				return err
+			}
+			// Within the session, the old file is a save's leftovers and goes outright.
+			retain = false
+		}
+
+		// A share that keeps versions deletes a file by emptying it: the contents
+		// become a version, and the versions stay for the folder to show it by.
+		if retain {
+			slabs, err = db.emptyFile(ctx, tx, share, path, acc, true)
+			if !errors.Is(err, ErrNotFound) {
 				return err
 			}
 		}
@@ -1019,10 +1015,12 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 			return ErrNotFound
 		}
 
-		// The versions of the file go with it.
-		released, err := dropVersionsAt(ctx, tx, share, path, 0)
-		if err != nil {
-			return err
+		// The versions of the file go with it where none are kept.
+		var released []types.Hash256
+		if !db.versioning.Keep {
+			if released, err = dropVersionsAt(ctx, tx, share, path, 0); err != nil {
+				return err
+			}
 		}
 
 		for _, bid := range bids {
@@ -1063,7 +1061,7 @@ func (db *Database) DeleteFile(acc Account, share string, path string) (slabs []
 
 // deletableFile opens the queries of DeleteFile: the CTE target is the file at
 // the path ($1, $2) the caller ($3) may delete, an upload in flight included
-// where no visible file is there.
+// where no visible file is there, and a version never.
 const deletableFile = `
 	WITH caller AS (
 		SELECT id, workgroup
@@ -1082,12 +1080,19 @@ const deletableFile = `
 			AND o.full_path = $2
 			AND (
 				o.temporary = FALSE
-				OR NOT EXISTS (
-					SELECT 1
-					FROM objects v
-					WHERE v.share_name = $1
-						AND v.full_path = $2
-						AND v.temporary = FALSE
+				OR (
+					NOT EXISTS (
+						SELECT 1
+						FROM versions kept
+						WHERE kept.object_id = o.id
+					)
+					AND NOT EXISTS (
+						SELECT 1
+						FROM objects v
+						WHERE v.share_name = $1
+							AND v.full_path = $2
+							AND v.temporary = FALSE
+					)
 				)
 			)
 			AND (

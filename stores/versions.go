@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -122,6 +123,8 @@ func (db *Database) keepsReplaced(ctx context.Context, tx pgx.Tx, share, path st
 // markRestored notes that the file holds unchanged the one of the versions
 // that is of its size, which a later restore need not keep; none: ErrNotFound.
 func markRestored(ctx context.Context, tx pgx.Tx, share, path string, ids []uint64) error {
+	// A zero ID names the newest version: the contents that stood as the file
+	// when the restore began, which its first write has made a version since.
 	const query = `
 		UPDATE objects o
 		SET restored_from = v.id
@@ -130,10 +133,16 @@ func markRestored(ctx context.Context, tx pgx.Tx, share, path string, ids []uint
 		WHERE o.share_name = $1
 			AND o.full_path = $2
 			AND o.temporary = FALSE
-			AND v.id = ANY($3::BIGINT[])
 			AND v.share_name = o.share_name
 			AND v.full_path = o.full_path
 			AND v.size = o.size
+			AND (v.id = ANY($3::BIGINT[]) OR 0 = ANY($3::BIGINT[]) AND versions.replaced_at = (
+				SELECT MAX(newest.replaced_at)
+				FROM versions newest
+				JOIN objects n ON n.id = newest.object_id
+				WHERE n.share_name = o.share_name
+					AND n.full_path = o.full_path
+			))
 	`
 
 	candidates := make([]int64, 0, len(ids))
@@ -239,77 +248,82 @@ func (db *Database) DeleteVersions(share, path string, id uint64) (slabs []types
 func (db *Database) EmptyFile(acc Account, share, path string, deliberate bool) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		const targets = deletableFile + `
-			SELECT t.id
-			FROM target t
-			JOIN objects o ON o.id = t.id
-			WHERE o.temporary = FALSE
-		`
-
-		rows, err := tx.Query(ctx, targets, share, path, acc.ID)
-		if err != nil {
-			return fmt.Errorf("failed to find the file: %w", err)
-		}
-		ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
-		if err != nil {
-			return fmt.Errorf("failed to read the file: %w", err)
-		}
-		if len(ids) == 0 {
-			return ErrNotFound
-		}
-
-		keep, err := db.keepsReplaced(ctx, tx, share, path, ids, uint64(acc.ID), deliberate)
-		if err != nil {
-			return err
-		}
-		if keep {
-			if err := recordVersions(ctx, tx, ids, uint64(acc.ID)); err != nil {
-				return err
-			}
-			slabs, err = db.pruneVersions(ctx, tx, share, path)
-			return err
-		}
-
-		const collect = `
-			SELECT DISTINCT m.buffer_id, m.slab_key
-			FROM metadata m
-			WHERE m.object_id = ANY($1::BIGINT[])
-		`
-
-		rows, err = tx.Query(ctx, collect, ids)
-		if err != nil {
-			return fmt.Errorf("failed to collect the storage of the file: %w", err)
-		}
-		bids, keys, err := collectStorage(rows)
-		if err != nil {
-			return err
-		}
-
-		if _, err := tx.Exec(ctx, `DELETE FROM objects WHERE id = ANY($1::BIGINT[])`, ids); err != nil {
-			return fmt.Errorf("failed to delete the file: %w", err)
-		}
-		for _, bid := range bids {
-			if _, err := tx.Exec(ctx, `
-				DELETE FROM buffers b
-				WHERE b.id = $1
-					AND NOT EXISTS (
-						SELECT 1
-						FROM metadata m
-						WHERE m.buffer_id = b.id
-					)
-			`, bid); err != nil {
-				return fmt.Errorf("failed to delete orphaned buffer: %w", err)
-			}
-		}
-
-		var workgroup int
-		if err := tx.QueryRow(ctx, `SELECT workgroup FROM accounts WHERE id = $1`, acc.ID).Scan(&workgroup); err != nil {
-			return fmt.Errorf("failed to resolve workgroup: %w", err)
-		}
-		slabs, err = unreferencedSlabs(ctx, tx, share, workgroup, keys)
+		slabs, err = db.emptyFile(ctx, tx, share, path, acc, deliberate)
 		return err
 	})
 	return
+}
+
+// emptyFile is EmptyFile within a transaction, which deleting a file on a share
+// that keeps versions comes down to as well.
+func (db *Database) emptyFile(ctx context.Context, tx pgx.Tx, share, path string, acc Account, deliberate bool) ([]types.Hash256, error) {
+	const targets = deletableFile + `
+		SELECT t.id
+		FROM target t
+		JOIN objects o ON o.id = t.id
+		WHERE o.temporary = FALSE
+	`
+
+	rows, err := tx.Query(ctx, targets, share, path, acc.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find the file: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the file: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, ErrNotFound
+	}
+
+	keep, err := db.keepsReplaced(ctx, tx, share, path, ids, uint64(acc.ID), deliberate)
+	if err != nil {
+		return nil, err
+	}
+	if keep {
+		if err := recordVersions(ctx, tx, ids, uint64(acc.ID)); err != nil {
+			return nil, err
+		}
+		return db.pruneVersions(ctx, tx, share, path)
+	}
+
+	const collect = `
+		SELECT DISTINCT m.buffer_id, m.slab_key
+		FROM metadata m
+		WHERE m.object_id = ANY($1::BIGINT[])
+	`
+
+	rows, err = tx.Query(ctx, collect, ids)
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect the storage of the file: %w", err)
+	}
+	bids, keys, err := collectStorage(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM objects WHERE id = ANY($1::BIGINT[])`, ids); err != nil {
+		return nil, fmt.Errorf("failed to delete the file: %w", err)
+	}
+	for _, bid := range bids {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM buffers b
+			WHERE b.id = $1
+				AND NOT EXISTS (
+					SELECT 1
+					FROM metadata m
+					WHERE m.buffer_id = b.id
+				)
+		`, bid); err != nil {
+			return nil, fmt.Errorf("failed to delete orphaned buffer: %w", err)
+		}
+	}
+
+	var workgroup int
+	if err := tx.QueryRow(ctx, `SELECT workgroup FROM accounts WHERE id = $1`, acc.ID).Scan(&workgroup); err != nil {
+		return nil, fmt.Errorf("failed to resolve workgroup: %w", err)
+	}
+	return unreferencedSlabs(ctx, tx, share, workgroup, keys)
 }
 
 // dropVersionsAt drops the version of the file at the path with the given ID,
@@ -648,6 +662,168 @@ func (db *Database) Versions(share, path string) (versions []Version, err error)
 			versions = append(versions, v)
 		}
 		return rows.Err()
+	})
+	return
+}
+
+// filesAt picks, for each path the scope covers, the copy of the file that
+// stood at the time $4 among the file as it is and its versions: one there by
+// then and not replaced by then, with the contents of the time where they
+// were kept, and the nearest kept after it otherwise. Times go by the second,
+// as the snapshot names do. $1 is the share and $3 the account asking.
+func filesAt(scope string) string {
+	return `
+		SELECT DISTINCT ON (o.full_path)
+			o.full_path,
+			o.id,
+			o.size,
+			o.created_at,
+			o.modified_at,
+			v.replaced_at
+		FROM objects o
+		LEFT JOIN versions v ON v.object_id = o.id
+		JOIN accounts owner ON owner.id = o.account
+		LEFT JOIN directories od
+			ON od.share_name = o.share_name
+			AND od.id = o.directory_id
+		CROSS JOIN caller c
+		WHERE o.share_name = $1
+			AND ` + scope + `
+			AND (o.temporary = FALSE OR v.object_id IS NOT NULL)
+			AND date_trunc('second', o.created_at) <= $4
+			AND (v.replaced_at IS NULL OR v.replaced_at > $4)
+			AND (
+				o.account = c.id
+				OR (
+					od.private = FALSE
+					AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
+				)
+				OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+				OR owns_ancestor(o.share_name, c.id, o.full_path)
+			)
+		ORDER BY o.full_path, date_trunc('second', o.modified_at) <= $4 DESC, v.replaced_at NULLS LAST, o.id
+	`
+}
+
+// ListObjectsAt lists the directory as it was at the time: the folders made
+// by then, and the files there by then with the contents they held, which are
+// the versions replaced since, deleted files among them. A file whose state
+// at the time was not kept is listed with the nearest state kept after it.
+func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.Time) (objects []ObjectMeta, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		query := `
+			WITH caller AS (
+				SELECT id, workgroup
+				FROM accounts
+				WHERE id = $3
+			)
+			SELECT
+				d.full_path,
+				0::bigint AS size,
+				d.created_at,
+				d.modified_at,
+				TRUE AS is_dir
+			FROM directories d
+			CROSS JOIN caller c
+			WHERE d.share_name = $1
+				AND d.parent_id IS NOT DISTINCT FROM $2
+				AND date_trunc('second', d.created_at) <= $4
+				AND (d.account = c.id
+					OR (d.private = FALSE AND EXISTS (
+						SELECT 1
+						FROM accounts a
+						WHERE a.id = d.account
+							AND (a.workgroup = c.workgroup OR a.workgroup = anonymous_workgroup())
+					))
+					OR granted_level(d.share_name, c.workgroup, d.full_path) >= 0
+					OR owns_ancestor(d.share_name, c.id, d.full_path)
+				)
+
+			UNION ALL
+
+			SELECT full_path, size, created_at, modified_at, FALSE AS is_dir
+			FROM (` + filesAt(`o.directory_id IS NOT DISTINCT FROM $2`) + `) f
+
+			ORDER BY full_path
+		`
+
+		parentID, found, err := listedDirectory(ctx, tx, acc, shareName, path)
+		if err != nil || !found {
+			return err
+		}
+
+		rows, err := tx.Query(ctx, query, shareName, parentID, acc.ID, at)
+		if err != nil {
+			return fmt.Errorf("failed to query the objects at the time: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var obj ObjectMeta
+			if err := rows.Scan(&obj.Path, &obj.Size, &obj.CreatedAt, &obj.ModifiedAt, &obj.IsDir); err != nil {
+				return fmt.Errorf("failed to scan object: %w", err)
+			}
+			objects = append(objects, obj)
+		}
+		return rows.Err()
+	})
+	return
+}
+
+// ObjectAt finds the copy of the file at the path that stood at the time, as
+// ListObjectsAt picks it: a version, or the file as it is now with a zero ID.
+// The caller answers for the account's right to read the file.
+func (db *Database) ObjectAt(acc Account, shareName, path string, at time.Time) (version Version, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		query := `
+			WITH caller AS (
+				SELECT id, workgroup
+				FROM accounts
+				WHERE id = $3
+			)
+			SELECT id, size, created_at, modified_at, replaced_at
+			FROM (` + filesAt(`o.full_path = $2`) + `) f
+		`
+		var id int64
+		var created time.Time
+		var replaced *time.Time
+		err := tx.QueryRow(ctx, query, shareName, path, acc.ID, at).Scan(&id, &version.Size, &created, &version.ModifiedAt, &replaced)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return fmt.Errorf("failed to find the file at the time: %w", err)
+		}
+		if replaced != nil {
+			version.ID, version.ReplacedAt = uint64(id), *replaced
+		}
+		return nil
+	})
+	return
+}
+
+// Snapshots lists the times the folder has previous states at, newest first:
+// the times the versions of the files under it, at any depth, were last
+// written, by the second. The caller answers for the right to the folder.
+func (db *Database) Snapshots(shareName, path string) (times []time.Time, err error) {
+	path = normalizePath(path)
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			SELECT DISTINCT date_trunc('second', o.modified_at) AS at
+			FROM objects o
+			JOIN versions v ON v.object_id = o.id
+			WHERE o.share_name = $1
+				AND starts_with(o.full_path, $2)
+			ORDER BY at DESC
+		`
+		prefix := strings.TrimSuffix(path, "/") + "/"
+		rows, err := tx.Query(ctx, query, shareName, prefix)
+		if err != nil {
+			return fmt.Errorf("failed to list the snapshots: %w", err)
+		}
+		times, err = pgx.CollectRows(rows, pgx.RowTo[time.Time])
+		return err
 	})
 	return
 }

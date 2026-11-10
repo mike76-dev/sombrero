@@ -605,11 +605,13 @@ func expandGeneric(access uint32) uint32 {
 	return access
 }
 
-// versionOpen says which previous version an open is of: the version's ID, and
-// the path of the file it is a version of.
+// versionOpen says what previous state an open is of: the time of the snapshot,
+// the path of the file or folder as it is, and the version's ID, which is zero
+// where the copy of the file at the time is the file as it is, or a folder.
 type versionOpen struct {
 	id   uint64
 	path string
+	at   time.Time
 }
 
 // readOnlyAccess is all a previous version grants: it is there to be read.
@@ -621,17 +623,33 @@ const readOnlyAccess = smb2.FILE_READ_DATA | smb2.FILE_READ_EA | smb2.FILE_EXECU
 func (op *open) readRange(acc stores.Account, path string, offset, length uint64, w io.Writer) error {
 	if op.version != nil {
 		versioner := op.treeConnect.client.(client.Versioner)
-		return versioner.ReadVersion(op.ctx, acc, op.version.path, op.version.id, offset, length, w)
+		id := op.version.id
+		if id == 0 {
+			// The copy of the time was the file as it is, which a write since has made a version.
+			v, err := versioner.ObjectAt(op.ctx, acc, op.version.path, op.version.at)
+			if err != nil {
+				return err
+			}
+			id = v.ID
+		}
+		if id == 0 {
+			return op.treeConnect.client.Read(op.ctx, acc, op.version.path, offset, length, w)
+		}
+		return versioner.ReadVersion(op.ctx, acc, op.version.path, id, offset, length, w)
 	}
 	return op.treeConnect.client.Read(op.ctx, acc, path, offset, length, w)
 }
 
-// snapshots lists the times the previous versions of the file go by, newest
-// first. A folder, a version and a share that keeps none have none.
+// snapshots lists the times the previous versions of the file go by, or the
+// folder has previous states at, newest first. A version and a share that
+// keeps none have none.
 func (op *open) snapshots(acc stores.Account) ([]time.Time, error) {
 	versioner, ok := op.treeConnect.client.(client.Versioner)
-	if !ok || op.version != nil || op.file.isDirectory() {
+	if !ok || op.version != nil {
 		return nil, nil
+	}
+	if op.file.isDirectory() {
+		return versioner.Snapshots(op.ctx, acc, op.pathName)
 	}
 	versions, err := versioner.Versions(op.ctx, acc, op.pathName)
 	if err != nil {
@@ -1368,7 +1386,7 @@ func (op *open) queryDirectory(acc stores.Account, pattern string) error {
 		return errNoDirectory
 	}
 
-	ois, err := op.treeConnect.client.List(ctx, acc, dir+"/")
+	ois, err := op.entries(ctx, acc, dir)
 	if err != nil {
 		return err
 	}
@@ -1383,16 +1401,18 @@ func (op *open) queryDirectory(acc stores.Account, pattern string) error {
 		}
 	}
 
-	// Search persisted Opens, too.
-	results = append(results, op.treeConnect.persistedObjects(func(path string) bool {
-		if _, ok := found[path]; ok {
-			return false
-		}
-		if utils.TrimName(path) != dir {
-			return false
-		}
-		return utils.MatchPattern(pattern, utils.TrimPath(path))
-	})...)
+	// Search persisted Opens, too: files being written now, which a previous state has none of.
+	if op.version == nil {
+		results = append(results, op.treeConnect.persistedObjects(func(path string) bool {
+			if _, ok := found[path]; ok {
+				return false
+			}
+			if utils.TrimName(path) != dir {
+				return false
+			}
+			return utils.MatchPattern(pattern, utils.TrimPath(path))
+		})...)
+	}
 
 	op.mu.Lock()
 	op.lastSearch = pattern
@@ -1404,6 +1424,16 @@ func (op *open) queryDirectory(acc stores.Account, pattern string) error {
 	}
 
 	return nil
+}
+
+// entries lists the directory of the open: as it is, or as it was at the time where the open is
+// a snapshot of it.
+func (op *open) entries(ctx context.Context, acc stores.Account, dir string) ([]client.ObjectInfo, error) {
+	if op.version != nil {
+		versioner := op.treeConnect.client.(client.Versioner)
+		return versioner.ListAt(ctx, acc, op.version.path, op.version.at)
+	}
+	return op.treeConnect.client.List(ctx, acc, dir+"/")
 }
 
 // id is a helper method that marshals the persistent and volatile ID parts into a byte sequence.
@@ -1621,9 +1651,12 @@ func (op *open) directorySnapshot(acc stores.Account) ([]byte, error) {
 	ctx := op.ctx
 	op.mu.Unlock()
 
-	ois, err := op.treeConnect.client.List(ctx, acc, dir)
+	ois, err := op.entries(ctx, acc, strings.TrimSuffix(dir, "/"))
 	if err != nil {
 		return nil, err
+	}
+	if op.version != nil {
+		return makeSnapshot(ois), nil
 	}
 
 	found := make(map[string]struct{})
