@@ -108,6 +108,34 @@ $$ LANGUAGE SQL STABLE
 	{name: "exempt kept versions from the limits", sql: `
 		ALTER TABLE versions ADD COLUMN kept BOOLEAN NOT NULL DEFAULT FALSE
 	`},
+	{name: "keep the previous versions of renterd files", sql: `
+		CREATE TABLE renterd_versions (
+			id BIGSERIAL PRIMARY KEY,
+			share_name TEXT NOT NULL,
+			path TEXT NOT NULL,
+			size BIGINT NOT NULL,
+			modified_at TIMESTAMPTZ NOT NULL,
+			replaced_by INT REFERENCES accounts(id) ON DELETE SET NULL,
+			replaced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			session_until TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			kept BOOLEAN NOT NULL DEFAULT FALSE
+		);
+		CREATE INDEX idx_renterd_versions_path ON renterd_versions (share_name, path);
+		CREATE INDEX idx_renterd_versions_replaced ON renterd_versions (replaced_at);
+		CREATE TABLE renterd_restored (
+			share_name TEXT NOT NULL,
+			path TEXT NOT NULL,
+			version_id BIGINT NOT NULL REFERENCES renterd_versions(id) ON DELETE CASCADE,
+			PRIMARY KEY (share_name, path)
+		);
+		CREATE TABLE renterd_displaced (
+			share_name TEXT NOT NULL,
+			path TEXT NOT NULL,
+			origin TEXT NOT NULL,
+			at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (share_name, path)
+		)
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

@@ -239,6 +239,40 @@ CREATE TABLE versions (
 );
 CREATE INDEX idx_versions_replaced ON versions (replaced_at);
 
+-- A version of a file on a renterd share, which the bucket holds as a hidden
+-- object named after the id; the columns are those of versions.
+CREATE TABLE renterd_versions (
+    id BIGSERIAL PRIMARY KEY,
+    share_name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size BIGINT NOT NULL,
+    modified_at TIMESTAMPTZ NOT NULL,
+    replaced_by INT REFERENCES accounts(id) ON DELETE SET NULL,
+    replaced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    session_until TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    kept BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX idx_renterd_versions_path ON renterd_versions (share_name, path);
+CREATE INDEX idx_renterd_versions_replaced ON renterd_versions (replaced_at);
+
+-- A renterd file that holds one of its versions unchanged, as restored_from
+-- notes it for an indexd file.
+CREATE TABLE renterd_restored (
+    share_name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    version_id BIGINT NOT NULL REFERENCES renterd_versions(id) ON DELETE CASCADE,
+    PRIMARY KEY (share_name, path)
+);
+
+-- A renterd file renamed away from a name, as displaced notes an indexd file.
+CREATE TABLE renterd_displaced (
+    share_name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (share_name, path)
+);
+
 -- A file renamed away from a name, noted so that deleting it soon after,
 -- once another file has taken the name, counts as replacing that file.
 CREATE TABLE displaced (

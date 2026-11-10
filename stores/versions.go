@@ -49,6 +49,11 @@ func (db *Database) SetVersioning(p VersionPolicy) {
 	db.versioning = p
 }
 
+// KeepsVersions says whether replaced files leave versions behind at all.
+func (db *Database) KeepsVersions() bool {
+	return db.versioning.Keep
+}
+
 // keepsVersion says whether the file about to be replaced is kept: the policy
 // must say so, and the save must not continue the editing session that left
 // the newest version, which it does when it is the same account's, within the
