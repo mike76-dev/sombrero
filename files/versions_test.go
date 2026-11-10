@@ -27,7 +27,7 @@ func versionedClient() *mockClient {
 		case "readme.txt":
 			return []client.VersionInfo{
 				{ID: 7, Size: 50, ModifiedAt: versionModified, ReplacedAt: versionModified.Add(time.Hour), ReplacedBy: "alice"},
-				{ID: 3, Size: 20, ModifiedAt: versionModified.Add(-24 * time.Hour), ReplacedAt: versionModified},
+				{ID: 3, Size: 20, ModifiedAt: versionModified.Add(-24 * time.Hour), ReplacedAt: versionModified, Kept: true},
 			}, nil
 		case "deleted.txt":
 			return []client.VersionInfo{{ID: 9, Size: 10, ModifiedAt: versionModified, ReplacedAt: versionModified.Add(time.Hour)}}, nil
@@ -56,8 +56,8 @@ func TestListingVersions(t *testing.T) {
 	}
 	var got []VersionEntry
 	json.NewDecoder(r.Body).Decode(&got)
-	if len(got) != 2 || got[0].ID != 7 || got[0].Size != 50 || got[0].ReplacedBy != "alice" || got[1].ID != 3 {
-		t.Errorf("want the two versions newest first, got %+v", got)
+	if len(got) != 2 || got[0].ID != 7 || got[0].Size != 50 || got[0].ReplacedBy != "alice" || got[0].Kept || got[1].ID != 3 || !got[1].Kept {
+		t.Errorf("want the two versions newest first, the older kept, got %+v", got)
 	}
 
 	// A deleted file is reached through the versions it left.
@@ -248,5 +248,57 @@ func TestDeletingVersions(t *testing.T) {
 	}
 	if len(mc.versionsDropped) != 3 {
 		t.Errorf("want nothing else deleted, got %v", mc.versionsDropped)
+	}
+}
+
+// TestKeepingAVersion verifies that a version is kept and released on request,
+// under the right to write, and that the call needs a version to name.
+func TestKeepingAVersion(t *testing.T) {
+	mc := versionedClient()
+	h, w := loggedIn(t, &mockStore{}, &mockServer{client: mc}, "alice", "hunter2")
+
+	if r := manage(h, w, http.MethodPost, "keep?path=/readme.txt&id=3"); r.Code != http.StatusNoContent {
+		t.Errorf("keeping a version: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
+	}
+	if r := manage(h, w, http.MethodDelete, "keep?path=/readme.txt&id=3"); r.Code != http.StatusNoContent {
+		t.Errorf("releasing a version: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
+	}
+	if r := manage(h, w, http.MethodPost, "keep?path=/deleted.txt&id=9"); r.Code != http.StatusNoContent {
+		t.Errorf("keeping a version of a deleted file: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
+	}
+	want := []keeping{{versionRef{"readme.txt", 3}, true}, {versionRef{"readme.txt", 3}, false}, {versionRef{"deleted.txt", 9}, true}}
+	if len(mc.kept) != 3 || mc.kept[0] != want[0] || mc.kept[1] != want[1] || mc.kept[2] != want[2] {
+		t.Errorf("want the markings %v, got %v", want, mc.kept)
+	}
+
+	tests := []struct {
+		name string
+		call string
+		err  error
+		want int
+	}{
+		{"no version", "keep?path=/readme.txt", nil, http.StatusBadRequest},
+		{"malformed version", "keep?path=/readme.txt&id=x", nil, http.StatusBadRequest},
+		{"a folder", "keep?path=/Projects&id=3", nil, http.StatusBadRequest},
+		{"not there", "keep?path=/gone.txt&id=3", nil, http.StatusNotFound},
+		{"no such version", "keep?path=/readme.txt&id=4", stores.ErrNotFound, http.StatusNotFound},
+		{"read-only folder", "keep?path=/readme.txt&id=3", stores.ErrAccessDenied, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mc.keepErr = tt.err
+			if r := manage(h, w, http.MethodPost, tt.call); r.Code != tt.want {
+				t.Errorf("want %d, got %d (%s)", tt.want, r.Code, r.Body.String())
+			}
+		})
+	}
+	if len(mc.kept) != 3 {
+		t.Errorf("want nothing else marked, got %v", mc.kept)
+	}
+
+	plain := struct{ client.Client }{mc}
+	ph, pw := loggedIn(t, &mockStore{}, &mockServer{client: plain}, "alice", "hunter2")
+	if r := manage(ph, pw, http.MethodPost, "keep?path=/readme.txt&id=3"); r.Code != http.StatusNotFound {
+		t.Errorf("without versions: want %d, got %d (%s)", http.StatusNotFound, r.Code, r.Body.String())
 	}
 }

@@ -211,6 +211,11 @@ type restoration struct {
 	ids  []uint64
 }
 
+// KeepVersion implements client.Versioner; the fake has no limits to exempt from.
+func (fc *fakeClient) KeepVersion(_ context.Context, _ stores.Account, _ string, _ uint64, _ bool) error {
+	return nil
+}
+
 // MarkRestored implements client.Versioner.
 func (fc *fakeClient) MarkRestored(_ context.Context, path string, ids []uint64) error {
 	fc.mu.Lock()

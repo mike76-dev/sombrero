@@ -34,12 +34,14 @@ type VersionPolicy struct {
 }
 
 // Version is a previous content of a file, held by a hidden object of its own.
+// A kept version is exempt from the count and age limits of the policy.
 type Version struct {
 	ID         uint64
 	Size       uint64
 	ModifiedAt time.Time
 	ReplacedAt time.Time
 	ReplacedBy string
+	Kept       bool
 }
 
 // SetVersioning sets what a replaced file leaves behind.
@@ -206,7 +208,8 @@ func keepVersion(ctx context.Context, tx pgx.Tx, oid, account uint64) error {
 }
 
 // pruneVersions drops the versions of the file beyond the count the policy
-// keeps, oldest first, and returns the slabs only they referenced.
+// keeps, oldest first, and returns the slabs only they referenced. The kept
+// versions neither count nor go.
 func (db *Database) pruneVersions(ctx context.Context, tx pgx.Tx, share, path string) ([]types.Hash256, error) {
 	count := db.versioning.Count
 	if count <= 0 {
@@ -219,6 +222,7 @@ func (db *Database) pruneVersions(ctx context.Context, tx pgx.Tx, share, path st
 		JOIN objects o ON o.id = v.object_id
 		WHERE o.share_name = $1
 			AND o.full_path = $2
+			AND NOT v.kept
 		ORDER BY v.replaced_at DESC, o.id DESC
 		OFFSET $3
 	`
@@ -230,8 +234,35 @@ func (db *Database) pruneVersions(ctx context.Context, tx pgx.Tx, share, path st
 	return dropVersions(ctx, tx, share, rows)
 }
 
+// KeepVersion exempts the version of the file at the path with the given ID
+// from the count and age limits, or puts it back under them; none: ErrNotFound.
+func (db *Database) KeepVersion(share, path string, id uint64, keep bool) error {
+	path = normalizePath(path)
+	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			UPDATE versions v
+			SET kept = $4
+			FROM objects o
+			WHERE o.id = v.object_id
+				AND o.share_name = $1
+				AND o.full_path = $2
+				AND o.id = $3
+		`
+
+		tag, err := tx.Exec(ctx, query, share, path, int64(id), keep)
+		if err != nil {
+			return fmt.Errorf("failed to mark the version: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
 // DeleteVersions removes the version of the file at the path with the given
-// ID, or every version of it with a zero ID, and returns the slabs released.
+// ID, or every version of it with a zero ID, kept or not, and returns the
+// slabs released.
 func (db *Database) DeleteVersions(share, path string, id uint64) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
@@ -448,7 +479,8 @@ func dropVersionRows(ctx context.Context, tx pgx.Tx, share string, victims []ver
 
 // ExpireVersions drops the versions replaced longer ago than the age, on every
 // share, and returns how many went. Their slabs are staged for unpinning, which
-// the connections pick up. A zero age keeps the versions for good.
+// the connections pick up. A zero age keeps the versions for good, as does the
+// kept flag of a version.
 func (db *Database) ExpireVersions(age time.Duration) (dropped int, err error) {
 	if age <= 0 {
 		return 0, nil
@@ -460,6 +492,7 @@ func (db *Database) ExpireVersions(age time.Duration) (dropped int, err error) {
 			FROM versions v
 			JOIN objects o ON o.id = v.object_id
 			WHERE v.replaced_at < NOW() - make_interval(secs => $1)
+				AND NOT v.kept
 		`
 
 		rows, err := tx.Query(ctx, expired, age.Seconds())
@@ -639,7 +672,7 @@ func (db *Database) Versions(share, path string) (versions []Version, err error)
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
 		const query = `
-			SELECT o.id, o.size, o.modified_at, v.replaced_at, COALESCE(a.account_name, '')
+			SELECT o.id, o.size, o.modified_at, v.replaced_at, COALESCE(a.account_name, ''), v.kept
 			FROM versions v
 			JOIN objects o ON o.id = v.object_id
 			LEFT JOIN accounts a ON a.id = v.replaced_by
@@ -656,7 +689,7 @@ func (db *Database) Versions(share, path string) (versions []Version, err error)
 
 		for rows.Next() {
 			var v Version
-			if err := rows.Scan(&v.ID, &v.Size, &v.ModifiedAt, &v.ReplacedAt, &v.ReplacedBy); err != nil {
+			if err := rows.Scan(&v.ID, &v.Size, &v.ModifiedAt, &v.ReplacedAt, &v.ReplacedBy, &v.Kept); err != nil {
 				return fmt.Errorf("failed to scan version: %w", err)
 			}
 			versions = append(versions, v)

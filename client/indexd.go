@@ -874,7 +874,7 @@ func (ic *IndexdClient) Versions(ctx context.Context, acc stores.Account, path s
 	}
 	infos := make([]VersionInfo, 0, len(versions))
 	for _, v := range versions {
-		infos = append(infos, VersionInfo{ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, ReplacedAt: v.ReplacedAt, ReplacedBy: v.ReplacedBy})
+		infos = append(infos, VersionInfo{ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, ReplacedAt: v.ReplacedAt, ReplacedBy: v.ReplacedBy, Kept: v.Kept})
 	}
 	return infos, nil
 }
@@ -957,6 +957,19 @@ func (ic *IndexdClient) RestoreVersion(ctx context.Context, acc stores.Account, 
 		}
 	}
 	return nil
+}
+
+// KeepVersion implements client.Versioner. Keeping a version takes the right
+// to write the file.
+func (ic *IndexdClient) KeepVersion(ctx context.Context, acc stores.Account, path string, id uint64, keep bool) error {
+	pa, err := ic.db.PathAccess(acc, ic.share, path)
+	if err != nil {
+		return err
+	}
+	if !pa.Write {
+		return stores.ErrAccessDenied
+	}
+	return ic.db.KeepVersion(ic.share, path, id, keep)
 }
 
 // DeleteVersions implements client.Versioner. Deleting versions takes the
