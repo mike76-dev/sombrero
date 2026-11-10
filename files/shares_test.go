@@ -55,6 +55,9 @@ type mockClient struct {
 	// The version hooks and what the client was asked to do with versions.
 	versions        func(string) ([]client.VersionInfo, error)
 	readVersion     func(string, uint64, uint64, uint64, io.Writer) error
+	snapshots       func(string) ([]time.Time, error)
+	listAt          func(string, time.Time) ([]client.ObjectInfo, error)
+	objectAt        func(string, time.Time) (client.VersionInfo, error)
 	restoreErr      error
 	dropVersionsErr error
 	restored        []versionRef
@@ -107,15 +110,24 @@ func (m *mockClient) MarkRestored(_ context.Context, _ string, _ []uint64) error
 	return nil
 }
 
-func (m *mockClient) Snapshots(_ context.Context, _ stores.Account, _ string) ([]time.Time, error) {
+func (m *mockClient) Snapshots(_ context.Context, _ stores.Account, p string) ([]time.Time, error) {
+	if m.snapshots != nil {
+		return m.snapshots(p)
+	}
 	return nil, nil
 }
 
-func (m *mockClient) ListAt(_ context.Context, _ stores.Account, _ string, _ time.Time) ([]client.ObjectInfo, error) {
+func (m *mockClient) ListAt(_ context.Context, _ stores.Account, p string, at time.Time) ([]client.ObjectInfo, error) {
+	if m.listAt != nil {
+		return m.listAt(p, at)
+	}
 	return nil, nil
 }
 
-func (m *mockClient) ObjectAt(_ context.Context, _ stores.Account, _ string, _ time.Time) (client.VersionInfo, error) {
+func (m *mockClient) ObjectAt(_ context.Context, _ stores.Account, p string, at time.Time) (client.VersionInfo, error) {
+	if m.objectAt != nil {
+		return m.objectAt(p, at)
+	}
 	return client.VersionInfo{}, stores.ErrNotFound
 }
 

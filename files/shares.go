@@ -84,7 +84,8 @@ func (h *Handler) sharesHandler(w http.ResponseWriter, req *http.Request, _ http
 }
 
 // listHandler handles the GET /share/:name/list calls, listing the folder the
-// path query names, or the root of the share without one.
+// path query names, or the root of the share without one, as it is, or as it
+// was at the time the at query names.
 func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params, s session) {
 	share, r, ok := h.shareFor(w, s, ps.ByName("name"))
 	if !ok {
@@ -98,6 +99,10 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 	p, ok := cleanPath(req.URL.Query().Get("path"))
 	if !ok {
 		writeError(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	at, ok := snapshotTime(w, req)
+	if !ok {
 		return
 	}
 
@@ -127,7 +132,28 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 			writeError(w, "not a folder", http.StatusBadRequest)
 			return
 		}
+		if !at.IsZero() && oi.CreatedAt.Truncate(time.Second).After(at) {
+			writeError(w, "folder not found", http.StatusNotFound)
+			return
+		}
 		listPath = strings.TrimPrefix(p, "/") + "/"
+	}
+
+	// A folder as it was is there to be read, and lists what the store kept of it.
+	if !at.IsZero() {
+		versioner, kept := c.(client.Versioner)
+		if !kept {
+			writeError(w, "folder not found", http.StatusNotFound)
+			return
+		}
+		ois, err := versioner.ListAt(ctx, s.account, strings.TrimPrefix(p, "/"), at)
+		if err != nil {
+			log.Printf("file API: failed to list %s on %s at %s: %v", p, share.Name, at, err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, Listing{Share: share.Name, Path: p, Entries: listEntries(ois)})
+		return
 	}
 
 	// The rights at the root are the policy's: the root belongs to everyone.
@@ -153,6 +179,11 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		return
 	}
 
+	writeJSON(w, Listing{Share: share.Name, Path: p, Rights: rights, Entries: listEntries(ois)})
+}
+
+// listEntries describes what a client listed, leaving the root itself out.
+func listEntries(ois []client.ObjectInfo) []Entry {
 	entries := make([]Entry, 0, len(ois))
 	for _, oi := range ois {
 		key := strings.TrimSuffix(oi.Key, "/")
@@ -171,7 +202,7 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 			ModifiedAt: oi.ModifiedAt,
 		})
 	}
-	writeJSON(w, Listing{Share: share.Name, Path: p, Rights: rights, Entries: entries})
+	return entries
 }
 
 // shareFor finds the share a call names and what the account holds on it,
