@@ -391,7 +391,7 @@ A logged-in account sees exactly what it would see over SMB. `GET /files/shares`
 curl -b cookies.txt "http://127.0.0.1:9999/files/shares"
 curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/list?path=/Projects"
 ```
-`GET /files/share/<SHARE>/file?path=/Projects/plan.pdf` downloads a file. The file is sent as an attachment unless `inline=1` is added, in which case a browser displays it if it is able to. Range requests are supported, so that a viewer can seek in a video or a PDF without downloading the entire file. A `HEAD` request to the same address returns the headers alone. Names containing special characters, such as spaces or brackets, must be URL-encoded in the query:
+`GET /files/share/<SHARE>/file?path=/Projects/plan.pdf` downloads a file. The file is sent as an attachment unless `inline=1` is added, in which case a browser displays it if it is able to. Images, audio, video and PDF documents are displayed as they are; a file of any other kind is displayed in a sandbox, so that a page uploaded to a share cannot execute scripts in the context of the server. Range requests are supported, so that a viewer can seek in a video or a PDF without downloading the entire file. A `HEAD` request to the same address returns the headers alone. Names containing special characters, such as spaces or brackets, must be URL-encoded in the query:
 ```Bash
 curl -b cookies.txt -o plan.pdf "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
 ```

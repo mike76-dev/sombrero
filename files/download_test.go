@@ -42,6 +42,43 @@ func readingClient() *mockClient {
 	}
 }
 
+// TestShowingAFileSandboxesCode verifies that a file shown inline runs nothing
+// as the server's origin, unless it is of a kind a browser renders by itself.
+func TestShowingAFileSandboxesCode(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		sandbox bool
+	}{
+		{"page.html", true},
+		{"logo.svg", true},
+		{"notes.txt", true},
+		{"data.json", true},
+		{"other.bin", true},
+		{"photo.jpg", false},
+		{"clip.mp4", false},
+		{"song.mp3", false},
+		{"plan.pdf", false},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/share/docs/file?path=/"+tt.name+"&inline=1", nil)
+		w := httptest.NewRecorder()
+		contentHeaders(w, req, tt.name)
+		if got := w.Header().Get("Content-Security-Policy") == "sandbox"; got != tt.sandbox {
+			t.Errorf("%s shown inline: sandboxed %v, want %v", tt.name, got, tt.sandbox)
+		}
+		if got := w.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "inline;") {
+			t.Errorf("%s: want it shown, got %q", tt.name, got)
+		}
+	}
+
+	// Saved rather than shown, nothing runs, so nothing is sandboxed.
+	req := httptest.NewRequest(http.MethodGet, "/share/docs/file?path=/page.html", nil)
+	w := httptest.NewRecorder()
+	contentHeaders(w, req, "page.html")
+	if got := w.Header().Get("Content-Security-Policy"); got != "" {
+		t.Errorf("an attachment: want no sandbox, got %q", got)
+	}
+}
+
 // download asks for the file with the given headers.
 func download(h http.Handler, from *httptest.ResponseRecorder, query string, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/share/docs/file?"+query, nil)
@@ -91,10 +128,17 @@ func TestDownloadingAFile(t *testing.T) {
 		}
 	}
 
-	// Asked for inline, the file is shown rather than saved.
+	// Asked for inline, the file is shown rather than saved, and shown
+	// sandboxed, as text could be a page.
 	r = download(h, w, "path=/readme.txt&inline=1", nil)
 	if got := r.Header().Get("Content-Disposition"); got != `inline; filename=readme.txt` {
 		t.Errorf("inline: want the inline disposition, got %q", got)
+	}
+	if got := r.Header().Get("Content-Security-Policy"); got != "sandbox" {
+		t.Errorf("inline: want the sandbox, got %q", got)
+	}
+	if got := r.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("want the type taken as given, got %q", got)
 	}
 
 	// A HEAD request describes the file without fetching any of it.

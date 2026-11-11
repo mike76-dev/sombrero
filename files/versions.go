@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"mime"
 	"net/http"
 	"path"
 	"strconv"
@@ -219,17 +218,7 @@ func (h *Handler) versionHandler(w http.ResponseWriter, req *http.Request, ps ht
 		}
 	}
 
-	name := path.Base(f.path)
-	ctype := mime.TypeByExtension(path.Ext(name))
-	if ctype == "" {
-		ctype = "application/octet-stream"
-	}
-	disposition := "attachment"
-	if req.URL.Query().Get("inline") != "" {
-		disposition = "inline"
-	}
-	w.Header().Set("Content-Type", ctype)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": name}))
+	contentHeaders(w, req, path.Base(f.path))
 
 	rd := &objectReader{
 		fetch: fetch,

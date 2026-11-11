@@ -21,13 +21,13 @@ function loadSort(): Sort {
   return { key: 'name', asc: true }
 }
 
-// viewable lists the kinds of file a browser shows by itself. Pages that could
-// run scripts under the library's origin are left out: they download instead.
+// viewable lists the kinds of file a browser shows by itself. The server
+// sandboxes what could carry code, so pages and SVG are safe to show.
 const viewable = new Set([
-  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif',
+  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif', 'svg',
   'mp4', 'webm', 'm4v', 'mov',
   'mp3', 'ogg', 'wav', 'm4a', 'flac',
-  'pdf', 'txt', 'md', 'csv', 'json', 'log',
+  'pdf', 'txt', 'md', 'csv', 'json', 'log', 'html', 'htm',
 ])
 
 function extension(name: string): string {

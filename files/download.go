@@ -56,17 +56,7 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		return
 	}
 
-	name := path.Base(p)
-	ctype := mime.TypeByExtension(path.Ext(name))
-	if ctype == "" {
-		ctype = "application/octet-stream"
-	}
-	disposition := "attachment"
-	if req.URL.Query().Get("inline") != "" {
-		disposition = "inline"
-	}
-	w.Header().Set("Content-Type", ctype)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": name}))
+	contentHeaders(w, req, path.Base(p))
 
 	// The chunk follows the share's part size the way the SMB read cache's does.
 	rd := &objectReader{
@@ -78,6 +68,37 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		chunk: h.chunkSize(partSize),
 	}
 	http.ServeContent(w, req, "", oi.ModifiedAt, rd)
+}
+
+// contentHeaders names the file in the response and says whether it is saved
+// or shown. Shown, a file that could carry code of its own is sandboxed: it
+// is somebody's upload, and it must not run as the server's origin, where the
+// sessions and the administration's password live.
+func contentHeaders(w http.ResponseWriter, req *http.Request, name string) {
+	ctype := mime.TypeByExtension(path.Ext(name))
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	disposition := "attachment"
+	if req.URL.Query().Get("inline") != "" {
+		disposition = "inline"
+		if !selfContained(ctype) {
+			w.Header().Set("Content-Security-Policy", "sandbox")
+		}
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": name}))
+}
+
+// selfContained reports whether a browser shows a file of the type with no
+// code of the file's own: such a file needs no sandbox, and a PDF viewer does
+// not work in one.
+func selfContained(ctype string) bool {
+	return ctype == "application/pdf" ||
+		(strings.HasPrefix(ctype, "image/") && ctype != "image/svg+xml") ||
+		strings.HasPrefix(ctype, "video/") ||
+		strings.HasPrefix(ctype, "audio/")
 }
 
 // objectReader reads a file off its share a chunk at a time, which is what
