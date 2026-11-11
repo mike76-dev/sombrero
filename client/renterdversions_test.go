@@ -408,6 +408,62 @@ func TestRenterdVersionsAtATime(t *testing.T) {
 
 // TestCopyAt verifies the choice of the copy current at a time, the save not
 // kept within a session resolving to the earliest kept contents after it.
+// TestRenterdVersionsHideTheirFolder verifies that the server's folder, where
+// the versions are kept, is neither seen nor reached by a client: not listed,
+// not there to look up or read, and not to be made, written, renamed or deleted.
+func TestRenterdVersionsHideTheirFolder(t *testing.T) {
+	rv, bucket, acc := versionedRenterd(t, stores.VersionPolicy{Keep: true, Count: 10})
+	ctx := context.Background()
+	bucket.put("/doc.txt", 400, time.Now().Add(-time.Hour))
+	save(t, rv, acc, "doc.txt")
+	object := strings.TrimPrefix(bucket.keys()[0], "/")
+	if !strings.HasPrefix(object, renterdVersionsFolder+"/") {
+		t.Fatalf("want the version kept under %s, got %q", renterdVersionsFolder, object)
+	}
+
+	ois, err := rv.List(ctx, acc, "")
+	if err != nil || len(ois) != 1 || ois[0].Key != "/doc.txt" {
+		t.Errorf("want the root listing the file alone, got %+v, %v", ois, err)
+	}
+	ois, err = rv.ListAt(ctx, acc, "", time.Now().Add(time.Hour))
+	if err != nil || len(ois) != 1 || ois[0].Key != "/doc.txt" {
+		t.Errorf("want the root as it was listing the file alone, got %+v, %v", ois, err)
+	}
+
+	for _, p := range []string{renterdReservedFolder, renterdVersionsFolder, object} {
+		if _, err := rv.Object(ctx, acc, p); !errors.Is(err, stores.ErrNotFound) {
+			t.Errorf("Object(%s): want ErrNotFound, got %v", p, err)
+		}
+		if _, err := rv.List(ctx, acc, p); !errors.Is(err, stores.ErrNotFound) {
+			t.Errorf("List(%s): want ErrNotFound, got %v", p, err)
+		}
+		if err := rv.Read(ctx, acc, p, 0, 10, io.Discard); !errors.Is(err, stores.ErrNotFound) {
+			t.Errorf("Read(%s): want ErrNotFound, got %v", p, err)
+		}
+		if err := rv.Delete(ctx, acc, p, false); !errors.Is(err, stores.ErrNotFound) {
+			t.Errorf("Delete(%s): want ErrNotFound, got %v", p, err)
+		}
+		if _, err := rv.Versions(ctx, acc, p); !errors.Is(err, stores.ErrNotFound) {
+			t.Errorf("Versions(%s): want ErrNotFound, got %v", p, err)
+		}
+	}
+	if err := rv.Delete(ctx, acc, renterdReservedFolder, true); !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("deleting the folder: want ErrNotFound, got %v", err)
+	}
+	if err := rv.MakeDirectory(ctx, acc, renterdReservedFolder); !errors.Is(err, stores.ErrDirectoryExists) {
+		t.Errorf("making the folder: want ErrDirectoryExists, got %v", err)
+	}
+	if _, err := rv.StartUpload(ctx, acc, renterdReservedFolder+"/new.txt"); !errors.Is(err, stores.ErrAccessDenied) {
+		t.Errorf("writing into the folder: want ErrAccessDenied, got %v", err)
+	}
+	if err := rv.Rename(ctx, acc, "doc.txt", renterdReservedFolder+"/doc.txt", false, false); !errors.Is(err, stores.ErrAccessDenied) {
+		t.Errorf("renaming into the folder: want ErrAccessDenied, got %v", err)
+	}
+	if keys := bucket.keys(); len(keys) != 2 || keys[0] != "/"+object || keys[1] != "/doc.txt" {
+		t.Errorf("want the bucket untouched, got %v", keys)
+	}
+}
+
 func TestCopyAt(t *testing.T) {
 	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
 	at := func(h int) time.Time { return base.Add(time.Duration(h) * time.Hour) }

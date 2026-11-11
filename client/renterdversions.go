@@ -15,9 +15,14 @@ import (
 	"go.sia.tech/renterd/v2/api"
 )
 
-// renterdVersionsFolder is where a renterd share keeps the contents of its
-// versions, each as an object named after the ID of its record.
-const renterdVersionsFolder = ".sombrero/versions"
+// renterdReservedFolder is the server's own folder of a renterd share, which
+// no client sees or touches; renterdVersionsFolder in it is where the share
+// keeps the contents of its versions, each as an object named after the ID of
+// its record.
+const (
+	renterdReservedFolder = ".sombrero"
+	renterdVersionsFolder = renterdReservedFolder + "/versions"
+)
 
 // RenterdVersions is a renterd client whose share keeps the previous versions
 // of its files: their contents as hidden objects of the bucket, their records
@@ -47,9 +52,76 @@ func versionKey(id uint64) string {
 	return fmt.Sprintf("%s/%d", renterdVersionsFolder, id)
 }
 
-// file is the object at the path where there is a file: a folder or nothing
-// there is reported as ErrNotFound.
+// reserved says whether the path is the server's folder or anything in it.
+func reserved(path string) bool {
+	p := strings.Trim(strings.ReplaceAll(path, "\\", "/"), "/")
+	return p == renterdReservedFolder || strings.HasPrefix(p, renterdReservedFolder+"/")
+}
+
+// IsEmpty implements Client: the server's folder is not there to a client.
+func (rv *RenterdVersions) IsEmpty(ctx context.Context, acc stores.Account, path string) (bool, error) {
+	if reserved(path) {
+		return false, stores.ErrNotFound
+	}
+	return rv.RenterdClient.IsEmpty(ctx, acc, path)
+}
+
+// List implements Client, leaving the server's folder out.
+func (rv *RenterdVersions) List(ctx context.Context, acc stores.Account, path string) ([]ObjectInfo, error) {
+	if reserved(path) {
+		return nil, stores.ErrNotFound
+	}
+	ois, err := rv.RenterdClient.List(ctx, acc, path)
+	if err != nil {
+		return nil, err
+	}
+	listed := make([]ObjectInfo, 0, len(ois))
+	for _, oi := range ois {
+		if !reserved(oi.Key) {
+			listed = append(listed, oi)
+		}
+	}
+	return listed, nil
+}
+
+// Object implements Client: the server's folder is not there to a client.
+func (rv *RenterdVersions) Object(ctx context.Context, acc stores.Account, path string) (ObjectInfo, error) {
+	if reserved(path) {
+		return ObjectInfo{}, stores.ErrNotFound
+	}
+	return rv.RenterdClient.Object(ctx, acc, path)
+}
+
+// Parents implements Client: the server's folder is not there to a client.
+func (rv *RenterdVersions) Parents(ctx context.Context, acc stores.Account, path string) (FileInfo, FileInfo, error) {
+	if reserved(path) {
+		return FileInfo{}, FileInfo{}, stores.ErrNotFound
+	}
+	return rv.RenterdClient.Parents(ctx, acc, path)
+}
+
+// Read implements Client: the server's folder is not there to a client.
+func (rv *RenterdVersions) Read(ctx context.Context, acc stores.Account, path string, offset, length uint64, buf io.Writer) error {
+	if reserved(path) {
+		return stores.ErrNotFound
+	}
+	return rv.RenterdClient.Read(ctx, acc, path, offset, length, buf)
+}
+
+// MakeDirectory implements Client: the server's folder is there already.
+func (rv *RenterdVersions) MakeDirectory(ctx context.Context, acc stores.Account, path string) error {
+	if reserved(path) {
+		return stores.ErrDirectoryExists
+	}
+	return rv.RenterdClient.MakeDirectory(ctx, acc, path)
+}
+
+// file is the object at the path where there is a file: a folder, the server's
+// folder or nothing there is reported as ErrNotFound.
 func (rv *RenterdVersions) file(ctx context.Context, acc stores.Account, path string) (ObjectInfo, error) {
+	if reserved(path) {
+		return ObjectInfo{}, stores.ErrNotFound
+	}
 	oi, err := rv.RenterdClient.Object(ctx, acc, path)
 	if errors.Is(err, stores.ErrNotFound) || err == nil && strings.HasSuffix(oi.Key, "/") {
 		return ObjectInfo{}, stores.ErrNotFound
@@ -96,8 +168,12 @@ func (rv *RenterdVersions) dropObjects(ctx context.Context, ids []uint64) {
 	}
 }
 
-// StartUpload implements Client, remembering who is writing.
+// StartUpload implements Client, remembering who is writing. Nothing is
+// written into the server's folder.
 func (rv *RenterdVersions) StartUpload(ctx context.Context, acc stores.Account, path string) (string, error) {
+	if reserved(path) {
+		return "", stores.ErrAccessDenied
+	}
 	id, err := rv.RenterdClient.StartUpload(ctx, acc, path)
 	if err == nil && id != "" {
 		rv.mu.Lock()
@@ -145,6 +221,9 @@ func (rv *RenterdVersions) FinishUpload(ctx context.Context, path string, upload
 // name, where it was renamed away from that name moments ago. A folder takes
 // the versions of its files with it.
 func (rv *RenterdVersions) Delete(ctx context.Context, acc stores.Account, path string, batch bool) error {
+	if reserved(path) {
+		return stores.ErrNotFound
+	}
 	if batch {
 		if err := rv.RenterdClient.Delete(ctx, acc, path, true); err != nil {
 			return err
@@ -199,7 +278,14 @@ func (rv *RenterdVersions) absorb(ctx context.Context, acc stores.Account, path 
 
 // Rename implements Client. The versions follow the file, or the files of the
 // folder, and a file renamed over is kept as a version where the policy says.
+// Nothing is renamed into the server's folder.
 func (rv *RenterdVersions) Rename(ctx context.Context, acc stores.Account, oldName, newName string, isDir, force bool) error {
+	if reserved(oldName) {
+		return stores.ErrNotFound
+	}
+	if reserved(newName) {
+		return stores.ErrAccessDenied
+	}
 	if !isDir && force {
 		over, err := rv.file(ctx, acc, newName)
 		if err == nil {
@@ -218,6 +304,9 @@ func (rv *RenterdVersions) Rename(ctx context.Context, acc stores.Account, oldNa
 
 // Versions implements Versioner.
 func (rv *RenterdVersions) Versions(ctx context.Context, acc stores.Account, path string) ([]VersionInfo, error) {
+	if reserved(path) {
+		return nil, stores.ErrNotFound
+	}
 	versions, err := rv.db.RenterdVersions(rv.share, path)
 	if err != nil {
 		return nil, err
@@ -310,6 +399,9 @@ func (rv *RenterdVersions) MarkRestored(ctx context.Context, path string, ids []
 
 // Snapshots implements Versioner.
 func (rv *RenterdVersions) Snapshots(ctx context.Context, acc stores.Account, path string) ([]time.Time, error) {
+	if reserved(path) {
+		return nil, stores.ErrNotFound
+	}
 	return rv.db.RenterdSnapshots(rv.share, path)
 }
 
@@ -357,6 +449,9 @@ func copyAt(copies []VersionInfo, at time.Time) (VersionInfo, bool) {
 
 // ObjectAt implements Versioner.
 func (rv *RenterdVersions) ObjectAt(ctx context.Context, acc stores.Account, path string, at time.Time) (VersionInfo, error) {
+	if reserved(path) {
+		return VersionInfo{}, stores.ErrNotFound
+	}
 	copies, err := rv.Versions(ctx, acc, path)
 	if err != nil {
 		return VersionInfo{}, err
@@ -379,6 +474,9 @@ func (rv *RenterdVersions) ObjectAt(ctx context.Context, acc stores.Account, pat
 // which a listing of the whole subtree tells, renterd dating no folder: one
 // nothing was made in by then was not there.
 func (rv *RenterdVersions) ListAt(ctx context.Context, acc stores.Account, dir string, at time.Time) ([]ObjectInfo, error) {
+	if reserved(dir) {
+		return nil, stores.ErrNotFound
+	}
 	prefix := "/" + strings.Trim(dir, "/")
 	if prefix != "/" {
 		prefix += "/"
@@ -396,7 +494,7 @@ func (rv *RenterdVersions) ListAt(ctx context.Context, acc stores.Account, dir s
 	// there while anything in it has a copy current at the time.
 	copies := make(map[string][]VersionInfo)
 	for _, oi := range live {
-		if oi.Key != prefix {
+		if oi.Key != prefix && !reserved(oi.Key) {
 			copies[oi.Key] = append(copies[oi.Key], VersionInfo{Size: oi.Size, ModifiedAt: oi.ModifiedAt})
 		}
 	}
