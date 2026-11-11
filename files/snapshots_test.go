@@ -44,7 +44,7 @@ func snapshotClient() *mockClient {
 		}
 		return []client.ObjectInfo{
 			{Key: "/Projects/plan.pdf", Size: 1000, ModifiedAt: made},
-			{Key: "/Projects/gone.txt", Size: 10, ModifiedAt: made},
+			{Key: "/Projects/gone.txt", Size: 10, ModifiedAt: made.In(time.FixedZone("CET", 3600))},
 		}, nil
 	}
 	mc.objectAt = func(p string, at time.Time) (client.VersionInfo, error) {
@@ -124,6 +124,9 @@ func TestListingAFolderAtATime(t *testing.T) {
 	}
 	if got.Entries[1].Name != "gone.txt" || got.Entries[1].Size != 10 || got.Entries[1].Dir {
 		t.Errorf("want the deleted file listed, got %+v", got.Entries[1])
+	}
+	if at := got.Entries[1].ModifiedAt.Format(time.RFC3339); at != versionModified.Add(-24*time.Hour).UTC().Format(time.RFC3339) {
+		t.Errorf("want the time of the deleted file in UTC, got %s", at)
 	}
 	if len(mc.listed) != 0 {
 		t.Errorf("want the folder as it is left alone, got %v listed", mc.listed)

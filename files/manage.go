@@ -284,7 +284,7 @@ func (h *Handler) entryAt(ctx context.Context, c client.Client, s session, p str
 	if oi, err := c.Object(ctx, s.account, strings.TrimPrefix(p, "/")); err == nil {
 		e.Dir = strings.HasSuffix(oi.Key, "/")
 		e.Size = oi.Size
-		e.CreatedAt, e.ModifiedAt = oi.CreatedAt, oi.ModifiedAt
+		e.CreatedAt, e.ModifiedAt = oi.CreatedAt.UTC(), oi.ModifiedAt.UTC()
 	}
 	return e
 }

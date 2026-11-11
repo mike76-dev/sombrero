@@ -30,7 +30,8 @@ type ShareInfo struct {
 	Rights Rights `json:"rights"`
 }
 
-// Entry is one file or folder of a listing.
+// Entry is one file or folder of a listing. Its times are in UTC, as every
+// time the file API returns: the backends keep theirs in different zones.
 type Entry struct {
 	Name       string    `json:"name"`
 	Path       string    `json:"path"`
@@ -198,8 +199,8 @@ func listEntries(ois []client.ObjectInfo) []Entry {
 			Path:       key,
 			Dir:        strings.HasSuffix(oi.Key, "/"),
 			Size:       oi.Size,
-			CreatedAt:  oi.CreatedAt,
-			ModifiedAt: oi.ModifiedAt,
+			CreatedAt:  oi.CreatedAt.UTC(),
+			ModifiedAt: oi.ModifiedAt.UTC(),
 		})
 	}
 	return entries
