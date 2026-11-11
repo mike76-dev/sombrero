@@ -79,6 +79,7 @@ func newFakeRenterd(t *testing.T) *fakeRenterd {
 		f.mu.Unlock()
 
 		if raw != nil {
+			r.Body = io.NopCloser(bytes.NewReader(body))
 			raw(w, r)
 			return
 		}
@@ -413,6 +414,20 @@ func TestRenterdSaysWhenTheObjectIsNotThere(t *testing.T) {
 	}
 	if !errors.Is(err, stores.ErrNotFound) {
 		t.Errorf("the delete failed with %v, want an error the caller can read as the object not being there", err)
+	}
+}
+
+// TestRenterdObjectNotThere verifies that a path the listing does not hold is
+// reported with the same sentinel, which the layers above test for.
+func TestRenterdObjectNotThere(t *testing.T) {
+	f := newFakeRenterd(t)
+	f.answer("/api/bus/objects", api.ObjectsResponse{
+		Objects: []api.ObjectMetadata{{Key: "/dir/one.txt", Size: 111}},
+	})
+
+	_, err := f.client("default").Object(context.Background(), stores.Account{}, "dir/two.txt")
+	if !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("an object not listed came back with %v, want ErrNotFound", err)
 	}
 }
 

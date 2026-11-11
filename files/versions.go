@@ -189,7 +189,7 @@ func (h *Handler) versionsHandler(w http.ResponseWriter, req *http.Request, ps h
 			return
 		}
 		for _, v := range versions {
-			entries = append(entries, VersionEntry{ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, ReplacedAt: v.ReplacedAt, ReplacedBy: v.ReplacedBy, Kept: v.Kept})
+			entries = append(entries, VersionEntry{ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt.UTC(), ReplacedAt: v.ReplacedAt.UTC(), ReplacedBy: v.ReplacedBy, Kept: v.Kept})
 		}
 	}
 	writeJSON(w, entries)

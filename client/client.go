@@ -196,7 +196,8 @@ type Versioner interface {
 	// Snapshots lists the times the folder has previous states at, newest first.
 	Snapshots(ctx context.Context, acc stores.Account, path string) ([]time.Time, error)
 
-	// ListAt lists the folder as it was at the time, deleted files included.
+	// ListAt lists the folder as it was at the time, deleted files included;
+	// a folder not there by then is ErrNotFound.
 	ListAt(ctx context.Context, acc stores.Account, path string, at time.Time) ([]ObjectInfo, error)
 
 	// ObjectAt finds the copy of the file that stood at the time: a version, or

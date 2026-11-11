@@ -74,16 +74,24 @@ func plainDuration(d time.Duration) string {
 // versionExpiryInterval is how often the versions past their age are dropped.
 const versionExpiryInterval = time.Hour
 
-// expireVersions drops the versions older than the age, now and then every
-// interval, until the context ends.
-func expireVersions(ctx context.Context, db *stores.Database, age time.Duration) {
+// expireVersions drops the versions older than the age, on the indexd shares
+// through the database and on the renterd shares through the server, now and
+// then every interval, until the context ends.
+func expireVersions(ctx context.Context, db *stores.Database, s *server, age time.Duration) {
 	ticker := time.NewTicker(versionExpiryInterval)
 	defer ticker.Stop()
 
 	for {
-		if n, err := db.ExpireVersions(age); err != nil {
+		n, err := db.ExpireVersions(age)
+		if err != nil {
 			log.Printf("failed to expire versions: %v", err)
-		} else if n > 0 {
+		}
+		if m, err := s.ExpireRenterdVersions(ctx, age); err != nil {
+			log.Printf("failed to expire renterd versions: %v", err)
+		} else {
+			n += m
+		}
+		if n > 0 {
 			log.Printf("Versioning: dropped %d versions older than %v", n, age)
 		}
 
@@ -178,13 +186,12 @@ func main() {
 	defer db.Close()
 
 	// The config refuses versioning in the Lite mode, so the store is the database here.
+	var versionAge time.Duration
 	if pg, ok := db.(*stores.Database); ok && cfg.Versioning.Enabled {
 		gap, session, count, age := cfg.Versioning.Retention()
 		pg.SetVersioning(stores.VersionPolicy{Keep: true, Gap: gap, MaxSession: session, Count: count})
 		log.Printf("Versioning: keeping up to %d versions per file for %v, one per editing session (gap %v, at most %v)", count, age, gap, session)
-		if age > 0 {
-			go expireVersions(ctx, pg, age)
-		}
+		versionAge = age
 	}
 
 	// Start listening on the SMB port 445.
@@ -207,6 +214,9 @@ func main() {
 	server := newServer(ctx, l, db, cfg)
 	server.applyCapabilities()
 	db.WithShares(server)
+	if versionAge > 0 {
+		go expireVersions(ctx, db.(*stores.Database), server, versionAge)
+	}
 
 	// Start the API server.
 	lAPI, err := net.Listen("tcp", cfg.API.Address)

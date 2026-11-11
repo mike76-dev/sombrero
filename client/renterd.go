@@ -208,11 +208,22 @@ func (rc *RenterdClient) IsEmpty(ctx context.Context, _ stores.Account, path str
 }
 
 // List lists the contents of a directory.
-func (rc *RenterdClient) List(ctx context.Context, _ stores.Account, path string) (ois []ObjectInfo, err error) {
+func (rc *RenterdClient) List(ctx context.Context, _ stores.Account, path string) ([]ObjectInfo, error) {
+	return rc.list(ctx, path, "/")
+}
+
+// listAll lists every object under the directory, at any depth.
+func (rc *RenterdClient) listAll(ctx context.Context, path string) ([]ObjectInfo, error) {
+	return rc.list(ctx, path, "")
+}
+
+// list lists the objects under the path, those under a subdirectory folded
+// into an entry for it where the delimiter is set.
+func (rc *RenterdClient) list(ctx context.Context, path, delimiter string) (ois []ObjectInfo, err error) {
 	values := url.Values{}
 	api.ListObjectOptions{
 		Bucket:    rc.bucket,
-		Delimiter: "/",
+		Delimiter: delimiter,
 		Limit:     -1,
 	}.Apply(values)
 	path = strings.ReplaceAll(path, "\\", "/") // Replace Windows formatting with the unified one
@@ -283,7 +294,7 @@ func (rc *RenterdClient) Object(ctx context.Context, _ stores.Account, path stri
 		}
 	}
 
-	return ObjectInfo{}, api.ErrObjectNotFound
+	return ObjectInfo{}, stores.ErrNotFound
 }
 
 // Parents retrieves the information about the directory at path and the one above it.

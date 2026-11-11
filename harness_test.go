@@ -329,6 +329,9 @@ func (fc *fakeClient) ListAt(_ context.Context, _ stores.Account, dir string, at
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 
+	if oi, ok := fc.objects[dir]; ok && oi.CreatedAt.UTC().Truncate(time.Second).After(at) {
+		return nil, stores.ErrNotFound
+	}
 	inDir := func(path string) bool {
 		parent := ""
 		if i := strings.LastIndex(path, "/"); i >= 0 {

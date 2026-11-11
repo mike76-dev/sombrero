@@ -30,7 +30,8 @@ type ShareInfo struct {
 	Rights Rights `json:"rights"`
 }
 
-// Entry is one file or folder of a listing.
+// Entry is one file or folder of a listing. Its times are in UTC, as every
+// time the file API returns: the backends keep theirs in different zones.
 type Entry struct {
 	Name       string    `json:"name"`
 	Path       string    `json:"path"`
@@ -132,14 +133,11 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 			writeError(w, "not a folder", http.StatusBadRequest)
 			return
 		}
-		if !at.IsZero() && oi.CreatedAt.Truncate(time.Second).After(at) {
-			writeError(w, "folder not found", http.StatusNotFound)
-			return
-		}
 		listPath = strings.TrimPrefix(p, "/") + "/"
 	}
 
-	// A folder as it was is there to be read, and lists what the store kept of it.
+	// A folder as it was is there to be read, and lists what the store kept of
+	// it, which also says whether the folder was there by then.
 	if !at.IsZero() {
 		versioner, kept := c.(client.Versioner)
 		if !kept {
@@ -147,7 +145,10 @@ func (h *Handler) listHandler(w http.ResponseWriter, req *http.Request, ps httpr
 			return
 		}
 		ois, err := versioner.ListAt(ctx, s.account, strings.TrimPrefix(p, "/"), at)
-		if err != nil {
+		if errors.Is(err, stores.ErrNotFound) {
+			writeError(w, "folder not found", http.StatusNotFound)
+			return
+		} else if err != nil {
 			log.Printf("file API: failed to list %s on %s at %s: %v", p, share.Name, at, err)
 			writeError(w, "internal error", http.StatusInternalServerError)
 			return
@@ -198,8 +199,8 @@ func listEntries(ois []client.ObjectInfo) []Entry {
 			Path:       key,
 			Dir:        strings.HasSuffix(oi.Key, "/"),
 			Size:       oi.Size,
-			CreatedAt:  oi.CreatedAt,
-			ModifiedAt: oi.ModifiedAt,
+			CreatedAt:  oi.CreatedAt.UTC(),
+			ModifiedAt: oi.ModifiedAt.UTC(),
 		})
 	}
 	return entries
