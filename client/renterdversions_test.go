@@ -393,8 +393,8 @@ func TestRenterdVersionsAtATime(t *testing.T) {
 	if ois, _ := rv.ListAt(ctx, acc, "docs", now.Add(time.Hour)); keys(ois) != "/docs/doc.txt /docs/plain.txt /docs/sub/" {
 		t.Errorf("the folder at a later time: want the files and the folder made since, got %q", keys(ois))
 	}
-	if ois, _ := rv.ListAt(ctx, acc, "docs", now.Add(-7*time.Hour)); len(ois) != 0 {
-		t.Errorf("before anything was made: want nothing, got %+v", ois)
+	if _, err := rv.ListAt(ctx, acc, "docs", now.Add(-7*time.Hour)); !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("before anything was made: want ErrNotFound, got %v", err)
 	}
 
 	times, err := rv.Snapshots(ctx, acc, "docs")

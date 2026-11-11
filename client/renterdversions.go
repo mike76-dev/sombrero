@@ -47,17 +47,11 @@ func versionKey(id uint64) string {
 	return fmt.Sprintf("%s/%d", renterdVersionsFolder, id)
 }
 
-// renterdMissing says whether the error means the object is not there, which
-// renterd says in two ways.
-func renterdMissing(err error) bool {
-	return errors.Is(err, stores.ErrNotFound) || errors.Is(err, api.ErrObjectNotFound)
-}
-
 // file is the object at the path where there is a file: a folder or nothing
 // there is reported as ErrNotFound.
 func (rv *RenterdVersions) file(ctx context.Context, acc stores.Account, path string) (ObjectInfo, error) {
 	oi, err := rv.RenterdClient.Object(ctx, acc, path)
-	if renterdMissing(err) || err == nil && strings.HasSuffix(oi.Key, "/") {
+	if errors.Is(err, stores.ErrNotFound) || err == nil && strings.HasSuffix(oi.Key, "/") {
 		return ObjectInfo{}, stores.ErrNotFound
 	}
 	return oi, err
@@ -96,7 +90,7 @@ func (rv *RenterdVersions) moveAside(ctx context.Context, acc stores.Account, pa
 // that is gone already is fine; one that will not go is left behind.
 func (rv *RenterdVersions) dropObjects(ctx context.Context, ids []uint64) {
 	for _, id := range ids {
-		if err := rv.RenterdClient.Delete(ctx, stores.Account{}, versionKey(id), false); err != nil && !renterdMissing(err) {
+		if err := rv.RenterdClient.Delete(ctx, stores.Account{}, versionKey(id), false); err != nil && !errors.Is(err, stores.ErrNotFound) {
 			log.Printf("failed to delete the object of version %d: %v", id, err)
 		}
 	}
@@ -382,7 +376,8 @@ func (rv *RenterdVersions) ObjectAt(ctx context.Context, acc stores.Account, pat
 
 // ListAt implements Versioner. The folder as it was holds the files, kept or
 // current, that stood at the time, and the subfolders any of those stood in,
-// which a listing of the whole subtree tells, renterd dating no folder.
+// which a listing of the whole subtree tells, renterd dating no folder: one
+// nothing was made in by then was not there.
 func (rv *RenterdVersions) ListAt(ctx context.Context, acc stores.Account, dir string, at time.Time) ([]ObjectInfo, error) {
 	prefix := "/" + strings.Trim(dir, "/")
 	if prefix != "/" {
@@ -411,7 +406,11 @@ func (rv *RenterdVersions) ListAt(ctx context.Context, acc stores.Account, dir s
 
 	var ois []ObjectInfo
 	dirs := make(map[string]bool)
+	existed := false
 	for key, cs := range copies {
+		for _, c := range cs {
+			existed = existed || !c.ModifiedAt.Truncate(time.Second).After(at)
+		}
 		v, ok := copyAt(cs, at)
 		if !ok {
 			continue
@@ -425,6 +424,9 @@ func (rv *RenterdVersions) ListAt(ctx context.Context, acc stores.Account, dir s
 			continue
 		}
 		ois = append(ois, ObjectInfo{Key: key, Size: v.Size, CreatedAt: v.ModifiedAt, ModifiedAt: v.ModifiedAt})
+	}
+	if !existed {
+		return nil, stores.ErrNotFound
 	}
 	sort.Slice(ois, func(i, j int) bool { return ois[i].Key < ois[j].Key })
 	return ois, nil

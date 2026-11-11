@@ -747,6 +747,7 @@ func filesAt(scope string) string {
 // by then, and the files there by then with the contents they held, which are
 // the versions replaced since, deleted files among them. A file whose state
 // at the time was not kept is listed with the nearest state kept after it.
+// A directory made after the time is ErrNotFound.
 func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.Time) (objects []ObjectMeta, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
@@ -789,6 +790,15 @@ func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.T
 		parentID, found, err := listedDirectory(ctx, tx, acc, shareName, path)
 		if err != nil || !found {
 			return err
+		}
+		if parentID != nil {
+			var made time.Time
+			if err := tx.QueryRow(ctx, `SELECT created_at FROM directories WHERE id = $1`, parentID).Scan(&made); err != nil {
+				return fmt.Errorf("failed to query the directory: %w", err)
+			}
+			if made.Truncate(time.Second).After(at) {
+				return ErrNotFound
+			}
 		}
 
 		rows, err := tx.Query(ctx, query, shareName, parentID, acc.ID, at)

@@ -36,6 +36,9 @@ func snapshotClient() *mockClient {
 		return []time.Time{versionModified.In(local), made.In(local)}, nil
 	}
 	mc.listAt = func(p string, at time.Time) ([]client.ObjectInfo, error) {
+		if at.Before(made) {
+			return nil, stores.ErrNotFound
+		}
 		if p != "Projects" || !at.Equal(versionModified) {
 			return nil, nil
 		}

@@ -417,6 +417,20 @@ func TestRenterdSaysWhenTheObjectIsNotThere(t *testing.T) {
 	}
 }
 
+// TestRenterdObjectNotThere verifies that a path the listing does not hold is
+// reported with the same sentinel, which the layers above test for.
+func TestRenterdObjectNotThere(t *testing.T) {
+	f := newFakeRenterd(t)
+	f.answer("/api/bus/objects", api.ObjectsResponse{
+		Objects: []api.ObjectMetadata{{Key: "/dir/one.txt", Size: 111}},
+	})
+
+	_, err := f.client("default").Object(context.Background(), stores.Account{}, "dir/two.txt")
+	if !errors.Is(err, stores.ErrNotFound) {
+		t.Errorf("an object not listed came back with %v, want ErrNotFound", err)
+	}
+}
+
 // TestRenterdKeepsOtherFailuresApart holds the line above to the one status it is about: anything
 // else the far end refuses with is still a failure of its own, and reading it as a missing object
 // would have the share above quietly carry on past it.

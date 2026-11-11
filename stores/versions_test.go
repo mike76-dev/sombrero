@@ -485,10 +485,14 @@ func TestListObjectsAt(t *testing.T) {
 	plantPiece(t, db, share, acc, "docs/quick.txt", types.Hash256{3}, 0, 50)
 	dateFile(t, db, share, "docs/quick.txt", 50, ago(9), ago(3), none)
 
-	// new.txt and the folder late appeared an hour ago, the folder sub 7 hours ago.
+	// new.txt and the folder late appeared an hour ago, the folder sub 7 hours
+	// ago, and docs itself 10 hours ago.
 	plantPiece(t, db, share, acc, "docs/new.txt", types.Hash256{4}, 0, 100)
 	dateFile(t, db, share, "docs/new.txt", 100, ago(1), ago(1), none)
 	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE directories SET created_at = $1 WHERE full_path = '/docs'`, ago(10)); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE directories SET created_at = $1 WHERE full_path = '/docs/sub'`, ago(7)); err != nil {
 			return err
 		}
@@ -536,9 +540,13 @@ func TestListObjectsAt(t *testing.T) {
 		})
 	}
 
-	// A folder the account does not see, or that is not there, lists nothing.
+	// A folder the account does not see, or that is not there, lists nothing;
+	// one made after the time was not there yet.
 	if objects, err := db.ListObjectsAt(acc, share, "elsewhere", ago(5)); err != nil || len(objects) != 0 {
 		t.Errorf("listing a folder not there: want nothing, got %v, %v", objects, err)
+	}
+	if _, err := db.ListObjectsAt(acc, share, "docs/late", ago(5)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("listing a folder before it was made: want ErrNotFound, got %v", err)
 	}
 
 	// A file resolves at a time to the same copy the listing shows: a version, or the file itself.

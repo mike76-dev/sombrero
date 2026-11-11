@@ -4086,9 +4086,14 @@ func (c *connection) createFile(req *smb2.Request, cr smb2.CreateRequest, ss *se
 			return smb2.NewErrorResponse(cr, smb2.STATUS_IO_TIMEOUT, 0, nil), nil
 		}
 		if err == nil && strings.HasSuffix(info.Key, "/") {
-			if info.CreatedAt.Truncate(time.Second).After(snapshot) {
+			// Whether the folder was there by then is the listing's to say: renterd dates no folder.
+			if _, lerr := versioner.ListAt(ctx, acc, path, snapshot); errors.Is(lerr, stores.ErrNotFound) {
 				cancel()
 				return smb2.NewErrorResponse(cr, smb2.STATUS_OBJECT_NAME_NOT_FOUND, 0, nil), nil
+			} else if lerr != nil {
+				cancel()
+				log.Printf("Couldn't list %s as it was: %v\n", path, lerr)
+				return smb2.NewErrorResponse(cr, smb2.STATUS_UNEXPECTED_NETWORK_ERROR, 0, nil), nil
 			}
 			info.Key = "/" + strings.TrimSuffix(openPath, "/") + "/"
 			version = &versionOpen{path: path, at: snapshot}

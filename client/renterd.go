@@ -294,7 +294,7 @@ func (rc *RenterdClient) Object(ctx context.Context, _ stores.Account, path stri
 		}
 	}
 
-	return ObjectInfo{}, api.ErrObjectNotFound
+	return ObjectInfo{}, stores.ErrNotFound
 }
 
 // Parents retrieves the information about the directory at path and the one above it.
