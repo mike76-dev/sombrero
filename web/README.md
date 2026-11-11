@@ -1,8 +1,12 @@
 # Sombrero Web UI
 
-The web UI is a React + TypeScript single-page app for managing a Sombrero server through its HTTP API. It covers the same ground as the API: workgroups, accounts, shares, access policies, share connections, host bans, and the server statistics.
+The web UI is a React + TypeScript single-page app in two parts, built into the server binary and served at the API address, so there is nothing separate to run or deploy. The library, at the root, is for the accounts: it shows them their shares in the browser. The administration, under `/admin`, is for the operator and covers the same ground as the API: workgroups, accounts, shares, access policies, share connections, host bans, and the server statistics. Open `http://127.0.0.1:9999/admin` in a browser and enter the API password (`api.password` from `sombrero.yml`) on the **Settings** page.
 
-It is built into the server binary and served at the API address under `/admin`, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999/admin` in a browser and enter the API password (`api.password` from `sombrero.yml`) on the **Settings** page.
+## Library
+
+The library is served at the root (`http://127.0.0.1:9999`) and requires the [file API](../README.md#file-api) to be enabled; where it is not, the page says so and points to the administration. An account logs in with its workgroup, by name or UUID, its username and its password, exactly as over SMB; a guest account leaves the password empty. The session lasts 24 hours, and the page returns to the login when it has expired.
+
+The sidebar lists the shares the account may reach, with the rights it holds on each on the overview page. A share opens at its root, and the breadcrumbs above the listing lead back up. The listing shows the name, size and modification time of every file and folder visible to the account, in the browser's time zone, and is sorted by clicking a column heading; folders always come first. A file is downloaded by clicking its name, and a file of a kind the browser displays itself, such as an image, a PDF or a video, can also be opened in a new tab. Each location has an address of its own, so a folder can be bookmarked or its link passed to another member of the share.
 
 ## Setup wizard
 
@@ -94,17 +98,17 @@ npm install
 npm run dev
 ```
 
-The dev server proxies requests from `/api` to the Sombrero API at `http://localhost:9999` (the API does not send CORS headers, so the browser cannot call it cross-origin directly). If the API runs elsewhere:
+The dev server proxies requests from `/api` and `/files` to the Sombrero server at `http://localhost:9999` (the server does not send CORS headers, so the browser cannot call it cross-origin directly). If the server runs elsewhere:
 
 ```bash
 SOMBRERO_API_URL=http://my-server:9999 npm run dev
 ```
 
-Open the printed URL with `/admin/` appended, go to **Settings**, enter the API password, and click **Save & test connection**.
+Open the printed URL for the library, or with `/admin/` appended for the administration, where you go to **Settings**, enter the API password, and click **Save & test connection**.
 
 ## Serving the UI separately
 
-`npm run build` emits the static site to `web/dist`, with the administration in `web/dist/admin`. The server embeds it, but it can also be served by any web server that routes `/api/*` to the Sombrero API port, stripping the `/api` prefix. Example Apache config (requires `a2enmod proxy proxy_http`):
+`npm run build` emits the static site to `web/dist`, with the administration in `web/dist/admin`. The server embeds it, but it can also be served by any web server that routes `/api/*` to the Sombrero API port, stripping the `/api` prefix, and `/files/*` to the same port with the prefix kept. Example Apache config (requires `a2enmod proxy proxy_http`):
 
 ```apache
 <VirtualHost *:80>
@@ -121,6 +125,8 @@ Open the printed URL with `/admin/` appended, go to **Settings**, enter the API 
 
     ProxyPass /api/ http://127.0.0.1:9999/
     ProxyPassReverse /api/ http://127.0.0.1:9999/
+    ProxyPass /files/ http://127.0.0.1:9999/files/
+    ProxyPassReverse /files/ http://127.0.0.1:9999/files/
 </VirtualHost>
 ```
 

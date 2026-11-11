@@ -17,11 +17,12 @@ const keepPlaceholder = {
 // The UI is two pages: the root, and the administration under /admin, which
 // the server serves as a single-page app of its own.
 //
-// During development, requests to /api are proxied to the Sombrero server
-// (which does not send CORS headers). The path is passed through as it is:
-// the server serves the API under /api and strips the prefix itself, so
-// development and the embedded build see the same URLs. Set SOMBRERO_API_URL
-// to point the proxy at a non-default address.
+// During development, requests to /api and /files are proxied to the Sombrero
+// server (which does not send CORS headers). The paths are passed through as
+// they are: the server serves the API under /api and the file API under
+// /files and strips the prefixes itself, so development and the embedded
+// build see the same URLs. Set SOMBRERO_API_URL to point the proxy at a
+// non-default address.
 export default defineConfig({
   plugins: [react(), keepPlaceholder],
   build: {
@@ -35,6 +36,10 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
+        target: process.env.SOMBRERO_API_URL || 'http://localhost:9999',
+        changeOrigin: true,
+      },
+      '/files': {
         target: process.env.SOMBRERO_API_URL || 'http://localhost:9999',
         changeOrigin: true,
       },

@@ -9,19 +9,7 @@ import { BackupPage } from './pages/BackupPage'
 import { BansPage } from './pages/BansPage'
 import { StatsPage } from './pages/StatsPage'
 import { SettingsPage } from './pages/SettingsPage'
-
-type Theme = 'light' | 'dark'
-
-function useTheme(): [Theme, () => void] {
-  const [theme, setTheme] = useState<Theme>(
-    () => (document.documentElement.dataset.theme as Theme) || 'light',
-  )
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme
-    localStorage.setItem('sombrero.theme', theme)
-  }, [theme])
-  return [theme, () => setTheme((t) => (t === 'light' ? 'dark' : 'light'))]
-}
+import { ThemeButton, useTheme } from './theme'
 
 const pages = {
   wizard: { label: 'Setup wizard', component: WizardPage },
@@ -84,9 +72,7 @@ export default function App() {
           >
             Source
           </a>
-          <button className="btn" onClick={toggleTheme} title="Toggle theme">
-            {theme === 'light' ? '\u{1F319} Dark mode' : '☀️ Light mode'}
-          </button>
+          <ThemeButton theme={theme} toggle={toggleTheme} />
         </div>
       </aside>
       <main className="content">
