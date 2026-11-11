@@ -2,7 +2,7 @@
 
 The web UI is a React + TypeScript single-page app for managing a Sombrero server through its HTTP API. It covers the same ground as the API: workgroups, accounts, shares, access policies, share connections, host bans, and the server statistics.
 
-It is built into the server binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter the API password (`api.password` from `sombrero.yml`) on the **Settings** page.
+It is built into the server binary and served at the API address under `/admin`, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999/admin` in a browser and enter the API password (`api.password` from `sombrero.yml`) on the **Settings** page.
 
 ## Setup wizard
 
@@ -100,11 +100,11 @@ The dev server proxies requests from `/api` to the Sombrero API at `http://local
 SOMBRERO_API_URL=http://my-server:9999 npm run dev
 ```
 
-Open the printed URL, go to **Settings**, enter the API password, and click **Save & test connection**.
+Open the printed URL with `/admin/` appended, go to **Settings**, enter the API password, and click **Save & test connection**.
 
 ## Serving the UI separately
 
-`npm run build` emits the static site to `web/dist`. The server embeds it, but it can also be served by any web server that routes `/api/*` to the Sombrero API port, stripping the `/api` prefix. Example Apache config (requires `a2enmod proxy proxy_http`):
+`npm run build` emits the static site to `web/dist`, with the administration in `web/dist/admin`. The server embeds it, but it can also be served by any web server that routes `/api/*` to the Sombrero API port, stripping the `/api` prefix. Example Apache config (requires `a2enmod proxy proxy_http`):
 
 ```apache
 <VirtualHost *:80>
@@ -113,6 +113,10 @@ Open the printed URL, go to **Settings**, enter the API password, and click **Sa
     <Directory /path/to/sombrero/web/dist>
         Require all granted
         FallbackResource /index.html
+    </Directory>
+
+    <Directory /path/to/sombrero/web/dist/admin>
+        FallbackResource /admin/index.html
     </Directory>
 
     ProxyPass /api/ http://127.0.0.1:9999/

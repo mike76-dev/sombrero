@@ -142,7 +142,7 @@ sudo sombrero --dir=<PATH_TO_SOMBRERO.YML>
 The superuser access is required because of the port 445 that the server is listening on.
 
 Now, you need to register shares and add user accounts that will be accessing these shares.
-This can be done either from the web UI, which is served at the API address (`http://127.0.0.1:9999` by default), or with the API calls described below. The typical workflow is:
+This can be done either from the web UI, which is served at the API address under `/admin` (`http://127.0.0.1:9999/admin` by default), or with the API calls described below. The typical workflow is:
 
 ### 1. Create a workgroup
 A workgroup can contain an arbitrary number of user accounts. Each workgroup can connect to a remote share and have its own storage quota on that share.
@@ -220,7 +220,7 @@ curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/
 ```
 
 ## Web UI
-The server ships with a web UI covering the same ground as the API. It is built into the binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter `<API_PASSWORD>` on the Settings page. The pages, the setup wizard, and how to build the UI are described in [web/README.md](web/README.md).
+The server ships with a web UI covering the same ground as the API. It is built into the binary and served at the API address under `/admin`, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999/admin` in a browser and enter `<API_PASSWORD>` on the Settings page. The pages, the setup wizard, and how to build the UI are described in [web/README.md](web/README.md).
 
 ## Running in Docker
 The server can also run in a container. The image is published for `amd64` and `arm64` as `ghcr.io/mike76-dev/sombrero`, tagged with the version and with `latest`. It is the same for both modes, since the mode is read from `sombrero.yml` at startup, and it has the web UI built in. To build it from the source instead, run in the repository root:

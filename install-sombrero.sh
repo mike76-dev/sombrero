@@ -554,7 +554,7 @@ EOF
 ${BOLD}What's next${RESET}
   1. Open the web UI. From another computer, go through an SSH tunnel:
        ssh -N -L 9999:$API_ADDRESS <user>@${address:-<this server>}
-     and then open http://127.0.0.1:9999 in the browser there.
+     and then open http://127.0.0.1:9999/admin in the browser there.
   2. Enter the API password on the Settings page.
   3. Open the Setup wizard, which walks you through creating a workgroup and an
      account, registering a share, connecting to it, and granting the account access.

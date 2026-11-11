@@ -5,19 +5,46 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Sombrero</title>
-    <script>
-      // Apply the saved theme before the app renders to avoid a flash.
-      (function () {
-        var theme = localStorage.getItem('sombrero.theme');
-        if (theme !== 'light' && theme !== 'dark') {
-          theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        font-size: 15px;
+        line-height: 1.5;
+        background: #f4f5f7;
+        color: #1f2733;
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        padding: 32px;
+        text-align: center;
+      }
+      a {
+        color: #d97706;
+        font-weight: 600;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #12151a;
+          color: #e5e8ec;
         }
-        document.documentElement.dataset.theme = theme;
-      })();
-    </script>
+        a {
+          color: #f59e0b;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <main>
+      <img src="/favicon.svg" width="48" height="48" alt="" />
+      <h1>Sombrero</h1>
+      <p>The server is running. Its administration is at <a href="/admin/">/admin</a>.</p>
+    </main>
   </body>
 </html>

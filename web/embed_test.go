@@ -11,6 +11,7 @@ import (
 func built() fstest.MapFS {
 	return fstest.MapFS{
 		"index.html":              {Data: []byte("<!doctype html><title>Sombrero</title>")},
+		"admin/index.html":        {Data: []byte("<!doctype html><title>Administration</title>")},
 		"favicon.svg":             {Data: []byte("<svg/>")},
 		"assets/index-abc123.js":  {Data: []byte("console.log(1)")},
 		"assets/index-abc123.css": {Data: []byte("body{}")},
@@ -28,7 +29,7 @@ func get(h http.Handler, path string) *httptest.ResponseRecorder {
 func TestHandlerServesFiles(t *testing.T) {
 	h := handler(built())
 
-	for _, path := range []string{"/", "/favicon.svg", "/assets/index-abc123.js"} {
+	for _, path := range []string{"/", "/admin/", "/favicon.svg", "/assets/index-abc123.js"} {
 		if w := get(h, path); w.Code != http.StatusOK {
 			t.Errorf("%s: want %d, got %d", path, http.StatusOK, w.Code)
 		}
@@ -37,26 +38,40 @@ func TestHandlerServesFiles(t *testing.T) {
 	if w := get(h, "/"); !strings.Contains(w.Body.String(), "Sombrero") {
 		t.Errorf("the root: want the index, got %q", w.Body.String())
 	}
+	if w := get(h, "/admin/"); !strings.Contains(w.Body.String(), "Administration") {
+		t.Errorf("/admin/: want the administration's index, got %q", w.Body.String())
+	}
 
-	// http.FileServer redirects the index to the canonical root.
-	if w := get(h, "/index.html"); w.Code != http.StatusMovedPermanently {
-		t.Errorf("/index.html: want %d, got %d", http.StatusMovedPermanently, w.Code)
+	// http.FileServer redirects an index to its canonical directory.
+	for _, path := range []string{"/index.html", "/admin/index.html", "/admin"} {
+		if w := get(h, path); w.Code != http.StatusMovedPermanently {
+			t.Errorf("%s: want %d, got %d", path, http.StatusMovedPermanently, w.Code)
+		}
 	}
 }
 
-// TestHandlerFallsBackToIndex verifies that a route of the single-page app is
-// answered with the index rather than a 404, so that a deep link survives a
-// page reload.
+// TestHandlerFallsBackToIndex verifies that a route of either single-page app
+// is answered with that app's index rather than a 404, so that a deep link
+// survives a page reload.
 func TestHandlerFallsBackToIndex(t *testing.T) {
 	h := handler(built())
 
-	for _, path := range []string{"/shares", "/workgroups/8303eeb8", "/settings"} {
+	for _, path := range []string{"/shares", "/shares/Projects/2026", "/settings"} {
 		w := get(h, path)
 		if w.Code != http.StatusOK {
 			t.Errorf("%s: want %d, got %d", path, http.StatusOK, w.Code)
 		}
 		if !strings.Contains(w.Body.String(), "Sombrero") {
 			t.Errorf("%s: want the index, got %q", path, w.Body.String())
+		}
+	}
+	for _, path := range []string{"/admin/shares", "/admin/workgroups/8303eeb8"} {
+		w := get(h, path)
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: want %d, got %d", path, http.StatusOK, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Administration") {
+			t.Errorf("%s: want the administration's index, got %q", path, w.Body.String())
 		}
 	}
 

@@ -14,6 +14,9 @@ const keepPlaceholder = {
   },
 }
 
+// The UI is two pages: the root, and the administration under /admin, which
+// the server serves as a single-page app of its own.
+//
 // During development, requests to /api are proxied to the Sombrero server
 // (which does not send CORS headers). The path is passed through as it is:
 // the server serves the API under /api and strips the prefix itself, so
@@ -21,6 +24,14 @@ const keepPlaceholder = {
 // to point the proxy at a non-default address.
 export default defineConfig({
   plugins: [react(), keepPlaceholder],
+  build: {
+    rollupOptions: {
+      input: {
+        root: fileURLToPath(new URL('./index.html', import.meta.url)),
+        admin: fileURLToPath(new URL('./admin/index.html', import.meta.url)),
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': {

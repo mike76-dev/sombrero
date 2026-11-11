@@ -32,8 +32,9 @@ var printVersion = flag.Bool("version", false, "print the version and exit")
 // lives under /api, behind the password and the ratelimiter. The file API,
 // where there is one, lives under /files with its own ratelimiter and no API
 // password: its calls carry an account's session. The web UI is served from
-// the root: it holds nothing secret, and asking for the password itself
-// beats leaving it to the browser's basic auth prompt.
+// the root, the administration under /admin: it holds nothing secret, and
+// asking for the password itself beats leaving it to the browser's basic
+// auth prompt.
 func newHTTPHandler(ctx context.Context, a, files http.Handler, password string, debug bool) http.Handler {
 	inner := a
 
@@ -231,7 +232,7 @@ func main() {
 	}
 	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, fileAPI, cfg.API.Password, cfg.Debug)}
 	go apiSrv.Serve(lAPI)
-	log.Printf("API and web UI: listening at http://%s ...\n", lAPI.Addr())
+	log.Printf("API and web UI: listening at http://%s, administration at http://%s/admin ...\n", lAPI.Addr(), lAPI.Addr())
 	if cfg.Files.Enabled {
 		log.Printf("File API: serving at http://%s/files ...\n", lAPI.Addr())
 	}
