@@ -114,3 +114,56 @@ export function list(share: string, path: string): Promise<Listing> {
 export function fileURL(share: string, path: string, inline = false): string {
   return url(`/share/${encodeURIComponent(share)}/file`, { path, inline: inline ? '1' : undefined })
 }
+
+export function makeFolder(share: string, path: string): Promise<Entry> {
+  return call<Entry>(`/share/${encodeURIComponent(share)}/folder`, { method: 'POST', query: { path } })
+}
+
+export function deleteFile(share: string, path: string, purge: boolean): Promise<void> {
+  return call(`/share/${encodeURIComponent(share)}/file`, { method: 'DELETE', query: { path, purge: purge ? '1' : undefined } })
+}
+
+export function deleteFolder(share: string, path: string): Promise<void> {
+  return call(`/share/${encodeURIComponent(share)}/folder`, { method: 'DELETE', query: { path, recursive: '1' } })
+}
+
+export function rename(share: string, from: string, to: string, replace: boolean): Promise<Entry> {
+  return call<Entry>(`/share/${encodeURIComponent(share)}/rename`, {
+    method: 'POST',
+    query: { path: from, to, replace: replace ? '1' : undefined },
+  })
+}
+
+// upload stores the file at the path, reporting how much has been sent as it
+// goes. It uses XMLHttpRequest, which is what reports upload progress.
+export function upload(
+  share: string,
+  path: string,
+  file: File,
+  onProgress: (sent: number) => void,
+): { done: Promise<Entry>; abort: () => void } {
+  const xhr = new XMLHttpRequest()
+  const done = new Promise<Entry>((resolve, reject) => {
+    xhr.open('PUT', url(`/share/${encodeURIComponent(share)}/file`, { path }))
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    xhr.upload.onprogress = (e) => onProgress(e.loaded)
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText) as Entry)
+        return
+      }
+      let message = xhr.statusText
+      try {
+        const parsed = JSON.parse(xhr.responseText)
+        if (typeof parsed === 'string' && parsed) message = parsed
+      } catch {
+        // The status text stands.
+      }
+      reject(new FilesError(message, xhr.status))
+    }
+    xhr.onerror = () => reject(new FilesError('The server cannot be reached.', 0))
+    xhr.onabort = () => reject(new FilesError('The upload was cancelled.', 0))
+    xhr.send(file)
+  })
+  return { done, abort: () => xhr.abort() }
+}

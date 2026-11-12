@@ -220,7 +220,7 @@ curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/share/shared-indexd/
 ```
 
 ## Web UI
-The server ships with a web UI in two parts, built into the binary and served at the API address, so there is nothing separate to run or deploy. The administration, under `/admin`, covers the same ground as the API: open `http://127.0.0.1:9999/admin` in a browser and enter `<API_PASSWORD>` on the Settings page. The library, at the root, is for the accounts: it lets them log in with the credentials they use for the shares and browse and download their files in the browser, and it requires the [file API](#file-api) to be enabled. The pages, the setup wizard, and how to build the UI are described in [web/README.md](web/README.md).
+The server ships with a web UI in two parts, built into the binary and served at the API address, so there is nothing separate to run or deploy. The administration, under `/admin`, covers the same ground as the API: open `http://127.0.0.1:9999/admin` in a browser and enter `<API_PASSWORD>` on the Settings page. The library, at the root, is for the accounts: it lets them log in with the credentials they use for the shares and browse, download, upload and manage their files in the browser, and it requires the [file API](#file-api) to be enabled. The pages, the setup wizard, and how to build the UI are described in [web/README.md](web/README.md).
 
 ## Running in Docker
 The server can also run in a container. The image is published for `amd64` and `arm64` as `ghcr.io/mike76-dev/sombrero`, tagged with the version and with `latest`. It is the same for both modes, since the mode is read from `sombrero.yml` at startup, and it has the web UI built in. To build it from the source instead, run in the repository root:
