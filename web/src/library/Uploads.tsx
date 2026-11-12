@@ -12,6 +12,8 @@ export interface Upload {
   error?: string
 }
 
+const doneLingers = 3000
+
 // useUploads keeps the queue of uploads to a share, sending one at a time.
 // onDone is told the folder an upload landed in, so the listing can follow.
 export function useUploads(share: string, onDone: (folder: string) => void, onExpired: () => void) {
@@ -40,6 +42,8 @@ export function useUploads(share: string, onDone: (folder: string) => void, onEx
       .then(() => {
         update(u.id, { state: 'done', sent: u.size })
         onDone(u.path.slice(0, u.path.lastIndexOf('/')) || '/')
+        // Done is shown long enough to be seen, then makes room.
+        setTimeout(() => setUploads((us) => us.filter((x) => x.id !== u.id)), doneLingers)
       })
       .catch((e) => {
         if (e instanceof FilesError && e.status === 401) onExpired()
@@ -62,6 +66,8 @@ export function useUploads(share: string, onDone: (folder: string) => void, onEx
     setUploads((us) => [...us, ...added])
   }, [])
 
+  // cancel stops an upload, or takes it off the list if it is waiting or has
+  // failed. One under way is stopped and reports the cancellation itself.
   const cancel = useCallback((id: number) => {
     setUploads((us) => {
       const u = us.find((u) => u.id === id)
@@ -71,23 +77,16 @@ export function useUploads(share: string, onDone: (folder: string) => void, onEx
     })
   }, [])
 
-  const clear = useCallback(() => setUploads((us) => us.filter((u) => u.state === 'waiting' || u.state === 'uploading')), [])
-
-  return { uploads, add, cancel, clear }
+  return { uploads, add, cancel }
 }
 
-export function UploadPanel({ uploads, onCancel, onClear }: { uploads: Upload[]; onCancel: (id: number) => void; onClear: () => void }) {
+export function UploadPanel({ uploads, onCancel }: { uploads: Upload[]; onCancel: (id: number) => void }) {
   if (uploads.length === 0) return null
   const active = uploads.filter((u) => u.state === 'waiting' || u.state === 'uploading').length
   return (
     <div className="uploads card">
       <div className="row row-spread">
         <strong>{active > 0 ? `Uploading ${active} of ${uploads.length}` : 'Uploads'}</strong>
-        {active < uploads.length && (
-          <button className="btn btn-small" onClick={onClear}>
-            Clear finished
-          </button>
-        )}
       </div>
       <ul className="upload-list">
         {uploads.map((u) => (
@@ -99,9 +98,9 @@ export function UploadPanel({ uploads, onCancel, onClear }: { uploads: Upload[];
                 {u.state === 'uploading' && `${formatBytes(u.sent)} of ${formatBytes(u.size)}`}
                 {u.state === 'done' && 'Done'}
                 {u.state === 'failed' && <span className="field-error">{u.error}</span>}
-                {(u.state === 'waiting' || u.state === 'uploading') && (
+                {u.state !== 'done' && (
                   <button className="btn btn-small" onClick={() => onCancel(u.id)}>
-                    Cancel
+                    {u.state === 'failed' ? 'Dismiss' : 'Cancel'}
                   </button>
                 )}
               </span>

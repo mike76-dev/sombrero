@@ -3,6 +3,8 @@ package files
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -93,6 +95,47 @@ func TestUploadingAFile(t *testing.T) {
 	}
 	if !bytes.Equal(joined, body) {
 		t.Errorf("a form-typed body: want %d bytes stored, got %d", len(body), len(joined))
+	}
+}
+
+// cutShort is a body that ends before its declared length, the way the body
+// of a cancelled upload does.
+type cutShort struct {
+	r io.Reader
+}
+
+func (b cutShort) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+// TestCancelledUploadStoresNothing verifies that a body cut short, in its
+// first part or a later one, is not stored as the file.
+func TestCancelledUploadStoresNothing(t *testing.T) {
+	for _, size := range []int{50, 250} {
+		mc := readingClient()
+		h, w := loggedIn(t, &mockStore{}, &mockServer{client: mc, partSize: 100}, "alice", "hunter2")
+
+		body := cutShort{bytes.NewReader(bytes.Repeat([]byte("x"), size))}
+		req := httptest.NewRequest(http.MethodPut, "/share/docs/file?path=/Projects/cut.bin", body)
+		req.ContentLength = 1000
+		for _, c := range w.Result().Cookies() {
+			req.AddCookie(c)
+		}
+		r := httptest.NewRecorder()
+		h.ServeHTTP(r, req)
+		if r.Code != http.StatusBadRequest {
+			t.Errorf("%d bytes of 1000: want %d, got %d (%s)", size, http.StatusBadRequest, r.Code, r.Body.String())
+		}
+		if len(mc.finished) != 0 {
+			t.Errorf("%d bytes of 1000: want nothing finished, got %v", size, mc.finished)
+		}
+		if len(mc.started) != len(mc.aborted) {
+			t.Errorf("%d bytes of 1000: want every started upload aborted, started %v, aborted %v", size, mc.started, mc.aborted)
+		}
 	}
 }
 

@@ -23,14 +23,27 @@ function loadSort(): Sort {
   return { key: 'name', asc: true }
 }
 
-// viewable lists the kinds of file a browser shows by itself. The server
+// viewable lists the kinds of file every browser shows by itself. The server
 // sandboxes what could carry code, so pages and SVG are safe to show.
-const viewable = new Set([
-  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif', 'svg',
-  'mp4', 'webm', 'm4v', 'mov',
-  'mp3', 'ogg', 'wav', 'm4a', 'flac',
-  'pdf', 'txt', 'md', 'csv', 'json', 'log', 'html', 'htm',
-])
+const viewable = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif', 'svg', 'pdf', 'txt', 'md', 'csv', 'json', 'log', 'html', 'htm'])
+
+// media maps the extensions of audio and video to the types the server sends
+// them as: whether this browser plays one is its own to say.
+const media: Record<string, string> = {
+  mp4: 'video/mp4', m4v: 'video/x-m4v', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska',
+  avi: 'video/x-msvideo', mpg: 'video/mpeg', mpeg: 'video/mpeg', ogv: 'video/ogg', '3gp': 'video/3gpp',
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg',
+  wav: 'audio/x-wav', flac: 'audio/flac', weba: 'audio/webm',
+}
+
+const player = document.createElement('video')
+
+function canShow(name: string): boolean {
+  const ext = extension(name)
+  if (viewable.has(ext)) return true
+  const type = media[ext]
+  return type !== undefined && player.canPlayType(type) !== ''
+}
 
 function extension(name: string): string {
   const i = name.lastIndexOf('.')
@@ -100,7 +113,7 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
     },
     [path, reload],
   )
-  const { uploads, add, cancel, clear } = useUploads(share, landed, onExpired)
+  const { uploads, add, cancel } = useUploads(share, landed, onExpired)
 
   useEffect(() => {
     let cancelled = false
@@ -216,7 +229,7 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
         )}
       </div>
       {notice && <div className="banner banner-success">{notice}</div>}
-      <UploadPanel uploads={uploads} onCancel={cancel} onClear={clear} />
+      <UploadPanel uploads={uploads} onCancel={cancel} />
       {error ? (
         <ErrorNotice share={share} error={error} />
       ) : !listing || stale ? (
@@ -402,7 +415,7 @@ function Row({
       <td className="col-size muted">{entry.dir ? '' : formatBytes(entry.size)}</td>
       <td className="col-time muted">{formatTime(entry.modifiedAt)}</td>
       <td className="col-actions">
-        {!entry.dir && viewable.has(extension(entry.name)) && (
+        {!entry.dir && canShow(entry.name) && (
           <a className="btn btn-small" href={fileURL(share, entry.path, true)} target="_blank" rel="noreferrer">
             Open
           </a>
