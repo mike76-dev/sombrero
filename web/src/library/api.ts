@@ -106,8 +106,51 @@ export function shares(): Promise<ShareInfo[]> {
   return call<ShareInfo[]>('/shares')
 }
 
-export function list(share: string, path: string): Promise<Listing> {
-  return call<Listing>(`/share/${encodeURIComponent(share)}/list`, { query: { path } })
+export interface Version {
+  id: number
+  size: number
+  modifiedAt: string
+  replacedAt: string
+  replacedBy?: string
+  kept: boolean
+}
+
+// A version is named by its id, or by a time at which it was the file's contents.
+export type VersionRef = { id: number } | { at: string }
+
+function refQuery(ref: VersionRef): Query {
+  return 'id' in ref ? { id: String(ref.id) } : { at: ref.at }
+}
+
+// list lists a folder as it is or, given a time, as it was then: deleted
+// files included and without rights, as the past is read-only.
+export function list(share: string, path: string, at?: string): Promise<Listing> {
+  return call<Listing>(`/share/${encodeURIComponent(share)}/list`, { query: { path, at } })
+}
+
+export function snapshots(share: string, path: string): Promise<string[]> {
+  return call<string[]>(`/share/${encodeURIComponent(share)}/snapshots`, { query: { path } })
+}
+
+export function versions(share: string, path: string): Promise<Version[]> {
+  return call<Version[]>(`/share/${encodeURIComponent(share)}/versions`, { query: { path } })
+}
+
+export function versionURL(share: string, path: string, ref: VersionRef, inline = false): string {
+  return url(`/share/${encodeURIComponent(share)}/version`, { path, ...refQuery(ref), inline: inline ? '1' : undefined })
+}
+
+export function restore(share: string, path: string, ref: VersionRef): Promise<Entry> {
+  return call<Entry>(`/share/${encodeURIComponent(share)}/restore`, { method: 'POST', query: { path, ...refQuery(ref) } })
+}
+
+// deleteVersions removes one version of the file, or all of them without an id.
+export function deleteVersions(share: string, path: string, id?: number): Promise<void> {
+  return call(`/share/${encodeURIComponent(share)}/versions`, { method: 'DELETE', query: { path, id: id === undefined ? undefined : String(id) } })
+}
+
+export function keepVersion(share: string, path: string, id: number, keep: boolean): Promise<void> {
+  return call(`/share/${encodeURIComponent(share)}/keep`, { method: keep ? 'POST' : 'DELETE', query: { path, id: String(id) } })
 }
 
 // fileURL is where a file is downloaded from, or shown if the browser can.

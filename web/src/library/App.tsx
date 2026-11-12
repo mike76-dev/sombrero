@@ -156,7 +156,13 @@ function Library({
         {route.share === null ? (
           <SharesPage shares={shareList} error={shareError} />
         ) : (
-          <Browser share={route.share} path={route.path} onExpired={onExpired} />
+          <Browser
+            share={route.share}
+            shareRights={shareList?.find((s) => s.name === route.share)?.rights}
+            path={route.path}
+            at={route.at}
+            onExpired={onExpired}
+          />
         )}
       </main>
     </div>

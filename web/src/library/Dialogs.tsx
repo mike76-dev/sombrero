@@ -1,10 +1,15 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
 
-// Modal is a card over the page. Escape and a click beside it close it.
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+// Modal is a card over the page. Escape and a click beside it close it; a
+// modal over a modal takes the Escape, so the one below listens only while
+// it is the topmost.
+export function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        e.preventDefault()
+        onClose()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -12,7 +17,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="modal card" role="dialog" aria-modal aria-label={title} onMouseDown={(e) => e.stopPropagation()}>
+      <div className={wide ? 'modal modal-wide card' : 'modal card'} role="dialog" aria-modal aria-label={title} onMouseDown={(e) => e.stopPropagation()}>
         <h2 className="card-title">{title}</h2>
         {children}
       </div>
@@ -138,10 +143,12 @@ export function PathDialog({
   )
 }
 
-// ConfirmDialog asks before something that cannot be undone.
+// ConfirmDialog asks before something that cannot be undone, or that is
+// marked as not dangerous and merely worth a second look.
 export function ConfirmDialog({
   title,
   action,
+  danger = true,
   busy,
   error,
   children,
@@ -150,6 +157,7 @@ export function ConfirmDialog({
 }: {
   title: string
   action: string
+  danger?: boolean
   busy: boolean
   error: string | null
   children: ReactNode
@@ -165,7 +173,7 @@ export function ConfirmDialog({
           <button type="button" className="btn" onClick={onClose} disabled={busy} autoFocus>
             Cancel
           </button>
-          <button type="button" className="btn btn-danger" onClick={onConfirm} disabled={busy}>
+          <button type="button" className={danger ? 'btn btn-danger' : 'btn btn-primary'} onClick={onConfirm} disabled={busy}>
             {action}
           </button>
         </div>

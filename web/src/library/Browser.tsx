@@ -1,9 +1,24 @@
 import { DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Entry, FilesError, Listing, deleteFile, deleteFolder, fileURL, list, makeFolder, rename } from './api'
-import { ConfirmDialog, NameDialog, PathDialog } from './Dialogs'
+import {
+  Entry,
+  FilesError,
+  Listing,
+  Rights,
+  deleteFile,
+  deleteFolder,
+  fileURL,
+  list,
+  makeFolder,
+  rename,
+  restore,
+  snapshots,
+  versionURL,
+} from './api'
+import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
 import { hashFor } from './route'
 import { UploadPanel, useUploads } from './Uploads'
-import { formatBytes, formatTime } from '../format'
+import { VersionsDialog } from './VersionsDialog'
+import { formatBytes, formatTime, formatTimeExact } from '../format'
 
 type SortKey = 'name' | 'size' | 'modified'
 interface Sort {
@@ -65,13 +80,18 @@ function compare(a: Entry, b: Entry, sort: Sort): number {
   return sort.asc ? c : -c
 }
 
+type FolderRights = { write: boolean; delete: boolean }
+
 // A dialog the browser has open, if any, and what it is about.
 type Dialog =
   | { kind: 'folder' }
   | { kind: 'rename'; entry: Entry }
-  | { kind: 'move'; entry: Entry; replace?: boolean }
+  | { kind: 'move'; entry: Entry }
   | { kind: 'delete'; entry: Entry }
   | { kind: 'replace'; files: File[]; names: string[] }
+  | { kind: 'versions'; entry: Entry }
+  | { kind: 'history' }
+  | { kind: 'restoreAt'; entry: Entry }
 
 // describe turns an error of the file API into a sentence.
 function describe(e: unknown): string {
@@ -94,7 +114,19 @@ function describe(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-export function Browser({ share, path, onExpired }: { share: string; path: string; onExpired: () => void }) {
+export function Browser({
+  share,
+  shareRights,
+  path,
+  at,
+  onExpired,
+}: {
+  share: string
+  shareRights?: Rights
+  path: string
+  at?: string
+  onExpired: () => void
+}) {
   const [listing, setListing] = useState<Listing | undefined>(undefined)
   const [error, setError] = useState<{ message: string; status: number } | null>(null)
   const [sort, setSort] = useState<Sort>(loadSort)
@@ -104,6 +136,7 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
   const [dialogError, setDialogError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
+  const [nowRights, setNowRights] = useState<FolderRights | undefined>(undefined)
   const picker = useRef<HTMLInputElement>(null)
 
   const reload = useCallback(() => setTick((t) => t + 1), [])
@@ -118,7 +151,7 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
   useEffect(() => {
     let cancelled = false
     setError(null)
-    list(share, path)
+    list(share, path, at)
       .then((l) => {
         if (!cancelled) setListing(l)
       })
@@ -130,13 +163,33 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
     return () => {
       cancelled = true
     }
-  }, [share, path, tick, onExpired])
+  }, [share, path, at, tick, onExpired])
+
+  // The past is read-only, so what may be restored into the present is the
+  // present folder's to say, or the share's where the folder is gone.
+  useEffect(() => {
+    if (!at) {
+      setNowRights(undefined)
+      return
+    }
+    let cancelled = false
+    list(share, path)
+      .then((l) => {
+        if (!cancelled) setNowRights(l.rights)
+      })
+      .catch(() => {
+        if (!cancelled) setNowRights(shareRights ? { write: shareRights.write, delete: shareRights.delete } : { write: false, delete: false })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [share, path, at, shareRights])
 
   useEffect(() => {
     localStorage.setItem(sortKey, JSON.stringify(sort))
   }, [sort])
 
-  useEffect(() => setNotice(null), [share, path])
+  useEffect(() => setNotice(null), [share, path, at])
 
   const entries = useMemo(() => (listing ? [...listing.entries].sort((a, b) => compare(a, b, sort)) : []), [listing, sort])
 
@@ -178,7 +231,7 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
 
   // Files to upload replace what is already there, which is asked about first.
   const takeFiles = (files: File[]) => {
-    if (files.length === 0 || !listing?.rights.write) return
+    if (files.length === 0 || !listing?.rights.write || at) return
     const have = new Set(listing.entries.filter((e) => !e.dir).map((e) => e.name))
     const names = files.map((f) => f.name).filter((n) => have.has(n))
     if (names.length > 0) open({ kind: 'replace', files, names })
@@ -192,7 +245,11 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
   }
 
   const stale = listing && (listing.share !== share || listing.path !== path)
-  const rights = listing && !stale ? listing.rights : { write: false, delete: false }
+  const none: FolderRights = { write: false, delete: false }
+  // In the present the listing's rights rule; in the past nothing is changed
+  // in place, and restoring is decided by the present's rights.
+  const rights = at || !listing || stale ? none : listing.rights
+  const restoreRights = at ? (nowRights ?? none) : rights
   return (
     <div
       className={dropping ? 'page dropping' : 'page'}
@@ -206,32 +263,45 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
       onDrop={onDrop}
     >
       <div className="row row-spread">
-        <Breadcrumbs share={share} path={path} />
-        {rights.write && (
-          <div className="toolbar">
-            <button className="btn" onClick={() => picker.current?.click()}>
-              Upload files
+        <Breadcrumbs share={share} path={path} at={at} />
+        <div className="toolbar">
+          {rights.write && (
+            <>
+              <button className="btn" onClick={() => picker.current?.click()}>
+                Upload files
+              </button>
+              <button className="btn" onClick={() => open({ kind: 'folder' })}>
+                New folder
+              </button>
+              <input
+                ref={picker}
+                type="file"
+                multiple
+                hidden
+                onChange={(e) => {
+                  takeFiles(Array.from(e.target.files ?? []))
+                  e.target.value = ''
+                }}
+              />
+            </>
+          )}
+          {!error && (
+            <button className="btn" onClick={() => open({ kind: 'history' })}>
+              History
             </button>
-            <button className="btn" onClick={() => open({ kind: 'folder' })}>
-              New folder
-            </button>
-            <input
-              ref={picker}
-              type="file"
-              multiple
-              hidden
-              onChange={(e) => {
-                takeFiles(Array.from(e.target.files ?? []))
-                e.target.value = ''
-              }}
-            />
-          </div>
-        )}
+          )}
+        </div>
       </div>
+      {at && (
+        <div className="banner history-banner">
+          This folder as it was on <strong>{formatTimeExact(at)}</strong>, deleted files included. Nothing here can be changed; a file may be restored to
+          the present. <a href={hashFor(share, path)}>Back to the present.</a>
+        </div>
+      )}
       {notice && <div className="banner banner-success">{notice}</div>}
       <UploadPanel uploads={uploads} onCancel={cancel} />
       {error ? (
-        <ErrorNotice share={share} error={error} />
+        <ErrorNotice share={share} error={error} at={at} />
       ) : !listing || stale ? (
         <p className="muted">Loading…</p>
       ) : entries.length === 0 ? (
@@ -248,7 +318,7 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
           </thead>
           <tbody>
             {entries.map((e) => (
-              <Row key={e.path} share={share} entry={e} rights={rights} onAction={open} />
+              <Row key={e.path} share={share} entry={e} at={at} rights={rights} canRestore={restoreRights.write} onAction={open} />
             ))}
           </tbody>
         </table>
@@ -328,7 +398,92 @@ export function Browser({ share, path, onExpired }: { share: string; path: strin
           </ul>
         </ConfirmDialog>
       )}
+      {dialog?.kind === 'versions' && (
+        <VersionsDialog
+          share={share}
+          entry={dialog.entry}
+          canShow={canShow(dialog.entry.name)}
+          rights={restoreRights}
+          onChanged={reload}
+          onExpired={onExpired}
+          onClose={close}
+        />
+      )}
+      {dialog?.kind === 'history' && <HistoryDialog share={share} path={path} at={at} onExpired={onExpired} onClose={close} />}
+      {dialog?.kind === 'restoreAt' && at && (
+        <ConfirmDialog
+          title="Restore file"
+          action="Restore"
+          danger={false}
+          busy={busy}
+          error={dialogError}
+          onClose={close}
+          onConfirm={() =>
+            act(() => restore(share, dialog.entry.path, { at }), `${dialog.entry.name} was restored as it was on ${formatTimeExact(at)}.`)
+          }
+        >
+          <p>
+            Restore <strong>{dialog.entry.name}</strong> as it was on {formatTimeExact(at)}? A file that is still there keeps its current contents as a
+            version; a deleted file comes back.
+          </p>
+        </ConfirmDialog>
+      )}
     </div>
+  )
+}
+
+// HistoryDialog lists the times at which the folder has a previous state, each
+// a way into the folder as it was then.
+function HistoryDialog({ share, path, at, onExpired, onClose }: { share: string; path: string; at?: string; onExpired: () => void; onClose: () => void }) {
+  const [times, setTimes] = useState<string[] | undefined>(undefined)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    snapshots(share, path)
+      .then((ts) => {
+        if (!cancelled) setTimes(ts)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        if (e instanceof FilesError && e.status === 401) onExpired()
+        else if (e instanceof FilesError && e.status === 404) setTimes([])
+        else setError(e instanceof Error ? e.message : String(e))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [share, path, onExpired])
+
+  return (
+    <Modal title="History" onClose={onClose}>
+      {error && <div className="banner banner-error">{error}</div>}
+      {!times ? (
+        <p className="muted">Loading…</p>
+      ) : times.length === 0 ? (
+        <p className="muted">No previous states of this folder are retained.</p>
+      ) : (
+        <>
+          <p className="muted">The folder has a previous state at each of these times. Open one to see the folder as it was then.</p>
+          <ul className="history-list">
+            {at && (
+              <li>
+                <a className="history-time" href={hashFor(share, path)} onClick={onClose}>
+                  Now
+                </a>
+              </li>
+            )}
+            {times.map((t) => (
+              <li key={t}>
+                <a className={t === at ? 'history-time history-current' : 'history-time'} href={hashFor(share, path, t)} onClick={onClose}>
+                  {formatTimeExact(t)}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </Modal>
   )
 }
 
@@ -381,12 +536,16 @@ function DeleteDialog({
 function Row({
   share,
   entry,
+  at,
   rights,
+  canRestore,
   onAction,
 }: {
   share: string
   entry: Entry
-  rights: { write: boolean; delete: boolean }
+  at?: string
+  rights: FolderRights
+  canRestore: boolean
   onAction: (d: Dialog) => void
 }) {
   const menu = useRef<HTMLDetailsElement>(null)
@@ -394,8 +553,10 @@ function Row({
     if (menu.current) menu.current.open = false
     onAction(d)
   }
+  // In the past a file is read at the time; in the present as it is.
+  const href = (inline: boolean) => (at ? versionURL(share, entry.path, { at }, inline) : fileURL(share, entry.path, inline))
   // Renaming and moving take the right to delete as well, so the menu hangs on it.
-  const manage = rights.delete
+  const manage = !entry.dir || rights.delete
   return (
     <tr>
       <td className="col-name">
@@ -403,11 +564,11 @@ function Row({
           {entry.dir ? '\u{1F4C1}' : '\u{1F4C4}'}
         </span>
         {entry.dir ? (
-          <a className="file-name" href={hashFor(share, entry.path)}>
+          <a className="file-name" href={hashFor(share, entry.path, at)}>
             {entry.name}
           </a>
         ) : (
-          <a className="file-name" href={fileURL(share, entry.path)} download={entry.name}>
+          <a className="file-name" href={href(false)} download={entry.name}>
             {entry.name}
           </a>
         )}
@@ -416,12 +577,12 @@ function Row({
       <td className="col-time muted">{formatTime(entry.modifiedAt)}</td>
       <td className="col-actions">
         {!entry.dir && canShow(entry.name) && (
-          <a className="btn btn-small" href={fileURL(share, entry.path, true)} target="_blank" rel="noreferrer">
+          <a className="btn btn-small" href={href(true)} target="_blank" rel="noreferrer">
             Open
           </a>
         )}
         {!entry.dir && (
-          <a className="btn btn-small" href={fileURL(share, entry.path)} download={entry.name}>
+          <a className="btn btn-small" href={href(false)} download={entry.name}>
             Download
           </a>
         )}
@@ -431,6 +592,16 @@ function Row({
               ⋯
             </summary>
             <div className="menu-items">
+              {!entry.dir && (
+                <button className="menu-item" onClick={() => pick({ kind: 'versions', entry })}>
+                  Versions
+                </button>
+              )}
+              {!entry.dir && at && canRestore && (
+                <button className="menu-item" onClick={() => pick({ kind: 'restoreAt', entry })}>
+                  Restore
+                </button>
+              )}
               {rights.write && rights.delete && (
                 <>
                   <button className="menu-item" onClick={() => pick({ kind: 'rename', entry })}>
@@ -454,21 +625,21 @@ function Row({
   )
 }
 
-function Breadcrumbs({ share, path }: { share: string; path: string }) {
+function Breadcrumbs({ share, path, at }: { share: string; path: string; at?: string }) {
   const segments = path.split('/').filter((s) => s !== '')
-  let at = ''
+  let here = ''
   return (
     <nav className="crumbs" aria-label="Location">
       <a href="#/">Shares</a>
       <span className="crumb-sep">/</span>
-      {segments.length === 0 ? <span className="crumb-current">{share}</span> : <a href={hashFor(share)}>{share}</a>}
+      {segments.length === 0 ? <span className="crumb-current">{share}</span> : <a href={hashFor(share, '/', at)}>{share}</a>}
       {segments.map((s, i) => {
-        at += '/' + s
+        here += '/' + s
         const last = i === segments.length - 1
         return (
-          <span key={at}>
+          <span key={here}>
             <span className="crumb-sep">/</span>
-            {last ? <span className="crumb-current">{s}</span> : <a href={hashFor(share, at)}>{s}</a>}
+            {last ? <span className="crumb-current">{s}</span> : <a href={hashFor(share, here, at)}>{s}</a>}
           </span>
         )
       })}
@@ -476,11 +647,11 @@ function Breadcrumbs({ share, path }: { share: string; path: string }) {
   )
 }
 
-function ErrorNotice({ share, error }: { share: string; error: { message: string; status: number } }) {
+function ErrorNotice({ share, error, at }: { share: string; error: { message: string; status: number }; at?: string }) {
   let text: string
   switch (error.status) {
     case 404:
-      text = error.message === 'share not found' ? 'There is no share of this name.' : 'The folder was not found.'
+      text = error.message === 'share not found' ? 'There is no share of this name.' : at ? 'The folder was not there at that time.' : 'The folder was not found.'
       break
     case 403:
       text = 'This account may not read here.'

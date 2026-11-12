@@ -261,8 +261,76 @@ a.share-card:hover {
   max-width: 440px;
 }
 
+.modal-wide {
+  max-width: 980px;
+}
+
 .modal-actions {
   justify-content: flex-end;
+}
+
+.history-banner {
+  margin-top: 0;
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-time {
+  display: block;
+  padding: 7px 10px;
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.history-time:hover {
+  background: var(--surface-2);
+}
+
+.history-current {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.versions td,
+.versions th {
+  white-space: nowrap;
+}
+
+.versions .col-actions {
+  width: auto;
+}
+
+.versions .col-actions .btn {
+  margin-left: 6px;
+}
+
+.versions .col-actions .btn:first-child {
+  margin-left: 0;
+}
+
+.version-kept {
+  margin-left: 8px;
+}
+
+.version-by {
+  font-size: 13px;
 }
 
 .modal .stack {
