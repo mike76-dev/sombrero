@@ -1213,50 +1213,71 @@ func (db *Database) absorbFile(ctx context.Context, tx pgx.Tx, share, path, orig
 	return db.pruneVersions(ctx, tx, share, origin)
 }
 
+// deletableDirectory is the directory at the path the account may delete. The
+// subtree is matched with starts_with, not LIKE: a directory named with a _ or
+// a % would make LIKE reach into its siblings.
+const deletableDirectory = `
+	WITH caller AS (
+		SELECT id, workgroup
+		FROM accounts
+		WHERE id = $3
+	),
+	src AS (
+		SELECT d.id, d.full_path
+		FROM directories d
+		JOIN accounts owner ON owner.id = d.account
+		CROSS JOIN caller c
+		WHERE d.share_name = $1
+			AND d.full_path = $2
+			AND (
+				d.account = c.id
+				OR (
+					d.private = FALSE
+					AND d.read_only = FALSE
+					AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
+				)
+				OR (d.read_only = FALSE AND (
+					granted_level(d.share_name, c.workgroup, d.full_path) >= 2
+					OR owns_ancestor(d.share_name, c.id, d.full_path)
+				))
+			)
+	)
+`
+
 // DeleteDirectory deletes a directory and all its contents. It returns the keys
 // of the slabs that no other file references any more, so that the caller can
-// unpin them.
+// unpin them. The versions of the files under it stay, found by their paths,
+// so that the files can be restored; a version is left without a directory.
 func (db *Database) DeleteDirectory(acc Account, share string, path string) (slabs []types.Hash256, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
-		// The subtree is matched with starts_with, not LIKE: a directory named
-		// with a _ or a % would make LIKE reach into its siblings.
-		const collectQuery = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $3
-			),
-			src AS (
-				SELECT d.id, d.full_path
-				FROM directories d
-				JOIN accounts owner ON owner.id = d.account
-				CROSS JOIN caller c
-				WHERE d.share_name = $1
-					AND d.full_path = $2
-					AND (
-						d.account = c.id
-						OR (
-							d.private = FALSE
-							AND d.read_only = FALSE
-							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
-						)
-						OR (d.read_only = FALSE AND (
-							granted_level(d.share_name, c.workgroup, d.full_path) >= 2
-							OR owns_ancestor(d.share_name, c.id, d.full_path)
-						))
-					)
-			),
-			-- A file still being uploaded into the directory goes with it, and its
-			-- storage is collected here: the object would be taken by the cascade
-			-- of the directory alone, leaving its buffer and its slabs paid for
-			-- and referenced by nobody.
+		// The versions are detached ahead of the delete: the cascade of the
+		// directory would take them with it.
+		const spareQuery = deletableDirectory + `
+			UPDATE objects o
+			SET directory_id = NULL
+			FROM src s
+			WHERE o.share_name = $1
+				AND starts_with(o.full_path, s.full_path || '/')
+				AND EXISTS (SELECT 1 FROM versions v WHERE v.object_id = o.id)
+		`
+
+		if _, err := tx.Exec(ctx, spareQuery, share, path, acc.ID); err != nil {
+			return fmt.Errorf("failed to spare the versions: %w", err)
+		}
+
+		// A file still being uploaded into the directory goes with it, and its
+		// storage is collected here: the object would be taken by the cascade
+		// of the directory alone, leaving its buffer and its slabs paid for
+		// and referenced by nobody.
+		const collectQuery = deletableDirectory + `,
 			target_objects AS (
 				SELECT o.id
 				FROM objects o
 				JOIN src s ON TRUE
 				WHERE o.share_name = $1
 					AND starts_with(o.full_path, s.full_path || '/')
+					AND NOT EXISTS (SELECT 1 FROM versions v WHERE v.object_id = o.id)
 			)
 			SELECT DISTINCT m.buffer_id, m.slab_key
 			FROM metadata m
@@ -1273,37 +1294,13 @@ func (db *Database) DeleteDirectory(acc Account, share string, path string) (sla
 			return err
 		}
 
-		const deleteQuery = `
-			WITH caller AS (
-				SELECT id, workgroup
-				FROM accounts
-				WHERE id = $3
-			),
-			src AS (
-				SELECT d.id, d.full_path
-				FROM directories d
-				JOIN accounts owner ON owner.id = d.account
-				CROSS JOIN caller c
-				WHERE d.share_name = $1
-					AND d.full_path = $2
-					AND (
-						d.account = c.id
-						OR (
-							d.private = FALSE
-							AND d.read_only = FALSE
-							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
-						)
-						OR (d.read_only = FALSE AND (
-							granted_level(d.share_name, c.workgroup, d.full_path) >= 2
-							OR owns_ancestor(d.share_name, c.id, d.full_path)
-						))
-					)
-			),
+		const deleteQuery = deletableDirectory + `,
 			delete_files AS (
 				DELETE FROM objects o
 				USING src s
 				WHERE o.share_name = $1
 					AND starts_with(o.full_path, s.full_path || '/')
+					AND NOT EXISTS (SELECT 1 FROM versions v WHERE v.object_id = o.id)
 				RETURNING o.id
 			),
 			delete_dirs AS (

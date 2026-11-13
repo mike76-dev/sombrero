@@ -324,12 +324,21 @@ func TestRenterdVersionsFollowRenames(t *testing.T) {
 		t.Errorf("want the file and three versions, got %v", keys)
 	}
 
-	// The folder takes the versions with it.
+	// The folder leaves the versions behind, until they are dropped as a lot.
 	if err := rv.Delete(ctx, acc, "b", true); err != nil {
 		t.Fatalf("Delete(dir): %v", err)
 	}
+	if sizes := sizesOf(t, rv, acc, "b/w.txt"); len(sizes) != 3 {
+		t.Errorf("want the versions to outlive the folder, got %v", sizes)
+	}
+	if keys := bucket.keys(); len(keys) != 3 {
+		t.Errorf("want the three versions left in the bucket, got %v", keys)
+	}
+	if err := rv.DeleteVersionsUnder(ctx, acc, "b"); err != nil {
+		t.Fatalf("DeleteVersionsUnder: %v", err)
+	}
 	if sizes := sizesOf(t, rv, acc, "b/w.txt"); len(sizes) != 0 {
-		t.Errorf("want the versions gone with the folder, got %v", sizes)
+		t.Errorf("want the versions dropped, got %v", sizes)
 	}
 	if keys := bucket.keys(); len(keys) != 0 {
 		t.Errorf("want the bucket empty, got %v", keys)

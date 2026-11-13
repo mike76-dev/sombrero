@@ -277,6 +277,29 @@ func (db *Database) DeleteVersions(share, path string, id uint64) (slabs []types
 	return
 }
 
+// DeleteVersionsUnder drops the versions of every file under the folder, at
+// any depth, kept or not, and returns the slabs released.
+func (db *Database) DeleteVersionsUnder(share, dir string) (slabs []types.Hash256, err error) {
+	prefix := strings.TrimSuffix(normalizePath(dir), "/") + "/"
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const under = `
+			SELECT o.id, o.workgroup
+			FROM versions v
+			JOIN objects o ON o.id = v.object_id
+			WHERE o.share_name = $1
+				AND starts_with(o.full_path, $2)
+		`
+
+		rows, err := tx.Query(ctx, under, share, prefix)
+		if err != nil {
+			return fmt.Errorf("failed to find the versions: %w", err)
+		}
+		slabs, err = dropVersions(ctx, tx, share, rows)
+		return err
+	})
+	return
+}
+
 // EmptyFile removes the contents of the file ahead of their replacement, as a
 // create that overwrites it does: they are kept as a version where the policy
 // says, or whatever the session when the emptying is deliberate, the versions
@@ -747,7 +770,9 @@ func filesAt(scope string) string {
 // by then, and the files there by then with the contents they held, which are
 // the versions replaced since, deleted files among them. A file whose state
 // at the time was not kept is listed with the nearest state kept after it.
-// A directory made after the time is ErrNotFound.
+// A directory made after the time is ErrNotFound. The versions a deleted
+// folder left have no directory, as the root's files have none: the root
+// lists only the files whose paths put them there.
 func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.Time) (objects []ObjectMeta, err error) {
 	path = normalizePath(path)
 	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
@@ -782,7 +807,8 @@ func (db *Database) ListObjectsAt(acc Account, shareName, path string, at time.T
 			UNION ALL
 
 			SELECT full_path, size, created_at, modified_at, FALSE AS is_dir
-			FROM (` + filesAt(`o.directory_id IS NOT DISTINCT FROM $2`) + `) f
+			FROM (` + filesAt(`o.directory_id IS NOT DISTINCT FROM $2
+				AND (o.directory_id IS NOT NULL OR position('/' IN substr(o.full_path, 2)) = 0)`) + `) f
 
 			ORDER BY full_path
 		`

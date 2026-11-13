@@ -178,6 +178,10 @@ type Versioner interface {
 	// file with a zero ID, kept or not.
 	DeleteVersions(ctx context.Context, acc stores.Account, path string, id uint64) error
 
+	// DeleteVersionsUnder removes the versions of every file under the folder,
+	// at any depth, kept or not: what a deleted folder left behind.
+	DeleteVersionsUnder(ctx context.Context, acc stores.Account, dir string) error
+
 	// KeepVersion exempts the version with the ID from the count and age
 	// limits of the policy, or puts it back under them.
 	KeepVersion(ctx context.Context, acc stores.Account, path string, id uint64, keep bool) error

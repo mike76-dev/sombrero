@@ -1217,6 +1217,29 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 	return nil
 }
 
+// DeleteVersionsUnder implements client.Versioner. The folder is gone by the
+// time this is asked, so its parent answers for the right to delete there.
+func (ic *IndexdClient) DeleteVersionsUnder(ctx context.Context, acc stores.Account, dir string) error {
+	pa, err := ic.db.PathAccess(acc, ic.share, dir)
+	if err != nil {
+		return err
+	}
+	if !pa.Delete {
+		return stores.ErrAccessDenied
+	}
+
+	slabs, err := ic.db.DeleteVersionsUnder(ic.share, dir)
+	if err != nil {
+		return err
+	}
+	if len(slabs) > 0 && ic.unpinSlabs(ctx, slabs) {
+		if err := ic.backend.PruneSlabs(ctx); err != nil {
+			log.Printf("failed to prune slabs after deleting the versions under %s: %v", dir, err)
+		}
+	}
+	return nil
+}
+
 // MarkRestored implements client.Versioner.
 func (ic *IndexdClient) MarkRestored(ctx context.Context, path string, ids []uint64) error {
 	return ic.db.MarkRestored(ic.share, path, ids)

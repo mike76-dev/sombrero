@@ -198,6 +198,19 @@ func (fc *fakeClient) DeleteVersions(_ context.Context, _ stores.Account, path s
 	return nil
 }
 
+// DeleteVersionsUnder implements client.Versioner.
+func (fc *fakeClient) DeleteVersionsUnder(_ context.Context, _ stores.Account, dir string) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	for path := range fc.versions {
+		if strings.HasPrefix(path, dir+"/") {
+			delete(fc.versions, path)
+		}
+	}
+	return nil
+}
+
 // emptying is one file emptied ahead of an overwrite: its path, and whether the
 // server took the overwrite for a restore.
 type emptying struct {

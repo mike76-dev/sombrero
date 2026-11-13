@@ -109,6 +109,14 @@ func (m *mockClient) DeleteVersions(_ context.Context, _ stores.Account, p strin
 	return nil
 }
 
+func (m *mockClient) DeleteVersionsUnder(_ context.Context, _ stores.Account, dir string) error {
+	if m.dropVersionsErr != nil {
+		return m.dropVersionsErr
+	}
+	m.versionsDropped = append(m.versionsDropped, versionRef{dir + "/", 0})
+	return nil
+}
+
 func (m *mockClient) KeepVersion(_ context.Context, _ stores.Account, p string, id uint64, keep bool) error {
 	if m.keepErr != nil {
 		return m.keepErr

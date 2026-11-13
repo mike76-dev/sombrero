@@ -405,17 +405,73 @@ func TestFoldersCarryTheVersions(t *testing.T) {
 		t.Errorf("want the version under the folder's new name, got %v", sizes)
 	}
 
+	// The folder goes with the file, and the version stays behind, without a
+	// directory, out of the root's history, with the slab it holds.
 	slabs, err := db.DeleteDirectory(acc, share, "old")
 	if err != nil {
 		t.Fatalf("DeleteDirectory: %v", err)
 	}
-	assertSlabs(t, "DeleteDirectory(old)", slabs, []types.Hash256{own})
-	if sizes := versionSizes(t, db, share, "old/doc.txt"); len(sizes) != 0 {
-		t.Errorf("want the versions gone with the folder, got %v", sizes)
+	if len(slabs) != 0 {
+		t.Errorf("want the slab of the version kept, got %v released", slabs)
+	}
+	if sizes := versionSizes(t, db, share, "old/doc.txt"); len(sizes) != 1 || sizes[0] != 400 {
+		t.Errorf("want the version left by the folder, got %v", sizes)
 	}
 	if n := bufferedBytes(t, db); n != 0 {
-		t.Errorf("want nothing left buffered, got %d bytes", n)
+		t.Errorf("want the deleted file's buffer gone, got %d bytes", n)
 	}
+	versions, _ := db.Versions(share, "old/doc.txt")
+	if dir := directoryOf(t, db, versions[0].ID); dir != nil {
+		t.Errorf("want the version without a directory, got %d", *dir)
+	}
+	objects, err := db.ListObjectsAt(acc, share, "/", time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ListObjectsAt(/): %v", err)
+	}
+	for _, o := range objects {
+		if o.Path == "/old/doc.txt" {
+			t.Errorf("want the version out of the root's history, got %+v", objects)
+		}
+	}
+
+	// The folder made again, the version is restored into it, and the slab
+	// goes once nothing holds it any more.
+	if err := db.CreateDirectory(acc, share, "old", false, false); err != nil {
+		t.Fatalf("CreateDirectory(old): %v", err)
+	}
+	if _, err := db.RestoreVersion(acc, share, "old/doc.txt", versions[0].ID); err != nil {
+		t.Fatalf("RestoreVersion: %v", err)
+	}
+	if om, err := db.Object(acc, share, "old/doc.txt"); err != nil || om.Size != 400 {
+		t.Fatalf("want the file restored with 400 bytes, got %+v, %v", om, err)
+	}
+	if _, err := db.DeleteFile(acc, share, "old/doc.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	if _, err := db.DeleteDirectory(acc, share, "old"); err != nil {
+		t.Fatalf("DeleteDirectory(old) again: %v", err)
+	}
+	slabs, err = db.DeleteVersionsUnder(share, "old")
+	if err != nil {
+		t.Fatalf("DeleteVersionsUnder: %v", err)
+	}
+	assertSlabs(t, "DeleteVersionsUnder(old)", slabs, []types.Hash256{own})
+	if sizes := versionSizes(t, db, share, "old/doc.txt"); len(sizes) != 0 {
+		t.Errorf("want the versions gone, got %v", sizes)
+	}
+}
+
+// directoryOf reads the directory the object with the ID is in, nil for none.
+func directoryOf(t *testing.T, db *Database, id uint64) *int64 {
+	t.Helper()
+	var dir *int64
+	err := db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT directory_id FROM objects WHERE id = $1`, int64(id)).Scan(&dir)
+	})
+	if err != nil {
+		t.Fatalf("reading the directory of object %d: %v", id, err)
+	}
+	return dir
 }
 
 // dateFile sets when the copy of the file with the size was created and
@@ -617,9 +673,11 @@ func TestEmptiedFolderIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteDirectory: %v", err)
 	}
-	assertSlabs(t, "DeleteDirectory(docs)", slabs, []types.Hash256{own})
-	if sizes := versionSizes(t, db, share, "docs/doc.txt"); len(sizes) != 0 {
-		t.Errorf("want the versions gone with the folder, got %v", sizes)
+	if len(slabs) != 0 {
+		t.Errorf("want the slab of the deleted file kept with its version, got %v released", slabs)
+	}
+	if sizes := versionSizes(t, db, share, "docs/doc.txt"); len(sizes) != 1 || sizes[0] != 400 {
+		t.Errorf("want the deleted file's version to outlive the folder, got %v", sizes)
 	}
 }
 

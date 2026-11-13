@@ -224,16 +224,10 @@ func (rv *RenterdVersions) Delete(ctx context.Context, acc stores.Account, path 
 	if reserved(path) {
 		return stores.ErrNotFound
 	}
+	// A folder goes with what is in it; the versions under it stay, found
+	// by their paths, so that the files can be restored.
 	if batch {
-		if err := rv.RenterdClient.Delete(ctx, acc, path, true); err != nil {
-			return err
-		}
-		ids, err := rv.db.DeleteRenterdVersionsUnder(rv.share, path)
-		if err != nil {
-			return err
-		}
-		rv.dropObjects(ctx, ids)
-		return nil
+		return rv.RenterdClient.Delete(ctx, acc, path, true)
 	}
 
 	live, err := rv.file(ctx, acc, path)
@@ -363,6 +357,16 @@ func (rv *RenterdVersions) RestoreVersion(ctx context.Context, acc stores.Accoun
 // DeleteVersions implements Versioner.
 func (rv *RenterdVersions) DeleteVersions(ctx context.Context, acc stores.Account, path string, id uint64) error {
 	ids, err := rv.db.DeleteRenterdVersions(rv.share, path, id)
+	if err != nil {
+		return err
+	}
+	rv.dropObjects(ctx, ids)
+	return nil
+}
+
+// DeleteVersionsUnder implements Versioner.
+func (rv *RenterdVersions) DeleteVersionsUnder(ctx context.Context, acc stores.Account, dir string) error {
+	ids, err := rv.db.DeleteRenterdVersionsUnder(rv.share, dir)
 	if err != nil {
 		return err
 	}

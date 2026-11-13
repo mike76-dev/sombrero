@@ -763,8 +763,8 @@ function HistoryDialog({ share, path, at, onExpired, onClose }: { share: string;
   )
 }
 
-// DeleteDialog asks before one item or a selection is deleted. Folders go
-// with everything in them; files may keep their versions or lose them too.
+// DeleteDialog asks before one item or a selection is deleted. Deleted files
+// keep their versions, a folder's included, unless they are purged too.
 function DeleteDialog({
   entries,
   busy,
@@ -780,8 +780,6 @@ function DeleteDialog({
 }) {
   const [purge, setPurge] = useState(false)
   const one = entries.length === 1 ? entries[0] : undefined
-  const folders = entries.filter((e) => e.dir).length
-  const files = entries.length - folders
   return (
     <ConfirmDialog
       title={one ? (one.dir ? 'Delete folder' : 'Delete file') : 'Delete items'}
@@ -792,16 +790,10 @@ function DeleteDialog({
       onConfirm={() => onConfirm(purge)}
     >
       {one ? (
-        one.dir ? (
-          <p>
-            Delete the folder <strong>{one.name}</strong> and everything in it? The files in it lose their previous versions as well, so this cannot be
-            undone.
-          </p>
-        ) : (
-          <p>
-            Delete the file <strong>{one.name}</strong>?
-          </p>
-        )
+        <p>
+          Delete the {one.dir ? 'folder' : 'file'} <strong>{one.name}</strong>
+          {one.dir ? ' and everything in it' : ''}?
+        </p>
       ) : (
         <>
           <p>Delete these {entries.length} items?</p>
@@ -810,25 +802,16 @@ function DeleteDialog({
               <li key={e.path}>{e.name}</li>
             ))}
           </ul>
-          {folders > 0 && (
-            <p>
-              {folders === 1 ? 'The folder goes' : 'The folders go'} with everything in them, and the files in them lose their previous versions as well, so
-              this cannot be undone.
-            </p>
-          )}
         </>
       )}
-      {files > 0 && (
-        <>
-          <label className="checkbox">
-            <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} />
-            {files === 1 && one ? 'Delete its previous versions as well' : 'Delete the previous versions of the files as well'}
-          </label>
-          <p className="muted field-hint">
-            On a share that retains versions, a deleted file is kept as a version until it is purged or its versions expire.
-          </p>
-        </>
-      )}
+      <label className="checkbox">
+        <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} />
+        {one && !one.dir ? 'Delete its previous versions as well' : 'Delete the previous versions of the files as well'}
+      </label>
+      <p className="muted field-hint">
+        On a share that retains versions, a deleted file is kept as a version until it is purged or its versions expire, the files of a deleted folder
+        included. The folder itself is not kept.
+      </p>
     </ConfirmDialog>
   )
 }
