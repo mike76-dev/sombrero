@@ -1,6 +1,7 @@
 import { ReactNode, useCallback, useEffect, useState } from 'react'
 import { FilesError, Identity, ShareInfo, logout, me, shares } from './api'
 import { Browser } from './Browser'
+import { DeletedPage } from './DeletedPage'
 import { LoginPage } from './LoginPage'
 import { SharesPage } from './SharesPage'
 import { hashFor, useRoute } from './route'
@@ -155,6 +156,8 @@ function Library({
       <main className="content">
         {route.share === null ? (
           <SharesPage shares={shareList} error={shareError} />
+        ) : route.bin ? (
+          <DeletedPage share={route.share} shareRights={shareList?.find((s) => s.name === route.share)?.rights} onExpired={onExpired} />
         ) : (
           <Browser
             share={route.share}

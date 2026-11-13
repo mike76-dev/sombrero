@@ -164,7 +164,6 @@ a.share-card:hover {
 
 .files .col-actions .btn {
   margin-left: 6px;
-  text-decoration: none;
 }
 
 .files .col-actions .btn:first-child {
@@ -417,7 +416,8 @@ tr.drop-target td:last-child {
   margin-left: 8px;
 }
 
-.version-by {
+.version-by,
+.deleted-folder {
   font-size: 13px;
 }
 

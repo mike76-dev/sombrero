@@ -15,8 +15,9 @@ import {
   versionURL,
   versions,
 } from './api'
+import { describe, outcome, runEach } from './batch'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
-import { hashFor } from './route'
+import { binHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { VersionsDialog } from './VersionsDialog'
 import { formatBytes, formatTime, formatTimeExact } from '../format'
@@ -94,33 +95,6 @@ type Dialog =
   | { kind: 'versions'; entry: Entry }
   | { kind: 'history' }
   | { kind: 'restoreAt'; entry: Entry }
-
-// describe turns an error of the file API into a sentence.
-function describe(e: unknown): string {
-  if (e instanceof FilesError) {
-    switch (e.message) {
-      case 'already exists':
-      case 'destination already exists':
-        return 'Something of that name is already there.'
-      case 'access denied':
-        return 'This account may not do that here.'
-      case 'not found':
-        return 'It is no longer there.'
-      case 'share unavailable':
-        return 'The share is not available at the moment.'
-      case 'destination is of the other kind':
-        return 'A file cannot replace a folder, nor a folder a file.'
-    }
-    return e.message
-  }
-  return e instanceof Error ? e.message : String(e)
-}
-
-// what names a batch in a sentence: the item itself when it is one, the
-// count otherwise.
-function what(items: Entry[]): string {
-  return items.length === 1 ? items[0].name : `${items.length} items`
-}
 
 // A notice reports a change that went through, with a way to take it back
 // while the notice is shown. It then lingers long enough to be taken.
@@ -306,33 +280,18 @@ export function Browser({
   ) => {
     setBusy(true)
     setProblem(null)
-    const failed: { entry: Entry; reason: string }[] = []
-    try {
-      for (const entry of items) {
-        try {
-          await f(entry)
-        } catch (e) {
-          if (e instanceof FilesError && e.status === 401) {
-            onExpired()
-            return
-          }
-          failed.push({ entry, reason: describe(e) })
-        }
-      }
-    } finally {
-      setBusy(false)
+    const { failed, expired } = await runEach(items, f)
+    setBusy(false)
+    if (expired) {
+      onExpired()
+      return
     }
     setDialog(null)
     reload()
-    if (failed.length === 0) {
-      setNotice({ text: `${what(items)} ${items.length === 1 ? 'was' : 'were'} ${done}.`, undo: undo?.(items) })
-    } else if (items.length === 1) {
-      setProblem(`${items[0].name} was not ${undone}: ${failed[0].reason}`)
-    } else {
-      const count = failed.length === items.length ? what(items) : `${failed.length} of ${items.length} items`
-      setProblem(`${count} were not ${undone}. ${failed.map((f) => `${f.entry.name}: ${f.reason}`).join(' ')}`)
-    }
-    setSelected(new Set(failed.map((f) => f.entry.path)))
+    const result = outcome(items, failed, done, undone)
+    if (result.ok) setNotice({ text: result.notice, undo: undo?.(items) })
+    else setProblem(result.problem)
+    setSelected(new Set(failed.map((f) => f.item.path)))
   }
 
   // moveBack undoes a move or a rename: each item goes from where it was put
@@ -463,6 +422,11 @@ export function Browser({
             <button className="btn" onClick={() => open({ kind: 'history' })}>
               History
             </button>
+          )}
+          {!error && !at && (
+            <a className="btn" href={binHash(share)}>
+              Deleted files
+            </a>
           )}
         </div>
       </div>

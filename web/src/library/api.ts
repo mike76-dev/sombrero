@@ -136,6 +136,23 @@ export function versions(share: string, path: string): Promise<Version[]> {
   return call<Version[]>(`/share/${encodeURIComponent(share)}/versions`, { query: { path } })
 }
 
+// A deleted file is one gone but for its versions, the newest of which, named
+// by the id, is what the deletion left.
+export interface Deleted {
+  name: string
+  path: string
+  id: number
+  size: number
+  modifiedAt: string
+  deletedAt: string
+  deletedBy?: string
+}
+
+// deleted lists the deleted files of the share, newest deletion first.
+export function deleted(share: string): Promise<Deleted[]> {
+  return call<Deleted[]>(`/share/${encodeURIComponent(share)}/deleted`)
+}
+
 export function versionURL(share: string, path: string, ref: VersionRef, inline = false): string {
   return url(`/share/${encodeURIComponent(share)}/version`, { path, ...refQuery(ref), inline: inline ? '1' : undefined })
 }
