@@ -277,6 +277,79 @@ func (db *Database) DeleteVersions(share, path string, id uint64) (slabs []types
 	return
 }
 
+// DeletedFile is a file that is gone but for its versions, the newest of which
+// is what the deletion left.
+type DeletedFile struct {
+	Path       string
+	ID         uint64
+	Size       uint64
+	ModifiedAt time.Time
+	DeletedAt  time.Time
+	DeletedBy  string
+}
+
+// DeletedFiles lists the files under the folder, at any depth, that are gone
+// but for their versions, as far as the account may see them, newest deletion
+// first. A version left by a deleted folder has no directory, so what the
+// account owns, holds a grant on or owns an ancestor of is what it sees.
+func (db *Database) DeletedFiles(acc Account, share, dir string) (files []DeletedFile, err error) {
+	prefix := strings.TrimSuffix(normalizePath(dir), "/") + "/"
+	err = db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		const query = `
+			WITH caller AS (
+				SELECT id, workgroup
+				FROM accounts
+				WHERE id = $3
+			)
+			SELECT full_path, id, size, modified_at, replaced_at, replaced_by
+			FROM (
+				SELECT DISTINCT ON (o.full_path)
+					o.full_path, o.id, o.size, o.modified_at, v.replaced_at,
+					COALESCE(a.account_name, '') AS replaced_by
+				FROM versions v
+				JOIN objects o ON o.id = v.object_id
+				JOIN accounts owner ON owner.id = o.account
+				LEFT JOIN accounts a ON a.id = v.replaced_by
+				LEFT JOIN directories od
+					ON od.share_name = o.share_name
+					AND od.id = o.directory_id
+				CROSS JOIN caller c
+				WHERE o.share_name = $1
+					AND starts_with(o.full_path, $2)
+					AND NOT EXISTS (
+						SELECT 1
+						FROM objects l
+						WHERE l.share_name = o.share_name
+							AND l.full_path = o.full_path
+							AND l.temporary = FALSE
+					)
+					AND (
+						o.account = c.id
+						OR (
+							od.private = FALSE
+							AND (owner.workgroup = c.workgroup OR owner.workgroup = anonymous_workgroup())
+						)
+						OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+						OR owns_ancestor(o.share_name, c.id, o.full_path)
+					)
+				ORDER BY o.full_path, v.replaced_at DESC, o.id DESC
+			) d
+			ORDER BY replaced_at DESC, full_path
+		`
+
+		rows, err := tx.Query(ctx, query, share, prefix, acc.ID)
+		if err != nil {
+			return fmt.Errorf("failed to list the deleted files: %w", err)
+		}
+		files, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (f DeletedFile, err error) {
+			err = row.Scan(&f.Path, &f.ID, &f.Size, &f.ModifiedAt, &f.DeletedAt, &f.DeletedBy)
+			return
+		})
+		return err
+	})
+	return
+}
+
 // DeleteVersionsUnder drops the versions of every file under the folder, at
 // any depth, kept or not, and returns the slabs released.
 func (db *Database) DeleteVersionsUnder(share, dir string) (slabs []types.Hash256, err error) {

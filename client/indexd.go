@@ -1240,6 +1240,22 @@ func (ic *IndexdClient) DeleteVersionsUnder(ctx context.Context, acc stores.Acco
 	return nil
 }
 
+// DeletedFiles implements client.Versioner.
+func (ic *IndexdClient) DeletedFiles(ctx context.Context, acc stores.Account, dir string) ([]DeletedFile, error) {
+	if _, err := ic.db.PathAccess(acc, ic.share, dir); err != nil {
+		return nil, err
+	}
+	deleted, err := ic.db.DeletedFiles(acc, ic.share, dir)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]DeletedFile, 0, len(deleted))
+	for _, d := range deleted {
+		files = append(files, DeletedFile{Path: d.Path, ID: d.ID, Size: d.Size, ModifiedAt: d.ModifiedAt, DeletedAt: d.DeletedAt, DeletedBy: d.DeletedBy})
+	}
+	return files, nil
+}
+
 // MarkRestored implements client.Versioner.
 func (ic *IndexdClient) MarkRestored(ctx context.Context, path string, ids []uint64) error {
 	return ic.db.MarkRestored(ic.share, path, ids)

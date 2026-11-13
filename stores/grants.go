@@ -414,16 +414,56 @@ func (db *Database) PathAccess(acc Account, shareName, path string) (pa PathAcce
 		}
 
 		err = tx.QueryRow(ctx, directoryQuery, shareName, parent, acc.ID).Scan(&visible, &canWrite, &canDelete)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+		if err == nil {
+			if !visible {
 				return ErrNotFound
 			}
+			pa = PathAccess{Write: canWrite, Delete: canWrite}
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("failed to query the parent: %w", err)
+		}
+
+		// The parent is gone too, and only the versions of a deleted file
+		// can be at the path: they answer for themselves, as their folder
+		// no longer can.
+		const versionsQuery = `
+			WITH caller AS (
+				SELECT id, workgroup
+				FROM accounts
+				WHERE id = $3
+			)
+			SELECT
+				COALESCE(bool_or(
+					o.account = c.id
+					OR granted_level(o.share_name, c.workgroup, o.full_path) >= 0
+					OR owns_ancestor(o.share_name, c.id, o.full_path)
+				), FALSE),
+				COALESCE(bool_or(
+					o.account = c.id
+					OR granted_level(o.share_name, c.workgroup, o.full_path) >= 1
+					OR owns_ancestor(o.share_name, c.id, o.full_path)
+				), FALSE),
+				COALESCE(bool_or(
+					o.account = c.id
+					OR granted_level(o.share_name, c.workgroup, o.full_path) >= 2
+					OR owns_ancestor(o.share_name, c.id, o.full_path)
+				), FALSE)
+			FROM versions v
+			JOIN objects o ON o.id = v.object_id
+			CROSS JOIN caller c
+			WHERE o.share_name = $1
+				AND o.full_path = $2
+		`
+
+		if err := tx.QueryRow(ctx, versionsQuery, shareName, path, acc.ID).Scan(&visible, &canWrite, &canDelete); err != nil {
+			return fmt.Errorf("failed to query the versions: %w", err)
 		}
 		if !visible {
 			return ErrNotFound
 		}
-		pa = PathAccess{Write: canWrite, Delete: canWrite}
+		pa = PathAccess{Write: canWrite, Delete: canDelete}
 		return nil
 	})
 	return

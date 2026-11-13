@@ -198,6 +198,11 @@ func (fc *fakeClient) DeleteVersions(_ context.Context, _ stores.Account, path s
 	return nil
 }
 
+// DeletedFiles implements client.Versioner.
+func (fc *fakeClient) DeletedFiles(_ context.Context, _ stores.Account, _ string) ([]client.DeletedFile, error) {
+	return nil, nil
+}
+
 // DeleteVersionsUnder implements client.Versioner.
 func (fc *fakeClient) DeleteVersionsUnder(_ context.Context, _ stores.Account, dir string) error {
 	fc.mu.Lock()

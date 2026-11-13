@@ -374,6 +374,55 @@ func (rv *RenterdVersions) DeleteVersionsUnder(ctx context.Context, acc stores.A
 	return nil
 }
 
+// DeletedFiles implements Versioner. The records say which paths have
+// versions; the bucket says which of them have no file any more, asked once
+// per folder.
+func (rv *RenterdVersions) DeletedFiles(ctx context.Context, acc stores.Account, dir string) ([]DeletedFile, error) {
+	versions, err := rv.db.RenterdVersionsUnder(rv.share, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// The versions come ordered by path and age, so the last of a path is
+	// the newest, the one its deletion left if it was deleted.
+	newest := map[string]stores.RenterdVersion{}
+	for _, v := range versions {
+		newest[v.Path] = v
+	}
+
+	live := map[string]bool{}
+	listed := map[string]bool{}
+	for p := range newest {
+		folder := p[:strings.LastIndex(p, "/")+1]
+		if listed[folder] {
+			continue
+		}
+		listed[folder] = true
+		ois, err := rv.RenterdClient.List(ctx, acc, strings.TrimPrefix(folder, "/"))
+		if err != nil && !errors.Is(err, stores.ErrNotFound) {
+			return nil, err
+		}
+		for _, oi := range ois {
+			live["/"+strings.TrimPrefix(oi.Key, "/")] = true
+		}
+	}
+
+	files := make([]DeletedFile, 0)
+	for p, v := range newest {
+		if live[p] {
+			continue
+		}
+		files = append(files, DeletedFile{Path: p, ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, DeletedAt: v.ReplacedAt, DeletedBy: v.ReplacedBy})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].DeletedAt.Equal(files[j].DeletedAt) {
+			return files[i].DeletedAt.After(files[j].DeletedAt)
+		}
+		return files[i].Path < files[j].Path
+	})
+	return files, nil
+}
+
 // KeepVersion implements Versioner.
 func (rv *RenterdVersions) KeepVersion(ctx context.Context, acc stores.Account, path string, id uint64, keep bool) error {
 	return rv.db.KeepRenterdVersion(rv.share, path, id, keep)

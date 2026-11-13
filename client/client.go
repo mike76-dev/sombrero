@@ -162,6 +162,17 @@ type VersionInfo struct {
 	Kept       bool
 }
 
+// DeletedFile is a file that is gone but for its versions, the newest of which,
+// named by the ID, is what the deletion left.
+type DeletedFile struct {
+	Path       string
+	ID         uint64
+	Size       uint64
+	ModifiedAt time.Time
+	DeletedAt  time.Time
+	DeletedBy  string
+}
+
 // Versioner is a client whose shares keep the previous versions of files.
 type Versioner interface {
 	// Versions lists the versions of the file the account may read, newest first.
@@ -181,6 +192,11 @@ type Versioner interface {
 	// DeleteVersionsUnder removes the versions of every file under the folder,
 	// at any depth, kept or not: what a deleted folder left behind.
 	DeleteVersionsUnder(ctx context.Context, acc stores.Account, dir string) error
+
+	// DeletedFiles lists the files under the folder, at any depth, that are
+	// gone but for their versions, as far as the account may see them, newest
+	// deletion first.
+	DeletedFiles(ctx context.Context, acc stores.Account, dir string) ([]DeletedFile, error)
 
 	// KeepVersion exempts the version with the ID from the count and age
 	// limits of the policy, or puts it back under them.

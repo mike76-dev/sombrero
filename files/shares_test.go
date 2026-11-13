@@ -54,6 +54,7 @@ type mockClient struct {
 
 	// The version hooks and what the client was asked to do with versions.
 	versions        func(string) ([]client.VersionInfo, error)
+	deletedFiles    func(string) ([]client.DeletedFile, error)
 	readVersion     func(string, uint64, uint64, uint64, io.Writer) error
 	snapshots       func(string) ([]time.Time, error)
 	listAt          func(string, time.Time) ([]client.ObjectInfo, error)
@@ -107,6 +108,13 @@ func (m *mockClient) DeleteVersions(_ context.Context, _ stores.Account, p strin
 	}
 	m.versionsDropped = append(m.versionsDropped, versionRef{p, id})
 	return nil
+}
+
+func (m *mockClient) DeletedFiles(_ context.Context, _ stores.Account, dir string) ([]client.DeletedFile, error) {
+	if m.deletedFiles != nil {
+		return m.deletedFiles(dir)
+	}
+	return nil, nil
 }
 
 func (m *mockClient) DeleteVersionsUnder(_ context.Context, _ stores.Account, dir string) error {
