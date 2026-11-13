@@ -435,27 +435,6 @@ export function Browser({
           the present. <a href={hashFor(share, path)}>Back to the present.</a>
         </div>
       )}
-      {notice && <div className="banner banner-success">{notice}</div>}
-      {problem && <div className="banner banner-error">{problem}</div>}
-      {picked.length > 0 && (
-        <div className="selection-bar">
-          <span>{picked.length === 1 ? '1 item selected' : `${picked.length} items selected`}</span>
-          <div className="toolbar">
-            {canDrag && (
-              <button className="btn" disabled={busy} onClick={() => open({ kind: 'moveMany', entries: picked })}>
-                Move
-              </button>
-            )}
-            <button className="btn btn-danger" disabled={busy} onClick={() => open({ kind: 'delete', entries: picked })}>
-              Delete
-            </button>
-            <button className="btn" onClick={() => pickAll(false)}>
-              Clear
-            </button>
-          </div>
-        </div>
-      )}
-      <UploadPanel uploads={uploads} onCancel={cancel} />
       {error ? (
         <ErrorNotice share={share} error={error} at={at} />
       ) : !listing || stale ? (
@@ -630,6 +609,39 @@ export function Browser({
             version; a deleted file comes back.
           </p>
         </ConfirmDialog>
+      )}
+
+      {(picked.length > 0 || uploads.length > 0 || notice || problem) && (
+        <div className="dock">
+          {picked.length > 0 && (
+            <div className="selection-bar">
+              <span>{picked.length === 1 ? '1 item selected' : `${picked.length} items selected`}</span>
+              <div className="toolbar">
+                {canDrag && (
+                  <button className="btn" disabled={busy} onClick={() => open({ kind: 'moveMany', entries: picked })}>
+                    Move
+                  </button>
+                )}
+                <button className="btn btn-danger" disabled={busy} onClick={() => open({ kind: 'delete', entries: picked })}>
+                  Delete
+                </button>
+                <button className="btn" onClick={() => pickAll(false)}>
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
+          <UploadPanel uploads={uploads} onCancel={cancel} />
+          {problem && (
+            <div className="banner banner-error dock-banner">
+              <span>{problem}</span>
+              <button className="btn btn-small" onClick={() => setProblem(null)}>
+                Dismiss
+              </button>
+            </div>
+          )}
+          {notice && <div className="banner banner-success">{notice}</div>}
+        </div>
       )}
     </div>
   )

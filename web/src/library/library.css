@@ -200,6 +200,39 @@ a.share-card:hover {
   margin: 0;
 }
 
+.dock {
+  position: sticky;
+  bottom: 16px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dock > * {
+  box-shadow: var(--shadow);
+}
+
+.dock .banner {
+  margin-top: 0;
+}
+
+.dock .upload-list {
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.dock-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.dock-banner .btn {
+  flex-shrink: 0;
+}
+
 .selection-bar {
   display: flex;
   flex-wrap: wrap;
