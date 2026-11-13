@@ -16,7 +16,7 @@ import {
 } from './api'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
 import { hashFor } from './route'
-import { UploadPanel, useUploads } from './Uploads'
+import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { VersionsDialog } from './VersionsDialog'
 import { formatBytes, formatTime, formatTimeExact } from '../format'
 
@@ -88,7 +88,7 @@ type Dialog =
   | { kind: 'rename'; entry: Entry }
   | { kind: 'move'; entry: Entry }
   | { kind: 'delete'; entry: Entry }
-  | { kind: 'replace'; files: File[]; names: string[] }
+  | { kind: 'replace'; folder: string; files: File[]; names: string[] }
   | { kind: 'versions'; entry: Entry }
   | { kind: 'history' }
   | { kind: 'restoreAt'; entry: Entry }
@@ -136,6 +136,9 @@ export function Browser({
   const [dialogError, setDialogError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
+  const [dragging, setDragging] = useState<Entry | null>(null)
+  const [overFolder, setOverFolder] = useState<string | null>(null)
+  const [problem, setProblem] = useState<string | null>(null)
   const [nowRights, setNowRights] = useState<FolderRights | undefined>(undefined)
   const picker = useRef<HTMLInputElement>(null)
 
@@ -189,7 +192,17 @@ export function Browser({
     localStorage.setItem(sortKey, JSON.stringify(sort))
   }, [sort])
 
-  useEffect(() => setNotice(null), [share, path, at])
+  useEffect(() => {
+    setNotice(null)
+    setProblem(null)
+  }, [share, path, at])
+
+  // A success notice goes away by itself, as a finished upload does.
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(null), doneLingers)
+    return () => clearTimeout(timer)
+  }, [notice])
 
   const entries = useMemo(() => (listing ? [...listing.entries].sort((a, b) => compare(a, b, sort)) : []), [listing, sort])
 
@@ -230,18 +243,36 @@ export function Browser({
   const within = (name: string) => (path === '/' ? '' : path) + '/' + name
 
   // Files to upload replace what is already there, which is asked about first.
-  const takeFiles = (files: File[]) => {
+  // Another folder than this one is listed to find that out.
+  const takeFiles = async (files: File[], folder = path) => {
     if (files.length === 0 || !listing?.rights.write || at) return
-    const have = new Set(listing.entries.filter((e) => !e.dir).map((e) => e.name))
+    let entries = listing.entries
+    if (folder !== path) {
+      try {
+        entries = (await list(share, folder)).entries
+      } catch (e) {
+        if (e instanceof FilesError && e.status === 401) onExpired()
+        else setProblem(describe(e))
+        return
+      }
+    }
+    const have = new Set(entries.filter((e) => !e.dir).map((e) => e.name))
     const names = files.map((f) => f.name).filter((n) => have.has(n))
-    if (names.length > 0) open({ kind: 'replace', files, names })
-    else add(path, files)
+    if (names.length > 0) open({ kind: 'replace', folder, files, names })
+    else add(folder, files)
   }
 
-  const onDrop = (e: DragEvent) => {
-    e.preventDefault()
-    setDropping(false)
-    takeFiles(Array.from(e.dataTransfer.files))
+  // moveTo moves a dragged entry into a folder, and says so or why not.
+  const moveTo = async (entry: Entry, folder: string) => {
+    setProblem(null)
+    try {
+      await rename(share, entry.path, (folder === '/' ? '' : folder) + '/' + entry.name, false)
+      setNotice(`${entry.name} was moved to ${folder}.`)
+      reload()
+    } catch (e) {
+      if (e instanceof FilesError && e.status === 401) onExpired()
+      else setProblem(`${entry.name} was not moved: ${describe(e)}`)
+    }
   }
 
   const stale = listing && (listing.share !== share || listing.path !== path)
@@ -250,20 +281,57 @@ export function Browser({
   // in place, and restoring is decided by the present's rights.
   const rights = at || !listing || stale ? none : listing.rights
   const restoreRights = at ? (nowRights ?? none) : rights
+  const canDrag = rights.write && rights.delete
+
+  // A drag is either one of the rows, which a folder takes as a move, or
+  // files from outside, which a folder takes as an upload into it. Dropping
+  // beside the rows is an upload into this folder.
+  const takes = (folder: string, e: DragEvent): boolean => {
+    if (dragging) return canDrag && folder !== dragging.path && folder !== path
+    return rights.write && e.dataTransfer.types.includes('Files')
+  }
+  const allowDrop = (folder: string, e: DragEvent) => {
+    if (!takes(folder, e)) return
+    e.preventDefault()
+    e.stopPropagation()
+    e.dataTransfer.dropEffect = dragging ? 'move' : 'copy'
+    setOverFolder(folder)
+    setDropping(false)
+  }
+  const dropInto = (folder: string, e: DragEvent) => {
+    if (!takes(folder, e)) return
+    e.preventDefault()
+    e.stopPropagation()
+    setOverFolder(null)
+    setDropping(false)
+    if (dragging) {
+      const entry = dragging
+      setDragging(null)
+      moveTo(entry, folder)
+    } else {
+      takeFiles(Array.from(e.dataTransfer.files), folder)
+    }
+  }
+  const leave = (folder: string) => setOverFolder((f) => (f === folder ? null : f))
+
   return (
     <div
       className={dropping ? 'page dropping' : 'page'}
       onDragOver={(e) => {
-        if (rights.write && e.dataTransfer.types.includes('Files')) {
+        if (!dragging && rights.write && e.dataTransfer.types.includes('Files')) {
           e.preventDefault()
           setDropping(true)
         }
       }}
       onDragLeave={() => setDropping(false)}
-      onDrop={onDrop}
+      onDrop={(e) => {
+        e.preventDefault()
+        setDropping(false)
+        if (!dragging) takeFiles(Array.from(e.dataTransfer.files))
+      }}
     >
       <div className="row row-spread">
-        <Breadcrumbs share={share} path={path} at={at} />
+        <Breadcrumbs share={share} path={path} at={at} overFolder={overFolder} onDragOver={allowDrop} onDragLeave={leave} onDrop={dropInto} />
         <div className="toolbar">
           {rights.write && (
             <>
@@ -299,6 +367,7 @@ export function Browser({
         </div>
       )}
       {notice && <div className="banner banner-success">{notice}</div>}
+      {problem && <div className="banner banner-error">{problem}</div>}
       <UploadPanel uploads={uploads} onCancel={cancel} />
       {error ? (
         <ErrorNotice share={share} error={error} at={at} />
@@ -318,7 +387,26 @@ export function Browser({
           </thead>
           <tbody>
             {entries.map((e) => (
-              <Row key={e.path} share={share} entry={e} at={at} rights={rights} canRestore={restoreRights.write} onAction={open} />
+              <Row
+                key={e.path}
+                share={share}
+                entry={e}
+                at={at}
+                rights={rights}
+                canRestore={restoreRights.write}
+                draggable={canDrag && !at}
+                dragged={dragging?.path === e.path}
+                over={overFolder === e.path}
+                onAction={open}
+                onDragStart={() => setDragging(e)}
+                onDragEnd={() => {
+                  setDragging(null)
+                  setOverFolder(null)
+                }}
+                onDragOver={allowDrop}
+                onDragLeave={leave}
+                onDrop={dropInto}
+              />
             ))}
           </tbody>
         </table>
@@ -383,13 +471,13 @@ export function Browser({
           error={null}
           onClose={close}
           onConfirm={() => {
-            add(path, dialog.files)
+            add(dialog.folder, dialog.files)
             setDialog(null)
           }}
         >
           <p>
-            {dialog.names.length === 1 ? 'A file of this name is already in the folder' : 'Files of these names are already in the folder'} and will
-            be replaced:
+            {dialog.names.length === 1 ? 'A file of this name is already in' : 'Files of these names are already in'}{' '}
+            {dialog.folder === path ? 'the folder' : <strong>{dialog.folder}</strong>} and will be replaced:
           </p>
           <ul className="name-list">
             {dialog.names.map((n) => (
@@ -533,21 +621,40 @@ function DeleteDialog({
   )
 }
 
+type DropHandlers = {
+  onDragOver: (folder: string, e: DragEvent) => void
+  onDragLeave: (folder: string) => void
+  onDrop: (folder: string, e: DragEvent) => void
+}
+
 function Row({
   share,
   entry,
   at,
   rights,
   canRestore,
+  draggable,
+  dragged,
+  over,
   onAction,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragLeave,
+  onDrop,
 }: {
   share: string
   entry: Entry
   at?: string
   rights: FolderRights
   canRestore: boolean
+  draggable: boolean
+  dragged: boolean
+  over: boolean
   onAction: (d: Dialog) => void
-}) {
+  onDragStart: () => void
+  onDragEnd: () => void
+} & DropHandlers) {
   const menu = useRef<HTMLDetailsElement>(null)
   const pick = (d: Dialog) => {
     if (menu.current) menu.current.open = false
@@ -557,8 +664,21 @@ function Row({
   const href = (inline: boolean) => (at ? versionURL(share, entry.path, { at }, inline) : fileURL(share, entry.path, inline))
   // Renaming and moving take the right to delete as well, so the menu hangs on it.
   const manage = !entry.dir || rights.delete
+  const classes = [dragged ? 'row-dragging' : '', over ? 'drop-target' : ''].filter(Boolean).join(' ')
   return (
-    <tr>
+    <tr
+      className={classes || undefined}
+      draggable={draggable}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData('text/plain', entry.name)
+        onDragStart()
+      }}
+      onDragEnd={onDragEnd}
+      onDragOver={entry.dir && !at ? (e) => onDragOver(entry.path, e) : undefined}
+      onDragLeave={entry.dir ? () => onDragLeave(entry.path) : undefined}
+      onDrop={entry.dir && !at ? (e) => onDrop(entry.path, e) : undefined}
+    >
       <td className="col-name">
         <span className="file-icon" aria-hidden>
           {entry.dir ? '\u{1F4C1}' : '\u{1F4C4}'}
@@ -625,21 +745,47 @@ function Row({
   )
 }
 
-function Breadcrumbs({ share, path, at }: { share: string; path: string; at?: string }) {
+// Breadcrumbs lead back up, and in the present each folder on the way takes
+// a drop, so that a row can be moved up without opening the folder first.
+function Breadcrumbs({
+  share,
+  path,
+  at,
+  overFolder,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+}: {
+  share: string
+  path: string
+  at?: string
+  overFolder: string | null
+} & DropHandlers) {
   const segments = path.split('/').filter((s) => s !== '')
   let here = ''
+  const crumb = (folder: string, label: string) => (
+    <a
+      href={hashFor(share, folder, at)}
+      className={overFolder === folder ? 'drop-target' : undefined}
+      onDragOver={at ? undefined : (e) => onDragOver(folder, e)}
+      onDragLeave={() => onDragLeave(folder)}
+      onDrop={at ? undefined : (e) => onDrop(folder, e)}
+    >
+      {label}
+    </a>
+  )
   return (
     <nav className="crumbs" aria-label="Location">
       <a href="#/">Shares</a>
       <span className="crumb-sep">/</span>
-      {segments.length === 0 ? <span className="crumb-current">{share}</span> : <a href={hashFor(share, '/', at)}>{share}</a>}
+      {segments.length === 0 ? <span className="crumb-current">{share}</span> : crumb('/', share)}
       {segments.map((s, i) => {
         here += '/' + s
         const last = i === segments.length - 1
         return (
           <span key={here}>
             <span className="crumb-sep">/</span>
-            {last ? <span className="crumb-current">{s}</span> : <a href={hashFor(share, here, at)}>{s}</a>}
+            {last ? <span className="crumb-current">{s}</span> : crumb(here, s)}
           </span>
         )
       })}

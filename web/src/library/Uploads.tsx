@@ -12,7 +12,7 @@ export interface Upload {
   error?: string
 }
 
-const doneLingers = 3000
+export const doneLingers = 3000
 
 // useUploads keeps the queue of uploads to a share, sending one at a time.
 // onDone is told the folder an upload landed in, so the listing can follow.
