@@ -13,6 +13,7 @@ import {
   restore,
   snapshots,
   versionURL,
+  versions,
 } from './api'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
 import { hashFor } from './route'
@@ -121,6 +122,15 @@ function what(items: Entry[]): string {
   return items.length === 1 ? items[0].name : `${items.length} items`
 }
 
+// A notice reports a change that went through, with a way to take it back
+// while the notice is shown. It then lingers long enough to be taken.
+type Notice = { text: string; undo?: () => Promise<void> }
+const undoLingers = 8000
+
+function into(folder: string, e: Entry): string {
+  return (folder === '/' ? '' : folder) + '/' + e.name
+}
+
 export function Browser({
   share,
   shareRights,
@@ -141,7 +151,7 @@ export function Browser({
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [busy, setBusy] = useState(false)
   const [dialogError, setDialogError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice | null>(null)
   const [dropping, setDropping] = useState(false)
   const [dragging, setDragging] = useState<Entry[] | null>(null)
   const [overFolder, setOverFolder] = useState<string | null>(null)
@@ -221,7 +231,7 @@ export function Browser({
   // A success notice goes away by itself, as a finished upload does.
   useEffect(() => {
     if (!notice) return
-    const timer = setTimeout(() => setNotice(null), doneLingers)
+    const timer = setTimeout(() => setNotice(null), notice.undo ? undoLingers : doneLingers)
     return () => clearTimeout(timer)
   }, [notice])
 
@@ -245,13 +255,13 @@ export function Browser({
 
   // act runs a change, closes the dialog when it worked and reports it there
   // when it did not. A lost session goes back to the login.
-  const act = async (f: () => Promise<unknown>, done: string) => {
+  const act = async (f: () => Promise<unknown>, done: string, undo?: () => Promise<void>) => {
     setBusy(true)
     setDialogError(null)
     try {
       await f()
       setDialog(null)
-      setNotice(done)
+      setNotice({ text: done, undo })
       reload()
     } catch (e) {
       if (e instanceof FilesError && e.status === 401) onExpired()
@@ -286,7 +296,14 @@ export function Browser({
   // runBatch applies a change to each item in turn and reports the outcome:
   // what went through in the notice, what did not by name in the problem
   // banner. The items that failed stay selected, so that they can be retried.
-  const runBatch = async (items: Entry[], f: (e: Entry) => Promise<unknown>, done: string, undone: string) => {
+  // Where everything went through, undo makes the notice's way back.
+  const runBatch = async (
+    items: Entry[],
+    f: (e: Entry) => Promise<unknown>,
+    done: string,
+    undone: string,
+    undo?: (items: Entry[]) => () => Promise<void>,
+  ) => {
     setBusy(true)
     setProblem(null)
     const failed: { entry: Entry; reason: string }[] = []
@@ -308,7 +325,7 @@ export function Browser({
     setDialog(null)
     reload()
     if (failed.length === 0) {
-      setNotice(`${what(items)} ${items.length === 1 ? 'was' : 'were'} ${done}.`)
+      setNotice({ text: `${what(items)} ${items.length === 1 ? 'was' : 'were'} ${done}.`, undo: undo?.(items) })
     } else if (items.length === 1) {
       setProblem(`${items[0].name} was not ${undone}: ${failed[0].reason}`)
     } else {
@@ -318,10 +335,30 @@ export function Browser({
     setSelected(new Set(failed.map((f) => f.entry.path)))
   }
 
+  // moveBack undoes a move or a rename: each item goes from where it was put
+  // back to where it was.
+  const moveBack = (to: (e: Entry) => string, word: string) => (items: Entry[]) => () =>
+    runBatch(items, (e) => rename(share, to(e), e.path, false), word, word)
   const moveAll = (items: Entry[], folder: string) =>
-    runBatch(items, (e) => rename(share, e.path, (folder === '/' ? '' : folder) + '/' + e.name, false), `moved to ${folder}`, 'moved')
+    runBatch(items, (e) => rename(share, e.path, into(folder, e), false), `moved to ${folder}`, 'moved', moveBack((e) => into(folder, e), 'moved back'))
+
+  // A deleted file is restored from the version its deletion left, which is
+  // the newest one. A folder leaves none, and a purge leaves none either.
+  const restoreDeleted = (e: Entry) =>
+    versions(share, e.path).then((vs) => {
+      if (vs.length === 0) throw new Error('No version of it is retained.')
+      const latest = vs.reduce((a, b) => (Date.parse(a.replacedAt) >= Date.parse(b.replacedAt) ? a : b))
+      return restore(share, e.path, { id: latest.id })
+    })
+  const undelete = (items: Entry[]) => () => runBatch(items, restoreDeleted, 'restored', 'restored')
   const deleteAll = (items: Entry[], purge: boolean) =>
-    runBatch(items, (e) => (e.dir ? deleteFolder(share, e.path) : deleteFile(share, e.path, purge)), 'deleted', 'deleted')
+    runBatch(
+      items,
+      (e) => (e.dir ? deleteFolder(share, e.path) : deleteFile(share, e.path, purge)),
+      'deleted',
+      'deleted',
+      purge || items.some((e) => e.dir) ? undefined : undelete,
+    )
 
   const stale = listing && (listing.share !== share || listing.path !== path)
   const none: FolderRights = { write: false, delete: false }
@@ -513,7 +550,13 @@ export function Browser({
           busy={busy}
           error={dialogError}
           onClose={close}
-          onSubmit={(name) => act(() => rename(share, dialog.entry.path, within(name), false), `${dialog.entry.name} was renamed to ${name}.`)}
+          onSubmit={(name) =>
+            act(
+              () => rename(share, dialog.entry.path, within(name), false),
+              `${dialog.entry.name} was renamed to ${name}.`,
+              moveBack(() => within(name), 'renamed back')([dialog.entry]),
+            )
+          }
         />
       )}
       {dialog?.kind === 'move' && (
@@ -524,10 +567,13 @@ export function Browser({
           busy={busy}
           error={dialogError}
           onClose={close}
-          onSubmit={(folder) => {
-            const to = (folder === '/' ? '' : folder) + '/' + dialog.entry.name
-            act(() => rename(share, dialog.entry.path, to, false), `${dialog.entry.name} was moved to ${folder}.`)
-          }}
+          onSubmit={(folder) =>
+            act(
+              () => rename(share, dialog.entry.path, into(folder, dialog.entry), false),
+              `${dialog.entry.name} was moved to ${folder}.`,
+              moveBack((e) => into(folder, e), 'moved back')([dialog.entry]),
+            )
+          }
         />
       )}
       {dialog?.kind === 'moveMany' && (
@@ -547,14 +593,12 @@ export function Browser({
           busy={busy}
           error={dialogError}
           onClose={close}
-          onConfirm={(purge) =>
-            dialog.entries.length === 1
-              ? act(
-                  () => (dialog.entries[0].dir ? deleteFolder(share, dialog.entries[0].path) : deleteFile(share, dialog.entries[0].path, purge)),
-                  `${dialog.entries[0].name} was deleted.`,
-                )
-              : deleteAll(dialog.entries, purge)
-          }
+          onConfirm={(purge) => {
+            const one = dialog.entries.length === 1 ? dialog.entries[0] : undefined
+            if (!one) deleteAll(dialog.entries, purge)
+            else if (one.dir) act(() => deleteFolder(share, one.path), `${one.name} was deleted.`)
+            else act(() => deleteFile(share, one.path, purge), `${one.name} was deleted.`, purge ? undefined : undelete([one]))
+          }}
         />
       )}
       {dialog?.kind === 'replace' && (
@@ -640,7 +684,24 @@ export function Browser({
               </button>
             </div>
           )}
-          {notice && <div className="banner banner-success">{notice}</div>}
+          {notice && (
+            <div className="banner banner-success dock-banner">
+              <span>{notice.text}</span>
+              {notice.undo && (
+                <button
+                  className="btn btn-small"
+                  disabled={busy}
+                  onClick={() => {
+                    const undo = notice.undo
+                    setNotice(null)
+                    undo?.()
+                  }}
+                >
+                  Undo
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -817,6 +878,8 @@ function Row({
   }
   // In the past a file is read at the time; in the present as it is.
   const href = (inline: boolean) => (at ? versionURL(share, entry.path, { at }, inline) : fileURL(share, entry.path, inline))
+  // A file the browser can show opens from its name; any other downloads.
+  const showable = !entry.dir && canShow(entry.name)
   // Renaming and moving take the right to delete as well, so the menu hangs on it.
   const manage = !entry.dir || rights.delete
   const classes = [dragged ? 'row-dragging' : '', over ? 'drop-target' : ''].filter(Boolean).join(' ')
@@ -847,6 +910,10 @@ function Row({
           <a className="file-name" href={hashFor(share, entry.path, at)}>
             {entry.name}
           </a>
+        ) : showable ? (
+          <a className="file-name" href={href(true)} target="_blank" rel="noreferrer">
+            {entry.name}
+          </a>
         ) : (
           <a className="file-name" href={href(false)} download={entry.name}>
             {entry.name}
@@ -856,7 +923,7 @@ function Row({
       <td className="col-size muted">{entry.dir ? '' : formatBytes(entry.size)}</td>
       <td className="col-time muted">{formatTime(entry.modifiedAt)}</td>
       <td className="col-actions">
-        {!entry.dir && canShow(entry.name) && (
+        {showable && (
           <a className="btn btn-small" href={href(true)} target="_blank" rel="noreferrer">
             Open
           </a>
