@@ -92,10 +92,10 @@ export function NameDialog({
   )
 }
 
-// PathDialog asks for the folder to move an item to.
+// PathDialog asks for the folder to move the subject, an item or several, to.
 export function PathDialog({
   title,
-  name,
+  subject,
   initial,
   busy,
   error,
@@ -103,7 +103,7 @@ export function PathDialog({
   onClose,
 }: {
   title: string
-  name: string
+  subject: ReactNode
   initial: string
   busy: boolean
   error: string | null
@@ -122,9 +122,7 @@ export function PathDialog({
   return (
     <Modal title={title} onClose={onClose}>
       <form className="stack" onSubmit={submit}>
-        <p className="muted">
-          Move <strong>{name}</strong> to the folder below. The folder must exist.
-        </p>
+        <p className="muted">Move {subject} to the folder below. The folder must exist.</p>
         <label className="field">
           <span className="field-label">Destination folder</span>
           <input ref={input} type="text" value={folder} onChange={(e) => setFolder(e.target.value)} autoComplete="off" placeholder="/" />

@@ -190,6 +190,28 @@ a.share-card:hover {
   gap: 8px;
 }
 
+.files .col-select {
+  width: 20px;
+  padding-right: 0;
+}
+
+.files .col-select input {
+  display: block;
+  margin: 0;
+}
+
+.selection-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+}
+
 .page.dropping .files,
 .page.dropping > .muted {
   outline: 2px dashed var(--accent);

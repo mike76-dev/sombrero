@@ -87,7 +87,8 @@ type Dialog =
   | { kind: 'folder' }
   | { kind: 'rename'; entry: Entry }
   | { kind: 'move'; entry: Entry }
-  | { kind: 'delete'; entry: Entry }
+  | { kind: 'delete'; entries: Entry[] }
+  | { kind: 'moveMany'; entries: Entry[] }
   | { kind: 'replace'; folder: string; files: File[]; names: string[] }
   | { kind: 'versions'; entry: Entry }
   | { kind: 'history' }
@@ -114,6 +115,12 @@ function describe(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
+// what names a batch in a sentence: the item itself when it is one, the
+// count otherwise.
+function what(items: Entry[]): string {
+  return items.length === 1 ? items[0].name : `${items.length} items`
+}
+
 export function Browser({
   share,
   shareRights,
@@ -136,8 +143,10 @@ export function Browser({
   const [dialogError, setDialogError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
-  const [dragging, setDragging] = useState<Entry | null>(null)
+  const [dragging, setDragging] = useState<Entry[] | null>(null)
   const [overFolder, setOverFolder] = useState<string | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const lastPicked = useRef<string | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
   const [nowRights, setNowRights] = useState<FolderRights | undefined>(undefined)
   const picker = useRef<HTMLInputElement>(null)
@@ -195,7 +204,19 @@ export function Browser({
   useEffect(() => {
     setNotice(null)
     setProblem(null)
+    setSelected(new Set())
+    lastPicked.current = null
   }, [share, path, at])
+
+  // A selection outlives a reload only as far as its items do.
+  useEffect(() => {
+    if (!listing) return
+    const present = new Set(listing.entries.map((e) => e.path))
+    setSelected((s) => {
+      const kept = new Set([...s].filter((p) => present.has(p)))
+      return kept.size === s.size ? s : kept
+    })
+  }, [listing])
 
   // A success notice goes away by itself, as a finished upload does.
   useEffect(() => {
@@ -262,18 +283,45 @@ export function Browser({
     else add(folder, files)
   }
 
-  // moveTo moves a dragged entry into a folder, and says so or why not.
-  const moveTo = async (entry: Entry, folder: string) => {
+  // runBatch applies a change to each item in turn and reports the outcome:
+  // what went through in the notice, what did not by name in the problem
+  // banner. The items that failed stay selected, so that they can be retried.
+  const runBatch = async (items: Entry[], f: (e: Entry) => Promise<unknown>, done: string, undone: string) => {
+    setBusy(true)
     setProblem(null)
+    const failed: { entry: Entry; reason: string }[] = []
     try {
-      await rename(share, entry.path, (folder === '/' ? '' : folder) + '/' + entry.name, false)
-      setNotice(`${entry.name} was moved to ${folder}.`)
-      reload()
-    } catch (e) {
-      if (e instanceof FilesError && e.status === 401) onExpired()
-      else setProblem(`${entry.name} was not moved: ${describe(e)}`)
+      for (const entry of items) {
+        try {
+          await f(entry)
+        } catch (e) {
+          if (e instanceof FilesError && e.status === 401) {
+            onExpired()
+            return
+          }
+          failed.push({ entry, reason: describe(e) })
+        }
+      }
+    } finally {
+      setBusy(false)
     }
+    setDialog(null)
+    reload()
+    if (failed.length === 0) {
+      setNotice(`${what(items)} ${items.length === 1 ? 'was' : 'were'} ${done}.`)
+    } else if (items.length === 1) {
+      setProblem(`${items[0].name} was not ${undone}: ${failed[0].reason}`)
+    } else {
+      const count = failed.length === items.length ? what(items) : `${failed.length} of ${items.length} items`
+      setProblem(`${count} were not ${undone}. ${failed.map((f) => `${f.entry.name}: ${f.reason}`).join(' ')}`)
+    }
+    setSelected(new Set(failed.map((f) => f.entry.path)))
   }
+
+  const moveAll = (items: Entry[], folder: string) =>
+    runBatch(items, (e) => rename(share, e.path, (folder === '/' ? '' : folder) + '/' + e.name, false), `moved to ${folder}`, 'moved')
+  const deleteAll = (items: Entry[], purge: boolean) =>
+    runBatch(items, (e) => (e.dir ? deleteFolder(share, e.path) : deleteFile(share, e.path, purge)), 'deleted', 'deleted')
 
   const stale = listing && (listing.share !== share || listing.path !== path)
   const none: FolderRights = { write: false, delete: false }
@@ -282,12 +330,33 @@ export function Browser({
   const rights = at || !listing || stale ? none : listing.rights
   const restoreRights = at ? (nowRights ?? none) : rights
   const canDrag = rights.write && rights.delete
+  const selectable = rights.delete && !at
+  const picked = useMemo(() => entries.filter((e) => selected.has(e.path)), [entries, selected])
 
-  // A drag is either one of the rows, which a folder takes as a move, or
-  // files from outside, which a folder takes as an upload into it. Dropping
-  // beside the rows is an upload into this folder.
+  // pick toggles a row, or with Shift the run of rows from the last one picked.
+  const pick = (entry: Entry, shift: boolean) => {
+    const from = shift && lastPicked.current ? entries.findIndex((e) => e.path === lastPicked.current) : -1
+    const to = entries.findIndex((e) => e.path === entry.path)
+    lastPicked.current = entry.path
+    setSelected((s) => {
+      const next = new Set(s)
+      if (from >= 0 && to >= 0) {
+        for (let i = Math.min(from, to); i <= Math.max(from, to); i++) next.add(entries[i].path)
+      } else if (next.has(entry.path)) {
+        next.delete(entry.path)
+      } else {
+        next.add(entry.path)
+      }
+      return next
+    })
+  }
+  const pickAll = (all: boolean) => setSelected(all ? new Set(entries.map((e) => e.path)) : new Set())
+
+  // A drag is either rows, which a folder takes as a move, or files from
+  // outside, which a folder takes as an upload into it. Dropping beside the
+  // rows is an upload into this folder. A selected row drags the selection.
   const takes = (folder: string, e: DragEvent): boolean => {
-    if (dragging) return canDrag && folder !== dragging.path && folder !== path
+    if (dragging) return canDrag && folder !== path && !dragging.some((d) => d.path === folder)
     return rights.write && e.dataTransfer.types.includes('Files')
   }
   const allowDrop = (folder: string, e: DragEvent) => {
@@ -305,9 +374,9 @@ export function Browser({
     setOverFolder(null)
     setDropping(false)
     if (dragging) {
-      const entry = dragging
+      const items = dragging
       setDragging(null)
-      moveTo(entry, folder)
+      moveAll(items, folder)
     } else {
       takeFiles(Array.from(e.dataTransfer.files), folder)
     }
@@ -368,6 +437,24 @@ export function Browser({
       )}
       {notice && <div className="banner banner-success">{notice}</div>}
       {problem && <div className="banner banner-error">{problem}</div>}
+      {picked.length > 0 && (
+        <div className="selection-bar">
+          <span>{picked.length === 1 ? '1 item selected' : `${picked.length} items selected`}</span>
+          <div className="toolbar">
+            {canDrag && (
+              <button className="btn" disabled={busy} onClick={() => open({ kind: 'moveMany', entries: picked })}>
+                Move
+              </button>
+            )}
+            <button className="btn btn-danger" disabled={busy} onClick={() => open({ kind: 'delete', entries: picked })}>
+              Delete
+            </button>
+            <button className="btn" onClick={() => pickAll(false)}>
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
       <UploadPanel uploads={uploads} onCancel={cancel} />
       {error ? (
         <ErrorNotice share={share} error={error} at={at} />
@@ -379,6 +466,19 @@ export function Browser({
         <table className="table files">
           <thead>
             <tr>
+              {selectable && (
+                <th className="col-select">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all"
+                    checked={picked.length === entries.length}
+                    ref={(el) => {
+                      if (el) el.indeterminate = picked.length > 0 && picked.length < entries.length
+                    }}
+                    onChange={(e) => pickAll(e.target.checked)}
+                  />
+                </th>
+              )}
               {header('name', 'Name')}
               {header('size', 'Size')}
               {header('modified', 'Modified')}
@@ -395,10 +495,12 @@ export function Browser({
                 rights={rights}
                 canRestore={restoreRights.write}
                 draggable={canDrag && !at}
-                dragged={dragging?.path === e.path}
+                dragged={dragging?.some((d) => d.path === e.path) ?? false}
                 over={overFolder === e.path}
+                selected={selectable ? selected.has(e.path) : undefined}
+                onPick={(shift) => pick(e, shift)}
                 onAction={open}
-                onDragStart={() => setDragging(e)}
+                onDragStart={() => setDragging(selected.has(e.path) ? picked : [e])}
                 onDragEnd={() => {
                   setDragging(null)
                   setOverFolder(null)
@@ -438,7 +540,7 @@ export function Browser({
       {dialog?.kind === 'move' && (
         <PathDialog
           title={dialog.entry.dir ? 'Move folder' : 'Move file'}
-          name={dialog.entry.name}
+          subject={<strong>{dialog.entry.name}</strong>}
           initial={path}
           busy={busy}
           error={dialogError}
@@ -449,17 +551,30 @@ export function Browser({
           }}
         />
       )}
+      {dialog?.kind === 'moveMany' && (
+        <PathDialog
+          title="Move items"
+          subject={`the ${dialog.entries.length} selected items`}
+          initial={path}
+          busy={busy}
+          error={null}
+          onClose={close}
+          onSubmit={(folder) => moveAll(dialog.entries, folder)}
+        />
+      )}
       {dialog?.kind === 'delete' && (
         <DeleteDialog
-          entry={dialog.entry}
+          entries={dialog.entries}
           busy={busy}
           error={dialogError}
           onClose={close}
           onConfirm={(purge) =>
-            act(
-              () => (dialog.entry.dir ? deleteFolder(share, dialog.entry.path) : deleteFile(share, dialog.entry.path, purge)),
-              `${dialog.entry.name} was deleted.`,
-            )
+            dialog.entries.length === 1
+              ? act(
+                  () => (dialog.entries[0].dir ? deleteFolder(share, dialog.entries[0].path) : deleteFile(share, dialog.entries[0].path, purge)),
+                  `${dialog.entries[0].name} was deleted.`,
+                )
+              : deleteAll(dialog.entries, purge)
           }
         />
       )}
@@ -575,42 +690,66 @@ function HistoryDialog({ share, path, at, onExpired, onClose }: { share: string;
   )
 }
 
+// DeleteDialog asks before one item or a selection is deleted. Folders go
+// with everything in them; files may keep their versions or lose them too.
 function DeleteDialog({
-  entry,
+  entries,
   busy,
   error,
   onClose,
   onConfirm,
 }: {
-  entry: Entry
+  entries: Entry[]
   busy: boolean
   error: string | null
   onClose: () => void
   onConfirm: (purge: boolean) => void
 }) {
   const [purge, setPurge] = useState(false)
+  const one = entries.length === 1 ? entries[0] : undefined
+  const folders = entries.filter((e) => e.dir).length
+  const files = entries.length - folders
   return (
     <ConfirmDialog
-      title={entry.dir ? 'Delete folder' : 'Delete file'}
+      title={one ? (one.dir ? 'Delete folder' : 'Delete file') : 'Delete items'}
       action="Delete"
       busy={busy}
       error={error}
       onClose={onClose}
       onConfirm={() => onConfirm(purge)}
     >
-      {entry.dir ? (
-        <p>
-          Delete the folder <strong>{entry.name}</strong> and everything in it? The files in it lose their previous versions as well, so this cannot be
-          undone.
-        </p>
+      {one ? (
+        one.dir ? (
+          <p>
+            Delete the folder <strong>{one.name}</strong> and everything in it? The files in it lose their previous versions as well, so this cannot be
+            undone.
+          </p>
+        ) : (
+          <p>
+            Delete the file <strong>{one.name}</strong>?
+          </p>
+        )
       ) : (
         <>
-          <p>
-            Delete the file <strong>{entry.name}</strong>?
-          </p>
+          <p>Delete these {entries.length} items?</p>
+          <ul className="name-list">
+            {entries.map((e) => (
+              <li key={e.path}>{e.name}</li>
+            ))}
+          </ul>
+          {folders > 0 && (
+            <p>
+              {folders === 1 ? 'The folder goes' : 'The folders go'} with everything in them, and the files in them lose their previous versions as well, so
+              this cannot be undone.
+            </p>
+          )}
+        </>
+      )}
+      {files > 0 && (
+        <>
           <label className="checkbox">
             <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} />
-            Delete its previous versions as well
+            {files === 1 && one ? 'Delete its previous versions as well' : 'Delete the previous versions of the files as well'}
           </label>
           <p className="muted field-hint">
             On a share that retains versions, a deleted file is kept as a version until it is purged or its versions expire.
@@ -636,6 +775,8 @@ function Row({
   draggable,
   dragged,
   over,
+  selected,
+  onPick,
   onAction,
   onDragStart,
   onDragEnd,
@@ -651,6 +792,8 @@ function Row({
   draggable: boolean
   dragged: boolean
   over: boolean
+  selected?: boolean
+  onPick: (shift: boolean) => void
   onAction: (d: Dialog) => void
   onDragStart: () => void
   onDragEnd: () => void
@@ -679,6 +822,11 @@ function Row({
       onDragLeave={entry.dir ? () => onDragLeave(entry.path) : undefined}
       onDrop={entry.dir && !at ? (e) => onDrop(entry.path, e) : undefined}
     >
+      {selected !== undefined && (
+        <td className="col-select">
+          <input type="checkbox" aria-label={`Select ${entry.name}`} checked={selected} readOnly onClick={(e) => onPick(e.shiftKey)} />
+        </td>
+      )}
       <td className="col-name">
         <span className="file-icon" aria-hidden>
           {entry.dir ? '\u{1F4C1}' : '\u{1F4C4}'}
@@ -733,7 +881,7 @@ function Row({
                 </>
               )}
               {rights.delete && (
-                <button className="menu-item menu-item-danger" onClick={() => pick({ kind: 'delete', entry })}>
+                <button className="menu-item menu-item-danger" onClick={() => pick({ kind: 'delete', entries: [entry] })}>
                   Delete
                 </button>
               )}
