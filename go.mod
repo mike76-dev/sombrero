@@ -10,9 +10,9 @@ require (
 	github.com/oiweiwei/go-msrpc v1.2.7
 	github.com/pierrec/lz4/v4 v4.1.25
 	go.sia.tech/core v0.21.8
-	go.sia.tech/indexd v0.6.2
+	go.sia.tech/indexd v0.6.3
 	go.sia.tech/renterd/v2 v2.9.5
-	go.sia.tech/siastorage v0.2.2-0.20261027151136-3de4fbee3cff
+	go.sia.tech/siastorage v0.2.2-0.20261112161720-8f9ee19ff0dc
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
@@ -55,7 +55,7 @@ require (
 	github.com/rs/zerolog v1.32.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	go.sia.tech/coreutils v0.25.2 // indirect
+	go.sia.tech/coreutils v0.25.3 // indirect
 	go.sia.tech/jape v0.14.4 // indirect
 	go.sia.tech/mux v1.5.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
