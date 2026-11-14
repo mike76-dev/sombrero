@@ -55,7 +55,7 @@ export function ConnectionsPage() {
     <div className="page">
       <Card title="Connect a workgroup to a share">
         <p className="muted">
-          For a <code>renterd</code> share, just press <em>Connect</em>. An <code>indexd</code>{' '}
+          For a <code>renterd</code> share, press <em>Connect</em>. An <code>indexd</code>{' '}
           share needs an app key. The first time, either press <em>Request approval</em>, open
           the link and approve the registration with the indexer, or paste a pre-authorized key
           obtained from the indexer and press <em>Connect</em>: the connection completes by

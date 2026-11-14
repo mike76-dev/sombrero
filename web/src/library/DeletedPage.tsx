@@ -14,7 +14,7 @@ function folderOf(path: string): string {
 }
 
 // DeletedPage lists the deleted files of a share: what is gone but for its
-// versions. Each is restored to where it was, or deleted for good.
+// versions. Each is restored to where it was, or deleted permanently.
 export function DeletedPage({ share, shareRights, onExpired }: { share: string; shareRights?: Rights; onExpired: () => void }) {
   const [list, setList] = useState<Deleted[] | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
@@ -128,7 +128,7 @@ export function DeletedPage({ share, shareRights, onExpired }: { share: string; 
       'restored',
       (ds) => () => run(ds, (d) => deleteFile(share, d.path, false), 'returned to the deleted files', 'returned'),
     )
-  const purgeAll = (ds: Deleted[]) => run(ds, (d) => deleteVersions(share, d.path), 'deleted for good', 'deleted')
+  const purgeAll = (ds: Deleted[]) => run(ds, (d) => deleteVersions(share, d.path), 'deleted permanently', 'deleted')
 
   return (
     <div className="page">
@@ -140,7 +140,7 @@ export function DeletedPage({ share, shareRights, onExpired }: { share: string; 
         <span className="crumb-current">Deleted files</span>
       </nav>
       <p className="muted">
-        A deleted file is kept here with its versions until it is restored or deleted for good, or its versions expire. A restored file goes back to
+        A deleted file is kept here with its versions until it is restored or deleted permanently, or its versions expire. A restored file goes back to
         where it was; a folder that is gone is made again for it.
       </p>
       {error ? (
@@ -211,10 +211,10 @@ export function DeletedPage({ share, shareRights, onExpired }: { share: string; 
       )}
 
       {confirm && (
-        <ConfirmDialog title="Delete for good" action="Delete" busy={busy} error={null} onClose={() => setConfirm(null)} onConfirm={() => purgeAll(confirm)}>
+        <ConfirmDialog title="Delete permanently" action="Delete" busy={busy} error={null} onClose={() => setConfirm(null)} onConfirm={() => purgeAll(confirm)}>
           <p>
-            Delete {confirm.length === 1 ? <strong>{confirm[0].name}</strong> : `these ${confirm.length} files`} for good, with every version? This cannot
-            be undone.
+            Delete {confirm.length === 1 ? <strong>{confirm[0].name}</strong> : `these ${confirm.length} files`} permanently, with every version? This
+            cannot be undone.
           </p>
           {confirm.length > 1 && (
             <ul className="name-list">

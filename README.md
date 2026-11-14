@@ -279,7 +279,7 @@ docker compose up -d
 ```
 
 ## Upload Packing
-A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Setting `maxBufferAge` (for example, `24h`) uploads them anyway once they have waited that long, however little has accumulated by then.
+A file whose size is not a multiple of the slab size leaves a piece of data behind that is too small for a slab of its own. Such pieces are kept in the database until they can be packed together into a full slab, which is uploaded as one. By default they are kept for as long as that takes, because an incomplete slab occupies as much storage as a full one. Setting `maxBufferAge` (for example, `24h`) uploads them regardless once they have waited that long, however little has accumulated by then.
 
 ## Upload Backlog
 What clients write to an `indexd` share is stored in the database first and uploaded to the network in the background. If clients write faster than the network takes the data, the backlog grows until the database runs out of disk space. Setting `maxBufferedData` caps the backlog across all shares:
@@ -333,7 +333,7 @@ There are two ways back. If you have a catalog file, use the Backup page of the 
 
 A restore brings back what the database lost, not what was deleted. When a file is deleted, the slabs that held only that file are unpinned right away, and a catalog can only point at data that is still in the account. A restore applied over a working share therefore brings back a file that was renamed or whose row went missing, but not one that was deleted, unless the file was small enough for its bytes to be carried inside the catalog. The server checks for this: before it recreates the files, it reads the account with the app key from the catalog, and a file whose data is no longer there is left out and listed in the result rather than created as an entry nobody can open.
 
-Do that import before you look at the orphaned slabs of a restored share. Until then, every slab that was uploaded after the catalog looks like an orphan to the server, because no file in the restored database refers to it. They are not orphans, and unpinning them would throw the data away. The import gives them their files back, and only what is still listed after that is really unused.
+Do that import before you look at the orphaned slabs of a restored share. Until then, every slab that was uploaded after the catalog looks like an orphan to the server, because no file in the restored database refers to it. They are not orphans, and unpinning them would throw the data away. The import gives them their files back, and only what is still listed after that is in fact unused.
 
 ## Shared Folders
 It is possible to define a list of shared folder names for each workgroup. Files uploaded or moved to such folders are not only visible for those users who uploaded or moved them, but for all members of the workgroup. Only working on `indexd` shares.
