@@ -196,17 +196,21 @@ export const requestConnection = (workgroup: string, share: string) =>
     { method: 'POST' },
   )
 
-// An indexd share is connected with a saved app key, with the key another
-// workgroup holds for the same indexer, or with the workgroup's own where it has
-// one; a renterd share needs none of them.
+// An indexd share is connected with a saved app key, with a key the indexer
+// authorized in advance, with the key another workgroup holds for the same
+// indexer, or with the workgroup's own where it has one; a renterd share needs
+// none of them.
 export const connect = (
   workgroup: string,
   share: string,
-  from?: { appKey?: string; fromWorkgroup?: string },
+  from?: { appKey?: string; preAuthorizedKey?: string; fromWorkgroup?: string },
 ) =>
   request<ConnectStatusResponse>(
     `/connect/${encodeURIComponent(workgroup)}/${encodeURIComponent(share)}`,
-    { method: 'PUT', body: from?.appKey || from?.fromWorkgroup ? from : undefined },
+    {
+      method: 'PUT',
+      body: from?.appKey || from?.preAuthorizedKey || from?.fromWorkgroup ? from : undefined,
+    },
   )
 
 export const connectStatus = (workgroup: string, share: string) =>

@@ -517,15 +517,17 @@ function ConnectStep({
 }) {
   const { run, busy, error } = useApiAction()
   const [appKey, setAppKey] = useState('')
+  const [preKey, setPreKey] = useState('')
   const attempt = useConnectAttempt(setup.workgroup, setup.share)
   const [keyFrom, setKeyFrom] = useState('')
   const indexd = setup.shareType === 'indexd'
   const reconnecting = Boolean(appKey.trim())
+  const preAuthorized = Boolean(preKey.trim()) && !reconnecting
   const reusable = indexd && attempt.reusable
 
   // Another workgroup's key is offered where this one has none of its own, and the
   // choice is dropped where the workgroup it was for is no longer among them.
-  const holders = indexd && !reusable && !reconnecting ? attempt.keyFrom : []
+  const holders = indexd && !reusable && !reconnecting && !preAuthorized ? attempt.keyFrom : []
   const sharing = holders.some((holder) => holder.workgroup === keyFrom) ? keyFrom : ''
 
   return (
@@ -539,10 +541,10 @@ function ConnectStep({
           </>
         ) : indexd ? (
           <>
-            An <code>indexd</code> share needs an app key. The first time, press{' '}
-            <em>Request approval</em>,
-            open the link and approve the registration with the indexer. The rest happens by
-            itself, and the new key is shown once, below — keep it. If the workgroup was
+            An <code>indexd</code> share needs an app key. The first time, either press{' '}
+            <em>Request approval</em>, open the link and approve the registration with the
+            indexer, or paste a pre-authorized key obtained from the indexer. The rest happens
+            by itself, and the new key is shown once, below — keep it. If the workgroup was
             connected before, paste that key instead. If it is already connected to another
             share on this indexer, it reuses the key from there, and it can also borrow another
             workgroup's key, which means sharing one account and quota at the indexer.
@@ -570,6 +572,15 @@ function ConnectStep({
               autoComplete="off"
             />
           </Field>
+          <Field label="Pre-authorized key (instead of the approval)">
+            <input
+              type="text"
+              value={preKey}
+              onChange={(e) => setPreKey(e.target.value)}
+              placeholder="hex, obtained from the indexer"
+              autoComplete="off"
+            />
+          </Field>
           <ShareKeyField holders={holders} value={sharing} onChange={setKeyFrom} />
         </div>
       )}
@@ -577,11 +588,11 @@ function ConnectStep({
         <div className="row">
           {indexd && (
             <button
-              className={reusable && !reconnecting ? 'btn' : 'btn btn-primary'}
-              disabled={busy || attempt.running || reconnecting}
+              className={(reusable && !reconnecting) || preAuthorized ? 'btn' : 'btn btn-primary'}
+              disabled={busy || attempt.running || reconnecting || preAuthorized}
               onClick={() =>
                 run(async () => {
-                  attempt.begin(await requestConnection(setup.workgroup, setup.share), true)
+                  attempt.begin(await requestConnection(setup.workgroup, setup.share))
                 })
               }
             >
@@ -589,19 +600,26 @@ function ConnectStep({
             </button>
           )}
           <button
-            className={indexd && !reusable && !sharing ? 'btn' : 'btn btn-primary'}
+            className={
+              indexd && !reusable && !sharing && !reconnecting && !preAuthorized
+                ? 'btn'
+                : 'btn btn-primary'
+            }
             disabled={
-              busy || attempt.running || (indexd && !reconnecting && !reusable && !sharing)
+              busy ||
+              attempt.running ||
+              (indexd && !reconnecting && !preAuthorized && !reusable && !sharing)
             }
             onClick={() =>
               run(async () => {
                 attempt.begin(
                   await connect(setup.workgroup, setup.share, {
                     appKey: appKey.trim() || undefined,
+                    preAuthorizedKey: preAuthorized ? preKey.trim() : undefined,
                     fromWorkgroup: sharing || undefined,
                   }),
-                  false,
                 )
+                setPreKey('')
               })
             }
           >
@@ -609,11 +627,13 @@ function ConnectStep({
               ? 'Connect'
               : reconnecting
                 ? 'Reconnect with the app key'
-                : reusable
-                  ? 'Connect with the key of this indexer'
-                  : sharing
-                    ? "Connect with that workgroup's key"
-                    : 'Reconnect with the app key'}
+                : preAuthorized
+                  ? 'Connect with the pre-authorized key'
+                  : reusable
+                    ? 'Connect with the key of this indexer'
+                    : sharing
+                      ? "Connect with that workgroup's key"
+                      : 'Reconnect with the app key'}
           </button>
         </div>
       )}

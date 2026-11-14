@@ -32,10 +32,12 @@ const (
 )
 
 // connectApprovalTimeout bounds the wait for the admin to approve a connection
-// request, and connectRetention is how long a finished attempt is kept for its
-// outcome to be read.
+// request, connectRegisterTimeout the registration with a pre-authorized key,
+// which waits for nobody, and connectRetention is how long a finished attempt
+// is kept for its outcome to be read.
 const (
 	connectApprovalTimeout = 10 * time.Minute
+	connectRegisterTimeout = 2 * time.Minute
 	connectRetention       = 10 * time.Minute
 )
 
