@@ -11,9 +11,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-# Go 1.27.4 rejects the storage engine's prebuilt archives for the LLVM
-# bitcode they carry; 1.27.3 stays until the engine ships them without it.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-trixie AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-trixie AS build
 ARG TARGETOS TARGETARCH BUILDARCH
 # The Rust engine makes every build a cgo build, so a foreign target needs its C cross-compiler.
 RUN case "$TARGETARCH" in "$BUILDARCH") ;; \
