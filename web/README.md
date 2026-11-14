@@ -40,7 +40,7 @@ Under each `indexd` share, the shared folders section lists the folders of the s
 
 ### Connections
 
-A workgroup gets onto a share by connecting to it. For a `renterd` share, this is a single click of **Connect**. An `indexd` share needs an app key. The first time, click **Request approval**, open the link the page shows and approve the registration with the indexer. The connection then completes on its own, and the new app key is shown once. Keep it, because reconnecting later means pasting it back in. A workgroup that is already connected to another share on the same indexer reuses the key it has there and needs no approval. It can also borrow another workgroup's key, but then both workgroups share one account at the indexer, including its quota.
+A workgroup gets onto a share by connecting to it. For a `renterd` share, this is a single click of **Connect**. An `indexd` share needs an app key. The first time, either click **Request approval**, open the link the page shows and approve the registration with the indexer, or paste a pre-authorized key obtained from the indexer and click **Connect**, which needs no approval. The connection then completes on its own, and the new app key is shown once; the pre-authorized key is spent by that one connection and not kept. Keep it, because reconnecting later means pasting it back in. A workgroup that is already connected to another share on the same indexer reuses the key it has there and needs no approval. It can also borrow another workgroup's key, but then both workgroups share one account at the indexer, including its quota.
 
 Connecting takes a while, since the client warms up a connection to every host, and the page shows which phase it is in. **Disconnect** takes the workgroup off the share again.
 

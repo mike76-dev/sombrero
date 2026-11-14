@@ -48,7 +48,10 @@ function duration(from: string, to: number): string {
 export interface ConnectAttempt {
   status: ConnectStatusResponse | null
   phase: ConnectState | null
-  approval: boolean
+
+  // first is the phase the attempt started in, which says which phases it
+  // goes through: an approval, a registration alone, or the connection alone.
+  first: ConnectState | null
   appKey: string | null
   error: string | null
 
@@ -65,7 +68,7 @@ export interface ConnectAttempt {
 
   // begin takes over from an action that started an attempt: what the action
   // returned is the first status, and the poll carries it from there.
-  begin: (res: ConnectStatusResponse, fromApproval: boolean) => void
+  begin: (res: ConnectStatusResponse) => void
 
   // idle drops what is on show, for when the connection has just been removed.
   idle: () => void
@@ -79,7 +82,7 @@ export function useConnectAttempt(workgroup: string, share: string): ConnectAtte
   const [error, setError] = useState<string | null>(null)
   const [appKey, setAppKey] = useState<string | null>(null)
   const [phase, setPhase] = useState<ConnectState | null>(null)
-  const [approval, setApproval] = useState(false)
+  const [first, setFirst] = useState<ConnectState | null>(null)
   const [tracking, setTracking] = useState<{ workgroup: string; share: string } | null>(null)
 
   useEffect(() => {
@@ -148,7 +151,7 @@ export function useConnectAttempt(workgroup: string, share: string): ConnectAtte
         if (res.appKey) setAppKey(res.appKey)
         if (isInFlight(res.state)) {
           setPhase(res.state)
-          setApproval(res.state !== 'connecting')
+          setFirst(res.state)
           setTracking({ workgroup, share })
         }
         setStatus(res)
@@ -165,15 +168,15 @@ export function useConnectAttempt(workgroup: string, share: string): ConnectAtte
   return {
     status,
     phase,
-    approval,
+    first,
     appKey,
     error,
     running: tracking !== null,
     connected: status?.state === 'connected',
     reusable: status?.reusable === true,
     keyFrom: status?.keyFrom ?? [],
-    begin: (res, fromApproval) => {
-      setApproval(fromApproval)
+    begin: (res) => {
+      setFirst(isInFlight(res.state) ? res.state : null)
       setPhase(isInFlight(res.state) ? res.state : null)
       setAppKey(null)
       setError(null)
@@ -202,7 +205,7 @@ function ConnectProgress({ attempt }: { attempt: ConnectAttempt }) {
     return () => clearInterval(timer)
   }, [running])
 
-  const steps = attempt.approval ? PHASES : PHASES.slice(2)
+  const steps = PHASES.slice(Math.max(0, PHASES.findIndex((step) => step.state === attempt.first)))
   const at = steps.findIndex((step) => step.state === (running ? status.state : attempt.phase))
   const done = status.state === 'connected'
   const failed = status.state === 'failed'

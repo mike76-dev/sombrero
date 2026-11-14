@@ -2028,6 +2028,49 @@ func TestConnect(t *testing.T) {
 		}
 	})
 
+	t.Run("PUT with a pre-authorized key starts registering", func(t *testing.T) {
+		ms := &mockStore{
+			findWorkgroup: foundWorkgroup(),
+			getShare:      foundShare("myshare", "indexd"),
+		}
+		api := newTestAPI(ms)
+		seed := hex.EncodeToString(bytes.Repeat([]byte{7}, 32))
+		w := doRequest(api, http.MethodPut, path, map[string]string{"preAuthorizedKey": seed})
+		checkStatus(t, w, http.StatusAccepted)
+		res := decodeJSON[ConnectStatusResponse](t, w)
+		if res.State != ConnectRegistering || res.URL != "" {
+			t.Errorf("want the attempt registering with nothing to approve, got %+v", res)
+		}
+
+		// The attempt is running, so a second one is refused meanwhile.
+		w = doRequest(api, http.MethodPut, path, map[string]string{"preAuthorizedKey": seed})
+		if w.Code != http.StatusConflict && w.Code != http.StatusAccepted {
+			t.Errorf("a second attempt: want %d or %d, got %d", http.StatusConflict, http.StatusAccepted, w.Code)
+		}
+	})
+
+	t.Run("PUT pre-authorized key refusals", func(t *testing.T) {
+		for _, tt := range []struct {
+			name string
+			typ  string
+			key  string
+			want int
+		}{
+			{"renterd share", "renterd", hex.EncodeToString(make([]byte, 32)), http.StatusBadRequest},
+			{"not hex", "indexd", "not-hex!!", http.StatusBadRequest},
+			{"wrong length", "indexd", hex.EncodeToString(make([]byte, 16)), http.StatusBadRequest},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				ms := &mockStore{
+					findWorkgroup: foundWorkgroup(),
+					getShare:      foundShare("myshare", tt.typ),
+				}
+				w := doRequest(newTestAPI(ms), http.MethodPut, path, map[string]string{"preAuthorizedKey": tt.key})
+				checkStatus(t, w, tt.want)
+			})
+		}
+	})
+
 	t.Run("PUT unknown workgroup returns 404", func(t *testing.T) {
 		w := doRequest(newTestAPI(&mockStore{}), http.MethodPut, "/connect/unknown-name/myshare", nil)
 		checkStatus(t, w, http.StatusNotFound)

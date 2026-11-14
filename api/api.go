@@ -2026,17 +2026,18 @@ func (api *API) connectHandlerPOST(w http.ResponseWriter, req *http.Request, ps 
 	// running: it is not this call's place to say how far it got in the meantime.
 	attempt.requested(approvalURL)
 	res := attempt.status()
-	go api.runConnect(attempt, builder, wg, share, nil)
+	go api.runConnect(attempt, builder, nil, wg, share, nil)
 
 	writeJSONStatus(w, http.StatusAccepted, res)
 }
 
 // runConnect carries a connection attempt through to its end. Where a builder is
 // given, it waits for the admin to approve the request with the indexer and
-// registers the app key that comes of it; the connection itself is made either
-// way. It runs in the background, and the phases it moves through are what
-// GET /connect/:workgroup/:share reports.
-func (api *API) runConnect(attempt *connectAttempt, builder *sdk.Builder, wg stores.Workgroup, share stores.Share, appKey types.PrivateKey) {
+// registers the app key that comes of it; where a pre-authorized key is given,
+// it registers with that, which waits for nobody; the connection itself is made
+// either way. It runs in the background, and the phases it moves through are
+// what GET /connect/:workgroup/:share reports.
+func (api *API) runConnect(attempt *connectAttempt, builder *sdk.Builder, preAuthorized types.PrivateKey, wg stores.Workgroup, share stores.Share, appKey types.PrivateKey) {
 	key := connectKey(wg, share)
 	defer func() { go api.connects.forget(api.ctx, key, attempt) }()
 
@@ -2044,24 +2045,48 @@ func (api *API) runConnect(attempt *connectAttempt, builder *sdk.Builder, wg sto
 	// passed in is one it already has.
 	var derived types.PrivateKey
 
+	if preAuthorized != nil {
+		var err error
+		if builder, err = sdk.NewBuilder(share.ServerName, api.appMetadata()); err != nil {
+			log.Printf("failed to prepare for the indexer: %v", err)
+			attempt.fail("failed to prepare for the indexer")
+			return
+		}
+	}
+
 	if builder != nil {
 		defer builder.Close()
 
-		ctx, cancel := context.WithTimeout(api.ctx, connectApprovalTimeout)
-		defer cancel()
+		var sdkInst *sdk.SDK
+		if preAuthorized != nil {
+			ctx, cancel := context.WithTimeout(api.ctx, connectRegisterTimeout)
+			defer cancel()
 
-		if err := builder.WaitForApproval(ctx); err != nil {
-			log.Printf("connection approval failed: %v", err)
-			attempt.fail("connection not approved: " + err.Error())
-			return
-		}
+			var err error
+			sdkInst, err = builder.ConnectPreAuthorized(ctx, preAuthorized, api.cfg.Indexd.SeedPhrase)
+			if err != nil {
+				log.Printf("connection with a pre-authorized key failed: %v", err)
+				attempt.fail("the indexer did not accept the pre-authorized key: " + err.Error())
+				return
+			}
+		} else {
+			ctx, cancel := context.WithTimeout(api.ctx, connectApprovalTimeout)
+			defer cancel()
 
-		attempt.advance(ConnectRegistering)
-		sdkInst, err := builder.Register(api.ctx, api.cfg.Indexd.SeedPhrase)
-		if err != nil {
-			log.Printf("failed to register app: %v", err)
-			attempt.fail("failed to register the app key with the indexer")
-			return
+			if err := builder.WaitForApproval(ctx); err != nil {
+				log.Printf("connection approval failed: %v", err)
+				attempt.fail("connection not approved: " + err.Error())
+				return
+			}
+
+			attempt.advance(ConnectRegistering)
+			var err error
+			sdkInst, err = builder.Register(api.ctx, api.cfg.Indexd.SeedPhrase)
+			if err != nil {
+				log.Printf("failed to register app: %v", err)
+				attempt.fail("failed to register the app key with the indexer")
+				return
+			}
 		}
 		appKey = sdkInst.AppKey()
 		derived = appKey
@@ -2138,18 +2163,21 @@ func (api *API) reusableAppKey(w http.ResponseWriter, wg stores.Workgroup, share
 	return nil, false
 }
 
-// connectHandlerPUT handles the PUT /connect/:workgroup/:share calls. Four paths:
+// connectHandlerPUT handles the PUT /connect/:workgroup/:share calls. Five paths:
 //  1. No body, renterd share — no key required.
 //  2. Body with appKey (hex) — indexd, reconnecting with an existing key.
-//  3. Body with fromWorkgroup — indexd, sharing the indexer account of the named
+//  3. Body with preAuthorizedKey (hex) — indexd, a first connection with a key
+//     the indexer has authorized in advance, so that nobody has to approve it.
+//  4. Body with fromWorkgroup — indexd, sharing the indexer account of the named
 //     workgroup, which is what its key for this indexer is of.
-//  4. No body, indexd share — the key of another connection the workgroup has to
+//  5. No body, indexd share — the key of another connection the workgroup has to
 //     the same indexer, where it has one.
 //
-// A first-time indexd connection has no PUT of its own: it is the approval of
-// the request POST /connect/:workgroup/:share makes that carries it through.
-// The connection is made in the background, and the response is the phase it
-// starts in; GET /connect/:workgroup/:share reports the rest.
+// Without a pre-authorized key, a first-time indexd connection has no PUT of
+// its own: it is the approval of the request POST /connect/:workgroup/:share
+// makes that carries it through. The connection is made in the background, and
+// the response is the phase it starts in; GET /connect/:workgroup/:share
+// reports the rest.
 //
 // :workgroup may be a UUID or a workgroup name.
 func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
@@ -2159,8 +2187,9 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 	}
 
 	var body struct {
-		AppKey        string `json:"appKey,omitempty"`        // hex-encoded
-		FromWorkgroup string `json:"fromWorkgroup,omitempty"` // UUID or name
+		AppKey           string `json:"appKey,omitempty"`           // hex-encoded
+		PreAuthorizedKey string `json:"preAuthorizedKey,omitempty"` // hex-encoded
+		FromWorkgroup    string `json:"fromWorkgroup,omitempty"`    // UUID or name
 	}
 	if req.ContentLength > 0 {
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
@@ -2170,6 +2199,41 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 	}
 	if body.FromWorkgroup != "" && share.Type != "indexd" {
 		writeError(w, "only an indexd share is connected with the app key of another workgroup", http.StatusBadRequest)
+		return
+	}
+
+	// A pre-authorized key is spent on the one request it signs, so it is
+	// neither stored nor reported: the app key the connection derives is.
+	if body.PreAuthorizedKey != "" {
+		if share.Type != "indexd" {
+			writeError(w, "only an indexd share is connected with a pre-authorized key", http.StatusBadRequest)
+			return
+		}
+		keyBytes, err := hex.DecodeString(body.PreAuthorizedKey)
+		if err != nil {
+			writeError(w, "invalid pre-authorized key encoding", http.StatusBadRequest)
+			return
+		}
+		var preAuthorized types.PrivateKey
+		switch len(keyBytes) {
+		case 32:
+			preAuthorized = types.NewPrivateKeyFromSeed(keyBytes)
+		case 64:
+			preAuthorized = types.PrivateKey(keyBytes)
+		default:
+			writeError(w, "a pre-authorized key is 32 or 64 bytes", http.StatusBadRequest)
+			return
+		}
+
+		attempt, started := api.connects.begin(connectKey(wg, share), ConnectRegistering)
+		if !started {
+			writeError(w, "this workgroup is already connecting to this share", http.StatusConflict)
+			return
+		}
+		res := attempt.status()
+		go api.runConnect(attempt, nil, preAuthorized, wg, share, nil)
+
+		writeJSONStatus(w, http.StatusAccepted, res)
 		return
 	}
 
@@ -2202,7 +2266,7 @@ func (api *API) connectHandlerPUT(w http.ResponseWriter, req *http.Request, ps h
 		return
 	}
 	res := attempt.status()
-	go api.runConnect(attempt, nil, wg, share, appKey)
+	go api.runConnect(attempt, nil, nil, wg, share, appKey)
 
 	writeJSONStatus(w, http.StatusAccepted, res)
 }

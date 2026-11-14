@@ -212,6 +212,15 @@ once and never again.
 ```Bash
 curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd" -d '{"appKey":"03a2aab5..."}'
 ```
+An indexer that issues pre-authorized keys offers a first connection without the approval
+step. Obtain a key from the indexer and pass it instead of requesting a connection:
+```Bash
+curl -u "":<API_PASSWORD> -X PUT "http://127.0.0.1:9999/api/connect/8303eeb8-f30e-4607-9eb7-875df2c5bd52/shared-indexd" -d '{"preAuthorizedKey":"7f1c93e0..."}'
+```
+The connection starts in the `registering` phase and ends `connected`, with the new app key
+reported once as above. The pre-authorized key only signs this one request; it is neither
+stored nor reported, and a key that has expired or has been used up is refused by the
+indexer, which the `failed` state reports.
 
 ### 5. Grant access to the share
 To grant an account access to the share, run:
