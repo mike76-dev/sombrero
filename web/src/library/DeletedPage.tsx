@@ -68,6 +68,15 @@ export function DeletedPage({ share, shareRights, onExpired }: { share: string; 
     return () => clearTimeout(timer)
   }, [notice])
 
+  useEffect(() => {
+    if (confirm || selected.size === 0) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelected(new Set())
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [confirm, selected.size])
+
   const rights = { write: shareRights?.write ?? false, delete: shareRights?.delete ?? false }
   const selectable = rights.write || rights.delete
   const items = list ?? []

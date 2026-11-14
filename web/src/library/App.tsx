@@ -116,6 +116,16 @@ function Library({
   const [shareList, setShareList] = useState<ShareInfo[] | undefined>(undefined)
   const [shareError, setShareError] = useState<string | null>(null)
 
+  // The tab names the place: the folder, the share, or its deleted files.
+  useEffect(() => {
+    const folder = route.path.slice(route.path.lastIndexOf('/') + 1)
+    const place = route.share === null ? '' : route.bin ? `Deleted files · ${route.share}` : folder || route.share
+    document.title = place ? `${place} · Sombrero` : 'Sombrero'
+    return () => {
+      document.title = 'Sombrero'
+    }
+  }, [route])
+
   useEffect(() => {
     shares()
       .then(setShareList)

@@ -209,6 +209,16 @@ export function Browser({
     return () => clearTimeout(timer)
   }, [notice])
 
+  // Escape clears the selection while no dialog is open to take the key.
+  useEffect(() => {
+    if (dialog || selected.size === 0) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelected(new Set())
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [dialog, selected.size])
+
   const entries = useMemo(() => (listing ? [...listing.entries].sort((a, b) => compare(a, b, sort)) : []), [listing, sort])
 
   const sortBy = (key: SortKey) => setSort((s) => (s.key === key ? { key, asc: !s.asc } : { key, asc: key === 'name' }))

@@ -186,6 +186,8 @@ a.share-card:hover {
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 
