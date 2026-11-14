@@ -419,8 +419,7 @@ export function ImportPage() {
           PNG, GIF, HEIC, WebP), video and audio (MP4, MOV, M4A, AVI, WAV), PDFs and ZIP
           archives, which covers Office documents too. Each one it finds becomes a file in{' '}
           <span className="mono">/lost+found/recovered</span>. The contents will be correct, but
-          the original names are gone for good, so the files are named after where they were
-          found.
+          the original names are lost, so the files are named after where they were found.
         </p>
         <p className="muted">
           This costs nothing in storage: a recovered file points at data the share already has.
@@ -435,9 +434,9 @@ export function ImportPage() {
           They cannot be put back together from here. A general recovery tool such as PhotoRec,
           run over a downloaded remainder, knows a few hundred more formats but has the same
           limit; untrunc can make the opening piece of a video playable given a healthy video
-          from the same camera. Deleting a recovered file deletes those bytes for good, and once
-          nothing more is wanted from the remainders, deleting them unpins the slabs so they
-          stop costing anything.
+          from the same camera. Deleting a recovered file deletes those bytes permanently, and
+          once nothing more is wanted from the remainders, deleting them unpins the slabs so
+          they stop costing anything.
         </p>
         <div className="row">
           <button

@@ -72,6 +72,9 @@ func (db *Database) keepsRenterdReplaced(ctx context.Context, tx pgx.Tx, share, 
 	if !deliberate || !db.versioning.Keep {
 		return db.keepsRenterdVersion(ctx, tx, share, path, account)
 	}
+	if s, err := renterdScratch(ctx, tx, share, path); err != nil || s {
+		return false, err
+	}
 
 	var restored bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM renterd_restored WHERE share_name = $1 AND path = $2)`, share, path).Scan(&restored)
@@ -81,12 +84,30 @@ func (db *Database) keepsRenterdReplaced(ctx context.Context, tx pgx.Tx, share, 
 	return !restored, nil
 }
 
+// renterdScratch is scratch for a renterd file: an editor's scratch file with
+// no versions on record.
+func renterdScratch(ctx context.Context, tx pgx.Tx, share, path string) (bool, error) {
+	if !temporaryName(path) {
+		return false, nil
+	}
+	var history bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM renterd_versions WHERE share_name = $1 AND path = $2)`, share, path).Scan(&history)
+	if err != nil {
+		return false, fmt.Errorf("failed to look up the versions: %w", err)
+	}
+	return !history, nil
+}
+
 // keepsRenterdVersion is keepsVersion for a renterd file: the policy must keep
-// versions, and the save must not continue the session of the newest one.
+// versions, the file must not be an editor's scratch file, and the save must
+// not continue the session of the newest one.
 func (db *Database) keepsRenterdVersion(ctx context.Context, tx pgx.Tx, share, path string, account uint64) (bool, error) {
 	p := db.versioning
 	if !p.Keep {
 		return false, nil
+	}
+	if s, err := renterdScratch(ctx, tx, share, path); err != nil || s {
+		return false, err
 	}
 	if p.Gap <= 0 {
 		return true, nil
