@@ -1,10 +1,10 @@
 package files
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
-	"mime"
 	"net/http"
 	"path"
 	"strconv"
@@ -32,6 +32,7 @@ type VersionEntry struct {
 type fileRef struct {
 	share    stores.Share
 	client   client.Client
+	gone     bool
 	partSize uint64
 	path     string
 	key      string
@@ -64,6 +65,7 @@ func (h *Handler) fileOf(w http.ResponseWriter, req *http.Request, ps httprouter
 	}
 
 	key := strings.TrimPrefix(p, "/")
+	gone := false
 	oi, err := c.Object(req.Context(), s.account, key)
 	if errors.Is(err, stores.ErrNotFound) {
 		// A deleted file lives on in its versions, where the share keeps them.
@@ -73,7 +75,7 @@ func (h *Handler) fileOf(w http.ResponseWriter, req *http.Request, ps httprouter
 			case verr != nil && !errors.Is(verr, stores.ErrNotFound):
 				err = verr
 			case verr == nil && len(versions) > 0:
-				oi, err = client.ObjectInfo{Key: p}, nil
+				oi, err, gone = client.ObjectInfo{Key: p}, nil, true
 			}
 		}
 	}
@@ -89,7 +91,41 @@ func (h *Handler) fileOf(w http.ResponseWriter, req *http.Request, ps httprouter
 		writeError(w, "not a file", http.StatusBadRequest)
 		return fileRef{}, false
 	}
-	return fileRef{share: share, client: c, partSize: partSize, path: p, key: key, object: oi}, true
+	return fileRef{share: share, client: c, gone: gone, partSize: partSize, path: p, key: key, object: oi}, true
+}
+
+// makeFolders makes the folders a deleted file's path runs through that are
+// gone, so that the file can be restored into its place.
+func (h *Handler) makeFolders(w http.ResponseWriter, ctx context.Context, s session, f fileRef) bool {
+	parts := strings.Split(f.key, "/")
+	for i := 1; i < len(parts); i++ {
+		folder := strings.Join(parts[:i], "/")
+		oi, err := f.client.Object(ctx, s.account, folder)
+		if err == nil {
+			if !strings.HasSuffix(oi.Key, "/") {
+				writeError(w, "a file is in the way at /"+folder, http.StatusConflict)
+				return false
+			}
+			continue
+		}
+		if !errors.Is(err, stores.ErrNotFound) {
+			log.Printf("file API: failed to look up %s on %s: %v", folder, f.share.Name, err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return false
+		}
+		err = f.client.MakeDirectory(ctx, s.account, folder)
+		switch {
+		case err == nil, errors.Is(err, stores.ErrDirectoryExists):
+		case errors.Is(err, stores.ErrAccessDenied):
+			writeError(w, "access denied", http.StatusForbidden)
+			return false
+		default:
+			log.Printf("file API: failed to make the folder %s on %s: %v", folder, f.share.Name, err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return false
+		}
+	}
+	return true
 }
 
 // versionID reads the id query of a call, zero where there is none.
@@ -195,6 +231,64 @@ func (h *Handler) versionsHandler(w http.ResponseWriter, req *http.Request, ps h
 	writeJSON(w, entries)
 }
 
+// DeletedEntry is a file that is gone but for its versions, the newest of
+// which, named by the ID, is what the deletion left.
+type DeletedEntry struct {
+	Name       string    `json:"name"`
+	Path       string    `json:"path"`
+	ID         uint64    `json:"id"`
+	Size       uint64    `json:"size"`
+	ModifiedAt time.Time `json:"modifiedAt"`
+	DeletedAt  time.Time `json:"deletedAt"`
+	DeletedBy  string    `json:"deletedBy,omitempty"`
+}
+
+// deletedHandler handles the GET /share/:name/deleted calls: the files under
+// the folder the path names, the root without one, that are gone but for
+// their versions, newest deletion first.
+func (h *Handler) deletedHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params, s session) {
+	share, r, ok := h.shareFor(w, s, ps.ByName("name"))
+	if !ok {
+		return
+	}
+	if !r.Read {
+		writeError(w, "access denied", http.StatusForbidden)
+		return
+	}
+	p, ok := cleanPath(req.URL.Query().Get("path"))
+	if !ok {
+		writeError(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	c, _, err := h.server.ShareClient(share, s.account.Workgroup)
+	if err != nil {
+		log.Printf("file API: share %s unavailable to workgroup %s: %v", share.Name, s.account.Workgroup, err)
+		writeError(w, "share unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	entries := []DeletedEntry{}
+	if v, kept := c.(client.Versioner); kept {
+		files, err := v.DeletedFiles(req.Context(), s.account, strings.TrimPrefix(p, "/"))
+		if errors.Is(err, stores.ErrNotFound) {
+			writeError(w, "folder not found", http.StatusNotFound)
+			return
+		} else if err != nil {
+			log.Printf("file API: failed to list the deleted files under %s on %s: %v", p, share.Name, err)
+			writeError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		for _, f := range files {
+			fp := "/" + strings.TrimPrefix(f.Path, "/")
+			entries = append(entries, DeletedEntry{
+				Name: path.Base(fp), Path: fp, ID: f.ID, Size: f.Size,
+				ModifiedAt: f.ModifiedAt.UTC(), DeletedAt: f.DeletedAt.UTC(), DeletedBy: f.DeletedBy,
+			})
+		}
+	}
+	writeJSON(w, entries)
+}
+
 // versionHandler handles the GET /share/:name/version calls, sending the
 // version the id query names of the file the path names, or the copy of the
 // file that stood at the time the at query names, as a download does.
@@ -219,17 +313,7 @@ func (h *Handler) versionHandler(w http.ResponseWriter, req *http.Request, ps ht
 		}
 	}
 
-	name := path.Base(f.path)
-	ctype := mime.TypeByExtension(path.Ext(name))
-	if ctype == "" {
-		ctype = "application/octet-stream"
-	}
-	disposition := "attachment"
-	if req.URL.Query().Get("inline") != "" {
-		disposition = "inline"
-	}
-	w.Header().Set("Content-Type", ctype)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": name}))
+	contentHeaders(w, req, path.Base(f.path))
 
 	rd := &objectReader{
 		fetch: fetch,
@@ -257,6 +341,11 @@ func (h *Handler) restoreHandler(w http.ResponseWriter, req *http.Request, ps ht
 	if version.ID == 0 {
 		// The file holds the contents of the time already.
 		writeJSON(w, h.entryAt(ctx, f.client, s, f.path))
+		return
+	}
+
+	// A file a deleted folder left is restored into the folder made again.
+	if f.gone && !h.makeFolders(w, ctx, s, f) {
 		return
 	}
 

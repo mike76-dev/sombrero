@@ -163,6 +163,8 @@ func (h *Handler) deleteHandler(w http.ResponseWriter, req *http.Request, ps htt
 	}
 
 	ctx := req.Context()
+	versioner, kept := c.(client.Versioner)
+	purge := req.URL.Query().Get("purge") != ""
 	if dir && req.URL.Query().Get("recursive") == "" {
 		empty, err := c.IsEmpty(ctx, s.account, t.key+"/")
 		if err != nil {
@@ -172,6 +174,14 @@ func (h *Handler) deleteHandler(w http.ResponseWriter, req *http.Request, ps htt
 		}
 		if !empty {
 			writeError(w, "folder not empty", http.StatusConflict)
+			return
+		}
+	} else if dir && kept && !purge {
+		// The files go one by one, so that the share keeps each as it keeps
+		// any deleted file; with the folder they would go outright.
+		if err := deleteFiles(ctx, c, s.account, t.key); err != nil {
+			log.Printf("file API: failed to delete the files of %s on %s: %v", p, share.Name, err)
+			writeError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -185,9 +195,14 @@ func (h *Handler) deleteHandler(w http.ResponseWriter, req *http.Request, ps htt
 		return
 	}
 
-	// A deleted file is kept as a version where the share keeps them; purge takes the versions too.
-	if versioner, kept := c.(client.Versioner); kept && !dir && req.URL.Query().Get("purge") != "" {
-		err := versioner.DeleteVersions(ctx, s.account, t.key, 0)
+	// What is deleted is kept as versions where the share keeps them; purge takes those too.
+	if kept && purge {
+		var err error
+		if dir {
+			err = versioner.DeleteVersionsUnder(ctx, s.account, t.key)
+		} else {
+			err = versioner.DeleteVersions(ctx, s.account, t.key, 0)
+		}
 		if err != nil && !errors.Is(err, stores.ErrNotFound) {
 			log.Printf("file API: failed to delete the versions of %s on %s: %v", p, share.Name, err)
 			writeError(w, "internal error", http.StatusInternalServerError)
@@ -195,6 +210,34 @@ func (h *Handler) deleteHandler(w http.ResponseWriter, req *http.Request, ps htt
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteFiles deletes the files under the folder one by one, deepest first,
+// and the emptied subfolders after them. What the account may not see or
+// delete is left to go with the folder, as it always has.
+func deleteFiles(ctx context.Context, c client.Client, acc stores.Account, dir string) error {
+	ois, err := c.List(ctx, acc, dir+"/")
+	if err != nil {
+		return err
+	}
+	for _, oi := range ois {
+		key := strings.TrimPrefix(oi.Key, "/")
+		isDir := strings.HasSuffix(key, "/")
+		key = strings.TrimSuffix(key, "/")
+		if key == "" || key == dir {
+			continue
+		}
+		if isDir {
+			if err := deleteFiles(ctx, c, acc, key); err != nil {
+				return err
+			}
+		}
+		err := c.Delete(ctx, acc, key, isDir)
+		if err != nil && !errors.Is(err, stores.ErrNotFound) && !errors.Is(err, stores.ErrAccessDenied) {
+			return err
+		}
+	}
+	return nil
 }
 
 // renameHandler handles the POST /share/:name/rename calls, moving what the

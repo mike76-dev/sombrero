@@ -70,8 +70,8 @@ func (h *Handler) uploadHandler(w http.ResponseWriter, req *http.Request, ps htt
 	// Nothing empty can be stored, so the first part is read before the
 	// upload is started, and an empty body starts none.
 	buf := make([]byte, partSize)
-	n, err := io.ReadFull(req.Body, buf)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+	n, err := readPart(req.Body, buf)
+	if err != nil {
 		writeError(w, "failed to read the body", http.StatusBadRequest)
 		return
 	}
@@ -105,8 +105,8 @@ func (h *Handler) uploadHandler(w http.ResponseWriter, req *http.Request, ps htt
 		parts = append(parts, api.MultipartCompletedPart{PartNumber: number, ETag: eTag})
 		offset += uint64(n)
 
-		n, err = io.ReadFull(req.Body, buf)
-		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		n, err = readPart(req.Body, buf)
+		if err != nil {
 			h.abortUpload(ctx, c, key, id)
 			writeError(w, "failed to read the body", http.StatusBadRequest)
 			return
@@ -125,6 +125,25 @@ func (h *Handler) uploadHandler(w http.ResponseWriter, req *http.Request, ps htt
 		entry.CreatedAt, entry.ModifiedAt = oi.CreatedAt, oi.ModifiedAt
 	}
 	writeJSONStatus(w, http.StatusCreated, entry)
+}
+
+// readPart fills the buffer from the body as far as the body goes. Only its
+// clean end is an end: a body cut short, as by a cancelled upload, reports
+// io.ErrUnexpectedEOF, which io.ReadFull would make indistinguishable from a
+// short last part, and which must not be stored as the whole file.
+func readPart(body io.Reader, buf []byte) (int, error) {
+	n := 0
+	for n < len(buf) {
+		m, err := body.Read(buf[n:])
+		n += m
+		if errors.Is(err, io.EOF) {
+			return n, nil
+		}
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
 }
 
 // abortUpload drops an upload that will not be finished. The request may be

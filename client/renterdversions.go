@@ -224,16 +224,10 @@ func (rv *RenterdVersions) Delete(ctx context.Context, acc stores.Account, path 
 	if reserved(path) {
 		return stores.ErrNotFound
 	}
+	// A folder goes with what is in it; the versions under it stay, found
+	// by their paths, so that the files can be restored.
 	if batch {
-		if err := rv.RenterdClient.Delete(ctx, acc, path, true); err != nil {
-			return err
-		}
-		ids, err := rv.db.DeleteRenterdVersionsUnder(rv.share, path)
-		if err != nil {
-			return err
-		}
-		rv.dropObjects(ctx, ids)
-		return nil
+		return rv.RenterdClient.Delete(ctx, acc, path, true)
 	}
 
 	live, err := rv.file(ctx, acc, path)
@@ -368,6 +362,65 @@ func (rv *RenterdVersions) DeleteVersions(ctx context.Context, acc stores.Accoun
 	}
 	rv.dropObjects(ctx, ids)
 	return nil
+}
+
+// DeleteVersionsUnder implements Versioner.
+func (rv *RenterdVersions) DeleteVersionsUnder(ctx context.Context, acc stores.Account, dir string) error {
+	ids, err := rv.db.DeleteRenterdVersionsUnder(rv.share, dir)
+	if err != nil {
+		return err
+	}
+	rv.dropObjects(ctx, ids)
+	return nil
+}
+
+// DeletedFiles implements Versioner. The records say which paths have
+// versions; the bucket says which of them have no file any more, asked once
+// per folder.
+func (rv *RenterdVersions) DeletedFiles(ctx context.Context, acc stores.Account, dir string) ([]DeletedFile, error) {
+	versions, err := rv.db.RenterdVersionsUnder(rv.share, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// The versions come ordered by path and age, so the last of a path is
+	// the newest, the one its deletion left if it was deleted.
+	newest := map[string]stores.RenterdVersion{}
+	for _, v := range versions {
+		newest[v.Path] = v
+	}
+
+	live := map[string]bool{}
+	listed := map[string]bool{}
+	for p := range newest {
+		folder := p[:strings.LastIndex(p, "/")+1]
+		if listed[folder] {
+			continue
+		}
+		listed[folder] = true
+		ois, err := rv.RenterdClient.List(ctx, acc, strings.TrimPrefix(folder, "/"))
+		if err != nil && !errors.Is(err, stores.ErrNotFound) {
+			return nil, err
+		}
+		for _, oi := range ois {
+			live["/"+strings.TrimPrefix(oi.Key, "/")] = true
+		}
+	}
+
+	files := make([]DeletedFile, 0)
+	for p, v := range newest {
+		if live[p] {
+			continue
+		}
+		files = append(files, DeletedFile{Path: p, ID: v.ID, Size: v.Size, ModifiedAt: v.ModifiedAt, DeletedAt: v.ReplacedAt, DeletedBy: v.ReplacedBy})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].DeletedAt.Equal(files[j].DeletedAt) {
+			return files[i].DeletedAt.After(files[j].DeletedAt)
+		}
+		return files[i].Path < files[j].Path
+	})
+	return files, nil
 }
 
 // KeepVersion implements Versioner.

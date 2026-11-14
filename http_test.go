@@ -110,8 +110,8 @@ func TestHTTPHandlerServesTheProfilesInDebugOnly(t *testing.T) {
 }
 
 // TestHTTPHandlerMountsTheFileAPIOnlyWhenGiven verifies that a server without
-// the file API serves nothing under /files but the UI, and that one with it
-// reaches it there, prefix taken off and without the API password.
+// the file API says so under /files, and that one with it reaches it there,
+// prefix taken off and without the API password.
 func TestHTTPHandlerMountsTheFileAPIOnlyWhenGiven(t *testing.T) {
 	apiStub := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -131,8 +131,8 @@ func TestHTTPHandlerMountsTheFileAPIOnlyWhenGiven(t *testing.T) {
 	}
 
 	off := newHTTPHandler(context.Background(), apiStub, nil, "hunter2", false)
-	if w := post(off, "/files/login"); w.Code == http.StatusAccepted || w.Code == http.StatusUnauthorized || w.Code == http.StatusNoContent {
-		t.Errorf("without the file API, /files/login was answered %d, want it left to the UI", w.Code)
+	if w := post(off, "/files/login"); w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "not enabled") {
+		t.Errorf("without the file API, /files/login was answered %d %q, want %d and the reason", w.Code, strings.TrimSpace(w.Body.String()), http.StatusNotFound)
 	}
 
 	on := newHTTPHandler(context.Background(), apiStub, filesStub, "hunter2", false)

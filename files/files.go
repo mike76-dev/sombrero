@@ -116,6 +116,7 @@ func New(store Store, srv Server) *Handler {
 	h.router.POST("/share/:name/rename", h.withSession(h.renameHandler))
 	h.router.GET("/share/:name/snapshots", h.withSession(h.snapshotsHandler))
 	h.router.GET("/share/:name/versions", h.withSession(h.versionsHandler))
+	h.router.GET("/share/:name/deleted", h.withSession(h.deletedHandler))
 	h.router.DELETE("/share/:name/versions", h.withSession(h.deleteVersionsHandler))
 	h.router.GET("/share/:name/version", h.withSession(h.versionHandler))
 	h.router.POST("/share/:name/restore", h.withSession(h.restoreHandler))

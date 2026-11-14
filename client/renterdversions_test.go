@@ -324,15 +324,64 @@ func TestRenterdVersionsFollowRenames(t *testing.T) {
 		t.Errorf("want the file and three versions, got %v", keys)
 	}
 
-	// The folder takes the versions with it.
+	// The folder leaves the versions behind, until they are dropped as a lot.
 	if err := rv.Delete(ctx, acc, "b", true); err != nil {
 		t.Fatalf("Delete(dir): %v", err)
 	}
+	if sizes := sizesOf(t, rv, acc, "b/w.txt"); len(sizes) != 3 {
+		t.Errorf("want the versions to outlive the folder, got %v", sizes)
+	}
+	if keys := bucket.keys(); len(keys) != 3 {
+		t.Errorf("want the three versions left in the bucket, got %v", keys)
+	}
+	if err := rv.DeleteVersionsUnder(ctx, acc, "b"); err != nil {
+		t.Fatalf("DeleteVersionsUnder: %v", err)
+	}
 	if sizes := sizesOf(t, rv, acc, "b/w.txt"); len(sizes) != 0 {
-		t.Errorf("want the versions gone with the folder, got %v", sizes)
+		t.Errorf("want the versions dropped, got %v", sizes)
 	}
 	if keys := bucket.keys(); len(keys) != 0 {
 		t.Errorf("want the bucket empty, got %v", keys)
+	}
+}
+
+// TestRenterdDeletedFiles verifies that the files gone but for their versions
+// are listed, a live file with versions is not, and a deleted folder's files
+// are among them.
+func TestRenterdDeletedFiles(t *testing.T) {
+	rv, _, acc := versionedRenterd(t, stores.VersionPolicy{Keep: true, Count: 10})
+	ctx := context.Background()
+
+	save(t, rv, acc, "b/w.txt")
+	save(t, rv, acc, "b/w.txt")
+	save(t, rv, acc, "b/keep.txt")
+	save(t, rv, acc, "b/keep.txt")
+	save(t, rv, acc, "top.txt")
+	if err := rv.Delete(ctx, acc, "b/w.txt", false); err != nil {
+		t.Fatalf("Delete(w): %v", err)
+	}
+	deleted, err := rv.DeletedFiles(ctx, acc, "")
+	if err != nil {
+		t.Fatalf("DeletedFiles: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0].Path != "/b/w.txt" || deleted[0].DeletedBy != acc.Username {
+		t.Fatalf("want w.txt alone, deleted by the account, got %+v", deleted)
+	}
+	if err := rv.Delete(ctx, acc, "top.txt", false); err != nil {
+		t.Fatalf("Delete(top): %v", err)
+	}
+	if err := rv.Delete(ctx, acc, "b", true); err != nil {
+		t.Fatalf("Delete(b): %v", err)
+	}
+	deleted, err = rv.DeletedFiles(ctx, acc, "")
+	if err != nil {
+		t.Fatalf("DeletedFiles after the folder: %v", err)
+	}
+	if len(deleted) != 3 {
+		t.Fatalf("want w.txt, keep.txt and top.txt, got %+v", deleted)
+	}
+	if under, _ := rv.DeletedFiles(ctx, acc, "b"); len(under) != 2 {
+		t.Errorf("want the two files under b, got %+v", under)
 	}
 }
 

@@ -44,6 +44,86 @@ func versionedClient() *mockClient {
 	return mc
 }
 
+// TestListingDeletedFiles verifies that the deleted files are listed with
+// their paths and the versions their deletions left, under the root or a
+// folder, and that a share keeping no versions lists none.
+func TestListingDeletedFiles(t *testing.T) {
+	mc := versionedClient()
+	mc.deletedFiles = func(dir string) ([]client.DeletedFile, error) {
+		switch dir {
+		case "":
+			return []client.DeletedFile{
+				{Path: "/Old/notes.txt", ID: 9, Size: 10, ModifiedAt: versionModified, DeletedAt: versionModified.Add(time.Hour), DeletedBy: "alice"},
+				{Path: "/deleted.txt", ID: 8, Size: 20, ModifiedAt: versionModified, DeletedAt: versionModified},
+			}, nil
+		case "Old":
+			return []client.DeletedFile{{Path: "/Old/notes.txt", ID: 9, Size: 10, ModifiedAt: versionModified, DeletedAt: versionModified.Add(time.Hour)}}, nil
+		case "gone":
+			return nil, stores.ErrNotFound
+		}
+		return nil, nil
+	}
+	h, w := loggedIn(t, &mockStore{}, &mockServer{client: mc}, "alice", "hunter2")
+
+	r := manage(h, w, http.MethodGet, "deleted")
+	if r.Code != http.StatusOK {
+		t.Fatalf("want %d, got %d (%s)", http.StatusOK, r.Code, r.Body.String())
+	}
+	var got []DeletedEntry
+	json.NewDecoder(r.Body).Decode(&got)
+	if len(got) != 2 || got[0].Name != "notes.txt" || got[0].Path != "/Old/notes.txt" || got[0].ID != 9 || got[0].DeletedBy != "alice" || got[1].Path != "/deleted.txt" {
+		t.Errorf("want the two deleted files as given, got %+v", got)
+	}
+	r = manage(h, w, http.MethodGet, "deleted?path=/Old")
+	got = nil
+	json.NewDecoder(r.Body).Decode(&got)
+	if r.Code != http.StatusOK || len(got) != 1 || got[0].Path != "/Old/notes.txt" {
+		t.Errorf("under a folder: want notes.txt alone, got %d %+v", r.Code, got)
+	}
+	if r := manage(h, w, http.MethodGet, "deleted?path=/gone"); r.Code != http.StatusNotFound {
+		t.Errorf("under a folder not there: want %d, got %d", http.StatusNotFound, r.Code)
+	}
+
+	plain := struct{ client.Client }{mc}
+	ph, pw := loggedIn(t, &mockStore{}, &mockServer{client: plain}, "alice", "hunter2")
+	if r := manage(ph, pw, http.MethodGet, "deleted"); r.Code != http.StatusOK || r.Body.String() != "[]\n" {
+		t.Errorf("without versions: want an empty list, got %d %s", r.Code, r.Body.String())
+	}
+}
+
+// TestRestoringMakesTheFolderAgain verifies that a file a deleted folder left
+// is restored into the folder made again, every missing level of it, and
+// that a file in the way of the folder stops the restore.
+func TestRestoringMakesTheFolderAgain(t *testing.T) {
+	mc := versionedClient()
+	mc.versions = func(p string) ([]client.VersionInfo, error) {
+		if p == "Old/2025/notes.txt" || p == "readme.txt/notes.txt" {
+			return []client.VersionInfo{{ID: 9, Size: 10, ModifiedAt: versionModified, ReplacedAt: versionModified.Add(time.Hour)}}, nil
+		}
+		return nil, nil
+	}
+	h, w := loggedIn(t, &mockStore{}, &mockServer{client: mc}, "alice", "hunter2")
+
+	r := manage(h, w, http.MethodPost, "restore?path=/Old/2025/notes.txt&id=9")
+	if r.Code != http.StatusOK {
+		t.Fatalf("want %d, got %d (%s)", http.StatusOK, r.Code, r.Body.String())
+	}
+	if len(mc.made) != 2 || mc.made[0] != "Old" || mc.made[1] != "Old/2025" {
+		t.Errorf("want the folders made top down, got %v", mc.made)
+	}
+	if len(mc.restored) != 1 || mc.restored[0] != (versionRef{"Old/2025/notes.txt", 9}) {
+		t.Errorf("want the version restored, got %v", mc.restored)
+	}
+
+	// A folder that is there already is left alone; a file in the way is a conflict.
+	if r := manage(h, w, http.MethodPost, "restore?path=/readme.txt/notes.txt&id=9"); r.Code != http.StatusConflict {
+		t.Errorf("a file in the way: want %d, got %d (%s)", http.StatusConflict, r.Code, r.Body.String())
+	}
+	if len(mc.made) != 2 || len(mc.restored) != 1 {
+		t.Errorf("want nothing else made or restored, got %v, %v", mc.made, mc.restored)
+	}
+}
+
 // TestListingVersions verifies that a file's versions are listed newest
 // first, and that a share keeping none lists none.
 func TestListingVersions(t *testing.T) {

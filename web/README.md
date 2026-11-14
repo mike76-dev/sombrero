@@ -1,8 +1,18 @@
 # Sombrero Web UI
 
-The web UI is a React + TypeScript single-page app for managing a Sombrero server through its HTTP API. It covers the same ground as the API: workgroups, accounts, shares, access policies, share connections, host bans, and the server statistics.
+The web UI is a React + TypeScript single-page app in two parts, built into the server binary and served at the API address, so there is nothing separate to run or deploy. The library, at the root, is for the accounts: it shows them their shares in the browser. The administration, under `/admin`, is for the operator and covers the same ground as the API: workgroups, accounts, shares, access policies, share connections, host bans, and the server statistics. Open `http://127.0.0.1:9999/admin` in a browser and enter the API password (`api.password` from `sombrero.yml`) on the **Settings** page.
 
-It is built into the server binary and served at the API address, so there is nothing separate to run or deploy. Open `http://127.0.0.1:9999` in a browser and enter the API password (`api.password` from `sombrero.yml`) on the **Settings** page.
+## Library
+
+The library is served at the root (`http://127.0.0.1:9999`) and requires the [file API](../README.md#file-api) to be enabled; where it is not, the page says so and points to the administration. An account logs in with its workgroup, by name or UUID, its username and its password, exactly as over SMB; a guest account leaves the password empty. The session lasts 24 hours, and the page returns to the login when it has expired.
+
+The sidebar lists the shares the account may reach, with the rights it holds on each on the overview page. A share opens at its root, and the breadcrumbs above the listing lead back up. The listing shows the name, size and modification time of every file and folder visible to the account, in the browser's time zone, and is sorted by clicking a column heading; folders always come first. A file of a kind the browser displays itself, such as an image, a PDF or a video, opens in a new tab when its name is clicked, and any file is downloaded with the **Download** button; a file the browser cannot display is downloaded from its name as well. Each location has an address of its own, so a folder can be bookmarked or its link passed to another member of the share.
+
+Where the account may write in a folder, files are uploaded with the **Upload files** button or by dropping them onto the listing, one at a time with their progress shown, and a file that would replace one already there is pointed out before the upload begins; a folder is created with **New folder**. Where the account may delete, the menu at the end of a row renames, moves or deletes the file or folder. Moving asks for the destination folder, which must exist; a file or folder is also moved by dragging its row onto a folder in the listing or onto one of the breadcrumbs, and files from outside the browser are uploaded into a folder by dropping them onto its row. Several files and folders are moved or deleted at once by ticking their rows, with Shift to tick a run of them, and using the bar that appears above the listing; dragging a ticked row moves the whole selection. Each item is handled on its own, and one that cannot be moved or deleted is named with the reason and stays ticked. The notice of a rename, a move or a deletion offers **Undo** for a few seconds: a moved or renamed item goes back to where it was, and a deleted file is restored from the version its deletion left, which a purge or a share without versions does not leave. Deleting a file or a folder offers to remove the previous versions as well; without that, a share that retains versions keeps every deleted file as a version, the files of a deleted folder included (see [Previous Versions](../README.md#previous-versions)). The rights are those of the folder: in a folder granted by another workgroup, or a read-only public folder, the actions the account does not hold are not offered, and a file of another account in a read-only folder remains protected.
+
+On a share that retains [previous versions](../README.md#previous-versions), **Versions** in the menu of a file lists them with the time each was last modified, its size, and when and by whom it was replaced. A version is opened or downloaded like a file; where the account may write, it is restored, which keeps the current contents as a version, and kept beyond the limits or released again; where the account may delete, a version is deleted, or all of them at once. **History** in the toolbar lists the times at which the folder has a previous state. Opening one shows the folder as it was at that time, with the files deleted since, and the address carries the time, so such a view can be linked to as well. Nothing in the past can be changed, but a file is opened, downloaded or restored to the present as it was then, deleted files included, and its versions are reached from there.
+
+**Deleted files** above the listing opens the deleted files of the share: every file that is gone but for its versions, the files of deleted folders included, each with its folder, its size and the time and account of its deletion. A file is restored to where it was, its folder made again if it is gone, or deleted for good together with its versions, one at a time or as a selection; **Undo** in the notice of a restoration returns the file to the deleted files. The list empties as the versions expire.
 
 ## Setup wizard
 
@@ -94,17 +104,17 @@ npm install
 npm run dev
 ```
 
-The dev server proxies requests from `/api` to the Sombrero API at `http://localhost:9999` (the API does not send CORS headers, so the browser cannot call it cross-origin directly). If the API runs elsewhere:
+The dev server proxies requests from `/api` and `/files` to the Sombrero server at `http://localhost:9999` (the server does not send CORS headers, so the browser cannot call it cross-origin directly). If the server runs elsewhere:
 
 ```bash
 SOMBRERO_API_URL=http://my-server:9999 npm run dev
 ```
 
-Open the printed URL, go to **Settings**, enter the API password, and click **Save & test connection**.
+Open the printed URL for the library, or with `/admin/` appended for the administration, where you go to **Settings**, enter the API password, and click **Save & test connection**.
 
 ## Serving the UI separately
 
-`npm run build` emits the static site to `web/dist`. The server embeds it, but it can also be served by any web server that routes `/api/*` to the Sombrero API port, stripping the `/api` prefix. Example Apache config (requires `a2enmod proxy proxy_http`):
+`npm run build` emits the static site to `web/dist`, with the administration in `web/dist/admin`. The server embeds it, but it can also be served by any web server that routes `/api/*` to the Sombrero API port, stripping the `/api` prefix, and `/files/*` to the same port with the prefix kept. Example Apache config (requires `a2enmod proxy proxy_http`):
 
 ```apache
 <VirtualHost *:80>
@@ -115,8 +125,14 @@ Open the printed URL, go to **Settings**, enter the API password, and click **Sa
         FallbackResource /index.html
     </Directory>
 
+    <Directory /path/to/sombrero/web/dist/admin>
+        FallbackResource /admin/index.html
+    </Directory>
+
     ProxyPass /api/ http://127.0.0.1:9999/
     ProxyPassReverse /api/ http://127.0.0.1:9999/
+    ProxyPass /files/ http://127.0.0.1:9999/files/
+    ProxyPassReverse /files/ http://127.0.0.1:9999/files/
 </VirtualHost>
 ```
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -32,8 +33,9 @@ var printVersion = flag.Bool("version", false, "print the version and exit")
 // lives under /api, behind the password and the ratelimiter. The file API,
 // where there is one, lives under /files with its own ratelimiter and no API
 // password: its calls carry an account's session. The web UI is served from
-// the root: it holds nothing secret, and asking for the password itself
-// beats leaving it to the browser's basic auth prompt.
+// the root, the administration under /admin: it holds nothing secret, and
+// asking for the password itself beats leaving it to the browser's basic
+// auth prompt.
 func newHTTPHandler(ctx context.Context, a, files http.Handler, password string, debug bool) http.Handler {
 	inner := a
 
@@ -54,6 +56,14 @@ func newHTTPHandler(ctx context.Context, a, files http.Handler, password string,
 	mux.Handle("/api/", http.StripPrefix("/api", api.Ratelimit(ctx)(api.BasicAuth(password)(inner))))
 	if files != nil {
 		mux.Handle("/files/", http.StripPrefix("/files", api.Ratelimit(ctx)(files)))
+	} else {
+		// Said in so many words: the UI asks here whether there is a file
+		// API, and a page served in its place would pass for an answer.
+		mux.HandleFunc("/files/", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode("the file API is not enabled")
+		})
 	}
 	mux.Handle("/", web.Handler())
 	return mux
@@ -231,7 +241,7 @@ func main() {
 	}
 	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, fileAPI, cfg.API.Password, cfg.Debug)}
 	go apiSrv.Serve(lAPI)
-	log.Printf("API and web UI: listening at http://%s ...\n", lAPI.Addr())
+	log.Printf("API and web UI: listening at http://%s, administration at http://%s/admin ...\n", lAPI.Addr(), lAPI.Addr())
 	if cfg.Files.Enabled {
 		log.Printf("File API: serving at http://%s/files ...\n", lAPI.Addr())
 	}

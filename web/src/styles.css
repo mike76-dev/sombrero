@@ -363,6 +363,7 @@ input[type='file']::file-selector-button:hover {
   color: var(--text);
   cursor: pointer;
   white-space: nowrap;
+  text-decoration: none;
 }
 
 .btn:hover:not(:disabled) {

@@ -29,6 +29,10 @@ and then build the server again. The API itself is unaffected and is
 served under /api.
 `
 
+// adminRoot is where the administration lives, as a single-page app of its own
+// below the root.
+const adminRoot = "admin/"
+
 // Handler returns an http.Handler that serves the web UI. The handler is
 // meant to be mounted at the root, below the API: it serves no secrets, so
 // that the UI can load and ask for the API password itself rather than
@@ -60,11 +64,14 @@ func handler(assets fs.FS) http.Handler {
 		}
 
 		if _, err := fs.Stat(assets, name); err != nil {
-			// A route within the single-page app rather than a file on
-			// disk: hand it the index and let the app work out what to
+			// A route within a single-page app rather than a file on disk:
+			// hand it the app's index and let the app work out what to
 			// show, so that a deep link survives a page reload.
 			req = req.Clone(req.Context())
 			req.URL.Path = "/"
+			if strings.HasPrefix(name, adminRoot) {
+				req.URL.Path = "/" + adminRoot
+			}
 			files.ServeHTTP(w, req)
 			return
 		}

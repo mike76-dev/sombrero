@@ -121,12 +121,40 @@ func TestDeleting(t *testing.T) {
 	if r := manage(h, w, http.MethodDelete, "folder?path=/Projects"); r.Code != http.StatusConflict {
 		t.Errorf("deleting a full folder: want %d, got %d", http.StatusConflict, r.Code)
 	}
+
+	// A folder deleted recursively has its files deleted one by one, deepest
+	// first, so that each leaves a version; with a purge they go with the
+	// folder, and the versions under it after them.
+	mc.list = func(p string) ([]client.ObjectInfo, error) {
+		switch p {
+		case "Projects/":
+			return []client.ObjectInfo{{Key: "/Projects/plan.pdf"}, {Key: "/Projects/Old/"}}, nil
+		case "Projects/Old/":
+			return []client.ObjectInfo{{Key: "/Projects/Old/notes.txt"}}, nil
+		}
+		return nil, nil
+	}
 	if r := manage(h, w, http.MethodDelete, "folder?path=/Projects&recursive=1"); r.Code != http.StatusNoContent {
 		t.Errorf("deleting a full folder recursively: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
 	}
-	want := []deletion{{"readme.txt", false}, {"readme.txt", false}, {"Projects", true}}
-	if len(mc.deleted) != len(want) || mc.deleted[0] != want[0] || mc.deleted[1] != want[1] || mc.deleted[2] != want[2] {
-		t.Errorf("want the deletions %v, got %v", want, mc.deleted)
+	if r := manage(h, w, http.MethodDelete, "folder?path=/Projects&recursive=1&purge=1"); r.Code != http.StatusNoContent {
+		t.Errorf("deleting a full folder with its versions: want %d, got %d (%s)", http.StatusNoContent, r.Code, r.Body.String())
+	}
+	want := []deletion{
+		{"readme.txt", false}, {"readme.txt", false},
+		{"Projects/plan.pdf", false}, {"Projects/Old/notes.txt", false}, {"Projects/Old", true}, {"Projects", true},
+		{"Projects", true},
+	}
+	if len(mc.deleted) != len(want) {
+		t.Fatalf("want the deletions %v, got %v", want, mc.deleted)
+	}
+	for i := range want {
+		if mc.deleted[i] != want[i] {
+			t.Errorf("deletion %d: want %v, got %v", i, want[i], mc.deleted[i])
+		}
+	}
+	if len(mc.versionsDropped) != 2 || mc.versionsDropped[1] != (versionRef{"Projects/", 0}) {
+		t.Errorf("want the versions under the purged folder dropped, got %v", mc.versionsDropped)
 	}
 
 	tests := []struct {
@@ -147,7 +175,7 @@ func TestDeleting(t *testing.T) {
 			}
 		})
 	}
-	if len(mc.deleted) != 3 {
+	if len(mc.deleted) != len(want) {
 		t.Errorf("want nothing else deleted, got %v", mc.deleted)
 	}
 
