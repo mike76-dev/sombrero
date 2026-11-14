@@ -1148,6 +1148,68 @@ func TestEmptyFileKeepsTheVersions(t *testing.T) {
 	}
 }
 
+// TestTemporaryFilesLeaveNoVersions verifies that an editor's scratch files
+// leave no versions when replaced or deleted, that the names they are told by
+// are the right ones, and that a file with a history is kept whatever its name.
+func TestTemporaryFilesLeaveNoVersions(t *testing.T) {
+	for name, want := range map[string]bool{
+		".doc.txt.swp": true, ".doc.txt.swo": true, "doc.txt~": true, "~$doc.docx": true, "~WRL0001.tmp": true,
+		"report.TMP": true, ".~lock.doc.odt#": true, "#doc.txt#": true, ".#doc.txt": true,
+		"doc.txt": false, "swp": false, ".swp": false, "doc.swap": false, "tmp.txt": false, "#": false, "~": true,
+	} {
+		if got := temporaryName("/docs/" + name); got != want {
+			t.Errorf("temporaryName(%q) = %v, want %v", name, got, want)
+		}
+	}
+
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Count: 10})
+
+	acc, share, _ := newSlabTestFixture(t, db)
+	own := types.Hash256{1}
+	plantPiece(t, db, share, acc, ".doc.txt.swp", own, 0, 400)
+	replaceFile(t, db, share, acc, ".doc.txt.swp", 300)
+	if sizes := versionSizes(t, db, share, ".doc.txt.swp"); len(sizes) != 0 {
+		t.Errorf("want no version of a replaced swap file, got %v", sizes)
+	}
+	slabs, err := db.DeleteFile(acc, share, ".doc.txt.swp")
+	if err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	if sizes := versionSizes(t, db, share, ".doc.txt.swp"); len(sizes) != 0 {
+		t.Errorf("want no version of a deleted swap file, got %v", sizes)
+	}
+	if n := bufferedBytes(t, db); n != 0 || len(slabs) != 0 {
+		t.Errorf("want the swap file's storage released, got %d bytes buffered and %v released", n, slabs)
+	}
+
+	// The swap save of an editor still leaves the real file its version.
+	plantPiece(t, db, share, acc, "doc.txt", types.Hash256{2}, 0, 400)
+	if _, err := db.RenameFile(acc, share, "doc.txt", "~WRL0001.tmp", false); err != nil {
+		t.Fatalf("RenameFile(away): %v", err)
+	}
+	plantPiece(t, db, share, acc, "doc.txt", types.Hash256{3}, 0, 300)
+	if _, err := db.DeleteFile(acc, share, "~WRL0001.tmp"); err != nil {
+		t.Fatalf("DeleteFile(old): %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt"); len(sizes) != 1 || sizes[0] != 400 {
+		t.Errorf("want the old contents as the version of the real file, got %v", sizes)
+	}
+
+	// A file with a history keeps it, and its contents, under a scratch name too.
+	if _, err := db.RenameFile(acc, share, "doc.txt", "doc.txt~", false); err != nil {
+		t.Fatalf("RenameFile(to a backup name): %v", err)
+	}
+	if _, err := db.DeleteFile(acc, share, "doc.txt~"); err != nil {
+		t.Fatalf("DeleteFile(backup name): %v", err)
+	}
+	if sizes := versionSizes(t, db, share, "doc.txt~"); len(sizes) != 2 || sizes[0] != 300 {
+		t.Errorf("want the renamed file kept with its history, got %v", sizes)
+	}
+}
+
 // TestDeletedFiles verifies that the files gone but for their versions are
 // listed under a folder, deepest deletions and all, newest first, that a
 // live file is not, that such a file under a gone folder still answers for

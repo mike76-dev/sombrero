@@ -54,14 +54,60 @@ func (db *Database) KeepsVersions() bool {
 	return db.versioning.Keep
 }
 
+// temporaryName reports whether the path names an editor's scratch file, which
+// leaves no versions: a vim swap or backup file, an Office or LibreOffice lock
+// file, an Emacs lock or autosave file, or a .tmp file.
+func temporaryName(path string) bool {
+	name := path[strings.LastIndex(path, "/")+1:]
+	lower := strings.ToLower(name)
+	switch {
+	case strings.HasSuffix(lower, ".tmp"), strings.HasSuffix(name, "~"):
+	case strings.HasPrefix(name, "~$"):
+	case strings.HasPrefix(name, ".~lock.") && strings.HasSuffix(name, "#"):
+	case strings.HasPrefix(name, ".#"), len(name) > 2 && strings.HasPrefix(name, "#") && strings.HasSuffix(name, "#"):
+	case strings.HasPrefix(name, ".") && len(lower) > 5 && lower[len(lower)-4:len(lower)-1] == ".sw" && lower[len(lower)-1] >= 'a' && lower[len(lower)-1] <= 'p':
+	default:
+		return false
+	}
+	return true
+}
+
+// scratch reports whether the path names an editor's scratch file with no
+// history, which leaves no versions. A file with versions is kept whatever its
+// name: a file renamed away keeps its history, and its contents with it.
+func scratch(ctx context.Context, tx pgx.Tx, share, path string) (bool, error) {
+	if !temporaryName(path) {
+		return false, nil
+	}
+	const query = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM versions v
+			JOIN objects o ON o.id = v.object_id
+			WHERE o.share_name = $1
+				AND o.full_path = $2
+		)
+	`
+
+	var history bool
+	if err := tx.QueryRow(ctx, query, share, path).Scan(&history); err != nil {
+		return false, fmt.Errorf("failed to look up the versions: %w", err)
+	}
+	return !history, nil
+}
+
 // keepsVersion says whether the file about to be replaced is kept: the policy
-// must say so, and the save must not continue the editing session that left
-// the newest version, which it does when it is the same account's, within the
-// gap of the session's last save and within the cap of its start.
+// must say so, the file must not be an editor's scratch file, and the save must
+// not continue the editing session that left the newest version, which it does
+// when it is the same account's, within the gap of the session's last save and
+// within the cap of its start.
 func (db *Database) keepsVersion(ctx context.Context, tx pgx.Tx, share, path string, account uint64) (bool, error) {
 	p := db.versioning
 	if !p.Keep {
 		return false, nil
+	}
+	if s, err := scratch(ctx, tx, share, path); err != nil || s {
+		return false, err
 	}
 	if p.Gap <= 0 {
 		return true, nil
@@ -109,6 +155,9 @@ func (db *Database) keepsVersion(ctx context.Context, tx pgx.Tx, share, path str
 func (db *Database) keepsReplaced(ctx context.Context, tx pgx.Tx, share, path string, ids []int64, account uint64, deliberate bool) (bool, error) {
 	if !deliberate || !db.versioning.Keep {
 		return db.keepsVersion(ctx, tx, share, path, account)
+	}
+	if s, err := scratch(ctx, tx, share, path); err != nil || s {
+		return false, err
 	}
 
 	const query = `

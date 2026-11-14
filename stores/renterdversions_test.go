@@ -152,6 +152,26 @@ func TestRenterdVersionLimits(t *testing.T) {
 	}
 }
 
+// TestRenterdTemporaryFilesLeaveNoVersions verifies that an editor's scratch
+// files leave no versions on a renterd share, replaced or deleted.
+func TestRenterdTemporaryFilesLeaveNoVersions(t *testing.T) {
+	ctx := context.Background()
+	db := NewTestStore(t, ctx)
+	defer db.Close()
+	db.SetVersioning(VersionPolicy{Keep: true, Count: 10})
+	acc, share, _ := newSlabTestFixture(t, db)
+
+	if id, _ := renterdSave(t, db, share, ".doc.txt.swp", acc, 1, false); id != 0 {
+		t.Errorf("want no version of a replaced swap file, got %d", id)
+	}
+	if id, _ := renterdSave(t, db, share, "doc.txt~", acc, 2, true); id != 0 {
+		t.Errorf("want no version of a deleted backup file, got %d", id)
+	}
+	if id, _ := renterdSave(t, db, share, "doc.txt", acc, 3, true); id == 0 {
+		t.Errorf("want the real file to keep its version")
+	}
+}
+
 // TestRenterdVersionsFollowTheFile verifies that the versions move with a
 // renamed file or folder, that the swap save is recognised, and that the
 // folder lists its versions and snapshots.
