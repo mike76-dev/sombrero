@@ -319,6 +319,18 @@ type FilesConfig struct {
 	Enabled bool `yaml:"enabled,omitempty"`
 }
 
+// EditorConfig names the Collabora Online server that edits documents in the
+// browser, which the file API serves to over WOPI. Off unless Collabora is set.
+type EditorConfig struct {
+	// Collabora is the address of the Collabora Online server, as the
+	// browsers reach it.
+	Collabora string `yaml:"collabora,omitempty"`
+
+	// URL is the address of this server as Collabora reaches it; the address
+	// the browser used where it is omitted.
+	URL string `yaml:"url,omitempty"`
+}
+
 // The defaults of the versioning.
 const (
 	DefaultVersionGap     = 10 * time.Minute
@@ -373,6 +385,7 @@ type Config struct {
 	Indexd   IndexdConfig   `yaml:"indexd,omitempty"`
 	Backup   BackupConfig   `yaml:"backup,omitempty"`
 	Files    FilesConfig    `yaml:"files,omitempty"`
+	Editor   EditorConfig   `yaml:"editor,omitempty"`
 
 	Versioning VersioningConfig `yaml:"versioning,omitempty"`
 }

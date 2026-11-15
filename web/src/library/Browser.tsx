@@ -17,7 +17,7 @@ import {
 } from './api'
 import { describe, outcome, runEach } from './batch'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
-import { binHash, hashFor } from './route'
+import { binHash, editHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { VersionsDialog } from './VersionsDialog'
 import { formatBytes, formatTime, formatTimeExact } from '../format'
@@ -51,6 +51,14 @@ const media: Record<string, string> = {
   avi: 'video/x-msvideo', mpg: 'video/mpeg', mpeg: 'video/mpeg', ogv: 'video/ogg', '3gp': 'video/3gpp',
   mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg',
   wav: 'audio/x-wav', flac: 'audio/flac', weba: 'audio/webm',
+}
+
+// documents lists the kinds of file the editor opens, as its discovery
+// document names them; the server has the last word on each.
+const documents = new Set(['docx', 'xlsx', 'pptx', 'doc', 'xls', 'ppt', 'odt', 'ods', 'odp', 'odg', 'rtf', 'txt', 'md', 'csv'])
+
+function canEdit(name: string): boolean {
+  return documents.has(extension(name))
 }
 
 const player = document.createElement('video')
@@ -110,12 +118,14 @@ export function Browser({
   shareRights,
   path,
   at,
+  editor,
   onExpired,
 }: {
   share: string
   shareRights?: Rights
   path: string
   at?: string
+  editor: boolean
   onExpired: () => void
 }) {
   const [listing, setListing] = useState<Listing | undefined>(undefined)
@@ -484,6 +494,7 @@ export function Browser({
                 at={at}
                 rights={rights}
                 canRestore={restoreRights.write}
+                editable={editor && !at && canEdit(e.name)}
                 draggable={canDrag && !at}
                 dragged={dragging?.some((d) => d.path === e.path) ?? false}
                 over={overFolder === e.path}
@@ -802,6 +813,7 @@ function Row({
   at,
   rights,
   canRestore,
+  editable,
   draggable,
   dragged,
   over,
@@ -819,6 +831,7 @@ function Row({
   at?: string
   rights: FolderRights
   canRestore: boolean
+  editable: boolean
   draggable: boolean
   dragged: boolean
   over: boolean
@@ -880,6 +893,11 @@ function Row({
       <td className="col-size muted">{entry.dir ? '' : formatBytes(entry.size)}</td>
       <td className="col-time muted">{formatTime(entry.modifiedAt)}</td>
       <td className="col-actions">
+        {editable && (
+          <a className="btn btn-small" href={editHash(share, entry.path)}>
+            {rights.write ? 'Edit' : 'View'}
+          </a>
+        )}
         {showable && (
           <a className="btn btn-small" href={href(true)} target="_blank" rel="noreferrer">
             Open

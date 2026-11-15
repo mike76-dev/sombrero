@@ -7,6 +7,21 @@ const base = '/files'
 export interface Identity {
   username: string
   workgroup: { uuid: string; name?: string }
+  editor?: boolean
+}
+
+// An EditSession is where the editor is loaded from, the access token it is
+// posted, and when the token expires, in milliseconds since the epoch.
+export interface EditSession {
+  url: string
+  token: string
+  ttl: number
+}
+
+// editSession opens the file in the editor: to edit where the account may
+// write, to view otherwise.
+export function editSession(share: string, path: string): Promise<EditSession> {
+  return call<EditSession>(`/share/${encodeURIComponent(share)}/edit`, { query: { path } })
 }
 
 export interface Rights {

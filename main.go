@@ -237,13 +237,24 @@ func main() {
 	a := api.NewAPI(ctx, db, server, cfg, version)
 	var fileAPI http.Handler
 	if cfg.Files.Enabled {
-		fileAPI = files.New(db, server)
+		fh := files.New(db, server)
+		if cfg.Editor.Collabora != "" {
+			if err := fh.SetEditor(cfg.Editor.Collabora, cfg.Editor.URL); err != nil {
+				log.Fatal(err)
+			}
+		}
+		fileAPI = fh
+	} else if cfg.Editor.Collabora != "" {
+		log.Println("The editor is configured, but the file API it works through is not enabled")
 	}
 	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, fileAPI, cfg.API.Password, cfg.Debug)}
 	go apiSrv.Serve(lAPI)
 	log.Printf("API and web UI: listening at http://%s, administration at http://%s/admin ...\n", lAPI.Addr(), lAPI.Addr())
 	if cfg.Files.Enabled {
 		log.Printf("File API: serving at http://%s/files ...\n", lAPI.Addr())
+		if cfg.Editor.Collabora != "" {
+			log.Printf("Editor: documents are edited with %s ...\n", cfg.Editor.Collabora)
+		}
 	}
 
 	go func() {

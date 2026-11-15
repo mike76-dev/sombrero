@@ -201,6 +201,22 @@ a.share-card:hover {
   margin: 0;
 }
 
+.editor-page {
+  gap: 12px;
+}
+
+.editor-bar {
+  margin-top: 0;
+}
+
+.editor-frame {
+  width: 100%;
+  height: calc(100vh - 110px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
 .dock {
   position: sticky;
   bottom: 16px;

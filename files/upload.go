@@ -67,27 +67,45 @@ func (h *Handler) uploadHandler(w http.ResponseWriter, req *http.Request, ps htt
 		return
 	}
 
-	// Nothing empty can be stored, so the first part is read before the
-	// upload is started, and an empty body starts none.
-	buf := make([]byte, partSize)
-	n, err := readPart(req.Body, buf)
-	if err != nil {
-		writeError(w, "failed to read the body", http.StatusBadRequest)
-		return
-	}
-	if n == 0 {
-		writeError(w, "an empty file cannot be stored", http.StatusBadRequest)
+	size, failure := h.storeBody(ctx, c, s.account, share.Name, key, partSize, req.Body)
+	if failure != nil {
+		writeError(w, failure.message, failure.code)
 		return
 	}
 
-	id, err := c.StartUpload(ctx, s.account, key)
+	entry := Entry{Name: path.Base(p), Path: p, Size: size}
+	if oi, err := c.Object(ctx, s.account, key); err == nil {
+		entry.CreatedAt, entry.ModifiedAt = oi.CreatedAt, oi.ModifiedAt
+	}
+	writeJSONStatus(w, http.StatusCreated, entry)
+}
+
+// failure is what a store that did not go through answers with.
+type failure struct {
+	code    int
+	message string
+}
+
+// storeBody stores the body as the file at the key, over whatever was there,
+// a part at a time, and returns the size stored. Nothing empty can be stored,
+// so the first part is read before the upload is started, and an empty body
+// starts none.
+func (h *Handler) storeBody(ctx context.Context, c client.Client, acc stores.Account, share, key string, partSize uint64, body io.Reader) (uint64, *failure) {
+	buf := make([]byte, partSize)
+	n, err := readPart(body, buf)
+	if err != nil {
+		return 0, &failure{http.StatusBadRequest, "failed to read the body"}
+	}
+	if n == 0 {
+		return 0, &failure{http.StatusBadRequest, "an empty file cannot be stored"}
+	}
+
+	id, err := c.StartUpload(ctx, acc, key)
 	if errors.Is(err, stores.ErrNotFound) {
-		writeError(w, "the file is being written by somebody else", http.StatusConflict)
-		return
+		return 0, &failure{http.StatusConflict, "the file is being written by somebody else"}
 	} else if err != nil {
-		log.Printf("file API: failed to start the upload of %s on %s: %v", p, share.Name, err)
-		writeError(w, "internal error", http.StatusInternalServerError)
-		return
+		log.Printf("file API: failed to start the upload of %s on %s: %v", key, share, err)
+		return 0, &failure{http.StatusInternalServerError, "internal error"}
 	}
 
 	// The parts are sent one after another: what bounds the memory is one
@@ -97,34 +115,26 @@ func (h *Handler) uploadHandler(w http.ResponseWriter, req *http.Request, ps htt
 	for number := 1; n > 0; number++ {
 		eTag, err := c.Write(ctx, bytes.NewReader(buf[:n]), key, id, number, offset, uint64(n))
 		if err != nil {
-			log.Printf("file API: failed to store part %d of %s on %s: %v", number, p, share.Name, err)
+			log.Printf("file API: failed to store part %d of %s on %s: %v", number, key, share, err)
 			h.abortUpload(ctx, c, key, id)
-			writeError(w, "failed to store the file", http.StatusInternalServerError)
-			return
+			return 0, &failure{http.StatusInternalServerError, "failed to store the file"}
 		}
 		parts = append(parts, api.MultipartCompletedPart{PartNumber: number, ETag: eTag})
 		offset += uint64(n)
 
-		n, err = readPart(req.Body, buf)
+		n, err = readPart(body, buf)
 		if err != nil {
 			h.abortUpload(ctx, c, key, id)
-			writeError(w, "failed to read the body", http.StatusBadRequest)
-			return
+			return 0, &failure{http.StatusBadRequest, "failed to read the body"}
 		}
 	}
 
 	if err := c.FinishUpload(ctx, key, id, parts); err != nil {
-		log.Printf("file API: failed to finish the upload of %s on %s: %v", p, share.Name, err)
+		log.Printf("file API: failed to finish the upload of %s on %s: %v", key, share, err)
 		h.abortUpload(ctx, c, key, id)
-		writeError(w, "failed to store the file", http.StatusInternalServerError)
-		return
+		return 0, &failure{http.StatusInternalServerError, "failed to store the file"}
 	}
-
-	entry := Entry{Name: path.Base(p), Path: p, Size: offset}
-	if oi, err := c.Object(ctx, s.account, key); err == nil {
-		entry.CreatedAt, entry.ModifiedAt = oi.CreatedAt, oi.ModifiedAt
-	}
-	writeJSONStatus(w, http.StatusCreated, entry)
+	return offset, nil
 }
 
 // readPart fills the buffer from the body as far as the body goes. Only its
