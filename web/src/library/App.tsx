@@ -1,5 +1,6 @@
 import { ReactNode, useCallback, useEffect, useState } from 'react'
 import { FilesError, Identity, ShareInfo, logout, me, shares } from './api'
+import { ActivityPage } from './ActivityPage'
 import { Browser } from './Browser'
 import { DeletedPage } from './DeletedPage'
 import { EditorPage } from './EditorPage'
@@ -117,10 +118,11 @@ function Library({
   const [shareList, setShareList] = useState<ShareInfo[] | undefined>(undefined)
   const [shareError, setShareError] = useState<string | null>(null)
 
-  // The tab names the place: the folder, the share, or its deleted files.
+  // The tab names the place: the folder, the share, its deleted files or its activity.
   useEffect(() => {
     const folder = route.path.slice(route.path.lastIndexOf('/') + 1)
-    const place = route.share === null ? '' : route.bin ? `Deleted files · ${route.share}` : folder || route.share
+    const place =
+      route.share === null ? '' : route.bin ? `Deleted files · ${route.share}` : route.activity ? `Activity · ${route.share}` : folder || route.share
     document.title = place ? `${place} · Sombrero` : 'Sombrero'
     return () => {
       document.title = 'Sombrero'
@@ -169,6 +171,8 @@ function Library({
           <SharesPage shares={shareList} error={shareError} />
         ) : route.bin ? (
           <DeletedPage share={route.share} shareRights={shareList?.find((s) => s.name === route.share)?.rights} onExpired={onExpired} />
+        ) : route.activity ? (
+          <ActivityPage share={route.share} onExpired={onExpired} />
         ) : route.edit ? (
           <EditorPage share={route.share} path={route.path} onExpired={onExpired} />
         ) : (

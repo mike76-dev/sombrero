@@ -17,7 +17,7 @@ import {
 } from './api'
 import { describe, outcome, runEach } from './batch'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
-import { binHash, editHash, hashFor } from './route'
+import { activityHash, binHash, editHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { VersionsDialog } from './VersionsDialog'
 import { formatBytes, formatTime, formatTimeExact } from '../format'
@@ -444,9 +444,14 @@ export function Browser({
             </button>
           )}
           {!error && !at && (
-            <a className="btn" href={binHash(share)}>
-              Deleted files
-            </a>
+            <>
+              <a className="btn" href={binHash(share)}>
+                Deleted files
+              </a>
+              <a className="btn" href={activityHash(share)}>
+                Activity
+              </a>
+            </>
           )}
         </div>
       </div>
