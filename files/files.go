@@ -56,10 +56,12 @@ type LoginRequest struct {
 	Password  string `json:"password"`
 }
 
-// Identity is who a session belongs to: the response of POST /login and GET /me.
+// Identity is who a session belongs to: the response of POST /login and GET
+// /me. Editor says whether documents can be edited in the browser here.
 type Identity struct {
 	Username  string            `json:"username"`
 	Workgroup WorkgroupIdentity `json:"workgroup"`
+	Editor    bool              `json:"editor,omitempty"`
 }
 
 // WorkgroupIdentity names the workgroup of an identity.
@@ -85,6 +87,12 @@ type Handler struct {
 	mu       sync.Mutex
 	sessions map[string]session
 
+	// The editor, where one is configured, with the access tokens it holds
+	// on files and the locks it takes on them.
+	editor     *editor
+	wopiTokens map[string]wopiToken
+	wopiLocks  map[string]wopiLock
+
 	// now is the clock, and chunkSize how much of a file a download fetches
 	// at a time for the share's part size; both replaceable by the tests.
 	now       func() time.Time
@@ -95,12 +103,14 @@ type Handler struct {
 // store and reaching the shares through the server.
 func New(store Store, srv Server) *Handler {
 	h := &Handler{
-		router:    httprouter.New(),
-		store:     store,
-		server:    srv,
-		sessions:  make(map[string]session),
-		now:       time.Now,
-		chunkSize: client.ReadChunkSize,
+		router:     httprouter.New(),
+		store:      store,
+		server:     srv,
+		sessions:   make(map[string]session),
+		wopiTokens: make(map[string]wopiToken),
+		wopiLocks:  make(map[string]wopiLock),
+		now:        time.Now,
+		chunkSize:  client.ReadChunkSize,
 	}
 	h.router.POST("/login", h.loginHandler)
 	h.router.POST("/logout", h.logoutHandler)
@@ -122,6 +132,11 @@ func New(store Store, srv Server) *Handler {
 	h.router.POST("/share/:name/restore", h.withSession(h.restoreHandler))
 	h.router.POST("/share/:name/keep", h.withSession(h.keepHandler))
 	h.router.DELETE("/share/:name/keep", h.withSession(h.keepHandler))
+	h.router.GET("/share/:name/edit", h.withSession(h.editHandler))
+	h.router.GET("/wopi/files/:id", h.withToken(h.checkFileInfoHandler))
+	h.router.GET("/wopi/files/:id/contents", h.withToken(h.getFileHandler))
+	h.router.POST("/wopi/files/:id/contents", h.withToken(h.putFileHandler))
+	h.router.POST("/wopi/files/:id", h.withToken(h.lockHandler))
 	return h
 }
 
@@ -190,7 +205,7 @@ func (h *Handler) loginHandler(w http.ResponseWriter, req *http.Request, _ httpr
 		Secure:   req.TLS != nil || req.Header.Get("X-Forwarded-Proto") == "https",
 		SameSite: http.SameSiteStrictMode,
 	})
-	writeJSON(w, identityOf(acc, wg))
+	writeJSON(w, h.identityOf(acc, wg))
 }
 
 // resolveWorkgroup finds the workgroup the login names, by UUID or by name. A
@@ -224,7 +239,7 @@ func (h *Handler) meHandler(w http.ResponseWriter, req *http.Request, _ httprout
 		writeError(w, "not logged in", http.StatusUnauthorized)
 		return
 	}
-	writeJSON(w, identityOf(s.account, s.workgroup))
+	writeJSON(w, h.identityOf(s.account, s.workgroup))
 }
 
 // startSession records a login and returns its token. Sessions that have run
@@ -262,8 +277,8 @@ func (h *Handler) authenticate(req *http.Request) (session, bool) {
 	return s, true
 }
 
-func identityOf(acc stores.Account, wg stores.Workgroup) Identity {
-	return Identity{Username: acc.Username, Workgroup: WorkgroupIdentity{UUID: wg.UUID, Name: wg.Name}}
+func (h *Handler) identityOf(acc stores.Account, wg stores.Workgroup) Identity {
+	return Identity{Username: acc.Username, Workgroup: WorkgroupIdentity{UUID: wg.UUID, Name: wg.Name}, Editor: h.editor != nil}
 }
 
 // writeJSON writes a JSON object to the response body.

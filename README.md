@@ -128,6 +128,9 @@ backup:                       # optional: catalogs of what the shares hold, to r
                               # in bytes, so that the file is complete in the backup; defaults to 262144
 files:                        # optional: the file API, which lets the accounts reach their shares over HTTP (see below)
   enabled: false              # off unless set; needs the Normal mode
+editor:                       # optional: edits documents in the browser with a Collabora Online server (see below); needs the file API
+  collabora: https://office.example.com # the address of the Collabora Online server, as the browsers reach it
+  url: https://files.example.com        # optional: the address of this server as Collabora reaches it; defaults to the address the browser used
 versioning:                   # optional: keeps the previous contents of replaced files (see below)
   enabled: false              # off unless set; needs the Normal mode
   gap: 10m                    # optional: saves closer together than this belong to one editing session and leave one version; defaults to 10m, "never" keeps every single save
@@ -455,6 +458,24 @@ curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/list?path=/Projec
 curl -b cookies.txt -o plan-then.pdf "http://127.0.0.1:9999/files/share/<SHARE>/version?path=/Projects/plan.pdf&at=2026-11-05T17:30:00Z"
 curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/share/<SHARE>/restore?path=/Projects/plan.pdf&at=2026-11-05T17:30:00Z"
 ```
+
+## Editing Documents in the Browser
+Documents on the shares can be edited in the browser with [Collabora Online](https://www.collaboraonline.com/), which is LibreOffice as a web service. Sombrero speaks the WOPI protocol to it: the editor fetches the document from the file API, the browsers edit it in the editor's own pages, and every save comes back to the file API as a replacement of the file, which versioning retains under the usual session rule. Several accounts editing one document work on it together, in one editing session. The feature requires the [file API](#file-api) and is enabled by naming the Collabora Online server in the config file:
+```YAML
+editor:
+  collabora: https://office.example.com
+  url: https://files.example.com
+```
+`collabora` is the address of the editor as the browsers reach it; `url` is the address of this server as the editor reaches it, which may be omitted where it is the address the browsers use, as it is behind a reverse proxy that serves both. The two must be able to reach each other: the editor calls the file API, and the browsers call both. In production both run behind TLS; on a single machine the editor may run without it:
+```Bash
+docker run -d --name collabora --restart unless-stopped --network host \
+  -e "aliasgroup1=https://files.example.com:443" \
+  -e "extra_params=--o:ssl.enable=false --o:ssl.termination=true" \
+  collabora/code
+```
+`aliasgroup1` names the address of this server as the editor is allowed to call it, which must match `url`, or the address the browsers use, exactly; without it the editor refuses the document. The editor listens on port 9980 and is proxied like the web UI (see [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)); the `collabora/code` image is the Collabora Online Development Edition, which is free to run under the Mozilla Public License and enforces no limit on users or documents; Collabora describes it as meant for testing, home use and small teams, and sells supported builds of the same software for larger deployments. OnlyOffice speaks WOPI as well, but has not been tested.
+
+The library offers **Edit** on the documents the editor opens, which are those the editor's discovery document lists: the OpenDocument and Microsoft Office formats, RTF, Markdown and plain text among them. An account that may not write the file views it in the editor instead. The file API serves the editor at `GET /files/share/<SHARE>/edit?path=/Projects/plan.docx`, which issues an access token on the file and returns the editor's URL with the file named in it, and under `/files/wopi/`, where the editor reads the file, saves it and takes its lock with the token rather than a session. The token is good for as long as the session that issued it. A save over a file that changed in the meantime, over SMB for instance, is refused, and the editor asks the user whether to overwrite the file or to keep both; a lock held by another editor refuses the save as well.
 
 ## Guest and Anonymous Access
 A share is reached only by the accounts its policies name, unless it is told to offer one of the two ways in below. Those are two different concepts, and both are turned off by default.

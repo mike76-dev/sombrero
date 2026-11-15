@@ -3,12 +3,14 @@ import { useEffect, useState } from 'react'
 // A place in the library is a hash: #/ for the shares, #/<share> for the root
 // of a share and #/<share>/<folder>/<folder> for a folder in it, each segment
 // URL-encoded. A folder as it was carries the time: #/<share>/<folder>?at=<time>.
-// The deleted files of a share are at #/<share>?bin.
+// The deleted files of a share are at #/<share>?bin, and a file in the editor
+// at #/<share>/<folder>/<file>?edit.
 export interface Route {
   share: string | null
   path: string
   at?: string
   bin?: boolean
+  edit?: boolean
 }
 
 export function parseRoute(hash: string): Route {
@@ -20,7 +22,17 @@ export function parseRoute(hash: string): Route {
   if (segments.length === 0) return { share: null, path: '/' }
   const params = new URLSearchParams(query)
   const at = params.get('at') ?? undefined
-  return { share: segments[0], path: '/' + segments.slice(1).join('/'), at, bin: params.has('bin') || undefined }
+  return {
+    share: segments[0],
+    path: '/' + segments.slice(1).join('/'),
+    at,
+    bin: params.has('bin') || undefined,
+    edit: params.has('edit') || undefined,
+  }
+}
+
+export function editHash(share: string, path: string): string {
+  return hashFor(share, path) + '?edit'
 }
 
 export function hashFor(share: string | null, path = '/', at?: string): string {
