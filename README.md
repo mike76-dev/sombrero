@@ -494,6 +494,8 @@ Downloads over WebDAV and the [file API](#file-api) are served through a read ca
 
 The address to mount is `https://sombrero.example.com/dav/`, or `https://sombrero.example.com/dav/<SHARE>/` for one share. On macOS it goes into `Go -> Connect to Server...` of the Finder; on Linux into the file manager as `davs://sombrero.example.com/dav/`, or `davfs2` mounts it; on Windows into `Map network drive` with `Connect using different credentials`, where the built-in client requires HTTPS for Basic authentication and treats files larger than 50 MB as absent until the registry value `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\FileSizeLimitInBytes` is raised. Third-party clients such as Cyberduck, Mountain Duck or rclone avoid the limits of the built-in ones.
 
+The [library](web/README.md) offers **Open in desktop application** on a document, which hands it to the office suite over WebDAV without mounting a drive: the suite opens the document from its WebDAV address, locks it while it is open and saves it to the share, and each save is retained as a version where the share keeps them. The link uses the Office URI schemes, so it works wherever an office suite is registered for them: Microsoft Office registers them, and LibreOffice does so on Linux and, when its installer is told to handle Microsoft Office documents, on Windows. The suite asks for the WebDAV credentials, and Microsoft Office sends them over HTTPS only.
+
 ## Guest and Anonymous Access
 A share is reached only by the accounts its policies name, unless it is told to offer one of the two ways in below. Those are two different concepts, and both are turned off by default.
 

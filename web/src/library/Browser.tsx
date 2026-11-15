@@ -61,6 +61,36 @@ function canEdit(name: string): boolean {
   return documents.has(extension(name))
 }
 
+// officeSchemes maps each kind of document to the Office URI scheme that the
+// desktop suite handling such documents, whichever it is, registers for.
+const officeSchemes: Record<string, string> = {
+  docx: 'ms-word',
+  docm: 'ms-word',
+  dotx: 'ms-word',
+  doc: 'ms-word',
+  odt: 'ms-word',
+  rtf: 'ms-word',
+  xlsx: 'ms-excel',
+  xlsm: 'ms-excel',
+  xls: 'ms-excel',
+  ods: 'ms-excel',
+  csv: 'ms-excel',
+  pptx: 'ms-powerpoint',
+  pptm: 'ms-powerpoint',
+  ppt: 'ms-powerpoint',
+  odp: 'ms-powerpoint',
+}
+
+// officeLink is the URI that opens the file in the desktop application over
+// WebDAV, for editing where the account may write and for viewing otherwise,
+// or nothing for a file that is not a document.
+function officeLink(share: string, path: string, write: boolean): string | null {
+  const scheme = officeSchemes[extension(path)]
+  if (!scheme) return null
+  const segments = [share, ...path.split('/').filter((s) => s !== '')].map(encodeURIComponent)
+  return `${scheme}:${write ? 'ofe' : 'ofv'}|u|${window.location.origin}/dav/${segments.join('/')}`
+}
+
 const player = document.createElement('video')
 
 function canShow(name: string): boolean {
@@ -857,6 +887,8 @@ function Row({
   const showable = !entry.dir && canShow(entry.name)
   // Renaming and moving take the right to delete as well, so the menu hangs on it.
   const manage = !entry.dir || rights.delete
+  // The desktop application opens the file as it is now, so not in the past.
+  const office = entry.dir || at ? null : officeLink(share, entry.path, rights.write)
   const classes = [dragged ? 'row-dragging' : '', over ? 'drop-target' : ''].filter(Boolean).join(' ')
   return (
     <tr
@@ -919,6 +951,11 @@ function Row({
               ⋯
             </summary>
             <div className="menu-items">
+              {office && (
+                <a className="menu-item" href={office} onClick={() => menu.current && (menu.current.open = false)}>
+                  Open in desktop application
+                </a>
+              )}
               {!entry.dir && (
                 <button className="menu-item" onClick={() => pick({ kind: 'versions', entry })}>
                   Versions

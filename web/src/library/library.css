@@ -346,6 +346,11 @@ tr.drop-target td:last-child {
   background: var(--surface-2);
 }
 
+a.menu-item {
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 .menu-item-danger {
   color: var(--danger);
 }
