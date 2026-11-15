@@ -36,6 +36,14 @@ type mockStore struct {
 	getShare            func(string) (stores.Share, error)
 	getShares           func(stores.Account) ([]stores.Share, error)
 	getAccessRights     func(stores.Share, stores.Account) (stores.AccessRights, error)
+	activity            func(string, stores.Account, uint64, int) ([]stores.Activity, error)
+}
+
+func (m *mockStore) Activity(share string, acc stores.Account, before uint64, limit int) ([]stores.Activity, error) {
+	if m.activity != nil {
+		return m.activity(share, acc, before, limit)
+	}
+	return nil, nil
 }
 
 var partners = stores.Workgroup{ID: 7, UUID: testUUID, Name: "partners"}

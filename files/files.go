@@ -26,6 +26,7 @@ type Store interface {
 	GetShare(name string) (stores.Share, error)
 	GetShares(acc stores.Account) ([]stores.Share, error)
 	GetAccessRights(share stores.Share, acc stores.Account) (stores.AccessRights, error)
+	Activity(share string, acc stores.Account, before uint64, limit int) ([]stores.Activity, error)
 }
 
 // Server is as much of the SMB server as the file API needs: the way to the
@@ -131,6 +132,7 @@ func New(store Store, srv Server) *Handler {
 	h.router.GET("/share/:name/snapshots", h.withSession(h.snapshotsHandler))
 	h.router.GET("/share/:name/versions", h.withSession(h.versionsHandler))
 	h.router.GET("/share/:name/deleted", h.withSession(h.deletedHandler))
+	h.router.GET("/share/:name/activity", h.withSession(h.activityHandler))
 	h.router.DELETE("/share/:name/versions", h.withSession(h.deleteVersionsHandler))
 	h.router.GET("/share/:name/version", h.withSession(h.versionHandler))
 	h.router.POST("/share/:name/restore", h.withSession(h.restoreHandler))
