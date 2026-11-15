@@ -74,6 +74,9 @@ func contentHeaders(w http.ResponseWriter, name string, inline bool) {
 	if ctype == "" {
 		ctype = "application/octet-stream"
 	}
+	// A copy the browser keeps is used again only once the server has
+	// agreed, so that it goes with the session or the link that fetched it.
+	w.Header().Set("Cache-Control", "private, no-cache")
 	disposition := "attachment"
 	if inline {
 		disposition = "inline"

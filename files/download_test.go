@@ -113,6 +113,7 @@ func TestDownloadingAFile(t *testing.T) {
 		"Content-Disposition": `attachment; filename=readme.txt`,
 		"Accept-Ranges":       "bytes",
 		"Last-Modified":       readmeModified.UTC().Format(http.TimeFormat),
+		"Cache-Control":       "private, no-cache",
 	} {
 		if got := r.Header().Get(name); got != want {
 			t.Errorf("%s: want %q, got %q", name, want, got)

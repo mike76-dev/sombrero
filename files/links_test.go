@@ -126,6 +126,9 @@ func TestSharingLinks(t *testing.T) {
 	if got := r.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "inline;") {
 		t.Errorf("the link: want the file shown, got %q", got)
 	}
+	if got := r.Header().Get("Cache-Control"); got != "private, no-cache" {
+		t.Errorf("the link: want a copy used only once the server agrees, got %q", got)
+	}
 	if r := public("/link/"+made.Token+"?download=1", http.MethodGet); !strings.HasPrefix(r.Header().Get("Content-Disposition"), "attachment;") {
 		t.Errorf("download: want the file saved, got %q", r.Header().Get("Content-Disposition"))
 	}
