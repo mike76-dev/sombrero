@@ -2,11 +2,13 @@ package files
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,12 +162,12 @@ func TestDownloadingAFile(t *testing.T) {
 	}
 }
 
-// TestDownloadingARange verifies that a range is served from where it starts,
-// and that one past the end is refused.
+// TestDownloadingARange verifies that a range is served from where it starts
+// with one fetch, and that one past the end is refused.
 func TestDownloadingARange(t *testing.T) {
 	mc := readingClient()
 	h, w := loggedIn(t, &mockStore{}, &mockServer{client: mc}, "alice", "hunter2")
-	h.chunkSize = func(uint64) uint64 { return 32 }
+	h.chunkSize = func(uint64) uint64 { return 64 }
 
 	r := download(h, w, "path=/readme.txt", map[string]string{"Range": "bytes=40-59"})
 	if r.Code != http.StatusPartialContent {
@@ -177,7 +179,7 @@ func TestDownloadingARange(t *testing.T) {
 	if got := r.Header().Get("Content-Range"); got != "bytes 40-59/100" {
 		t.Errorf("Content-Range: want %q, got %q", "bytes 40-59/100", got)
 	}
-	if len(mc.reads) != 1 || mc.reads[0] != [2]uint64{40, 32} {
+	if len(mc.reads) != 1 || mc.reads[0] != [2]uint64{40, 60} {
 		t.Errorf("want one read from 40, got %v", mc.reads)
 	}
 
@@ -222,22 +224,225 @@ func TestDownloadRefusals(t *testing.T) {
 	}
 }
 
+// fetchLog records the fetches a reader makes, from whichever goroutine.
+type fetchLog struct {
+	mu      sync.Mutex
+	fetched [][2]uint64
+}
+
+func (l *fetchLog) fetch(_ context.Context, offset, length uint64, w io.Writer) error {
+	l.mu.Lock()
+	l.fetched = append(l.fetched, [2]uint64{offset, length})
+	l.mu.Unlock()
+	_, err := w.Write(make([]byte, length))
+	return err
+}
+
+func (l *fetchLog) all() [][2]uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([][2]uint64(nil), l.fetched...)
+}
+
+func (l *fetchLog) reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.fetched = nil
+}
+
+const mib = 1 << 20
+
+// testReader reads a file of the size through the cache in chunks of the size.
+func testReader(c *readCache, file fileKey, chunk uint64, fetch fetchFunc) *objectReader {
+	return &objectReader{cache: c, file: file, fetch: fetch, chunk: chunk}
+}
+
+// sameFetches fails the test unless the fetches are the ones wanted, in order.
+func sameFetches(t *testing.T, what string, got, want [][2]uint64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: want the fetches %v, got %v", what, want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("%s: fetch %d: want %v, got %v", what, i, want[i], got[i])
+		}
+	}
+}
+
+// TestObjectReaderFetchesGrow verifies that a reader starts small and doubles
+// its fetches while the reads stay sequential, up to the chunk, and that a
+// read elsewhere starts small again, so that a seek-and-peek costs little and
+// a stream soon reads in whole chunks.
+func TestObjectReaderFetchesGrow(t *testing.T) {
+	l := &fetchLog{}
+	c := newReadCache(readCacheBudget)
+	file := fileKey{key: "big.bin", size: 20 * mib}
+	r := testReader(c, file, 8*mib, l.fetch)
+
+	if n, err := io.Copy(io.Discard, r); err != nil || n != 20*mib {
+		t.Fatalf("reading the whole file: got %d bytes, %v", n, err)
+	}
+	sameFetches(t, "a stream", l.all(), [][2]uint64{{0, mib}, {mib, 2 * mib}, {3 * mib, 4 * mib}, {7 * mib, 8 * mib}, {15 * mib, 5 * mib}})
+
+	// Another file is read from the middle: the fetch starts small again.
+	l.reset()
+	other := testReader(c, fileKey{key: "big.bin", version: 2, size: 20 * mib}, 8*mib, l.fetch)
+	if _, err := other.Seek(5*mib, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := io.ReadFull(other, make([]byte, 64<<10)); err != nil {
+		t.Fatalf("reading after the seek: %v", err)
+	}
+	sameFetches(t, "a seek-and-peek", l.all(), [][2]uint64{{5 * mib, mib}})
+}
+
+// TestReadCacheServesLaterRequests verifies that what one reader fetched
+// serves another reading the same file, as a mounted drive comes back for
+// the same bytes in a new request whenever its player seeks.
+func TestReadCacheServesLaterRequests(t *testing.T) {
+	l := &fetchLog{}
+	c := newReadCache(readCacheBudget)
+	file := fileKey{key: "big.bin", size: 5 * mib, modified: readmeModified}
+	if _, err := io.Copy(io.Discard, testReader(c, file, 8*mib, l.fetch)); err != nil {
+		t.Fatalf("reading the whole file: %v", err)
+	}
+	l.reset()
+
+	again := testReader(c, file, 8*mib, l.fetch)
+	if _, err := again.Seek(mib, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if n, err := io.Copy(io.Discard, again); err != nil || n != 4*mib {
+		t.Fatalf("reading the file again: got %d bytes, %v", n, err)
+	}
+	sameFetches(t, "the same file again", l.all(), nil)
+
+	// The file written anew is another file.
+	changed := fileKey{key: "big.bin", size: 5 * mib, modified: readmeModified.Add(time.Second)}
+	if _, err := io.ReadFull(testReader(c, changed, 8*mib, l.fetch), make([]byte, 10)); err != nil {
+		t.Fatalf("reading the changed file: %v", err)
+	}
+	sameFetches(t, "the file changed", l.all(), [][2]uint64{{0, mib}})
+}
+
+// TestObjectReaderReadsAhead verifies that the next piece is fetched while
+// the reads are in the second half of the one in hand, and that it is kept
+// for the request that comes for it, whether or not the reader that started
+// it goes on.
+func TestObjectReaderReadsAhead(t *testing.T) {
+	started := make(chan [2]uint64, 8)
+	fetch := func(_ context.Context, offset, length uint64, w io.Writer) error {
+		started <- [2]uint64{offset, length}
+		_, err := w.Write(make([]byte, length))
+		return err
+	}
+	c := newReadCache(readCacheBudget)
+	file := fileKey{key: "big.bin", size: 8 * mib}
+	r := testReader(c, file, 8*mib, fetch)
+
+	// The first half of the piece is served with no fetch ahead of it.
+	if _, err := io.ReadFull(r, make([]byte, mib/2)); err != nil {
+		t.Fatalf("reading the first half: %v", err)
+	}
+	if got := <-started; got != [2]uint64{0, mib} {
+		t.Fatalf("want the first megabyte fetched, got %v", got)
+	}
+	select {
+	case got := <-started:
+		t.Fatalf("want nothing fetched ahead in the first half, got %v", got)
+	default:
+	}
+
+	// Past the middle, the next piece is fetched before it is asked for.
+	if _, err := io.ReadFull(r, make([]byte, 1)); err != nil {
+		t.Fatalf("reading past the middle: %v", err)
+	}
+	select {
+	case got := <-started:
+		if got != [2]uint64{mib, 2 * mib} {
+			t.Fatalf("want the next two megabytes fetched ahead, got %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("want a fetch ahead, got none")
+	}
+
+	// The reader seeks away; another request for the piece fetched ahead
+	// finds it in the cache.
+	if _, err := r.Seek(5*mib, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := io.ReadFull(r, make([]byte, 1)); err != nil {
+		t.Fatalf("reading after the seek: %v", err)
+	}
+	if got := <-started; got != [2]uint64{5 * mib, mib} {
+		t.Errorf("after a seek: want a megabyte fetched from there, got %v", got)
+	}
+	next := testReader(c, file, 8*mib, fetch)
+	if _, err := next.Seek(mib, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := io.ReadFull(next, make([]byte, 1)); err != nil {
+		t.Fatalf("reading the piece fetched ahead: %v", err)
+	}
+	select {
+	case got := <-started:
+		t.Errorf("want the piece fetched ahead served from the cache, got the fetch %v", got)
+	default:
+	}
+}
+
+// TestReadCacheKeepsToItsBudget verifies that the cache drops the pieces
+// longest unused rather than grow past its budget.
+func TestReadCacheKeepsToItsBudget(t *testing.T) {
+	l := &fetchLog{}
+	c := newReadCache(2 * mib)
+	file := fileKey{key: "big.bin", size: 4 * mib}
+	if _, err := io.Copy(io.Discard, testReader(c, file, mib, l.fetch)); err != nil {
+		t.Fatalf("reading the whole file: %v", err)
+	}
+	sameFetches(t, "a stream", l.all(), [][2]uint64{{0, mib}, {mib, mib}, {2 * mib, mib}, {3 * mib, mib}})
+	if c.used > 2*mib {
+		t.Errorf("want at most two megabytes held, got %d", c.used)
+	}
+
+	// The end of the file is still in hand; the start is gone.
+	l.reset()
+	again := testReader(c, file, mib, l.fetch)
+	if _, err := again.Seek(3*mib, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := io.ReadFull(again, make([]byte, 10)); err != nil {
+		t.Fatalf("reading the end: %v", err)
+	}
+	if _, err := again.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := io.ReadFull(again, make([]byte, 10)); err != nil {
+		t.Fatalf("reading the start: %v", err)
+	}
+	sameFetches(t, "after the budget was reached", l.all(), [][2]uint64{{0, mib}})
+}
+
 // TestObjectReaderReportsShortReads verifies that a backend that hands back
 // less than asked for fails the read rather than passing a truncated file off
-// as whole.
+// as whole, and that a failed fetch is not kept.
 func TestObjectReaderReportsShortReads(t *testing.T) {
-	short := func(_, length uint64, w io.Writer) error {
+	short := func(_ context.Context, _, length uint64, w io.Writer) error {
 		_, err := w.Write(make([]byte, length-1))
 		return err
 	}
-	rd := &objectReader{fetch: short, path: "x", size: 10, chunk: 10}
-	if _, err := io.ReadAll(rd); err == nil || !strings.Contains(err.Error(), "want 10") {
+	c := newReadCache(readCacheBudget)
+	file := fileKey{key: "x", size: 10}
+	if _, err := io.ReadAll(testReader(c, file, 10, short)); err == nil || !strings.Contains(err.Error(), "want 10") {
 		t.Errorf("want a short read reported, got %v", err)
 	}
 
-	failing := func(uint64, uint64, io.Writer) error { return errStore }
-	rd = &objectReader{fetch: failing, path: "x", size: 10, chunk: 10}
-	if _, err := io.ReadAll(rd); !errors.Is(err, errStore) {
+	failing := func(context.Context, uint64, uint64, io.Writer) error { return errStore }
+	if _, err := io.ReadAll(testReader(c, file, 10, failing)); !errors.Is(err, errStore) {
 		t.Errorf("want the backend's error, got %v", err)
+	}
+	if len(c.files) != 0 || c.used != 0 {
+		t.Errorf("want nothing kept of the failed fetches, got %d files and %d bytes", len(c.files), c.used)
 	}
 }

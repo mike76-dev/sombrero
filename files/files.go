@@ -93,6 +93,9 @@ type Handler struct {
 	wopiTokens map[string]wopiToken
 	wopiLocks  map[string]wopiLock
 
+	// cache holds what downloads fetched lately, for the requests to come.
+	cache *readCache
+
 	// now is the clock, and chunkSize how much of a file a download fetches
 	// at a time for the share's part size; both replaceable by the tests.
 	now       func() time.Time
@@ -109,6 +112,7 @@ func New(store Store, srv Server) *Handler {
 		sessions:   make(map[string]session),
 		wopiTokens: make(map[string]wopiToken),
 		wopiLocks:  make(map[string]wopiLock),
+		cache:      newReadCache(readCacheBudget),
 		now:        time.Now,
 		chunkSize:  client.ReadChunkSize,
 	}

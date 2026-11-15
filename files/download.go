@@ -1,9 +1,8 @@
 package files
 
 import (
-	"bytes"
+	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"mime"
@@ -59,14 +58,10 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 	contentHeaders(w, req, path.Base(p))
 
 	// The chunk follows the share's part size the way the SMB read cache's does.
-	rd := &objectReader{
-		fetch: func(offset, length uint64, w io.Writer) error {
+	rd := h.newReader(fileKey{share: share.Name, key: key, size: oi.Size, modified: oi.ModifiedAt}, partSize,
+		func(ctx context.Context, offset, length uint64, w io.Writer) error {
 			return c.Read(ctx, s.account, key, offset, length, w)
-		},
-		path:  key,
-		size:  oi.Size,
-		chunk: h.chunkSize(partSize),
-	}
+		})
 	http.ServeContent(w, req, "", oi.ModifiedAt, rd)
 }
 
@@ -101,42 +96,45 @@ func selfContained(ctype string) bool {
 		strings.HasPrefix(ctype, "audio/")
 }
 
-// objectReader reads a file off its share a chunk at a time, which is what
-// lets a download be served without holding the whole file.
+// objectReader reads a file off its share through the read cache a piece at a
+// time, which is what lets a download be served without holding the whole
+// file. Once the reads are past the middle of the piece in hand, the next is
+// fetched meanwhile, so that a stream does not stop for every fetch.
 type objectReader struct {
-	// fetch reads a range of the file into the writer, from wherever it is.
-	fetch func(offset, length uint64, w io.Writer) error
-	path  string
-	size  uint64
+	cache *readCache
+	file  fileKey
+	fetch fetchFunc
 	chunk uint64
 
-	pos   int64
-	buf   []byte
-	bufAt int64
+	pos int64
+	seg *segment
 }
 
-// Read implements io.Reader. A read outside the chunk in hand fetches the
-// chunk starting where the read does, so a sequential read stays contiguous.
+// newReader reads the file with the handler's cache.
+func (h *Handler) newReader(file fileKey, partSize uint64, fetch fetchFunc) *objectReader {
+	return &objectReader{cache: h.cache, file: file, fetch: fetch, chunk: h.chunkSize(partSize)}
+}
+
+// Read implements io.Reader.
 func (r *objectReader) Read(p []byte) (int, error) {
-	if r.pos >= int64(r.size) {
+	if r.pos >= int64(r.file.size) {
 		return 0, io.EOF
 	}
-	if r.buf == nil || r.pos < r.bufAt || r.pos >= r.bufAt+int64(len(r.buf)) {
-		start := uint64(r.pos)
-		n := min(r.chunk, r.size-start)
-		var b bytes.Buffer
-		b.Grow(int(n))
-		if err := r.fetch(start, n, &b); err != nil {
-			log.Printf("file API: failed to read %s at %d: %v", r.path, start, err)
-			return 0, err
+	pos := uint64(r.pos)
+	if r.seg == nil || pos < r.seg.at || pos >= r.seg.end() {
+		s := r.cache.segmentAt(r.file, pos, r.chunk, r.fetch)
+		<-s.done
+		if s.err != nil {
+			log.Printf("file API: failed to read %s at %d: %v", r.file.key, s.at, s.err)
+			return 0, s.err
 		}
-		if uint64(b.Len()) != n {
-			return 0, fmt.Errorf("read %d bytes of %s at %d, want %d", b.Len(), r.path, start, n)
-		}
-		r.buf, r.bufAt = b.Bytes(), int64(start)
+		r.seg = s
 	}
-	k := copy(p, r.buf[r.pos-r.bufAt:])
+	k := copy(p, r.seg.data[pos-r.seg.at:])
 	r.pos += int64(k)
+	if end := r.seg.end(); end < r.file.size && uint64(r.pos)-r.seg.at > r.seg.n/2 {
+		r.cache.ahead(r.file, end, r.chunk, r.fetch)
+	}
 	return k, nil
 }
 
@@ -149,7 +147,7 @@ func (r *objectReader) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekCurrent:
 		pos = r.pos + offset
 	case io.SeekEnd:
-		pos = int64(r.size) + offset
+		pos = int64(r.file.size) + offset
 	default:
 		return 0, errors.New("invalid whence")
 	}
