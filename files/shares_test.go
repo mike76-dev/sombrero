@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ type mockClient struct {
 	read       func(string, uint64, uint64, io.Writer) error
 	pathAccess func(string) (stores.PathAccess, error)
 	listed     []string
+	mu         sync.Mutex
 	reads      [][2]uint64
 
 	// The upload hooks and what the client saw of one.
@@ -213,7 +215,9 @@ type sentPart struct {
 }
 
 func (m *mockClient) Read(_ context.Context, _ stores.Account, p string, offset, length uint64, w io.Writer) error {
+	m.mu.Lock()
 	m.reads = append(m.reads, [2]uint64{offset, length})
+	m.mu.Unlock()
 	if m.read != nil {
 		return m.read(p, offset, length, w)
 	}

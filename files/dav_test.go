@@ -2,12 +2,17 @@ package files
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/mike76-dev/sombrero/client"
+	"github.com/mike76-dev/sombrero/stores"
 )
 
 // davHandler returns the WebDAV handler over the docs share with readme.txt
@@ -145,6 +150,100 @@ func TestDAVDownload(t *testing.T) {
 	}
 	if w := dav(h, http.MethodGet, "/dav/docs/Projects/", `partners\alice`, "hunter2", nil); w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("a folder: want %d, got %d", http.StatusMethodNotAllowed, w.Code)
+	}
+}
+
+// clipByte is the byte at the offset of the test clip, telling every position apart.
+func clipByte(i uint64) byte { return byte(i*7 + i>>8 + i>>16) }
+
+// clipClient is a client with clip.mp4 of the size, whose reads take a moment.
+func clipClient(size uint64) *mockClient {
+	return &mockClient{
+		object: func(p string) (client.ObjectInfo, error) {
+			if p == "clip.mp4" {
+				return client.ObjectInfo{Key: "/clip.mp4", Size: size, ModifiedAt: readmeModified}, nil
+			}
+			return client.ObjectInfo{}, stores.ErrNotFound
+		},
+		read: func(p string, offset, length uint64, w io.Writer) error {
+			if p != "clip.mp4" || offset+length > size {
+				return stores.ErrNotFound
+			}
+			time.Sleep(20 * time.Millisecond)
+			b := make([]byte, length)
+			for i := range b {
+				b[i] = clipByte(offset + uint64(i))
+			}
+			_, err := w.Write(b)
+			return err
+		},
+	}
+}
+
+// TestDAVStreaming plays a clip the way a mounted drive does: one open-ended
+// GET per seek, read as far as the player cares to, then dropped for the
+// next, with two players at once. Every byte must be the right one, and no
+// request may hang.
+func TestDAVStreaming(t *testing.T) {
+	const size = 40 << 20
+	h := New(&mockStore{}, &mockServer{client: clipClient(size), partSize: 64})
+	h.chunkSize = func(uint64) uint64 { return 4 << 20 }
+	srv := httptest.NewServer(h.DAV())
+	defer srv.Close()
+
+	// get opens the clip from the offset and reads n bytes of it, checking them.
+	get := func(t *testing.T, from, n uint64) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/dav/docs/clip.mp4", nil)
+		req.SetBasicAuth(`partners\alice`, "hunter2")
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", from))
+		res, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("GET from %d: %v", from, err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusPartialContent {
+			t.Fatalf("GET from %d: want %d, got %d", from, http.StatusPartialContent, res.StatusCode)
+		}
+		if want := fmt.Sprintf("bytes %d-%d/%d", from, size-1, size); res.Header.Get("Content-Range") != want {
+			t.Fatalf("GET from %d: want Content-Range %q, got %q", from, want, res.Header.Get("Content-Range"))
+		}
+		b := make([]byte, n)
+		if _, err := io.ReadFull(res.Body, b); err != nil {
+			t.Fatalf("GET from %d: reading %d bytes: %v", from, n, err)
+		}
+		for i, c := range b {
+			if c != clipByte(from+uint64(i)) {
+				t.Fatalf("GET from %d: byte %d is wrong", from, from+uint64(i))
+			}
+		}
+	}
+
+	play := func(t *testing.T) {
+		get(t, 0, 300<<10)            // the head, read a little
+		get(t, size-(64<<10), 64<<10) // the index at the end
+		get(t, 0, 3<<20)              // back to the start, playing
+		get(t, 2<<20, 7<<20)          // a seek within what is in hand, playing on past it
+		get(t, 30<<20, 10<<20)        // a seek far ahead, to the end
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				play(t)
+			}()
+		}
+		wg.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("playing the clip hangs")
 	}
 }
 
