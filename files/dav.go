@@ -333,15 +333,10 @@ func (fs davFS) OpenFile(ctx context.Context, name string, flag int, _ os.FileMo
 	}
 	f := &davFile{fs: fs, place: p, info: info}
 	if !info.dir {
-		f.reader = &objectReader{
-			ctx: ctx,
-			fetch: func(ctx context.Context, offset, length uint64, w io.Writer) error {
+		f.reader = fs.h.newReader(fileKey{share: p.share.Name, key: p.key, size: info.size, modified: info.modified}, p.partSize,
+			func(ctx context.Context, offset, length uint64, w io.Writer) error {
 				return p.client.Read(ctx, p.session.account, p.key, offset, length, w)
-			},
-			path:  p.key,
-			size:  info.size,
-			chunk: fs.h.chunkSize(p.partSize),
-		}
+			})
 	}
 	return f, nil
 }

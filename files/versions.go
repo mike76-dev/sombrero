@@ -302,7 +302,6 @@ func (h *Handler) versionHandler(w http.ResponseWriter, req *http.Request, ps ht
 		return
 	}
 
-	ctx := req.Context()
 	fetch := func(ctx context.Context, offset, length uint64, w io.Writer) error {
 		return f.client.Read(ctx, s.account, f.key, offset, length, w)
 	}
@@ -315,14 +314,8 @@ func (h *Handler) versionHandler(w http.ResponseWriter, req *http.Request, ps ht
 
 	contentHeaders(w, req, path.Base(f.path))
 
-	rd := &objectReader{
-		ctx:   ctx,
-		fetch: fetch,
-		path:  f.key,
-		size:  version.Size,
-		chunk: h.chunkSize(f.partSize),
-	}
-	http.ServeContent(w, req, "", version.ModifiedAt, rd)
+	file := fileKey{share: f.share.Name, key: f.key, version: version.ID, size: version.Size, modified: version.ModifiedAt}
+	http.ServeContent(w, req, "", version.ModifiedAt, h.newReader(file, f.partSize, fetch))
 }
 
 // restoreHandler handles the POST /share/:name/restore calls, making the
