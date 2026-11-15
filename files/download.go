@@ -101,6 +101,12 @@ func selfContained(ctype string) bool {
 		strings.HasPrefix(ctype, "audio/")
 }
 
+// firstFetch is how much a reader fetches at first; the fetches double while
+// the reads stay sequential, up to the chunk. A request that reads a little
+// and leaves, as a player seeking through a file does, costs little that way,
+// and one that streams soon reads in whole chunks.
+const firstFetch = 1 << 20
+
 // objectReader reads a file off its share a chunk at a time, which is what
 // lets a download be served without holding the whole file.
 type objectReader struct {
@@ -113,6 +119,7 @@ type objectReader struct {
 	pos   int64
 	buf   []byte
 	bufAt int64
+	next  uint64
 }
 
 // Read implements io.Reader. A read outside the chunk in hand fetches the
@@ -123,7 +130,11 @@ func (r *objectReader) Read(p []byte) (int, error) {
 	}
 	if r.buf == nil || r.pos < r.bufAt || r.pos >= r.bufAt+int64(len(r.buf)) {
 		start := uint64(r.pos)
-		n := min(r.chunk, r.size-start)
+		if r.buf == nil || start != uint64(r.bufAt)+uint64(len(r.buf)) {
+			r.next = min(firstFetch, r.chunk)
+		}
+		n := min(r.next, r.size-start)
+		r.next = min(r.next*2, r.chunk)
 		var b bytes.Buffer
 		b.Grow(int(n))
 		if err := r.fetch(start, n, &b); err != nil {

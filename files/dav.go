@@ -37,9 +37,12 @@ func (h *Handler) DAV() http.Handler {
 		FileSystem: davFS{h: h},
 		LockSystem: webdav.NewMemLS(),
 		Logger: func(req *http.Request, err error) {
-			if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
-				log.Printf("WebDAV: %s %s: %v", req.Method, req.URL.Path, err)
+			// What a client is told in the status is not news for the log.
+			if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrExist) ||
+				errors.Is(err, webdav.ErrLocked) || errors.Is(err, webdav.ErrConfirmationFailed) {
+				return
 			}
+			log.Printf("WebDAV: %s %s: %v", req.Method, req.URL.Path, err)
 		},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

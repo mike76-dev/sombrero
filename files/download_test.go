@@ -225,6 +225,50 @@ func TestDownloadRefusals(t *testing.T) {
 // TestObjectReaderReportsShortReads verifies that a backend that hands back
 // less than asked for fails the read rather than passing a truncated file off
 // as whole.
+// TestObjectReaderFetchesGrow verifies that a reader starts small and doubles
+// its fetches while the reads stay sequential, and starts small again after
+// a seek, so that a seek-and-peek costs little and a stream soon reads in
+// whole chunks.
+func TestObjectReaderFetchesGrow(t *testing.T) {
+	const mib = 1 << 20
+	var fetched [][2]uint64
+	r := &objectReader{
+		fetch: func(offset, length uint64, w io.Writer) error {
+			fetched = append(fetched, [2]uint64{offset, length})
+			_, err := w.Write(make([]byte, length))
+			return err
+		},
+		path:  "big.bin",
+		size:  5 * mib,
+		chunk: 8 * mib,
+	}
+
+	if n, err := io.Copy(io.Discard, r); err != nil || n != 5*mib {
+		t.Fatalf("reading the whole file: got %d bytes, %v", n, err)
+	}
+	want := [][2]uint64{{0, mib}, {mib, 2 * mib}, {3 * mib, 2 * mib}}
+	if len(fetched) != len(want) {
+		t.Fatalf("want the fetches %v, got %v", want, fetched)
+	}
+	for i := range want {
+		if fetched[i] != want[i] {
+			t.Errorf("fetch %d: want %v, got %v", i, want[i], fetched[i])
+		}
+	}
+
+	// A seek out of the chunk in hand starts small again.
+	fetched = nil
+	if _, err := r.Seek(mib, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := io.ReadFull(r, make([]byte, 64<<10)); err != nil {
+		t.Fatalf("reading after the seek: %v", err)
+	}
+	if len(fetched) != 1 || fetched[0] != [2]uint64{mib, mib} {
+		t.Errorf("after a seek: want one fetch of a megabyte, got %v", fetched)
+	}
+}
+
 func TestObjectReaderReportsShortReads(t *testing.T) {
 	short := func(_, length uint64, w io.Writer) error {
 		_, err := w.Write(make([]byte, length-1))
