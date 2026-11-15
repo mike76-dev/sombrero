@@ -16,6 +16,8 @@ Where the server names a Collabora Online server (see [Editing Documents in the 
 
 **Deleted files** above the listing opens the deleted files of the share: every file that is gone but for its versions, the files of deleted folders included, each with its folder, its size and the time and account of its deletion. A file is restored to where it was, its folder made again if it is gone, or deleted permanently together with its versions, one at a time or as a selection; **Undo** in the notice of a restoration returns the file to the deleted files. The list empties as the versions expire.
 
+**Activity** above the listing opens the [activity feed](../README.md#activity-feed) of the share: what the accounts of the workgroup did on it, over SMB, the file API, WebDAV and the editor alike, newest first and day by day. Each entry names the account, says what it did, with the size of an uploaded or restored file, and links the file's folder, or the folder itself; **Show earlier activity** at the end loads the next page.
+
 ## Setup wizard
 
 Each of the things above has a page of its own, and the **Setup wizard** page walks through them in the order that gets a client onto a share: workgroup, account, share, connection, access policy. Every step either makes a new one or takes one that is already there, so the wizard is as good for adding an account to an existing setup as for a server with nothing on it yet. It is a way through the same pages, not a separate one: everything it does can be done on the pages themselves, which is also where anything is changed afterwards.

@@ -89,28 +89,39 @@ func plainDuration(d time.Duration) string {
 	}
 }
 
-// versionExpiryInterval is how often the versions past their age are dropped.
-const versionExpiryInterval = time.Hour
+const (
+	// expiryInterval is how often the versions and the activity past their
+	// age are dropped.
+	expiryInterval = time.Hour
+	// activityAge is how long the activity feed reaches back.
+	activityAge = 90 * 24 * time.Hour
+)
 
-// expireVersions drops the versions older than the age, on the indexd shares
-// through the database and on the renterd shares through the server, now and
-// then every interval, until the context ends.
-func expireVersions(ctx context.Context, db *stores.Database, s *server, age time.Duration) {
-	ticker := time.NewTicker(versionExpiryInterval)
+// expire drops the versions older than the age, where there is one, on the
+// indexd shares through the database and on the renterd shares through the
+// server, and the activity older than activityAge, now and then every
+// interval, until the context ends.
+func expire(ctx context.Context, db *stores.Database, s *server, age time.Duration) {
+	ticker := time.NewTicker(expiryInterval)
 	defer ticker.Stop()
 
 	for {
-		n, err := db.ExpireVersions(age)
-		if err != nil {
-			log.Printf("failed to expire versions: %v", err)
+		if age > 0 {
+			n, err := db.ExpireVersions(age)
+			if err != nil {
+				log.Printf("failed to expire versions: %v", err)
+			}
+			if m, err := s.ExpireRenterdVersions(ctx, age); err != nil {
+				log.Printf("failed to expire renterd versions: %v", err)
+			} else {
+				n += m
+			}
+			if n > 0 {
+				log.Printf("Versioning: dropped %d versions older than %v", n, age)
+			}
 		}
-		if m, err := s.ExpireRenterdVersions(ctx, age); err != nil {
-			log.Printf("failed to expire renterd versions: %v", err)
-		} else {
-			n += m
-		}
-		if n > 0 {
-			log.Printf("Versioning: dropped %d versions older than %v", n, age)
+		if _, err := db.ExpireActivity(activityAge); err != nil {
+			log.Printf("failed to expire the activity: %v", err)
 		}
 
 		select {
@@ -232,8 +243,8 @@ func main() {
 	server := newServer(ctx, l, db, cfg)
 	server.applyCapabilities()
 	db.WithShares(server)
-	if versionAge > 0 {
-		go expireVersions(ctx, db.(*stores.Database), server, versionAge)
+	if pg, ok := db.(*stores.Database); ok {
+		go expire(ctx, pg, server, versionAge)
 	}
 
 	// Start the API server.

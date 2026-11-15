@@ -280,3 +280,19 @@ CREATE TABLE displaced (
     path TEXT NOT NULL,
     at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Something an account did on a share, for the activity feed of its workgroup;
+-- target is the new path of a rename, size that of an upload.
+CREATE TABLE activity (
+    id BIGSERIAL PRIMARY KEY,
+    share_name TEXT NOT NULL,
+    workgroup TEXT NOT NULL,
+    username TEXT NOT NULL,
+    action TEXT NOT NULL,
+    path TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT '',
+    size BIGINT NOT NULL DEFAULT 0,
+    at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_activity_feed ON activity (share_name, workgroup, id);
+CREATE INDEX idx_activity_at ON activity (at);

@@ -439,6 +439,49 @@ tr.drop-target td:last-child {
   font-size: 13px;
 }
 
+.activity {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.activity-day {
+  width: 100%;
+}
+
+.activity-date {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--text-muted);
+}
+
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.activity-item {
+  display: flex;
+  gap: 16px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  line-height: 1.5;
+}
+
+.activity-time {
+  flex: 0 0 64px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .modal .stack {
   margin-top: 0;
 }

@@ -459,6 +459,16 @@ curl -b cookies.txt -o plan-then.pdf "http://127.0.0.1:9999/files/share/<SHARE>/
 curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/share/<SHARE>/restore?path=/Projects/plan.pdf&at=2026-11-05T17:30:00Z"
 ```
 
+## Activity Feed
+The server records what the accounts do on the shares, over SMB, the file API, WebDAV and the editor alike: a file uploaded or updated, deleted, renamed or moved, a folder created or deleted, and a version restored. The feed of a share is kept per workgroup: an account sees what the accounts of its own workgroup did on the share, and nothing of other workgroups. Entries are kept for 90 days. The scratch files of editors, such as the `~$` and `.tmp` files of Microsoft Office, leave no entries, and a scratch file renamed onto a document, which is how some editors save, is recorded as an update of the document. The saves of an editing session are one entry: a file written again by the same account within ten minutes of its last write appears once, with the time and the size of the latest write. The feed requires the Normal mode, as the Lite mode keeps none.
+
+`GET /files/share/<SHARE>/activity` returns the newest 50 entries, each with its ID, time, account, action (`upload`, `update`, `delete`, `rename`, `mkdir`, `rmdir` or `restore`), path, the new path of a rename or a move as `target`, and the size of an uploaded or restored file. `limit` sets the number of entries, up to 200, and `before=<ID>` continues from the last entry of an earlier page:
+```Bash
+curl -c cookies.txt -X POST "http://127.0.0.1:9999/files/login" -d '{"workgroup":"<WORKGROUP>","username":"<USERNAME>","password":"<PASSWORD>"}'
+curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/activity?limit=100"
+curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/activity?before=<ID>"
+```
+
 ## Editing Documents in the Browser
 Documents on the shares can be edited in the browser with [Collabora Online](https://www.collaboraonline.com/), which is LibreOffice as a web service. Sombrero speaks the WOPI protocol to it: the editor fetches the document from the file API, the browsers edit it in the editor's own pages, and every save comes back to the file API as a replacement of the file, which versioning retains under the usual session rule. Several accounts editing one document work on it together, in one editing session. The feature requires the [file API](#file-api) and is enabled by naming the Collabora Online server in the config file:
 ```YAML

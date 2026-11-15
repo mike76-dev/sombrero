@@ -54,6 +54,10 @@ type Store interface {
 	IsConnected(wg Workgroup, share Share) (bool, types.PrivateKey, error)
 	SetAppKey(wg Workgroup, share Share, key types.PrivateKey) error
 
+	// Activity is the feed of what the account's workgroup did on the share,
+	// newest first, before the entry with the ID; see Database.Activity.
+	Activity(share string, acc Account, before uint64, limit int) ([]Activity, error)
+
 	WithShares(shares Shares)
 	Close()
 }

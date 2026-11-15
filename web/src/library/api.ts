@@ -168,6 +168,27 @@ export function deleted(share: string): Promise<Deleted[]> {
   return call<Deleted[]>(`/share/${encodeURIComponent(share)}/deleted`)
 }
 
+// An entry of a share's activity feed: what an account of the workgroup did,
+// where and when. The target is the new path of a rename or a move, the size
+// that of an uploaded or restored file.
+export interface ActivityEntry {
+  id: number
+  at: string
+  username: string
+  action: 'upload' | 'update' | 'delete' | 'rename' | 'mkdir' | 'rmdir' | 'restore'
+  path: string
+  target?: string
+  size?: number
+}
+
+// activity lists a page of the feed of the share, newest first, before the
+// entry with the id where one is given.
+export function activity(share: string, before?: number, limit?: number): Promise<ActivityEntry[]> {
+  return call<ActivityEntry[]>(`/share/${encodeURIComponent(share)}/activity`, {
+    query: { before: before === undefined ? undefined : String(before), limit: limit === undefined ? undefined : String(limit) },
+  })
+}
+
 export function versionURL(share: string, path: string, ref: VersionRef, inline = false): string {
   return url(`/share/${encodeURIComponent(share)}/version`, { path, ...refQuery(ref), inline: inline ? '1' : undefined })
 }
