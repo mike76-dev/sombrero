@@ -151,6 +151,18 @@ $$ LANGUAGE SQL STABLE
 		CREATE INDEX idx_activity_feed ON activity (share_name, workgroup, id);
 		CREATE INDEX idx_activity_at ON activity (at)
 	`},
+	{name: "keep the sharing links", sql: `
+		CREATE TABLE links (
+			token TEXT PRIMARY KEY,
+			share_name TEXT NOT NULL,
+			path TEXT NOT NULL,
+			account INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ
+		);
+		CREATE INDEX idx_links_file ON links (share_name, path);
+		CREATE INDEX idx_links_account ON links (account)
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

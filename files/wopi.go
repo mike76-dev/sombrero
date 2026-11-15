@@ -253,10 +253,10 @@ func (h *Handler) editHandler(w http.ResponseWriter, req *http.Request, ps httpr
 	writeJSON(w, EditSession{URL: urlsrc + sep + "WOPISrc=" + url.QueryEscape(src), Token: token, TTL: s.expires.UnixMilli()})
 }
 
-// publicBase is the address the editor reaches this server at: the one
-// configured, or the one the browser used.
+// publicBase is the address the editor and the sharing links reach this
+// server at: the one configured for the editor, or the one the browser used.
 func (h *Handler) publicBase(req *http.Request) *url.URL {
-	if h.editor.public != nil {
+	if h.editor != nil && h.editor.public != nil {
 		return h.editor.public
 	}
 	scheme := "http"

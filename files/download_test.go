@@ -61,9 +61,8 @@ func TestShowingAFileSandboxesCode(t *testing.T) {
 		{"song.mp3", false},
 		{"plan.pdf", false},
 	} {
-		req := httptest.NewRequest(http.MethodGet, "/share/docs/file?path=/"+tt.name+"&inline=1", nil)
 		w := httptest.NewRecorder()
-		contentHeaders(w, req, tt.name)
+		contentHeaders(w, tt.name, true)
 		if got := w.Header().Get("Content-Security-Policy") == "sandbox"; got != tt.sandbox {
 			t.Errorf("%s shown inline: sandboxed %v, want %v", tt.name, got, tt.sandbox)
 		}
@@ -73,9 +72,8 @@ func TestShowingAFileSandboxesCode(t *testing.T) {
 	}
 
 	// Saved rather than shown, nothing runs, so nothing is sandboxed.
-	req := httptest.NewRequest(http.MethodGet, "/share/docs/file?path=/page.html", nil)
 	w := httptest.NewRecorder()
-	contentHeaders(w, req, "page.html")
+	contentHeaders(w, "page.html", false)
 	if got := w.Header().Get("Content-Security-Policy"); got != "" {
 		t.Errorf("an attachment: want no sandbox, got %q", got)
 	}
@@ -115,6 +113,7 @@ func TestDownloadingAFile(t *testing.T) {
 		"Content-Disposition": `attachment; filename=readme.txt`,
 		"Accept-Ranges":       "bytes",
 		"Last-Modified":       readmeModified.UTC().Format(http.TimeFormat),
+		"Cache-Control":       "private, no-cache",
 	} {
 		if got := r.Header().Get(name); got != want {
 			t.Errorf("%s: want %q, got %q", name, want, got)

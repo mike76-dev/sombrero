@@ -55,7 +55,7 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 		return
 	}
 
-	contentHeaders(w, req, path.Base(p))
+	contentHeaders(w, path.Base(p), req.URL.Query().Get("inline") != "")
 
 	// The chunk follows the share's part size the way the SMB read cache's does.
 	rd := h.newReader(fileKey{share: share.Name, key: key, size: oi.Size, modified: oi.ModifiedAt}, partSize,
@@ -69,13 +69,16 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 // or shown. Shown, a file that could carry code of its own is sandboxed: it
 // is somebody's upload, and it must not run as the server's origin, where the
 // sessions and the administration's password live.
-func contentHeaders(w http.ResponseWriter, req *http.Request, name string) {
+func contentHeaders(w http.ResponseWriter, name string, inline bool) {
 	ctype := mime.TypeByExtension(path.Ext(name))
 	if ctype == "" {
 		ctype = "application/octet-stream"
 	}
+	// A copy the browser keeps is used again only once the server has
+	// agreed, so that it goes with the session or the link that fetched it.
+	w.Header().Set("Cache-Control", "private, no-cache")
 	disposition := "attachment"
-	if req.URL.Query().Get("inline") != "" {
+	if inline {
 		disposition = "inline"
 		if !selfContained(ctype) {
 			w.Header().Set("Content-Security-Policy", "sandbox")

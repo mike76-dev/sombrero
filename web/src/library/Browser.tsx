@@ -19,6 +19,7 @@ import { describe, outcome, runEach } from './batch'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
 import { activityHash, binHash, editHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
+import { LinksDialog } from './LinksDialog'
 import { VersionsDialog } from './VersionsDialog'
 import { formatBytes, formatTime, formatTimeExact } from '../format'
 
@@ -131,6 +132,7 @@ type Dialog =
   | { kind: 'moveMany'; entries: Entry[] }
   | { kind: 'replace'; folder: string; files: File[]; names: string[] }
   | { kind: 'versions'; entry: Entry }
+  | { kind: 'links'; entry: Entry }
   | { kind: 'history' }
   | { kind: 'restoreAt'; entry: Entry }
 
@@ -655,6 +657,7 @@ export function Browser({
           onClose={close}
         />
       )}
+      {dialog?.kind === 'links' && <LinksDialog share={share} entry={dialog.entry} onExpired={onExpired} onClose={close} />}
       {dialog?.kind === 'history' && <HistoryDialog share={share} path={path} at={at} onExpired={onExpired} onClose={close} />}
       {dialog?.kind === 'restoreAt' && at && (
         <ConfirmDialog
@@ -955,6 +958,11 @@ function Row({
                 <a className="menu-item" href={office} onClick={() => menu.current && (menu.current.open = false)}>
                   Open in desktop application
                 </a>
+              )}
+              {!entry.dir && !at && (
+                <button className="menu-item" onClick={() => pick({ kind: 'links', entry })}>
+                  Share link
+                </button>
               )}
               {!entry.dir && (
                 <button className="menu-item" onClick={() => pick({ kind: 'versions', entry })}>

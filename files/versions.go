@@ -312,7 +312,7 @@ func (h *Handler) versionHandler(w http.ResponseWriter, req *http.Request, ps ht
 		}
 	}
 
-	contentHeaders(w, req, path.Base(f.path))
+	contentHeaders(w, path.Base(f.path), req.URL.Query().Get("inline") != "")
 
 	file := fileKey{share: f.share.Name, key: f.key, version: version.ID, size: version.Size, modified: version.ModifiedAt}
 	http.ServeContent(w, req, "", version.ModifiedAt, h.newReader(file, f.partSize, fetch))
