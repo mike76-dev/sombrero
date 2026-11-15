@@ -495,6 +495,11 @@ type IndexdClient struct {
 	mu        sync.Mutex
 	retagging map[types.Hash256]struct{}
 
+	// uploaders holds the account writing each upload under way, which
+	// FinishUpload is not told and the activity feed names.
+	uploadersMu sync.Mutex
+	uploaders   map[string]stores.Account
+
 	// claimed holds the metadata IDs of the pieces this client has claimed
 	// and not yet completed or requeued, so that the janitor for stranded
 	// pieces does not mistake work in progress for a leftover of a crash.
@@ -599,6 +604,7 @@ func newIndexdClient(db *stores.Database, backend storageBackend, share string, 
 		share:        share,
 		workgroup:    workgroup,
 		db:           db,
+		uploaders:    make(map[string]stores.Account),
 		backend:      backend,
 		dataShards:   dataShards,
 		parityShards: parityShards,
@@ -945,6 +951,7 @@ func (ic *IndexdClient) RestoreVersion(ctx context.Context, acc stores.Account, 
 		return err
 	}
 	ic.retag(replaced)
+	recordActivity(ic.db, ic.share, acc, stores.ActivityRestore, path, "", ic.sizeOf(acc, path))
 
 	select {
 	case ic.packChan <- struct{}{}:
@@ -957,6 +964,24 @@ func (ic *IndexdClient) RestoreVersion(ctx context.Context, acc stores.Account, 
 		}
 	}
 	return nil
+}
+
+// sizeOf is the size of the file at the path, zero where it cannot be told.
+func (ic *IndexdClient) sizeOf(acc stores.Account, path string) uint64 {
+	om, err := ic.db.Object(acc, ic.share, path)
+	if err != nil {
+		return 0
+	}
+	return om.Size
+}
+
+// uploader is the account that started the upload, forgotten with this.
+func (ic *IndexdClient) uploader(id string) stores.Account {
+	ic.uploadersMu.Lock()
+	defer ic.uploadersMu.Unlock()
+	acc := ic.uploaders[id]
+	delete(ic.uploaders, id)
+	return acc
 }
 
 // KeepVersion implements client.Versioner. Keeping a version takes the right
@@ -1076,7 +1101,13 @@ func (ic *IndexdClient) StartUpload(ctx context.Context, acc stores.Account, pat
 		return
 	}
 
-	return ic.db.CreateUpload(acc, ic.share, path)
+	uploadID, err = ic.db.CreateUpload(acc, ic.share, path)
+	if err == nil {
+		ic.uploadersMu.Lock()
+		ic.uploaders[uploadID] = acc
+		ic.uploadersMu.Unlock()
+	}
+	return
 }
 
 // AbortUpload aborts an initiated multipart upload.
@@ -1085,6 +1116,7 @@ func (ic *IndexdClient) AbortUpload(ctx context.Context, path string, uploadID s
 		return nil
 	}
 
+	ic.uploader(uploadID)
 	slabs, err := ic.db.RemoveUpload(uploadID)
 	if err != nil {
 		return fmt.Errorf("couldn't abort upload: %v", err)
@@ -1114,6 +1146,11 @@ func (ic *IndexdClient) FinishUpload(ctx context.Context, path string, uploadID 
 	// holding runs of a file that no longer has them, so they are noted while
 	// they still say what they held. Truncating a file is a rewrite of it too.
 	replaced := ic.slabsOf(path, false)
+	acc := ic.uploader(uploadID)
+	action := stores.ActivityUpload
+	if _, err := ic.db.Object(acc, ic.share, path); err == nil {
+		action = stores.ActivityUpdate
+	}
 
 	slabs, err := ic.db.FinalizeUpload(uploadID)
 	if err != nil {
@@ -1121,6 +1158,7 @@ func (ic *IndexdClient) FinishUpload(ctx context.Context, path string, uploadID 
 	}
 
 	ic.retag(replaced)
+	recordActivity(ic.db, ic.share, acc, action, path, "", ic.sizeOf(acc, path))
 
 	// Finalizing is what makes a piece that is left buffered eligible for
 	// packing, so this is the point at which the packer has new work.
@@ -1191,8 +1229,10 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 	touched := ic.slabsOf(path, batch)
 
 	var slabs []types.Hash256
+	action := stores.ActivityDelete
 	if batch {
 		slabs, err = ic.db.DeleteDirectory(acc, ic.share, path)
+		action = stores.ActivityRmdir
 	} else {
 		slabs, err = ic.db.DeleteFile(acc, ic.share, path)
 	}
@@ -1201,6 +1241,7 @@ func (ic *IndexdClient) Delete(ctx context.Context, acc stores.Account, path str
 	}
 
 	ic.retag(touched)
+	recordActivity(ic.db, ic.share, acc, action, path, "", 0)
 
 	if len(slabs) == 0 {
 		return nil
@@ -1294,7 +1335,11 @@ func (ic *IndexdClient) MakeDirectory(ctx context.Context, acc stores.Account, p
 			}
 		}
 	}
-	return ic.db.CreateDirectory(acc, ic.share, path, private, readOnly)
+	if err := ic.db.CreateDirectory(acc, ic.share, path, private, readOnly); err != nil {
+		return err
+	}
+	recordActivity(ic.db, ic.share, acc, stores.ActivityMkdir, path, "", 0)
+	return nil
 }
 
 // Rename renames a file or a directory. What was renamed over goes, and the
@@ -1313,6 +1358,7 @@ func (ic *IndexdClient) Rename(ctx context.Context, acc stores.Account, oldName,
 
 	// The objects are still of the same bytes, under names they no longer go by.
 	ic.retag(ic.slabsOf(newName, isDir))
+	recordActivity(ic.db, ic.share, acc, stores.ActivityRename, oldName, newName, 0)
 
 	// The slabs are staged in the database, so a failure here only delays
 	// their unpinning until the periodic retry.

@@ -136,6 +136,21 @@ $$ LANGUAGE SQL STABLE
 			PRIMARY KEY (share_name, path)
 		)
 	`},
+	{name: "record the activity on the shares", sql: `
+		CREATE TABLE activity (
+			id BIGSERIAL PRIMARY KEY,
+			share_name TEXT NOT NULL,
+			workgroup TEXT NOT NULL,
+			username TEXT NOT NULL,
+			action TEXT NOT NULL,
+			path TEXT NOT NULL,
+			target TEXT NOT NULL DEFAULT '',
+			size BIGINT NOT NULL DEFAULT 0,
+			at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX idx_activity_feed ON activity (share_name, workgroup, id);
+		CREATE INDEX idx_activity_at ON activity (at)
+	`},
 }
 
 // schemaVersion is the version of the schema that init.sql creates.

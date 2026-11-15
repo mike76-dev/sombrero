@@ -113,7 +113,11 @@ func (rv *RenterdVersions) MakeDirectory(ctx context.Context, acc stores.Account
 	if reserved(path) {
 		return stores.ErrDirectoryExists
 	}
-	return rv.RenterdClient.MakeDirectory(ctx, acc, path)
+	if err := rv.RenterdClient.MakeDirectory(ctx, acc, path); err != nil {
+		return err
+	}
+	recordActivity(rv.db, rv.share, acc, stores.ActivityMkdir, path, "", 0)
+	return nil
 }
 
 // file is the object at the path where there is a file: a folder, the server's
@@ -205,15 +209,25 @@ func (rv *RenterdVersions) FinishUpload(ctx context.Context, path string, upload
 	if strings.HasSuffix(path, ":Zone.Identifier") {
 		return nil
 	}
+	action := stores.ActivityUpload
 	live, err := rv.file(ctx, acc, path)
 	if err == nil {
+		action = stores.ActivityUpdate
 		if _, err := rv.stash(ctx, acc, path, live, false); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, stores.ErrNotFound) {
 		return err
 	}
-	return rv.RenterdClient.FinishUpload(ctx, path, uploadID, parts)
+	if err := rv.RenterdClient.FinishUpload(ctx, path, uploadID, parts); err != nil {
+		return err
+	}
+	var size uint64
+	if oi, err := rv.file(ctx, acc, path); err == nil {
+		size = oi.Size
+	}
+	recordActivity(rv.db, rv.share, acc, action, path, "", size)
+	return nil
 }
 
 // Delete implements Client. A file goes the way EmptyFile takes it, so that it
@@ -227,9 +241,21 @@ func (rv *RenterdVersions) Delete(ctx context.Context, acc stores.Account, path 
 	// A folder goes with what is in it; the versions under it stay, found
 	// by their paths, so that the files can be restored.
 	if batch {
-		return rv.RenterdClient.Delete(ctx, acc, path, true)
+		if err := rv.RenterdClient.Delete(ctx, acc, path, true); err != nil {
+			return err
+		}
+		recordActivity(rv.db, rv.share, acc, stores.ActivityRmdir, path, "", 0)
+		return nil
 	}
+	if err := rv.deleteFile(ctx, acc, path); err != nil {
+		return err
+	}
+	recordActivity(rv.db, rv.share, acc, stores.ActivityDelete, path, "", 0)
+	return nil
+}
 
+// deleteFile is Delete for a file.
+func (rv *RenterdVersions) deleteFile(ctx context.Context, acc stores.Account, path string) error {
 	live, err := rv.file(ctx, acc, path)
 	if err != nil {
 		return err
@@ -293,6 +319,7 @@ func (rv *RenterdVersions) Rename(ctx context.Context, acc stores.Account, oldNa
 	if err := rv.RenterdClient.Rename(ctx, acc, oldName, newName, isDir, force); err != nil {
 		return err
 	}
+	recordActivity(rv.db, rv.share, acc, stores.ActivityRename, oldName, newName, 0)
 	return rv.db.RenterdFileRenamed(rv.share, oldName, newName, isDir)
 }
 
@@ -351,6 +378,7 @@ func (rv *RenterdVersions) RestoreVersion(ctx context.Context, acc stores.Accoun
 	if err != nil {
 		return fmt.Errorf("failed to copy the version onto the file: %w", err)
 	}
+	recordActivity(rv.db, rv.share, acc, stores.ActivityRestore, path, "", v.Size)
 	return rv.db.MarkRenterdRestored(rv.share, path, v.Size, []uint64{id})
 }
 

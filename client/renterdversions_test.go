@@ -83,6 +83,10 @@ func (b *renterdBucket) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	case strings.HasPrefix(r.URL.Path, "/api/worker/object/"):
 		key := strings.TrimPrefix(r.URL.Path, "/api/worker/object")
+		if r.Method == http.MethodPut {
+			b.objects[key] = api.ObjectMetadata{Key: key, ModTime: api.TimeRFC3339(time.Now())}
+			return
+		}
 		if _, ok := b.objects[key]; !ok {
 			http.Error(w, "object not found", http.StatusNotFound)
 			return
