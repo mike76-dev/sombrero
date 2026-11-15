@@ -1,6 +1,7 @@
 package files
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/stores"
+	"go.sia.tech/renterd/v2/api"
 	"golang.org/x/net/webdav"
 )
 
@@ -28,8 +30,7 @@ const davPrefix = "/dav"
 // since the file system interface knows nothing of requests.
 type davSession struct{}
 
-// DAV returns the WebDAV handler, which the server mounts at /dav. This
-// version serves reading alone; the calls that write are refused.
+// DAV returns the WebDAV handler, which the server mounts at /dav.
 func (h *Handler) DAV() http.Handler {
 	wd := &webdav.Handler{
 		Prefix:     davPrefix,
@@ -46,11 +47,6 @@ func (h *Handler) DAV() http.Handler {
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Sombrero"`)
 			writeError(w, "authentication required", http.StatusUnauthorized)
-			return
-		}
-		switch req.Method {
-		case http.MethodPut, http.MethodDelete, "MKCOL", "MOVE", "COPY", "PROPPATCH":
-			writeError(w, "WebDAV is read-only on this server", http.StatusForbidden)
 			return
 		}
 		wd.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), davSession{}, s)))
@@ -100,63 +96,192 @@ func (h *Handler) basicAuth(req *http.Request) (session, bool) {
 }
 
 // davFS is the shares as a file system: the root holds a folder per share
-// the account may read, and each share its files and folders.
+// the account may read, and each share its files and folders, which the
+// account changes with the rights it holds over SMB.
 type davFS struct {
 	h *Handler
 }
 
-func (fs davFS) Mkdir(context.Context, string, os.FileMode) error { return os.ErrPermission }
-func (fs davFS) RemoveAll(context.Context, string) error          { return os.ErrPermission }
-func (fs davFS) Rename(context.Context, string, string) error     { return os.ErrPermission }
-
 // place is where a WebDAV path points: the root, a share, or a file or
-// folder on it, with the client that reaches the share.
+// folder on it, with the client that reaches the share and the rights the
+// account holds on the share.
 type place struct {
 	share    stores.Share
 	key      string
 	client   client.Client
 	partSize uint64
 	session  session
+	rights   Rights
+}
+
+// writable says whether the account may write at the key: the share's policy
+// and the folder's rights both have to allow it.
+func (p place) writable(ctx context.Context) error {
+	if p.client == nil || p.key == "" || !p.rights.Write {
+		return os.ErrPermission
+	}
+	return p.allows(ctx, func(pa stores.PathAccess) bool { return pa.Write })
+}
+
+// deletable says whether the account may delete at the key.
+func (p place) deletable(ctx context.Context) error {
+	if p.client == nil || p.key == "" || !p.rights.Delete {
+		return os.ErrPermission
+	}
+	return p.allows(ctx, func(pa stores.PathAccess) bool { return pa.Delete })
+}
+
+func (p place) allows(ctx context.Context, ok func(stores.PathAccess) bool) error {
+	ac, checks := p.client.(client.AccessChecker)
+	if !checks {
+		return nil
+	}
+	pa, err := ac.PathAccess(ctx, p.session.account, p.key)
+	if errors.Is(err, stores.ErrNotFound) {
+		return os.ErrNotExist
+	} else if err != nil {
+		return err
+	}
+	if !ok(pa) {
+		return os.ErrPermission
+	}
+	return nil
+}
+
+// Mkdir makes a folder where the account may write.
+func (fs davFS) Mkdir(ctx context.Context, name string, _ os.FileMode) error {
+	p, _, err := fs.resolve(ctx, name)
+	if err == nil {
+		return os.ErrExist
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	p, err = fs.placeOf(ctx, name)
+	if err != nil {
+		return err
+	}
+	if err := p.writable(ctx); err != nil {
+		return err
+	}
+	err = p.client.MakeDirectory(ctx, p.session.account, p.key)
+	switch {
+	case errors.Is(err, stores.ErrDirectoryExists):
+		return os.ErrExist
+	case errors.Is(err, stores.ErrNotFound):
+		return os.ErrNotExist
+	case errors.Is(err, stores.ErrAccessDenied):
+		return os.ErrPermission
+	}
+	return err
+}
+
+// RemoveAll deletes a file, or a folder with everything in it, where the
+// account may delete. A folder's files go one by one, so that the share keeps
+// each as it keeps any deleted file.
+func (fs davFS) RemoveAll(ctx context.Context, name string) error {
+	p, info, err := fs.resolve(ctx, name)
+	if err != nil {
+		return err
+	}
+	if err := p.deletable(ctx); err != nil {
+		return err
+	}
+	if info.dir {
+		if err := deleteFiles(ctx, p.client, p.session.account, p.key); err != nil {
+			return err
+		}
+	}
+	err = p.client.Delete(ctx, p.session.account, p.key, info.dir)
+	switch {
+	case errors.Is(err, stores.ErrNotFound):
+		return os.ErrNotExist
+	case errors.Is(err, stores.ErrAccessDenied):
+		return os.ErrPermission
+	}
+	return err
+}
+
+// Rename moves a file or a folder within its share, where the account may
+// delete it and write at the destination.
+func (fs davFS) Rename(ctx context.Context, oldName, newName string) error {
+	from, info, err := fs.resolve(ctx, oldName)
+	if err != nil {
+		return err
+	}
+	to, err := fs.placeOf(ctx, newName)
+	if err != nil {
+		return err
+	}
+	if to.share.Name != from.share.Name || to.key == "" || from.key == "" {
+		return os.ErrPermission
+	}
+	if err := from.deletable(ctx); err != nil {
+		return err
+	}
+	if err := to.writable(ctx); err != nil {
+		return err
+	}
+	err = from.client.Rename(ctx, from.session.account, from.key, to.key, info.dir, false)
+	switch {
+	case errors.Is(err, stores.ErrNotFound):
+		return os.ErrNotExist
+	case errors.Is(err, stores.ErrAccessDenied):
+		return os.ErrPermission
+	case errors.Is(err, stores.ErrDirectoryExists):
+		return os.ErrExist
+	}
+	return err
+}
+
+// placeOf is the place a path names on its share, whether or not anything is
+// there yet.
+func (fs davFS) placeOf(ctx context.Context, name string) (place, error) {
+	s, ok := ctx.Value(davSession{}).(session)
+	if !ok {
+		return place{}, os.ErrPermission
+	}
+	name = path.Clean("/" + name)
+	if name == "/" {
+		return place{session: s}, nil
+	}
+	shareName, rest, _ := strings.Cut(strings.TrimPrefix(name, "/"), "/")
+	share, err := fs.h.store.GetShare(shareName)
+	if err != nil {
+		return place{}, err
+	}
+	if share.Name == "" {
+		return place{}, os.ErrNotExist
+	}
+	r, err := fs.h.rightsOn(s.account, share)
+	if err != nil {
+		return place{}, err
+	}
+	if !r.Read {
+		return place{}, os.ErrNotExist
+	}
+	c, partSize, err := fs.h.server.ShareClient(share, s.account.Workgroup)
+	if err != nil {
+		return place{}, err
+	}
+	return place{share: share, key: rest, client: c, partSize: partSize, session: s, rights: r}, nil
 }
 
 // resolve finds what the path names, as far as the account may see it. The
 // root and a share need no lookup beyond the rights; anything deeper is
 // looked up on the share.
 func (fs davFS) resolve(ctx context.Context, name string) (place, davInfo, error) {
-	s, ok := ctx.Value(davSession{}).(session)
-	if !ok {
-		return place{}, davInfo{}, os.ErrPermission
+	p, err := fs.placeOf(ctx, name)
+	if err != nil {
+		return place{}, davInfo{}, err
 	}
-	name = path.Clean("/" + name)
-	if name == "/" {
-		return place{session: s}, davInfo{name: "/", dir: true, modified: fs.h.now()}, nil
+	if p.client == nil {
+		return p, davInfo{name: "/", dir: true, modified: fs.h.now()}, nil
+	}
+	if p.key == "" {
+		return p, davInfo{name: p.share.Name, dir: true, modified: fs.h.now()}, nil
 	}
 
-	shareName, rest, _ := strings.Cut(strings.TrimPrefix(name, "/"), "/")
-	share, err := fs.h.store.GetShare(shareName)
-	if err != nil {
-		return place{}, davInfo{}, err
-	}
-	if share.Name == "" {
-		return place{}, davInfo{}, os.ErrNotExist
-	}
-	r, err := fs.h.rightsOn(s.account, share)
-	if err != nil {
-		return place{}, davInfo{}, err
-	}
-	if !r.Read {
-		return place{}, davInfo{}, os.ErrNotExist
-	}
-	c, partSize, err := fs.h.server.ShareClient(share, s.account.Workgroup)
-	if err != nil {
-		return place{}, davInfo{}, err
-	}
-	p := place{share: share, key: rest, client: c, partSize: partSize, session: s}
-	if rest == "" {
-		return p, davInfo{name: shareName, dir: true, modified: fs.h.now()}, nil
-	}
-
-	oi, err := c.Object(ctx, s.account, rest)
+	oi, err := p.client.Object(ctx, p.session.account, p.key)
 	if errors.Is(err, stores.ErrNotFound) {
 		return place{}, davInfo{}, os.ErrNotExist
 	} else if err != nil {
@@ -179,11 +304,25 @@ func (fs davFS) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 	return info, nil
 }
 
-// OpenFile opens a file for reading, or a folder for listing; nothing is
-// opened for writing.
+// OpenFile opens a file for reading, a folder for listing, or a file for
+// writing where the account may write, which stores what is written over
+// whatever was there.
 func (fs davFS) OpenFile(ctx context.Context, name string, flag int, _ os.FileMode) (webdav.File, error) {
 	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0 {
-		return nil, os.ErrPermission
+		if flag&os.O_APPEND != 0 {
+			return nil, os.ErrPermission
+		}
+		p, err := fs.placeOf(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if err := p.writable(ctx); err != nil {
+			return nil, err
+		}
+		if oi, err := p.client.Object(ctx, p.session.account, p.key); err == nil && strings.HasSuffix(oi.Key, "/") {
+			return nil, os.ErrPermission
+		}
+		return &davWriter{ctx: ctx, h: fs.h, place: p, buf: make([]byte, 0, p.partSize)}, nil
 	}
 	p, info, err := fs.resolve(ctx, name)
 	if err != nil {
@@ -286,6 +425,103 @@ func (f *davFile) Readdir(count int) ([]os.FileInfo, error) {
 	batch := f.children[:n]
 	f.children = f.children[n:]
 	return batch, nil
+}
+
+// davWriter takes what a client uploads and stores it as the file, a part at
+// a time, the way the file API's upload does; closing it finishes the file.
+// Nothing empty can be stored, so an empty upload stores nothing.
+type davWriter struct {
+	ctx   context.Context
+	h     *Handler
+	place place
+
+	buf    []byte
+	id     string
+	number int
+	offset uint64
+	parts  []api.MultipartCompletedPart
+	failed error
+}
+
+func (w *davWriter) Read([]byte) (int, error)           { return 0, os.ErrPermission }
+func (w *davWriter) Seek(int64, int) (int64, error)     { return 0, os.ErrPermission }
+func (w *davWriter) Readdir(int) ([]os.FileInfo, error) { return nil, os.ErrPermission }
+
+func (w *davWriter) Stat() (os.FileInfo, error) {
+	return davInfo{name: path.Base(w.place.key), size: w.offset + uint64(len(w.buf)), modified: w.h.now()}, nil
+}
+
+// Write gathers the bytes into parts of the share's size and sends each as
+// it fills.
+func (w *davWriter) Write(p []byte) (int, error) {
+	if w.failed != nil {
+		return 0, w.failed
+	}
+	written := 0
+	for len(p) > 0 {
+		room := cap(w.buf) - len(w.buf)
+		n := min(room, len(p))
+		w.buf = append(w.buf, p[:n]...)
+		p, written = p[n:], written+n
+		if len(w.buf) == cap(w.buf) {
+			if err := w.flush(); err != nil {
+				return written, err
+			}
+		}
+	}
+	return written, nil
+}
+
+// flush sends the gathered part, starting the upload with the first one.
+func (w *davWriter) flush() error {
+	if len(w.buf) == 0 {
+		return nil
+	}
+	c, acc := w.place.client, w.place.session.account
+	if w.id == "" {
+		id, err := c.StartUpload(w.ctx, acc, w.place.key)
+		if err != nil {
+			return w.fail(err)
+		}
+		w.id = id
+	}
+	w.number++
+	eTag, err := c.Write(w.ctx, bytes.NewReader(w.buf), w.place.key, w.id, w.number, w.offset, uint64(len(w.buf)))
+	if err != nil {
+		return w.fail(err)
+	}
+	w.parts = append(w.parts, api.MultipartCompletedPart{PartNumber: w.number, ETag: eTag})
+	w.offset += uint64(len(w.buf))
+	w.buf = w.buf[:0]
+	return nil
+}
+
+// fail abandons the upload and remembers why.
+func (w *davWriter) fail(err error) error {
+	if w.id != "" {
+		w.h.abortUpload(w.ctx, w.place.client, w.place.key, w.id)
+		w.id = ""
+	}
+	w.failed = err
+	return err
+}
+
+// Close finishes the file with what was written.
+func (w *davWriter) Close() error {
+	if w.failed != nil {
+		return w.failed
+	}
+	if err := w.flush(); err != nil {
+		return err
+	}
+	if w.id == "" {
+		return nil
+	}
+	if err := w.place.client.FinishUpload(w.ctx, w.place.key, w.id, w.parts); err != nil {
+		return w.fail(err)
+	}
+	w.id = ""
+	return nil
 }
 
 func (f *davFile) list() ([]os.FileInfo, error) {
