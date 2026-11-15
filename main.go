@@ -36,7 +36,7 @@ var printVersion = flag.Bool("version", false, "print the version and exit")
 // the root, the administration under /admin: it holds nothing secret, and
 // asking for the password itself beats leaving it to the browser's basic
 // auth prompt.
-func newHTTPHandler(ctx context.Context, a, files http.Handler, password string, debug bool) http.Handler {
+func newHTTPHandler(ctx context.Context, a, files, dav http.Handler, password string, debug bool) http.Handler {
 	inner := a
 
 	// The profiles go behind the password with the rest of the API, and only in the debug mode:
@@ -54,16 +54,24 @@ func newHTTPHandler(ctx context.Context, a, files http.Handler, password string,
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", api.Ratelimit(ctx)(api.BasicAuth(password)(inner))))
+	// Said in so many words: the UI asks here whether there is a file API,
+	// and a page served in its place would pass for an answer.
+	notEnabled := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode("the file API is not enabled")
+	}
 	if files != nil {
 		mux.Handle("/files/", http.StripPrefix("/files", api.Ratelimit(ctx)(files)))
 	} else {
-		// Said in so many words: the UI asks here whether there is a file
-		// API, and a page served in its place would pass for an answer.
-		mux.HandleFunc("/files/", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode("the file API is not enabled")
-		})
+		mux.HandleFunc("/files/", notEnabled)
+	}
+	// WebDAV sees its paths whole, as the handler is told its prefix.
+	if dav != nil {
+		mux.Handle("/dav", api.Ratelimit(ctx)(dav))
+		mux.Handle("/dav/", api.Ratelimit(ctx)(dav))
+	} else {
+		mux.HandleFunc("/dav/", notEnabled)
 	}
 	mux.Handle("/", web.Handler())
 	return mux
@@ -235,7 +243,7 @@ func main() {
 	}
 	defer lAPI.Close()
 	a := api.NewAPI(ctx, db, server, cfg, version)
-	var fileAPI http.Handler
+	var fileAPI, dav http.Handler
 	if cfg.Files.Enabled {
 		fh := files.New(db, server)
 		if cfg.Editor.Collabora != "" {
@@ -243,15 +251,15 @@ func main() {
 				log.Fatal(err)
 			}
 		}
-		fileAPI = fh
+		fileAPI, dav = fh, fh.DAV()
 	} else if cfg.Editor.Collabora != "" {
 		log.Println("The editor is configured, but the file API it works through is not enabled")
 	}
-	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, fileAPI, cfg.API.Password, cfg.Debug)}
+	apiSrv := &http.Server{Handler: newHTTPHandler(ctx, a, fileAPI, dav, cfg.API.Password, cfg.Debug)}
 	go apiSrv.Serve(lAPI)
 	log.Printf("API and web UI: listening at http://%s, administration at http://%s/admin ...\n", lAPI.Addr(), lAPI.Addr())
 	if cfg.Files.Enabled {
-		log.Printf("File API: serving at http://%s/files ...\n", lAPI.Addr())
+		log.Printf("File API: serving at http://%s/files, WebDAV at http://%s/dav ...\n", lAPI.Addr(), lAPI.Addr())
 		if cfg.Editor.Collabora != "" {
 			log.Printf("Editor: documents are edited with %s ...\n", cfg.Editor.Collabora)
 		}

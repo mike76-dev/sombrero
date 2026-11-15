@@ -14,6 +14,7 @@ require (
 	go.sia.tech/renterd/v2 v2.9.5
 	go.sia.tech/siastorage v0.2.2-0.20261112161720-8f9ee19ff0dc
 	golang.org/x/crypto v0.58.0
+	golang.org/x/net v0.61.0
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -26,7 +27,6 @@ require (
 	github.com/bytedance/sonic/loader v0.5.2 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/dunglas/httpsfv v1.1.1 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.6 // indirect
 	github.com/gotd/contrib v0.25.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/indece-official/go-ebcdic v1.2.0 // indirect
@@ -54,15 +54,12 @@ require (
 	github.com/quic-go/webtransport-go v0.13.0 // indirect
 	github.com/rs/zerolog v1.32.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
-	github.com/x448/float16 v0.8.4 // indirect
 	go.sia.tech/coreutils v0.25.3 // indirect
 	go.sia.tech/jape v0.14.4 // indirect
 	go.sia.tech/mux v1.5.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
-	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
-	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/tools v0.52.0 // indirect
 )
