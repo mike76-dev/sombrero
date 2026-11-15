@@ -19,8 +19,13 @@ const (
 	ActivityRestore = "restore"
 )
 
-// activityPageLimit is the most entries one page of the feed holds.
-const activityPageLimit = 200
+const (
+	// activityPageLimit is the most entries one page of the feed holds.
+	activityPageLimit = 200
+	// activityGap is how soon after writing a file the same account's next
+	// write of it counts as the same editing session, shown as one entry.
+	activityGap = 10 * time.Minute
+)
 
 // Activity is something an account did on a share: the feed of its workgroup
 // is made of these. Target is the new path of a rename, Size that of an upload.
@@ -38,7 +43,9 @@ type Activity struct {
 
 // RecordActivity adds an entry to the feed. An editor's scratch file is nobody's
 // business, so nothing is recorded about one; a scratch file renamed onto a
-// real name is how some editors save, and counts as updating that file.
+// real name is how some editors save, and counts as updating that file. The
+// saves of an editing session are one entry: an update within the gap of the
+// account's last write of the file takes that entry's place, under its action.
 func (db *Database) RecordActivity(a Activity) error {
 	a.Path = normalizePath(a.Path)
 	if a.Target != "" {
@@ -53,6 +60,25 @@ func (db *Database) RecordActivity(a Activity) error {
 		return nil
 	}
 	return db.txn(func(ctx context.Context, tx pgx.Tx) error {
+		if a.Action == ActivityUpdate {
+			const session = `
+				DELETE FROM activity
+				WHERE id = (
+					SELECT id FROM activity
+					WHERE share_name = $1 AND workgroup = $2 AND username = $3 AND path = $4
+						AND action IN ($5, $6) AND at > NOW() - make_interval(secs => $7)
+					ORDER BY id DESC LIMIT 1
+				)
+				RETURNING action
+			`
+			var action string
+			err := tx.QueryRow(ctx, session, a.Share, a.Workgroup, a.Username, a.Path, ActivityUpload, ActivityUpdate, activityGap.Seconds()).Scan(&action)
+			if err == nil {
+				a.Action = action
+			} else if err != pgx.ErrNoRows {
+				return fmt.Errorf("failed to find the editing session: %w", err)
+			}
+		}
 		const insert = `
 			INSERT INTO activity (share_name, workgroup, username, action, path, target, size)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)

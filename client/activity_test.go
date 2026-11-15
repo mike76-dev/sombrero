@@ -36,7 +36,8 @@ func act(t *testing.T, c Client, acc stores.Account) {
 }
 
 // wantFeed fails the test unless the feed of the share holds the round of
-// work act does, newest first, in the account's name.
+// work act does, newest first, in the account's name; the two saves, moments
+// apart, are one entry.
 func wantFeed(t *testing.T, db *stores.Database, share string, acc stores.Account) {
 	t.Helper()
 	feed, err := db.Activity(share, acc, 0, 0)
@@ -47,7 +48,6 @@ func wantFeed(t *testing.T, db *stores.Database, share string, acc stores.Accoun
 		{Action: stores.ActivityRmdir, Path: "/Plans"},
 		{Action: stores.ActivityDelete, Path: "/Plans/report.txt"},
 		{Action: stores.ActivityRename, Path: "/report.txt", Target: "/Plans/report.txt"},
-		{Action: stores.ActivityUpdate, Path: "/report.txt"},
 		{Action: stores.ActivityUpload, Path: "/report.txt"},
 		{Action: stores.ActivityMkdir, Path: "/Plans"},
 	}
