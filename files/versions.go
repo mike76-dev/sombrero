@@ -303,12 +303,12 @@ func (h *Handler) versionHandler(w http.ResponseWriter, req *http.Request, ps ht
 	}
 
 	ctx := req.Context()
-	fetch := func(offset, length uint64, w io.Writer) error {
+	fetch := func(ctx context.Context, offset, length uint64, w io.Writer) error {
 		return f.client.Read(ctx, s.account, f.key, offset, length, w)
 	}
 	if version.ID != 0 {
 		versioner := f.client.(client.Versioner)
-		fetch = func(offset, length uint64, w io.Writer) error {
+		fetch = func(ctx context.Context, offset, length uint64, w io.Writer) error {
 			return versioner.ReadVersion(ctx, s.account, f.key, version.ID, offset, length, w)
 		}
 	}
@@ -316,6 +316,7 @@ func (h *Handler) versionHandler(w http.ResponseWriter, req *http.Request, ps ht
 	contentHeaders(w, req, path.Base(f.path))
 
 	rd := &objectReader{
+		ctx:   ctx,
 		fetch: fetch,
 		path:  f.key,
 		size:  version.Size,

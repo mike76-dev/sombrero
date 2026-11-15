@@ -2,6 +2,7 @@ package files
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -60,7 +61,8 @@ func (h *Handler) fileHandler(w http.ResponseWriter, req *http.Request, ps httpr
 
 	// The chunk follows the share's part size the way the SMB read cache's does.
 	rd := &objectReader{
-		fetch: func(offset, length uint64, w io.Writer) error {
+		ctx: ctx,
+		fetch: func(ctx context.Context, offset, length uint64, w io.Writer) error {
 			return c.Read(ctx, s.account, key, offset, length, w)
 		},
 		path:  key,
@@ -108,10 +110,13 @@ func selfContained(ctype string) bool {
 const firstFetch = 1 << 20
 
 // objectReader reads a file off its share a chunk at a time, which is what
-// lets a download be served without holding the whole file.
+// lets a download be served without holding the whole file. Once the reads
+// are past the middle of the chunk in hand, the next is fetched meanwhile, so
+// that a stream does not stop for every fetch.
 type objectReader struct {
+	ctx context.Context
 	// fetch reads a range of the file into the writer, from wherever it is.
-	fetch func(offset, length uint64, w io.Writer) error
+	fetch func(ctx context.Context, offset, length uint64, w io.Writer) error
 	path  string
 	size  uint64
 	chunk uint64
@@ -120,34 +125,79 @@ type objectReader struct {
 	buf   []byte
 	bufAt int64
 	next  uint64
+	ahead *fetched
 }
 
-// Read implements io.Reader. A read outside the chunk in hand fetches the
-// chunk starting where the read does, so a sequential read stays contiguous.
+// fetched is a fetch under way or done: data or err is set once done is closed.
+type fetched struct {
+	at     uint64
+	data   []byte
+	err    error
+	done   chan struct{}
+	cancel context.CancelFunc
+}
+
+// start fetches n bytes from at in the background.
+func (r *objectReader) start(at, n uint64) *fetched {
+	ctx, cancel := context.WithCancel(r.context())
+	f := &fetched{at: at, done: make(chan struct{}), cancel: cancel}
+	go func() {
+		defer close(f.done)
+		var b bytes.Buffer
+		b.Grow(int(n))
+		if err := r.fetch(ctx, at, n, &b); err != nil {
+			f.err = err
+		} else if uint64(b.Len()) != n {
+			f.err = fmt.Errorf("read %d bytes of %s at %d, want %d", b.Len(), r.path, at, n)
+		} else {
+			f.data = b.Bytes()
+		}
+	}()
+	return f
+}
+
+func (r *objectReader) context() context.Context {
+	if r.ctx == nil {
+		return context.Background()
+	}
+	return r.ctx
+}
+
+// Read implements io.Reader. A read outside the chunk in hand takes the one
+// fetched ahead if it starts there, and otherwise fetches from where the read
+// is, starting small again unless it follows on from the chunk in hand.
 func (r *objectReader) Read(p []byte) (int, error) {
 	if r.pos >= int64(r.size) {
 		return 0, io.EOF
 	}
 	if r.buf == nil || r.pos < r.bufAt || r.pos >= r.bufAt+int64(len(r.buf)) {
 		start := uint64(r.pos)
-		if r.buf == nil || start != uint64(r.bufAt)+uint64(len(r.buf)) {
-			r.next = min(firstFetch, r.chunk)
+		f := r.ahead
+		r.ahead = nil
+		if f != nil && f.at != start {
+			f.cancel()
+			f = nil
 		}
-		n := min(r.next, r.size-start)
-		r.next = min(r.next*2, r.chunk)
-		var b bytes.Buffer
-		b.Grow(int(n))
-		if err := r.fetch(start, n, &b); err != nil {
-			log.Printf("file API: failed to read %s at %d: %v", r.path, start, err)
-			return 0, err
+		if f == nil {
+			if r.buf == nil || start != uint64(r.bufAt)+uint64(len(r.buf)) {
+				r.next = min(firstFetch, r.chunk)
+			}
+			f = r.start(start, min(r.next, r.size-start))
+			r.next = min(r.next*2, r.chunk)
 		}
-		if uint64(b.Len()) != n {
-			return 0, fmt.Errorf("read %d bytes of %s at %d, want %d", b.Len(), r.path, start, n)
+		<-f.done
+		if f.err != nil {
+			log.Printf("file API: failed to read %s at %d: %v", r.path, f.at, f.err)
+			return 0, f.err
 		}
-		r.buf, r.bufAt = b.Bytes(), int64(start)
+		r.buf, r.bufAt = f.data, int64(f.at)
 	}
 	k := copy(p, r.buf[r.pos-r.bufAt:])
 	r.pos += int64(k)
+	if end := uint64(r.bufAt) + uint64(len(r.buf)); r.ahead == nil && end < r.size && r.pos-r.bufAt > int64(len(r.buf))/2 {
+		r.ahead = r.start(end, min(r.next, r.size-end))
+		r.next = min(r.next*2, r.chunk)
+	}
 	return k, nil
 }
 

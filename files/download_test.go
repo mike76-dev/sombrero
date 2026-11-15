@@ -2,11 +2,13 @@ package files
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,12 +162,12 @@ func TestDownloadingAFile(t *testing.T) {
 	}
 }
 
-// TestDownloadingARange verifies that a range is served from where it starts,
-// and that one past the end is refused.
+// TestDownloadingARange verifies that a range is served from where it starts
+// with one fetch, and that one past the end is refused.
 func TestDownloadingARange(t *testing.T) {
 	mc := readingClient()
 	h, w := loggedIn(t, &mockStore{}, &mockServer{client: mc}, "alice", "hunter2")
-	h.chunkSize = func(uint64) uint64 { return 32 }
+	h.chunkSize = func(uint64) uint64 { return 64 }
 
 	r := download(h, w, "path=/readme.txt", map[string]string{"Range": "bytes=40-59"})
 	if r.Code != http.StatusPartialContent {
@@ -177,7 +179,7 @@ func TestDownloadingARange(t *testing.T) {
 	if got := r.Header().Get("Content-Range"); got != "bytes 40-59/100" {
 		t.Errorf("Content-Range: want %q, got %q", "bytes 40-59/100", got)
 	}
-	if len(mc.reads) != 1 || mc.reads[0] != [2]uint64{40, 32} {
+	if len(mc.reads) != 1 || mc.reads[0] != [2]uint64{40, 60} {
 		t.Errorf("want one read from 40, got %v", mc.reads)
 	}
 
@@ -222,31 +224,46 @@ func TestDownloadRefusals(t *testing.T) {
 	}
 }
 
-// TestObjectReaderReportsShortReads verifies that a backend that hands back
-// less than asked for fails the read rather than passing a truncated file off
-// as whole.
+// fetchLog records the fetches a reader makes, from whichever goroutine.
+type fetchLog struct {
+	mu      sync.Mutex
+	fetched [][2]uint64
+}
+
+func (l *fetchLog) fetch(_ context.Context, offset, length uint64, w io.Writer) error {
+	l.mu.Lock()
+	l.fetched = append(l.fetched, [2]uint64{offset, length})
+	l.mu.Unlock()
+	_, err := w.Write(make([]byte, length))
+	return err
+}
+
+func (l *fetchLog) all() [][2]uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([][2]uint64(nil), l.fetched...)
+}
+
+func (l *fetchLog) reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.fetched = nil
+}
+
 // TestObjectReaderFetchesGrow verifies that a reader starts small and doubles
 // its fetches while the reads stay sequential, and starts small again after
 // a seek, so that a seek-and-peek costs little and a stream soon reads in
 // whole chunks.
 func TestObjectReaderFetchesGrow(t *testing.T) {
 	const mib = 1 << 20
-	var fetched [][2]uint64
-	r := &objectReader{
-		fetch: func(offset, length uint64, w io.Writer) error {
-			fetched = append(fetched, [2]uint64{offset, length})
-			_, err := w.Write(make([]byte, length))
-			return err
-		},
-		path:  "big.bin",
-		size:  5 * mib,
-		chunk: 8 * mib,
-	}
+	l := &fetchLog{}
+	r := &objectReader{fetch: l.fetch, path: "big.bin", size: 5 * mib, chunk: 8 * mib}
 
 	if n, err := io.Copy(io.Discard, r); err != nil || n != 5*mib {
 		t.Fatalf("reading the whole file: got %d bytes, %v", n, err)
 	}
 	want := [][2]uint64{{0, mib}, {mib, 2 * mib}, {3 * mib, 2 * mib}}
+	fetched := l.all()
 	if len(fetched) != len(want) {
 		t.Fatalf("want the fetches %v, got %v", want, fetched)
 	}
@@ -257,20 +274,90 @@ func TestObjectReaderFetchesGrow(t *testing.T) {
 	}
 
 	// A seek out of the chunk in hand starts small again.
-	fetched = nil
+	l.reset()
 	if _, err := r.Seek(mib, io.SeekStart); err != nil {
 		t.Fatalf("Seek: %v", err)
 	}
 	if _, err := io.ReadFull(r, make([]byte, 64<<10)); err != nil {
 		t.Fatalf("reading after the seek: %v", err)
 	}
-	if len(fetched) != 1 || fetched[0] != [2]uint64{mib, mib} {
+	if fetched := l.all(); len(fetched) != 1 || fetched[0] != [2]uint64{mib, mib} {
 		t.Errorf("after a seek: want one fetch of a megabyte, got %v", fetched)
 	}
 }
 
+// TestObjectReaderReadsAhead verifies that the next chunk is fetched while
+// the reads are in the second half of the one in hand, that a sequential
+// read then takes it, and that a seek elsewhere cancels it.
+func TestObjectReaderReadsAhead(t *testing.T) {
+	const mib = 1 << 20
+	started := make(chan [2]uint64, 8)
+	var aheadCtx context.Context
+	var mu sync.Mutex
+	r := &objectReader{
+		fetch: func(ctx context.Context, offset, length uint64, w io.Writer) error {
+			mu.Lock()
+			if offset == mib {
+				aheadCtx = ctx
+			}
+			mu.Unlock()
+			started <- [2]uint64{offset, length}
+			_, err := w.Write(make([]byte, length))
+			return err
+		},
+		path:  "big.bin",
+		size:  8 * mib,
+		chunk: 8 * mib,
+	}
+
+	// The first half of the chunk is served with no fetch ahead of it.
+	if _, err := io.ReadFull(r, make([]byte, mib/2)); err != nil {
+		t.Fatalf("reading the first half: %v", err)
+	}
+	if got := <-started; got != [2]uint64{0, mib} {
+		t.Fatalf("want the first megabyte fetched, got %v", got)
+	}
+	select {
+	case got := <-started:
+		t.Fatalf("want nothing fetched ahead in the first half, got %v", got)
+	default:
+	}
+
+	// Past the middle, the next chunk is fetched before it is asked for.
+	if _, err := io.ReadFull(r, make([]byte, 1)); err != nil {
+		t.Fatalf("reading past the middle: %v", err)
+	}
+	select {
+	case got := <-started:
+		if got != [2]uint64{mib, 2 * mib} {
+			t.Fatalf("want the next two megabytes fetched ahead, got %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("want a fetch ahead, got none")
+	}
+
+	// A seek elsewhere cancels it and fetches afresh from there.
+	if _, err := r.Seek(5*mib, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := io.ReadFull(r, make([]byte, 1)); err != nil {
+		t.Fatalf("reading after the seek: %v", err)
+	}
+	if got := <-started; got != [2]uint64{5 * mib, mib} {
+		t.Errorf("after a seek: want a megabyte fetched from there, got %v", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if aheadCtx == nil || aheadCtx.Err() == nil {
+		t.Error("want the fetch ahead cancelled by the seek")
+	}
+}
+
+// TestObjectReaderReportsShortReads verifies that a backend that hands back
+// less than asked for fails the read rather than passing a truncated file off
+// as whole.
 func TestObjectReaderReportsShortReads(t *testing.T) {
-	short := func(_, length uint64, w io.Writer) error {
+	short := func(_ context.Context, _, length uint64, w io.Writer) error {
 		_, err := w.Write(make([]byte, length-1))
 		return err
 	}
@@ -279,7 +366,7 @@ func TestObjectReaderReportsShortReads(t *testing.T) {
 		t.Errorf("want a short read reported, got %v", err)
 	}
 
-	failing := func(uint64, uint64, io.Writer) error { return errStore }
+	failing := func(context.Context, uint64, uint64, io.Writer) error { return errStore }
 	rd = &objectReader{fetch: failing, path: "x", size: 10, chunk: 10}
 	if _, err := io.ReadAll(rd); !errors.Is(err, errStore) {
 		t.Errorf("want the backend's error, got %v", err)

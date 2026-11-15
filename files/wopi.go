@@ -1,6 +1,7 @@
 package files
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/xml"
@@ -358,8 +359,9 @@ func (h *Handler) getFileHandler(w http.ResponseWriter, req *http.Request, _ htt
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	rd := &objectReader{
-		fetch: func(offset, length uint64, w io.Writer) error {
-			return c.Read(req.Context(), t.account, key, offset, length, w)
+		ctx: req.Context(),
+		fetch: func(ctx context.Context, offset, length uint64, w io.Writer) error {
+			return c.Read(ctx, t.account, key, offset, length, w)
 		},
 		path:  key,
 		size:  oi.Size,
