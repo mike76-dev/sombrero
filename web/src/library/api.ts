@@ -206,6 +206,31 @@ export function keepVersion(share: string, path: string, id: number, keep: boole
   return call(`/share/${encodeURIComponent(share)}/keep`, { method: keep ? 'POST' : 'DELETE', query: { path, id: String(id) } })
 }
 
+// A sharing link to a file: whoever holds the address reads the file as the
+// account that made the link, until the link expires, where it does, or goes.
+export interface SharingLink {
+  token: string
+  url: string
+  path: string
+  createdBy: string
+  createdAt: string
+  expiresAt?: string
+}
+
+// createLink makes a link to the file, expiring at the time where one is given.
+export function createLink(share: string, path: string, expiresAt?: string): Promise<SharingLink> {
+  return call<SharingLink>(`/share/${encodeURIComponent(share)}/link`, { method: 'POST', query: { path }, body: { expiresAt } })
+}
+
+// links lists the links to the file made by the workgroup, newest first.
+export function links(share: string, path: string): Promise<SharingLink[]> {
+  return call<SharingLink[]>(`/share/${encodeURIComponent(share)}/links`, { query: { path } })
+}
+
+export function deleteLink(share: string, token: string): Promise<void> {
+  return call(`/share/${encodeURIComponent(share)}/link`, { method: 'DELETE', query: { token } })
+}
+
 // fileURL is where a file is downloaded from, or shown if the browser can.
 export function fileURL(share: string, path: string, inline = false): string {
   return url(`/share/${encodeURIComponent(share)}/file`, { path, inline: inline ? '1' : undefined })

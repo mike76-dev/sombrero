@@ -444,6 +444,20 @@ a.menu-item {
   font-size: 13px;
 }
 
+.link-form {
+  align-items: center;
+}
+
+.links .col-link {
+  width: 45%;
+}
+
+.link-url {
+  width: 100%;
+  min-width: 200px;
+  font-size: 13px;
+}
+
 .activity {
   display: flex;
   flex-direction: column;
