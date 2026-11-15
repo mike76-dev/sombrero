@@ -561,6 +561,36 @@ sudo systemctl reload apache2
 
 If Apache is itself behind another proxy or a CDN, configure [mod_remoteip](https://httpd.apache.org/docs/current/mod/mod_remoteip.html) with the addresses of those front-ends, so that the entry Apache appends is the real client rather than the hop in front of it.
 
+A Collabora Online server for [editing documents in the browser](#editing-documents-in-the-browser) goes behind the same proxy under a name of its own, with TLS terminated by Apache and the editor's WebSocket routes passed through. It needs one more module:
+```Bash
+sudo a2enmod proxy_wstunnel
+```
+and a virtual host of its own, with the certificate lines as above:
+```ApacheConf
+<VirtualHost *:443>
+    ServerName office.example.com
+
+    SSLEngine on
+    SSLCertificateFile    /etc/letsencrypt/live/office.example.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/office.example.com/privkey.pem
+
+    AllowEncodedSlashes NoDecode
+    ProxyPreserveHost On
+
+    ProxyPass        /browser http://127.0.0.1:9980/browser retry=0
+    ProxyPassReverse /browser http://127.0.0.1:9980/browser
+    ProxyPass        /hosting/discovery http://127.0.0.1:9980/hosting/discovery retry=0
+    ProxyPassReverse /hosting/discovery http://127.0.0.1:9980/hosting/discovery
+    ProxyPass        /hosting/capabilities http://127.0.0.1:9980/hosting/capabilities retry=0
+    ProxyPassReverse /hosting/capabilities http://127.0.0.1:9980/hosting/capabilities
+    ProxyPassMatch   "/cool/(.*)/ws$" ws://127.0.0.1:9980/cool/$1/ws nocanon
+    ProxyPass        /cool/adminws ws://127.0.0.1:9980/cool/adminws
+    ProxyPass        /cool http://127.0.0.1:9980/cool
+    ProxyPassReverse /cool http://127.0.0.1:9980/cool
+</VirtualHost>
+```
+The editor is then started with `aliasgroup1=https://sombrero.example.com:443` and `extra_params=--o:ssl.enable=false --o:ssl.termination=true`, as in the editing section, and the config file names it as `editor.collabora: https://office.example.com`; `editor.url` may stay out, since the editor reaches this server at the name the browsers use.
+
 ## Connecting to the Server
 In the guides below, `<SERVER_NET_ADDRESS>` stands for the network address of the SMB server, while `<SHARE_NAME>` is the name of the share registered earlier.
 
