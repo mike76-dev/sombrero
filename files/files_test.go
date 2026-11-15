@@ -37,6 +37,10 @@ type mockStore struct {
 	getShares           func(stores.Account) ([]stores.Share, error)
 	getAccessRights     func(stores.Share, stores.Account) (stores.AccessRights, error)
 	activity            func(string, stores.Account, uint64, int) ([]stores.Activity, error)
+	createLink          func(string, string, stores.Account, time.Time) (stores.Link, error)
+	link                func(string) (stores.Link, error)
+	links               func(string, string, stores.Account) ([]stores.Link, error)
+	deleteLink          func(string, stores.Account) error
 }
 
 func (m *mockStore) Activity(share string, acc stores.Account, before uint64, limit int) ([]stores.Activity, error) {
@@ -44,6 +48,34 @@ func (m *mockStore) Activity(share string, acc stores.Account, before uint64, li
 		return m.activity(share, acc, before, limit)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) CreateLink(share, path string, acc stores.Account, expires time.Time) (stores.Link, error) {
+	if m.createLink != nil {
+		return m.createLink(share, path, acc, expires)
+	}
+	return stores.Link{}, errStore
+}
+
+func (m *mockStore) Link(token string) (stores.Link, error) {
+	if m.link != nil {
+		return m.link(token)
+	}
+	return stores.Link{}, stores.ErrNotFound
+}
+
+func (m *mockStore) Links(share, path string, acc stores.Account) ([]stores.Link, error) {
+	if m.links != nil {
+		return m.links(share, path, acc)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) DeleteLink(token string, acc stores.Account) error {
+	if m.deleteLink != nil {
+		return m.deleteLink(token, acc)
+	}
+	return stores.ErrNotFound
 }
 
 var partners = stores.Workgroup{ID: 7, UUID: testUUID, Name: "partners"}

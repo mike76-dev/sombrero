@@ -90,8 +90,8 @@ func plainDuration(d time.Duration) string {
 }
 
 const (
-	// expiryInterval is how often the versions and the activity past their
-	// age are dropped.
+	// expiryInterval is how often the versions, the activity and the sharing
+	// links past their time are dropped.
 	expiryInterval = time.Hour
 	// activityAge is how long the activity feed reaches back.
 	activityAge = 90 * 24 * time.Hour
@@ -122,6 +122,9 @@ func expire(ctx context.Context, db *stores.Database, s *server, age time.Durati
 		}
 		if _, err := db.ExpireActivity(activityAge); err != nil {
 			log.Printf("failed to expire the activity: %v", err)
+		}
+		if _, err := db.ExpireLinks(); err != nil {
+			log.Printf("failed to expire the links: %v", err)
 		}
 
 		select {

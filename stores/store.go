@@ -1,6 +1,8 @@
 package stores
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	"go.sia.tech/core/types"
 )
@@ -57,6 +59,12 @@ type Store interface {
 	// Activity is the feed of what the account's workgroup did on the share,
 	// newest first, before the entry with the ID; see Database.Activity.
 	Activity(share string, acc Account, before uint64, limit int) ([]Activity, error)
+
+	// The sharing links to the files; see the methods of Database.
+	CreateLink(share, path string, acc Account, expires time.Time) (Link, error)
+	Link(token string) (Link, error)
+	Links(share, path string, acc Account) ([]Link, error)
+	DeleteLink(token string, acc Account) error
 
 	WithShares(shares Shares)
 	Close()

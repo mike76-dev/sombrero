@@ -469,6 +469,19 @@ curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/activity?limit=10
 curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/activity?before=<ID>"
 ```
 
+## Sharing Links
+A file on a share can be given to somebody without an account through a sharing link. The link is an address with a token nobody guesses, at which the file is read as the account that made the link, so it opens whatever the account may read and stops working when the account loses that right or is removed. A link lasts until it is deleted, or until the time it was given on creation, after which it is dropped. The links to a file are visible to the accounts of the workgroup that made them, and any of them may delete one. Sharing links require the Normal mode, as the Lite mode keeps none.
+
+`POST /files/share/<SHARE>/link?path=/Projects/plan.pdf` makes a link, lasting unless the body names the expiry, and returns its token and address with the account and time of its creation. `GET /files/share/<SHARE>/links?path=/Projects/plan.pdf` lists the links to the file, and `DELETE /files/share/<SHARE>/link?token=<TOKEN>` deletes one. The address itself needs no login: `GET /files/link/<TOKEN>` returns the file, shown in the browser where it is able to, under the same sandbox as the file API's own downloads, or saved with `download=1`:
+```Bash
+curl -c cookies.txt -X POST "http://127.0.0.1:9999/files/login" -d '{"workgroup":"<WORKGROUP>","username":"<USERNAME>","password":"<PASSWORD>"}'
+curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/share/<SHARE>/link?path=/Projects/plan.pdf" -d '{"expiresAt":"2026-12-31T23:59:59Z"}'
+curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/links?path=/Projects/plan.pdf"
+curl -b cookies.txt -X DELETE "http://127.0.0.1:9999/files/share/<SHARE>/link?token=<TOKEN>"
+curl -o plan.pdf "http://127.0.0.1:9999/files/link/<TOKEN>?download=1"
+```
+The address a link carries is built from the request that made it, or from the `url` of the `editor` section of the config file where it is set, so behind a [reverse proxy](#running-behind-a-reverse-proxy) the public address is used.
+
 ## Editing Documents in the Browser
 Documents on the shares can be edited in the browser with [Collabora Online](https://www.collaboraonline.com/), which is LibreOffice as a web service. Sombrero speaks the WOPI protocol to it: the editor fetches the document from the file API, the browsers edit it in the editor's own pages, and every save comes back to the file API as a replacement of the file, which versioning retains under the usual session rule. Several accounts editing one document work on it together, in one editing session. The feature requires the [file API](#file-api) and is enabled by naming the Collabora Online server in the config file:
 ```YAML
