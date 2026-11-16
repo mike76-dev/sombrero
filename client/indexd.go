@@ -770,6 +770,22 @@ func (ic *IndexdClient) List(ctx context.Context, acc stores.Account, path strin
 	return ois, nil
 }
 
+// Search implements Searcher through the database.
+func (ic *IndexdClient) Search(ctx context.Context, acc stores.Account, text string) (ois []ObjectInfo, err error) {
+	oms, err := ic.db.SearchObjects(acc, ic.share, text)
+	if err != nil {
+		return nil, err
+	}
+	for _, om := range oms {
+		oi := ObjectInfo{Key: om.Path, CreatedAt: om.CreatedAt, ModifiedAt: om.ModifiedAt, Size: om.Size}
+		if om.IsDir {
+			oi.Key += "/"
+		}
+		ois = append(ois, oi)
+	}
+	return ois, nil
+}
+
 // Object retrieves the information about a file or a directory.
 func (ic *IndexdClient) Object(ctx context.Context, acc stores.Account, path string) (ObjectInfo, error) {
 	if path == "" {

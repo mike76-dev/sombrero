@@ -217,6 +217,36 @@ func (rc *RenterdClient) listAll(ctx context.Context, path string) ([]ObjectInfo
 	return rc.list(ctx, path, "")
 }
 
+// Search implements Searcher by walking the bucket, as renterd keeps no index
+// of the names.
+func (rc *RenterdClient) Search(ctx context.Context, _ stores.Account, text string) ([]ObjectInfo, error) {
+	return rc.search(ctx, text, func(string) bool { return true })
+}
+
+// search is Search over the objects the keep function admits.
+func (rc *RenterdClient) search(ctx context.Context, text string, keep func(key string) bool) (matches []ObjectInfo, err error) {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return nil, nil
+	}
+	ois, err := rc.listAll(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(ois, func(a, b ObjectInfo) int { return strings.Compare(a.Key, b.Key) })
+	for _, oi := range ois {
+		name := strings.TrimSuffix(oi.Key, "/")
+		name = name[strings.LastIndex(name, "/")+1:]
+		if keep(oi.Key) && strings.Contains(strings.ToLower(name), text) {
+			matches = append(matches, oi)
+			if len(matches) == stores.SearchLimit {
+				break
+			}
+		}
+	}
+	return matches, nil
+}
+
 // list lists the objects under the path, those under a subdirectory folded
 // into an entry for it where the delimiter is set.
 func (rc *RenterdClient) list(ctx context.Context, path, delimiter string) (ois []ObjectInfo, err error) {
