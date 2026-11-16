@@ -20,6 +20,8 @@ Where the server names a Collabora Online server (see [Editing Documents in the 
 
 **Deleted files** above the listing opens the deleted files of the share: every file that is gone but for its versions, the files of deleted folders included, each with its folder, its size and the time and account of its deletion. A file is restored to where it was, its folder made again if it is gone, or deleted permanently together with its versions, one at a time or as a selection; **Undo** in the notice of a restoration returns the file to the deleted files. The list empties as the versions expire.
 
+The search box above the listing finds the files and folders of the whole share whose names contain the text, irrespective of case, among those the account may list, up to 200 of them by path. Each result shows the folder it is in, which opens on a click, and a file opens or downloads from its name as it does in a listing. The address carries the text, so a search can be linked to and refined from its own page.
+
 **Activity** above the listing opens the [activity feed](../README.md#activity-feed) of the share: what the accounts of the workgroup did on it, over SMB, the file API, WebDAV and the editor alike, newest first and day by day. Each entry names the account, says what it did, with the size of an uploaded or restored file, and links the file's folder, or the folder itself; **Show earlier activity** at the end loads the next page.
 
 ## Setup wizard

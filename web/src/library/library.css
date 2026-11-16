@@ -191,6 +191,15 @@ a.share-card:hover {
   gap: 8px;
 }
 
+.search-form {
+  margin-left: 16px;
+}
+
+.search-form input {
+  width: 220px;
+  background: var(--surface);
+}
+
 .files .col-select {
   width: 20px;
   padding-right: 0;

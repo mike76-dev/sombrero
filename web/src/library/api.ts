@@ -143,6 +143,12 @@ export function list(share: string, path: string, at?: string): Promise<Listing>
   return call<Listing>(`/share/${encodeURIComponent(share)}/list`, { query: { path, at } })
 }
 
+// search finds the files and folders of the share whose names contain the
+// text, among those the account may list, by path and up to 200 of them.
+export function search(share: string, q: string): Promise<Entry[]> {
+  return call<Entry[]>(`/share/${encodeURIComponent(share)}/search`, { query: { q } })
+}
+
 export function snapshots(share: string, path: string): Promise<string[]> {
   return call<string[]>(`/share/${encodeURIComponent(share)}/snapshots`, { query: { path } })
 }
