@@ -369,6 +369,17 @@ func (v VersioningConfig) Retention() (gap, session time.Duration, count int, ag
 	return v.Gap.Interval(DefaultVersionGap), v.MaxSession.Interval(DefaultVersionSession), count, v.MaxAge.Interval(DefaultVersionAge)
 }
 
+// DefaultActivityRetention is how long the activity feed reaches back unless
+// the config file says otherwise.
+const DefaultActivityRetention = 90 * 24 * time.Hour
+
+// ActivityConfig is the retention of the activity feed, which records what
+// the accounts do on the shares.
+type ActivityConfig struct {
+	// Retention is how long an entry is kept; "never" keeps them for good.
+	Retention CheckInterval `yaml:"retention,omitempty"`
+}
+
 type Config struct {
 	Debug          bool       `yaml:"debug"`
 	Mode           ServerMode `yaml:"mode"`
@@ -388,6 +399,7 @@ type Config struct {
 	Editor   EditorConfig   `yaml:"editor,omitempty"`
 
 	Versioning VersioningConfig `yaml:"versioning,omitempty"`
+	Activity   ActivityConfig   `yaml:"activity,omitempty"`
 }
 
 // BufferAge is how long the leftover data of a share may wait: what MaxBufferAge
