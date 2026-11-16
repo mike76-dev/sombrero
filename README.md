@@ -584,12 +584,14 @@ Then create a virtual host, e.g. in `/etc/apache2/sites-available/sombrero.conf`
     SSLCertificateKeyFile /etc/letsencrypt/live/sombrero.example.com/privkey.pem
 
     RequestHeader unset X-Forwarded-For
+    RequestHeader set X-Forwarded-Proto "https"
 
     ProxyPreserveHost On
     ProxyPass        / http://127.0.0.1:9999/
     ProxyPassReverse / http://127.0.0.1:9999/
 </VirtualHost>
 ```
+The `X-Forwarded-Proto` header tells the server that it is reached over HTTPS, which the addresses it hands out, such as the [sharing links](#sharing-links) and the editor's, are then built with.
 
 Enable the site and reload:
 ```Bash
