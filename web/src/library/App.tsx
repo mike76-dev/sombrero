@@ -5,6 +5,7 @@ import { Browser } from './Browser'
 import { DeletedPage } from './DeletedPage'
 import { EditorPage } from './EditorPage'
 import { LoginPage } from './LoginPage'
+import { SearchPage } from './SearchPage'
 import { SharesPage } from './SharesPage'
 import { hashFor, useRoute } from './route'
 import { ThemeButton, useTheme } from '../theme'
@@ -122,7 +123,15 @@ function Library({
   useEffect(() => {
     const folder = route.path.slice(route.path.lastIndexOf('/') + 1)
     const place =
-      route.share === null ? '' : route.bin ? `Deleted files · ${route.share}` : route.activity ? `Activity · ${route.share}` : folder || route.share
+      route.share === null
+        ? ''
+        : route.bin
+          ? `Deleted files · ${route.share}`
+          : route.activity
+            ? `Activity · ${route.share}`
+            : route.q
+              ? `Search · ${route.share}`
+              : folder || route.share
     document.title = place ? `${place} · Sombrero` : 'Sombrero'
     return () => {
       document.title = 'Sombrero'
@@ -173,6 +182,8 @@ function Library({
           <DeletedPage share={route.share} shareRights={shareList?.find((s) => s.name === route.share)?.rights} onExpired={onExpired} />
         ) : route.activity ? (
           <ActivityPage share={route.share} onExpired={onExpired} />
+        ) : route.q ? (
+          <SearchPage share={route.share} q={route.q} onExpired={onExpired} />
         ) : route.edit ? (
           <EditorPage share={route.share} path={route.path} onExpired={onExpired} />
         ) : (

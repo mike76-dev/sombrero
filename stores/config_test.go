@@ -442,6 +442,26 @@ func TestReadConfigVersioningSection(t *testing.T) {
 	if _, session, _, age := cfg.Versioning.Retention(); session != 0 || age != 0 {
 		t.Errorf("want sessions uncapped and versions kept for good, got %v and %v", session, age)
 	}
+	if got := cfg.Activity.Retention.Interval(DefaultActivityRetention); got != DefaultActivityRetention {
+		t.Errorf("want the activity kept for the default, got %v", got)
+	}
+
+	write("api:\n  password: hunter2\nactivity:\n  retention: 24h\n")
+	cfg, err = ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if got := cfg.Activity.Retention.Interval(DefaultActivityRetention); got != 24*time.Hour {
+		t.Errorf("want the activity kept for a day, got %v", got)
+	}
+	write("api:\n  password: hunter2\nactivity:\n  retention: never\n")
+	cfg, err = ReadConfig(dir)
+	if err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+	if got := cfg.Activity.Retention.Interval(DefaultActivityRetention); got != 0 {
+		t.Errorf("want the activity kept for good, got %v", got)
+	}
 
 	for name, body := range map[string]string{
 		"the Lite mode":     "mode: lite\napi:\n  password: hunter2\nversioning:\n  enabled: true\n",

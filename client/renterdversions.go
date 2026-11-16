@@ -84,6 +84,11 @@ func (rv *RenterdVersions) List(ctx context.Context, acc stores.Account, path st
 	return listed, nil
 }
 
+// Search implements Searcher: nothing in the server's folder is found.
+func (rv *RenterdVersions) Search(ctx context.Context, _ stores.Account, text string) ([]ObjectInfo, error) {
+	return rv.search(ctx, text, func(key string) bool { return !reserved(key) })
+}
+
 // Object implements Client: the server's folder is not there to a client.
 func (rv *RenterdVersions) Object(ctx context.Context, acc stores.Account, path string) (ObjectInfo, error) {
 	if reserved(path) {

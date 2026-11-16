@@ -89,24 +89,20 @@ func plainDuration(d time.Duration) string {
 	}
 }
 
-const (
-	// expiryInterval is how often the versions, the activity and the sharing
-	// links past their time are dropped.
-	expiryInterval = time.Hour
-	// activityAge is how long the activity feed reaches back.
-	activityAge = 90 * 24 * time.Hour
-)
+// expiryInterval is how often the versions, the activity and the sharing
+// links past their time are dropped.
+const expiryInterval = time.Hour
 
-// expire drops the versions older than the age, where there is one, on the
+// expire drops the versions older than versionAge, where there is one, on the
 // indexd shares through the database and on the renterd shares through the
-// server, and the activity older than activityAge, now and then every
-// interval, until the context ends.
-func expire(ctx context.Context, db *stores.Database, s *server, age time.Duration) {
+// server, the activity older than activityAge, where there is one, and the
+// expired sharing links, now and then every interval, until the context ends.
+func expire(ctx context.Context, db *stores.Database, s *server, versionAge, activityAge time.Duration) {
 	ticker := time.NewTicker(expiryInterval)
 	defer ticker.Stop()
 
 	for {
-		if age > 0 {
+		if age := versionAge; age > 0 {
 			n, err := db.ExpireVersions(age)
 			if err != nil {
 				log.Printf("failed to expire versions: %v", err)
@@ -247,7 +243,7 @@ func main() {
 	server.applyCapabilities()
 	db.WithShares(server)
 	if pg, ok := db.(*stores.Database); ok {
-		go expire(ctx, pg, server, versionAge)
+		go expire(ctx, pg, server, versionAge, cfg.Activity.Retention.Interval(stores.DefaultActivityRetention))
 	}
 
 	// Start the API server.

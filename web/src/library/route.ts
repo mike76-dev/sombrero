@@ -4,13 +4,15 @@ import { useEffect, useState } from 'react'
 // of a share and #/<share>/<folder>/<folder> for a folder in it, each segment
 // URL-encoded. A folder as it was carries the time: #/<share>/<folder>?at=<time>.
 // The deleted files of a share are at #/<share>?bin, its activity at
-// #/<share>?activity, and a file in the editor at #/<share>/<folder>/<file>?edit.
+// #/<share>?activity, a search of it at #/<share>?q=<text>, and a file in the
+// editor at #/<share>/<folder>/<file>?edit.
 export interface Route {
   share: string | null
   path: string
   at?: string
   bin?: boolean
   activity?: boolean
+  q?: string
   edit?: boolean
 }
 
@@ -29,8 +31,13 @@ export function parseRoute(hash: string): Route {
     at,
     bin: params.has('bin') || undefined,
     activity: params.has('activity') || undefined,
+    q: params.get('q') ?? undefined,
     edit: params.has('edit') || undefined,
   }
+}
+
+export function searchHash(share: string, q: string): string {
+  return hashFor(share) + '?q=' + encodeURIComponent(q)
 }
 
 export function editHash(share: string, path: string): string {

@@ -151,6 +151,13 @@ type AccessChecker interface {
 	PathAccess(ctx context.Context, acc stores.Account, path string) (stores.PathAccess, error)
 }
 
+// Searcher is the part of a client that finds the files and folders of the
+// share whose names contain a text, whatever the case, among those the account
+// may list, by path and up to stores.SearchLimit of them.
+type Searcher interface {
+	Search(ctx context.Context, acc stores.Account, text string) ([]ObjectInfo, error)
+}
+
 // VersionInfo describes a previous version of a file: when its contents were
 // last written, and when and by whom they were replaced.
 type VersionInfo struct {

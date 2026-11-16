@@ -137,6 +137,8 @@ versioning:                   # optional: keeps the previous contents of replace
   maxSession: 1h              # optional: an editing session longer than this leaves a version at the next save; defaults to 1h, "never" leaves one per session
   maxVersions: 10             # optional: how many versions of a file are kept; defaults to 10
   maxAge: 720h                # optional: how long a version is kept; defaults to 720h (30 days), "never" keeps them forever
+activity:                     # optional: the activity feed of the shares (see below)
+  retention: 2160h            # optional: how long an entry is kept; defaults to 2160h (90 days), "never" keeps them forever
 ```
 The server can be started either as a standalone executable or as a service (the latter is preferred). For example, on Linux:
 ```Bash
@@ -398,10 +400,11 @@ The response identifies the account and its workgroup, and the session is return
 curl -b cookies.txt "http://127.0.0.1:9999/files/me"
 curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/logout"
 ```
-A logged-in account sees exactly what it would see over SMB. `GET /files/shares` lists the shares that the account's policies grant access to, with the read, write, delete and execute rights of the account on each; a guest account sees only the shares that allow guest access. `GET /files/share/<SHARE>/list?path=/Projects` lists a folder (the root of the share if no path is given) with the name, size and timestamps of every file and folder visible to the account, including the [granted folders](#granting-folders-to-other-workgroups). The listing also states whether the account may write and delete in the folder: the rights of the share policy, narrowed by the grant level in a folder of another workgroup. A client reads them again on entering a subfolder, because a folder may be granted at a higher level than its parent:
+A logged-in account sees exactly what it would see over SMB. `GET /files/shares` lists the shares that the account's policies grant access to, with the read, write, delete and execute rights of the account on each; a guest account sees only the shares that allow guest access. `GET /files/share/<SHARE>/list?path=/Projects` lists a folder (the root of the share if no path is given) with the name, size and timestamps of every file and folder visible to the account, including the [granted folders](#granting-folders-to-other-workgroups). The listing also states whether the account may write and delete in the folder: the rights of the share policy, narrowed by the grant level in a folder of another workgroup. A client reads them again on entering a subfolder, because a folder may be granted at a higher level than its parent. `GET /files/share/<SHARE>/search?q=report` finds the files and folders of the whole share whose names contain the text, irrespective of case, among those the account may list, as entries of the same shape, by path and up to 200 of them:
 ```Bash
 curl -b cookies.txt "http://127.0.0.1:9999/files/shares"
 curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/list?path=/Projects"
+curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/search?q=report"
 ```
 `GET /files/share/<SHARE>/file?path=/Projects/plan.pdf` downloads a file. The file is sent as an attachment unless `inline=1` is added, in which case a browser displays it if it is able to. Images, audio, video and PDF documents are displayed as they are; a file of any other kind is displayed in a sandbox, so that a page uploaded to a share cannot execute scripts in the context of the server. Range requests are supported, so that a viewer can seek in a video or a PDF without downloading the entire file. A `HEAD` request to the same address returns the headers alone. Names containing special characters, such as spaces or brackets, must be URL-encoded in the query:
 ```Bash
@@ -460,7 +463,11 @@ curl -b cookies.txt -X POST "http://127.0.0.1:9999/files/share/<SHARE>/restore?p
 ```
 
 ## Activity Feed
-The server records what the accounts do on the shares, over SMB, the file API, WebDAV and the editor alike: a file uploaded or updated, deleted, renamed or moved, a folder created or deleted, and a version restored. The feed of a share is kept per workgroup: an account sees what the accounts of its own workgroup did on the share, and nothing of other workgroups. Entries are kept for 90 days. The scratch files of editors, such as the `~$` and `.tmp` files of Microsoft Office, leave no entries, and a scratch file renamed onto a document, which is how some editors save, is recorded as an update of the document. The saves of an editing session are one entry: a file written again by the same account within ten minutes of its last write appears once, with the time and the size of the latest write. The feed requires the Normal mode, as the Lite mode keeps none.
+The server records what the accounts do on the shares, over SMB, the file API, WebDAV and the editor alike: a file uploaded or updated, deleted, renamed or moved, a folder created or deleted, and a version restored. The feed of a share is kept per workgroup: an account sees what the accounts of its own workgroup did on the share, and nothing of other workgroups. An entry is kept for the `retention` of the `activity` section of the config file, 90 days unless set, and `never` keeps the entries forever:
+```YAML
+activity:
+  retention: 2160h
+``` The scratch files of editors, such as the `~$` and `.tmp` files of Microsoft Office, leave no entries, and a scratch file renamed onto a document, which is how some editors save, is recorded as an update of the document. The saves of an editing session are one entry: a file written again by the same account within ten minutes of its last write appears once, with the time and the size of the latest write. The feed requires the Normal mode, as the Lite mode keeps none.
 
 `GET /files/share/<SHARE>/activity` returns the newest 50 entries, each with its ID, time, account, action (`upload`, `update`, `delete`, `rename`, `mkdir`, `rmdir` or `restore`), path, the new path of a rename or a move as `target`, and the size of an uploaded or restored file. `limit` sets the number of entries, up to 200, and `before=<ID>` continues from the last entry of an earlier page:
 ```Bash

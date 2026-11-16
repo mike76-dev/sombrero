@@ -126,6 +126,7 @@ func New(store Store, srv Server) *Handler {
 	h.router.GET("/me", h.meHandler)
 	h.router.GET("/shares", h.withSession(h.sharesHandler))
 	h.router.GET("/share/:name/list", h.withSession(h.listHandler))
+	h.router.GET("/share/:name/search", h.withSession(h.searchHandler))
 	h.router.GET("/share/:name/file", h.withSession(h.fileHandler))
 	h.router.HEAD("/share/:name/file", h.withSession(h.fileHandler))
 	h.router.PUT("/share/:name/file", h.withSession(h.uploadHandler))

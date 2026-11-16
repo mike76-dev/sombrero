@@ -32,7 +32,9 @@ type mockClient struct {
 	object     func(string) (client.ObjectInfo, error)
 	read       func(string, uint64, uint64, io.Writer) error
 	pathAccess func(string) (stores.PathAccess, error)
+	search     func(string) ([]client.ObjectInfo, error)
 	listed     []string
+	searched   []string
 	mu         sync.Mutex
 	reads      [][2]uint64
 
@@ -268,6 +270,14 @@ func (m *mockClient) List(_ context.Context, _ stores.Account, p string) ([]clie
 	m.listed = append(m.listed, p)
 	if m.list != nil {
 		return m.list(p)
+	}
+	return nil, nil
+}
+
+func (m *mockClient) Search(_ context.Context, _ stores.Account, text string) ([]client.ObjectInfo, error) {
+	m.searched = append(m.searched, text)
+	if m.search != nil {
+		return m.search(text)
 	}
 	return nil, nil
 }

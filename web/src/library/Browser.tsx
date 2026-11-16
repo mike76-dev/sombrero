@@ -20,6 +20,7 @@ import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
 import { activityHash, binHash, editHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { LinksDialog } from './LinksDialog'
+import { SearchBox } from './SearchBox'
 import { VersionsDialog } from './VersionsDialog'
 import { formatBytes, formatTime, formatTimeExact } from '../format'
 
@@ -94,7 +95,8 @@ function officeLink(share: string, path: string, write: boolean): string | null 
 
 const player = document.createElement('video')
 
-function canShow(name: string): boolean {
+// canShow says whether the browser shows a file of the name by itself.
+export function canShow(name: string): boolean {
   const ext = extension(name)
   if (viewable.has(ext)) return true
   const type = media[ext]
@@ -483,6 +485,7 @@ export function Browser({
               <a className="btn" href={activityHash(share)}>
                 Activity
               </a>
+              <SearchBox share={share} />
             </>
           )}
         </div>
