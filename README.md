@@ -16,7 +16,7 @@ On Ubuntu, the installer script does the whole setup: it installs the server, se
 curl -fsSLO https://raw.githubusercontent.com/mike76-dev/sombrero/master/install-sombrero.sh
 sudo bash install-sombrero.sh
 ```
-It asks for the mode and an API password, and prints how to reach the web UI when it is done. Run it again to upgrade the server to the latest release; the configuration and the data are kept. `sudo bash install-sombrero.sh --help` lists the options.
+It asks for the mode, whether to enable the [file API](#file-api) and [versioning](#previous-versions) in the Normal mode, and an API password, and prints how to reach the web UI when it is done. Run it again to upgrade the server to the latest release; the configuration and the data are kept. `sudo bash install-sombrero.sh --help` lists the options.
 
 The released binaries need Ubuntu 26.04 / Debian 13 or newer. On an older system, use the Docker image or build from source.
 

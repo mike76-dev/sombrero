@@ -6,6 +6,7 @@ set -euo pipefail
 REPO=mike76-dev/sombrero
 BIN=/usr/local/bin/sombrero
 DATA_DIR=/var/lib/sombrero
+BACKUP_DIR=/var/backups/sombrero
 CONFIG=$DATA_DIR/sombrero.yml
 UNIT=/etc/systemd/system/sombrero.service
 SERVICE_USER=sombrero
@@ -14,6 +15,8 @@ DB_NAME=sombrero
 DB_USER=sombrero
 
 MODE=""
+FILES=""
+VERSIONING=""
 BINARY=""
 RELEASE=""
 ASSUME_YES=false
@@ -32,6 +35,10 @@ Run again, it upgrades the server and keeps the configuration and the data.
 
 Options:
   --mode normal|lite   the server mode; asked for if omitted
+  --files yes|no       whether to enable the file API, which serves the web library, WebDAV,
+                       the sharing links and the search; asked for in the Normal mode if omitted
+  --versioning yes|no  whether to keep the previous versions of replaced files; asked for in
+                       the Normal mode if omitted
   --version X.Y.Z      the release to install; the latest one if omitted
   --binary PATH        install this binary instead of downloading a release
   -y, --yes            take the defaults instead of asking
@@ -143,6 +150,14 @@ parse_args() {
 			MODE=${2:-}
 			shift
 			;;
+		--files)
+			FILES=${2:-}
+			shift
+			;;
+		--versioning)
+			VERSIONING=${2:-}
+			shift
+			;;
 		--version)
 			RELEASE=${2:-}
 			shift
@@ -163,6 +178,14 @@ parse_args() {
 	case "$MODE" in
 	"" | normal | lite) ;;
 	*) die "--mode is either normal or lite" ;;
+	esac
+	case "$FILES" in
+	"" | yes | no) ;;
+	*) die "--files is either yes or no" ;;
+	esac
+	case "$VERSIONING" in
+	"" | yes | no) ;;
+	*) die "--versioning is either yes or no" ;;
 	esac
 }
 
@@ -227,6 +250,35 @@ EOF
 		2 | lite) MODE=lite && return ;;
 		esac
 	done
+}
+
+# choose_features asks about the file API and versioning, which the Lite mode
+# does not offer, so there they are off without asking.
+choose_features() {
+	if [ "$MODE" = lite ]; then
+		FILES=no
+		VERSIONING=no
+		return
+	fi
+	if [ -z "$FILES" ]; then
+		cat <<EOF
+
+The file API serves the shares over HTTP: the web library at the API address, WebDAV,
+the browser editor, the activity feed, sharing links and search. It is reached with the
+accounts of the shares, not the API password.
+EOF
+		FILES=no
+		confirm "Enable the file API?" y && FILES=yes
+	fi
+	if [ -z "$VERSIONING" ]; then
+		cat <<EOF
+
+Versioning keeps the previous contents of a replaced file, for a client to go back to:
+one version per editing session, up to 10 per file, each for 30 days.
+EOF
+		VERSIONING=no
+		confirm "Keep the previous versions of files?" y && VERSIONING=yes
+	fi
 }
 
 choose_api_password() {
@@ -364,6 +416,12 @@ indexd:
   logoURL: https://raw.githubusercontent.com/mike76-dev/sombrero/master/logo.png
   serviceURL: https://github.com/mike76-dev/sombrero
   seedPhrase: ''
+files:
+  enabled: $([ "$FILES" = yes ] && echo true || echo false)
+versioning:
+  enabled: $([ "$VERSIONING" = yes ] && echo true || echo false)
+activity:
+  retention: 2160h
 EOF
 			fi
 		} >"$CONFIG"
@@ -388,6 +446,9 @@ allow_bbr() {
 }
 
 write_unit() {
+	# The folder the README suggests for the backup catalogs, writable to the
+	# server although the rest of the system is not.
+	install -d -m 700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$BACKUP_DIR"
 	cat >"$UNIT" <<EOF
 [Unit]
 Description=Sombrero SMB server
@@ -405,6 +466,7 @@ RestartSec=5
 TimeoutStopSec=60
 StateDirectory=sombrero
 StateDirectoryMode=0700
+ReadWritePaths=-$BACKUP_DIR
 
 # Port 445 is the only privilege the server needs.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -474,6 +536,7 @@ upgrade() {
 install_fresh() {
 	step "Installing Sombrero"
 	choose_mode
+	choose_features
 	choose_api_password
 	STOP_SAMBA=false
 	check_ports
@@ -492,6 +555,8 @@ EOF
   - run the server in the $MODE mode as the systemd service sombrero, under a user of its own
   - keep its configuration and data in $DATA_DIR
 EOF
+	[ "$FILES" = yes ] && echo "  - enable the file API, with the web library, WebDAV, sharing links and search"
+	[ "$VERSIONING" = yes ] && echo "  - keep the previous versions of replaced files"
 	$STOP_SAMBA && echo "  - stop and disable Samba"
 	[ -n "$FIREWALL_SOURCE" ] && echo "  - open port 445 in ufw to ${FIREWALL_SOURCE/any/everyone}"
 	echo
@@ -539,8 +604,9 @@ summary() {
 	step "${GREEN}Sombrero $NEW_VERSION is installed and running${RESET}"
 	cat <<EOF
 
-  Web UI and API:  http://$API_ADDRESS (reachable from this machine only)
+  Administration:  http://$API_ADDRESS/admin (reachable from this machine only)
 EOF
+	[ "$FILES" = yes ] && echo "  Web library:     http://$API_ADDRESS/ (the accounts of the shares log in here)"
 	if $API_PASSWORD_GENERATED; then
 		echo "  API password:    $API_PASSWORD"
 	else
@@ -560,6 +626,14 @@ ${BOLD}What's next${RESET}
      account, registering a share, connecting to it, and granting the account access.
   4. Connect to \\\\${address:-<this server>}\\<share> from your computers with that account.
 EOF
+	if [ "$FILES" = yes ]; then
+		cat <<EOF
+  5. Open http://127.0.0.1:9999/ through the same tunnel and log in with that account
+     to browse the share in the web library. To reach it, and WebDAV at /dav, from
+     elsewhere, put a reverse proxy with TLS in front of the API address; the README
+     has the details.
+EOF
+	fi
 	if [ "$MODE" = normal ]; then
 		cat <<EOF
 
