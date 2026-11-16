@@ -16,12 +16,22 @@ export interface Route {
   edit?: boolean
 }
 
+// decode reads a segment of the hash. One with a malformed escape, as a link
+// passed on with its encoding undone has, is taken as it stands.
+function decode(segment: string): string {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return segment
+  }
+}
+
 export function parseRoute(hash: string): Route {
   const [location, query = ''] = hash.replace(/^#\/?/, '').split('?', 2)
   const segments = location
     .split('/')
     .filter((s) => s !== '')
-    .map(decodeURIComponent)
+    .map(decode)
   if (segments.length === 0) return { share: null, path: '/' }
   const params = new URLSearchParams(query)
   const at = params.get('at') ?? undefined
