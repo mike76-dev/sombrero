@@ -17,6 +17,7 @@ import {
 } from './api'
 import { describe, outcome, runEach } from './batch'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
+import { FileIcon, Icon, IconLink } from './icons'
 import { activityHash, binHash, editHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { LinksDialog } from './LinksDialog'
@@ -978,9 +979,7 @@ function Row({
         </td>
       )}
       <td className="col-name">
-        <span className="file-icon" aria-hidden>
-          {entry.dir ? '\u{1F4C1}' : '\u{1F4C4}'}
-        </span>
+        <FileIcon name={entry.name} dir={entry.dir} />
         {entry.dir ? (
           <a className="file-name" href={hashFor(share, entry.path, at)}>
             {entry.name}
@@ -998,25 +997,13 @@ function Row({
       <td className="col-size muted">{entry.dir ? '' : formatBytes(entry.size)}</td>
       <td className="col-time muted">{formatTime(entry.modifiedAt)}</td>
       <td className="col-actions">
-        {editable && (
-          <a className="btn btn-small" href={editHash(share, entry.path)}>
-            {rights.write ? 'Edit' : 'View'}
-          </a>
-        )}
-        {showable && (
-          <a className="btn btn-small" href={href(true)} target="_blank" rel="noreferrer">
-            Open
-          </a>
-        )}
-        {!entry.dir && (
-          <a className="btn btn-small" href={href(false)} download={entry.name}>
-            Download
-          </a>
-        )}
+        {editable && <IconLink icon={rights.write ? 'edit' : 'view'} label={rights.write ? 'Edit' : 'View'} href={editHash(share, entry.path)} />}
+        {showable && <IconLink icon="open" label="Open" href={href(true)} target="_blank" rel="noreferrer" />}
+        {!entry.dir && <IconLink icon="download" label="Download" href={href(false)} download={entry.name} />}
         {manage && (
           <details ref={menu} className="menu">
-            <summary className="btn btn-small" aria-label="More actions">
-              ⋯
+            <summary className="btn-icon" aria-label="More actions" data-tip="More actions">
+              <Icon name="more" />
             </summary>
             <div className="menu-items">
               {office && (

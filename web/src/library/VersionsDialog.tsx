@@ -10,6 +10,7 @@ import {
   versions,
 } from "./api";
 import { ConfirmDialog, Modal } from "./Dialogs";
+import { IconButton, IconLink } from "./icons";
 import { formatBytes, formatTimeExact } from "../format";
 
 // VersionsDialog lists the previous versions of a file, with what the rights
@@ -129,44 +130,37 @@ export function VersionsDialog({
                     </td>
                     <td className="col-actions">
                       {canShow && (
-                        <a
-                          className="btn btn-small"
-                          href={versionURL(
-                            share,
-                            entry.path,
-                            { id: v.id },
-                            true,
-                          )}
+                        <IconLink
+                          icon="open"
+                          label="Open"
+                          href={versionURL(share, entry.path, { id: v.id }, true)}
                           target="_blank"
                           rel="noreferrer"
-                        >
-                          Open
-                        </a>
+                        />
                       )}
-                      <a
-                        className="btn btn-small"
+                      <IconLink
+                        icon="download"
+                        label="Download"
                         href={versionURL(share, entry.path, { id: v.id })}
                         download={entry.name}
-                      >
-                        Download
-                      </a>
+                      />
                       {rights.write && (
                         <>
-                          <button
-                            className="btn btn-small"
+                          <IconButton
+                            icon="restore"
+                            label="Restore"
                             disabled={busy}
                             onClick={() => setConfirm({ kind: "restore", v })}
-                          >
-                            Restore
-                          </button>
-                          <button
-                            className="btn btn-small"
-                            disabled={busy}
-                            title={
+                          />
+                          <IconButton
+                            icon="pin"
+                            label={
                               v.kept
                                 ? "Let the version expire again"
                                 : "Keep the version beyond the limits"
                             }
+                            className={v.kept ? "btn-icon-on" : undefined}
+                            disabled={busy}
                             onClick={() =>
                               act(
                                 () =>
@@ -176,19 +170,17 @@ export function VersionsDialog({
                                   : "The version is kept.",
                               )
                             }
-                          >
-                            {v.kept ? "Release" : "Keep"}
-                          </button>
+                          />
                         </>
                       )}
                       {rights.delete && (
-                        <button
-                          className="btn btn-small btn-danger"
+                        <IconButton
+                          icon="trash"
+                          label="Delete"
+                          danger
                           disabled={busy}
                           onClick={() => setConfirm({ kind: "delete", v })}
-                        >
-                          Delete
-                        </button>
+                        />
                       )}
                     </td>
                   </tr>
