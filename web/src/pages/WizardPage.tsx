@@ -12,6 +12,7 @@ import {
   updateWorkgroup,
 } from '../api/endpoints'
 import { Card, ErrorBanner, Field, SuccessBanner, useApiAction } from '../components/common'
+import { Icon } from '../icons'
 import { ConnectStatusView, ShareKeyField, useConnectAttempt } from '../components/connect'
 import { PublicDirsEditor, cleanPublicDirs, samePublicDirs } from '../components/publicdirs'
 import { ServerAddressField } from '../components/serveraddress'
@@ -65,7 +66,7 @@ function StepBar({ at, steps }: { at: number; steps: readonly { key: string; lab
           className={`step step-${i < at ? 'done' : i === at ? 'active' : 'pending'}`}
         >
           <span className="step-mark" aria-hidden="true">
-            {i < at ? '✓' : ''}
+            {i < at && <Icon name="check" size={14} />}
           </span>
           <span className="step-label">{step.label}</span>
         </li>

@@ -17,7 +17,7 @@ import {
 } from './api'
 import { describe, outcome, runEach } from './batch'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
-import { FileIcon, Icon, IconButton, IconLink } from './icons'
+import { FileIcon, Icon, IconButton, IconLink } from '../icons'
 import { activityHash, binHash, editHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { LinksDialog } from './LinksDialog'
@@ -559,7 +559,10 @@ export function Browser({
         <p className="muted">Loading…</p>
       ) : entries.length === 0 ? (
         rights.write ? (
-          <div className="drop-hint">This folder is empty. Drop files or folders here to upload them.</div>
+          <div className="drop-hint">
+            <Icon name="upload" size={36} />
+            <span>This folder is empty. Drop files or folders here to upload them.</span>
+          </div>
         ) : (
           <p className="muted">This folder is empty.</p>
         )
@@ -953,7 +956,7 @@ function Row({
   const manage = !entry.dir || rights.delete
   // The desktop application opens the file as it is now, so not in the past.
   const office = entry.dir || at ? null : officeLink(share, entry.path, rights.write)
-  const classes = [dragged ? 'row-dragging' : '', over ? 'drop-target' : ''].filter(Boolean).join(' ')
+  const classes = [dragged ? 'row-dragging' : '', over ? 'drop-target' : '', selected ? 'row-selected' : ''].filter(Boolean).join(' ')
   return (
     <tr
       className={classes || undefined}

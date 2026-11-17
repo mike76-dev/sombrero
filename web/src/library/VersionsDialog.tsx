@@ -10,7 +10,7 @@ import {
   versions,
 } from "./api";
 import { ConfirmDialog, Modal } from "./Dialogs";
-import { IconButton, IconLink } from "./icons";
+import { IconButton, IconLink } from "../icons";
 import { formatBytes, formatTimeExact } from "../format";
 
 // VersionsDialog lists the previous versions of a file, with what the rights

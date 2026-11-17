@@ -35,23 +35,7 @@ export function Flag({ on, label }: { on: boolean; label: string }) {
   return <span className={on ? 'flag flag-on' : 'flag'}>{label}</span>
 }
 
-export function CopyButton({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      type="button"
-      className="btn btn-small"
-      onClick={() => {
-        navigator.clipboard.writeText(value).then(() => {
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
-        })
-      }}
-    >
-      {copied ? 'Copied!' : 'Copy'}
-    </button>
-  )
-}
+export { CopyButton } from '../icons'
 
 // Fetches API data on mount (and whenever deps change), with a manual reload.
 export function useApiData<T>(fetcher: () => Promise<T>, deps: unknown[] = []) {

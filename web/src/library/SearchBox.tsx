@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react'
-import { Icon } from './icons'
+import { Icon } from '../icons'
 import { searchHash } from './route'
 
 // SearchBox takes a text and goes to the search of the share for it.

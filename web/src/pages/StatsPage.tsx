@@ -1,5 +1,6 @@
 import { getStats, getVersion } from '../api/endpoints'
 import { Card, ErrorBanner, formatBytes, useApiData } from '../components/common'
+import { IconButton } from '../icons'
 
 function formatUptime(start: string): string {
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(start).getTime()) / 1000))
@@ -25,9 +26,7 @@ export function StatsPage() {
         title={
           <span className="row row-spread">
             <span>Server statistics</span>
-            <button className="btn btn-small" onClick={reload} disabled={busy}>
-              Reload
-            </button>
+            <IconButton icon="refresh" label="Reload" onClick={reload} disabled={busy} />
           </span>
         }
       >

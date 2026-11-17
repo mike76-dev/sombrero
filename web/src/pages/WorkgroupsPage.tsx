@@ -17,6 +17,7 @@ import {
   useApiData,
 } from '../components/common'
 import { PublicDirsEditor, cleanPublicDirs } from '../components/publicdirs'
+import { IconButton } from '../icons'
 
 function WorkgroupCard({ wg, onChanged }: { wg: Workgroup; onChanged: () => void }) {
   const { run, busy, error, message } = useApiAction()
@@ -144,9 +145,7 @@ export function WorkgroupsPage() {
         title={
           <span className="row row-spread">
             <span>Workgroups{data ? ` (${workgroups.length})` : ''}</span>
-            <button className="btn btn-small" onClick={reload} disabled={busy}>
-              Reload
-            </button>
+            <IconButton icon="refresh" label="Reload" onClick={reload} disabled={busy} />
           </span>
         }
       >

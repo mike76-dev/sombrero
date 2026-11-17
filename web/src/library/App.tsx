@@ -9,7 +9,7 @@ import { SearchPage } from './SearchPage'
 import { SharesPage } from './SharesPage'
 import { hashFor, useRoute } from './route'
 import { ThemeButton, useTheme } from '../theme'
-import { Icon } from './icons'
+import { Icon } from '../icons'
 
 // The session the page holds: not known yet, none, or an account's. The file
 // API being off is a state of its own, so that the page can say so.
@@ -179,10 +179,7 @@ function Library({
             <span className="identity-workgroup muted">{workgroup}</span>
           </div>
           <SourceLink />
-          <button className="btn btn-labelled" onClick={toggleTheme} aria-label={theme === 'light' ? 'Dark mode' : 'Light mode'}>
-            <Icon name={theme === 'light' ? 'moon' : 'sun'} />
-            <span className="btn-label">{theme === 'light' ? 'Dark mode' : 'Light mode'}</span>
-          </button>
+          <ThemeButton theme={theme} toggle={toggleTheme} />
           <button className="btn btn-labelled" onClick={onLogout} aria-label="Log out">
             <Icon name="logout" />
             <span className="btn-label">Log out</span>

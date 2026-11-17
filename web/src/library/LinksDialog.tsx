@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { Entry, FilesError, SharingLink, createLink, deleteLink, links } from './api'
 import { describe } from './batch'
 import { ConfirmDialog, Modal } from './Dialogs'
-import { IconButton } from './icons'
+import { IconButton } from '../icons'
 import { formatTime } from '../format'
 
 // The choices of how long a link lasts, in days, or forever.
