@@ -69,6 +69,21 @@ a.brand {
   margin: 0;
 }
 
+.lib .source-link-foot {
+  display: none;
+}
+
+.lib .sidebar-footer .btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.lib .sidebar-footer .icon {
+  color: var(--accent);
+}
+
 .identity {
   display: flex;
   flex-direction: column;
@@ -292,6 +307,11 @@ a.share-card:hover {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.toolbar .btn,
+.toolbar .btn-tool {
+  min-height: 40px;
 }
 
 .toolbar .btn {
@@ -723,9 +743,25 @@ a.menu-item {
 }
 
 @media (max-width: 720px) {
+  .lib .nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    margin: 0 -12px;
+    padding: 0 12px 4px;
+    mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 24px), transparent);
+  }
+
+  .lib .nav::-webkit-scrollbar {
+    display: none;
+  }
+
   .lib .nav-item {
     display: inline-block;
-    max-width: 100%;
+    flex-shrink: 0;
+    max-width: 70vw;
+    scroll-snap-align: start;
   }
 
   .lib .sidebar-footer {
@@ -736,6 +772,8 @@ a.menu-item {
 
   .lib .sidebar-footer .btn {
     width: auto;
+    min-height: 40px;
+    padding: 0 10px;
   }
 
   .identity {
@@ -766,11 +804,27 @@ a.menu-item {
     padding: 0 10px;
   }
 
+  .toolbar .btn-labelled,
+  .toolbar .btn-tool {
+    flex: 1;
+    justify-content: center;
+  }
+
   .search-form {
-    margin-left: 0;
+    flex: 1 0 100%;
+    margin: 12px 0 0;
+  }
+
+  .lib .sidebar-footer .source-link {
+    display: none;
+  }
+
+  .lib .source-link-foot {
+    display: block;
+    margin: 24px 0 0;
   }
 
   .search-form input {
-    width: 190px;
+    width: 100%;
   }
 }
