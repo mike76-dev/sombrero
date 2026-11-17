@@ -294,12 +294,67 @@ a.share-card:hover {
   gap: 8px;
 }
 
+.toolbar .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  box-shadow: var(--shadow);
+}
+
+.toolbar .icon {
+  width: 20px;
+  height: 20px;
+  color: var(--accent);
+}
+
+.toolbar .btn-primary .icon {
+  color: inherit;
+}
+
+.toolbar .search-form .icon {
+  width: 18px;
+  height: 18px;
+  color: var(--text-muted);
+}
+
+.toolbar .btn-tool {
+  width: auto;
+  height: auto;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.toolbar .btn-tool:hover,
+.toolbar .btn-tool:focus-visible {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+
+.toolbar .btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
 .search-form {
+  position: relative;
   margin-left: 16px;
+}
+
+.search-form .icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
 }
 
 .search-form input {
   width: 220px;
+  padding-left: 34px;
   background: var(--surface);
 }
 
@@ -695,5 +750,27 @@ a.menu-item {
 
   .files .col-actions {
     width: auto;
+  }
+
+  .btn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .toolbar .btn-labelled {
+    position: relative;
+    padding: 0 10px;
+  }
+
+  .search-form {
+    margin-left: 0;
+  }
+
+  .search-form input {
+    width: 190px;
   }
 }

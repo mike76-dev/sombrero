@@ -24,6 +24,12 @@ const paths = {
   copy: 'M9 11a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2z M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1',
   link: 'M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1 M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1',
   close: 'M18 6L6 18 M6 6l12 12',
+  upload: 'M12 16V5 M7 10l5-5 5 5 M4 19h16',
+  uploadFolder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M12 17v-6 M9.5 13.5L12 11l2.5 2.5',
+  newFolder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M12 10.5v6 M9 13.5h6',
+  history: 'M3 12a9 9 0 1 0 2.6-6.4 M3 4v5h5 M12 8v4l3 2',
+  activity: 'M3 12h4l3-8 4 16 3-8h4',
+  search: 'M4 11a7 7 0 1 0 14 0a7 7 0 1 0-14 0 M20 20l-4-4',
 }
 
 export type IconName = keyof typeof paths

@@ -17,7 +17,7 @@ import {
 } from './api'
 import { describe, outcome, runEach } from './batch'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
-import { FileIcon, Icon, IconLink } from './icons'
+import { FileIcon, Icon, IconButton, IconLink } from './icons'
 import { activityHash, binHash, editHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { LinksDialog } from './LinksDialog'
@@ -503,14 +503,17 @@ export function Browser({
         <div className="toolbar">
           {rights.write && (
             <>
-              <button className="btn" onClick={() => picker.current?.click()}>
-                Upload files
+              <button className="btn btn-primary btn-labelled" onClick={() => picker.current?.click()}>
+                <Icon name="upload" />
+                <span className="btn-label">Upload files</span>
               </button>
-              <button className="btn" onClick={() => folderPicker.current?.click()}>
-                Upload folder
+              <button className="btn btn-labelled" onClick={() => folderPicker.current?.click()}>
+                <Icon name="uploadFolder" />
+                <span className="btn-label">Upload folder</span>
               </button>
-              <button className="btn" onClick={() => open({ kind: 'folder' })}>
-                New folder
+              <button className="btn btn-labelled" onClick={() => open({ kind: 'folder' })}>
+                <Icon name="newFolder" />
+                <span className="btn-label">New folder</span>
               </button>
               <input
                 ref={picker}
@@ -534,19 +537,11 @@ export function Browser({
               />
             </>
           )}
-          {!error && (
-            <button className="btn" onClick={() => open({ kind: 'history' })}>
-              History
-            </button>
-          )}
+          {!error && <IconButton className="btn-tool" icon="history" label="History" onClick={() => open({ kind: 'history' })} />}
           {!error && !at && (
             <>
-              <a className="btn" href={binHash(share)}>
-                Deleted files
-              </a>
-              <a className="btn" href={activityHash(share)}>
-                Activity
-              </a>
+              <IconLink className="btn-tool" icon="trash" label="Deleted files" href={binHash(share)} />
+              <IconLink className="btn-tool" icon="activity" label="Activity" href={activityHash(share)} />
               <SearchBox share={share} />
             </>
           )}
