@@ -40,6 +40,7 @@ import {
   useApiData,
 } from '../components/common'
 import { ServerAddressField } from '../components/serveraddress'
+import { IconButton } from '../icons'
 import { WorkgroupSelect } from '../components/selects'
 
 const emptyShare: Share = {
@@ -800,9 +801,7 @@ function SharesListCard({
       title={
         <span className="row row-spread">
           <span>Registered shares{loaded ? ` (${shares.length})` : ''}</span>
-          <button className="btn btn-small" onClick={onChanged} disabled={busy}>
-            Reload
-          </button>
+          <IconButton icon="refresh" label="Reload" onClick={onChanged} disabled={busy} />
         </span>
       }
     >
@@ -814,26 +813,32 @@ function SharesListCard({
             <tr>
               <th>Name</th>
               <th>Type</th>
-              <th>Server</th>
+              <th className="col-server">Server</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
             {shares.map((s) => (
               <Fragment key={s.name}>
-                <tr>
+                <tr
+                  className={expanded === s.name ? 'row-expandable row-open' : 'row-expandable'}
+                  onClick={() => setExpanded(expanded === s.name ? null : s.name)}
+                >
                   <td>
                     <strong>{s.name}</strong>
                   </td>
                   <td>{s.type}</td>
-                  <td className="mono muted">{s.serverName}</td>
-                  <td>
-                    <button
-                      className="btn btn-small"
-                      onClick={() => setExpanded(expanded === s.name ? null : s.name)}
-                    >
-                      {expanded === s.name ? 'Hide' : 'Details'}
-                    </button>
+                  <td className="mono muted col-server">{s.serverName}</td>
+                  <td className="col-expand">
+                    <IconButton
+                      icon={expanded === s.name ? 'chevronUp' : 'chevronDown'}
+                      label={expanded === s.name ? 'Hide the details' : 'Show the details'}
+                      aria-expanded={expanded === s.name}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setExpanded(expanded === s.name ? null : s.name)
+                      }}
+                    />
                   </td>
                 </tr>
                 {expanded === s.name && (

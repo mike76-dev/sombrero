@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { connectStatus } from '../api/endpoints'
 import { AppKeyHolder, ConnectState, ConnectStatusResponse } from '../api/types'
 import { CopyButton, ErrorBanner, Field } from './common'
+import { Icon } from '../icons'
 
 // Following a connection: the phases it goes through, the poll that keeps them
 // up to date, and the panel that shows them. The Connections page and the setup
@@ -222,7 +223,7 @@ function ConnectProgress({ attempt }: { attempt: ConnectAttempt }) {
           return (
             <li key={step.state} className={`step step-${mark}`}>
               <span className="step-mark" aria-hidden="true">
-                {mark === 'done' ? '✓' : mark === 'failed' ? '✕' : ''}
+                {mark === 'done' ? <Icon name="check" size={14} /> : mark === 'failed' ? <Icon name="close" size={14} /> : null}
               </span>
               <span>
                 <span className="step-label">{step.label}</span>

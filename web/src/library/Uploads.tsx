@@ -12,6 +12,12 @@ export interface Upload {
   error?: string
 }
 
+// An Incoming is a file to upload and the folder it goes into.
+export interface Incoming {
+  file: File
+  folder: string
+}
+
 export const doneLingers = 3000
 
 // useUploads keeps the queue of uploads to a share, sending one at a time.
@@ -56,12 +62,12 @@ export function useUploads(share: string, onDone: (folder: string) => void, onEx
       })
   }, [uploads, share, update, onDone, onExpired])
 
-  const add = useCallback((folder: string, list: File[]) => {
-    const added: Upload[] = list.map((f) => {
+  const add = useCallback((list: Incoming[]) => {
+    const added: Upload[] = list.map(({ file, folder }) => {
       const id = next.current++
-      files.current.set(id, f)
-      const path = (folder === '/' ? '' : folder) + '/' + f.name
-      return { id, name: f.name, path, size: f.size, sent: 0, state: 'waiting' }
+      files.current.set(id, file)
+      const path = (folder === '/' ? '' : folder) + '/' + file.name
+      return { id, name: file.name, path, size: file.size, sent: 0, state: 'waiting' }
     })
     setUploads((us) => [...us, ...added])
   }, [])

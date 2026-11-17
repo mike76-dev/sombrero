@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Icon } from './icons'
 
 export type Theme = 'light' | 'dark'
 
@@ -16,9 +17,11 @@ export function useTheme(): [Theme, () => void] {
 }
 
 export function ThemeButton({ theme, toggle }: { theme: Theme; toggle: () => void }) {
+  const label = theme === 'light' ? 'Dark mode' : 'Light mode'
   return (
-    <button className="btn" onClick={toggle} title="Toggle theme">
-      {theme === 'light' ? '\u{1F319} Dark mode' : '☀️ Light mode'}
+    <button className="btn btn-labelled" onClick={toggle} aria-label={label}>
+      <Icon name={theme === 'light' ? 'moon' : 'sun'} />
+      <span className="btn-label">{label}</span>
     </button>
   )
 }

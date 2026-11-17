@@ -17,10 +17,12 @@ import {
 } from './api'
 import { describe, outcome, runEach } from './batch'
 import { ConfirmDialog, Modal, NameDialog, PathDialog } from './Dialogs'
+import { FileIcon, Icon, IconButton, IconLink } from '../icons'
 import { activityHash, binHash, editHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { LinksDialog } from './LinksDialog'
 import { SearchBox } from './SearchBox'
+import { Tree, fromPicker, gather, join } from './tree'
 import { VersionsDialog } from './VersionsDialog'
 import { formatBytes, formatTime, formatTimeExact } from '../format'
 
@@ -132,7 +134,7 @@ type Dialog =
   | { kind: 'move'; entry: Entry }
   | { kind: 'delete'; entries: Entry[] }
   | { kind: 'moveMany'; entries: Entry[] }
-  | { kind: 'replace'; folder: string; files: File[]; names: string[] }
+  | { kind: 'replace'; tree: Tree; names: string[] }
   | { kind: 'versions'; entry: Entry }
   | { kind: 'links'; entry: Entry }
   | { kind: 'history' }
@@ -144,7 +146,11 @@ type Notice = { text: string; undo?: () => Promise<void> }
 const undoLingers = 8000
 
 function into(folder: string, e: Entry): string {
-  return (folder === '/' ? '' : folder) + '/' + e.name
+  return join(folder, e.name)
+}
+
+function parentOf(p: string): string {
+  return p.slice(0, p.lastIndexOf('/')) || '/'
 }
 
 export function Browser({
@@ -178,6 +184,7 @@ export function Browser({
   const [problem, setProblem] = useState<string | null>(null)
   const [nowRights, setNowRights] = useState<FolderRights | undefined>(undefined)
   const picker = useRef<HTMLInputElement>(null)
+  const folderPicker = useRef<HTMLInputElement>(null)
 
   const reload = useCallback(() => setTick((t) => t + 1), [])
   const landed = useCallback(
@@ -301,24 +308,66 @@ export function Browser({
 
   const within = (name: string) => (path === '/' ? '' : path) + '/' + name
 
-  // Files to upload replace what is already there, which is asked about first.
-  // Another folder than this one is listed to find that out.
-  const takeFiles = async (files: File[], folder = path) => {
-    if (files.length === 0 || !listing?.rights.write || at) return
-    let entries = listing.entries
-    if (folder !== path) {
+  // What comes in is checked against what is there before anything is sent:
+  // a file replaces one of its name, which is asked about first, and a folder
+  // in the way of a file, or a file in the way of a folder, stops the whole.
+  const take = async (tree: Tree) => {
+    if (!listing?.rights.write || at || (tree.files.length === 0 && tree.folders.length === 0)) return
+    const label = (folder: string) => (folder === path ? 'this folder' : folder)
+    // The folders that are listed are those that exist; one to be made is
+    // known from its parent's listing, so only what exists is asked for.
+    const listed = new Map<string, Entry[] | null>([[path, listing.entries]])
+    const entriesOf = async (folder: string): Promise<Entry[] | null> => {
+      let entries = listed.get(folder)
+      if (entries !== undefined) return entries
       try {
         entries = (await list(share, folder)).entries
       } catch (e) {
+        if (!(e instanceof FilesError) || e.status !== 404) throw e
+        entries = null
+      }
+      listed.set(folder, entries)
+      return entries
+    }
+    const problems: string[] = []
+    const names: string[] = []
+    try {
+      for (const folder of tree.folders) {
+        const siblings = await entriesOf(parentOf(folder))
+        const name = folder.slice(folder.lastIndexOf('/') + 1)
+        const there = siblings?.find((e) => e.name === name)
+        if (there && !there.dir) problems.push(`A file named ${name} is already in ${label(parentOf(folder))}.`)
+        else if (!there) listed.set(folder, null)
+      }
+      for (const { file, folder } of tree.files) {
+        const there = (await entriesOf(folder))?.find((e) => e.name === file.name)
+        if (there?.dir) problems.push(`A folder named ${file.name} is already in ${label(folder)}.`)
+        else if (there) names.push(folder === path ? file.name : join(folder, file.name))
+      }
+    } catch (e) {
+      if (e instanceof FilesError && e.status === 401) onExpired()
+      else setProblem(describe(e))
+      return
+    }
+    if (problems.length > 0) setProblem(problems.join(' ') + ' Nothing was uploaded.')
+    else if (names.length > 0) open({ kind: 'replace', tree, names })
+    else send(tree)
+  }
+
+  // send makes the folders of the tree, parents first, and queues its files.
+  const send = async (tree: Tree) => {
+    for (const folder of tree.folders) {
+      try {
+        await makeFolder(share, folder)
+      } catch (e) {
+        if (e instanceof FilesError && e.message === 'already exists') continue
         if (e instanceof FilesError && e.status === 401) onExpired()
-        else setProblem(describe(e))
+        else setProblem(`The folder ${folder} could not be created: ${describe(e)}`)
         return
       }
     }
-    const have = new Set(entries.filter((e) => !e.dir).map((e) => e.name))
-    const names = files.map((f) => f.name).filter((n) => have.has(n))
-    if (names.length > 0) open({ kind: 'replace', folder, files, names })
-    else add(folder, files)
+    if (tree.folders.length > 0) reload()
+    add(tree.files)
   }
 
   // runBatch applies a change to each item in turn and reports the outcome:
@@ -428,7 +477,7 @@ export function Browser({
       setDragging(null)
       moveAll(items, folder)
     } else {
-      takeFiles(Array.from(e.dataTransfer.files), folder)
+      gather(e.dataTransfer, folder).then(take)
     }
   }
   const leave = (folder: string) => setOverFolder((f) => (f === folder ? null : f))
@@ -446,7 +495,7 @@ export function Browser({
       onDrop={(e) => {
         e.preventDefault()
         setDropping(false)
-        if (!dragging) takeFiles(Array.from(e.dataTransfer.files))
+        if (!dragging) gather(e.dataTransfer, path).then(take)
       }}
     >
       <div className="row row-spread">
@@ -454,11 +503,17 @@ export function Browser({
         <div className="toolbar">
           {rights.write && (
             <>
-              <button className="btn" onClick={() => picker.current?.click()}>
-                Upload files
+              <button className="btn btn-primary btn-labelled" onClick={() => picker.current?.click()}>
+                <Icon name="upload" />
+                <span className="btn-label">Upload files</span>
               </button>
-              <button className="btn" onClick={() => open({ kind: 'folder' })}>
-                New folder
+              <button className="btn btn-labelled" onClick={() => folderPicker.current?.click()}>
+                <Icon name="uploadFolder" />
+                <span className="btn-label">Upload folder</span>
+              </button>
+              <button className="btn btn-labelled" onClick={() => open({ kind: 'folder' })}>
+                <Icon name="newFolder" />
+                <span className="btn-label">New folder</span>
               </button>
               <input
                 ref={picker}
@@ -466,25 +521,27 @@ export function Browser({
                 multiple
                 hidden
                 onChange={(e) => {
-                  takeFiles(Array.from(e.target.files ?? []))
+                  take(fromPicker(Array.from(e.target.files ?? []), path))
+                  e.target.value = ''
+                }}
+              />
+              <input
+                ref={folderPicker}
+                type="file"
+                webkitdirectory=""
+                hidden
+                onChange={(e) => {
+                  take(fromPicker(Array.from(e.target.files ?? []), path))
                   e.target.value = ''
                 }}
               />
             </>
           )}
-          {!error && (
-            <button className="btn" onClick={() => open({ kind: 'history' })}>
-              History
-            </button>
-          )}
+          {!error && <IconButton className="btn-tool" icon="history" label="History" onClick={() => open({ kind: 'history' })} />}
           {!error && !at && (
             <>
-              <a className="btn" href={binHash(share)}>
-                Deleted files
-              </a>
-              <a className="btn" href={activityHash(share)}>
-                Activity
-              </a>
+              <IconLink className="btn-tool" icon="trash" label="Deleted files" href={binHash(share)} />
+              <IconLink className="btn-tool" icon="activity" label="Activity" href={activityHash(share)} />
               <SearchBox share={share} />
             </>
           )}
@@ -501,7 +558,14 @@ export function Browser({
       ) : !listing || stale ? (
         <p className="muted">Loading…</p>
       ) : entries.length === 0 ? (
-        <p className="muted">{rights.write ? 'This folder is empty. Drop files here to upload them.' : 'This folder is empty.'}</p>
+        rights.write ? (
+          <div className="drop-hint">
+            <Icon name="upload" size={36} />
+            <span>This folder is empty. Drop files or folders here to upload them.</span>
+          </div>
+        ) : (
+          <p className="muted">This folder is empty.</p>
+        )
       ) : (
         <table className="table files">
           <thead>
@@ -634,14 +698,11 @@ export function Browser({
           error={null}
           onClose={close}
           onConfirm={() => {
-            add(dialog.folder, dialog.files)
             setDialog(null)
+            send(dialog.tree)
           }}
         >
-          <p>
-            {dialog.names.length === 1 ? 'A file of this name is already in' : 'Files of these names are already in'}{' '}
-            {dialog.folder === path ? 'the folder' : <strong>{dialog.folder}</strong>} and will be replaced:
-          </p>
+          <p>{dialog.names.length === 1 ? 'A file of this name is already there and will be replaced:' : 'Files of these names are already there and will be replaced:'}</p>
           <ul className="name-list">
             {dialog.names.map((n) => (
               <li key={n}>{n}</li>
@@ -895,7 +956,7 @@ function Row({
   const manage = !entry.dir || rights.delete
   // The desktop application opens the file as it is now, so not in the past.
   const office = entry.dir || at ? null : officeLink(share, entry.path, rights.write)
-  const classes = [dragged ? 'row-dragging' : '', over ? 'drop-target' : ''].filter(Boolean).join(' ')
+  const classes = [dragged ? 'row-dragging' : '', over ? 'drop-target' : '', selected ? 'row-selected' : ''].filter(Boolean).join(' ')
   return (
     <tr
       className={classes || undefined}
@@ -916,9 +977,7 @@ function Row({
         </td>
       )}
       <td className="col-name">
-        <span className="file-icon" aria-hidden>
-          {entry.dir ? '\u{1F4C1}' : '\u{1F4C4}'}
-        </span>
+        <FileIcon name={entry.name} dir={entry.dir} />
         {entry.dir ? (
           <a className="file-name" href={hashFor(share, entry.path, at)}>
             {entry.name}
@@ -936,25 +995,13 @@ function Row({
       <td className="col-size muted">{entry.dir ? '' : formatBytes(entry.size)}</td>
       <td className="col-time muted">{formatTime(entry.modifiedAt)}</td>
       <td className="col-actions">
-        {editable && (
-          <a className="btn btn-small" href={editHash(share, entry.path)}>
-            {rights.write ? 'Edit' : 'View'}
-          </a>
-        )}
-        {showable && (
-          <a className="btn btn-small" href={href(true)} target="_blank" rel="noreferrer">
-            Open
-          </a>
-        )}
-        {!entry.dir && (
-          <a className="btn btn-small" href={href(false)} download={entry.name}>
-            Download
-          </a>
-        )}
+        {editable && <IconLink icon={rights.write ? 'edit' : 'view'} label={rights.write ? 'Edit' : 'View'} href={editHash(share, entry.path)} />}
+        {showable && <IconLink icon="open" label="Open" href={href(true)} target="_blank" rel="noreferrer" />}
+        {!entry.dir && <IconLink icon="download" label="Download" href={href(false)} download={entry.name} />}
         {manage && (
           <details ref={menu} className="menu">
-            <summary className="btn btn-small" aria-label="More actions">
-              ⋯
+            <summary className="btn-icon" aria-label="More actions" data-tip="More actions">
+              <Icon name="more" />
             </summary>
             <div className="menu-items">
               {office && (

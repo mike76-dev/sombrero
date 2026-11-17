@@ -90,6 +90,9 @@ body {
 }
 
 .nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   text-align: left;
   padding: 9px 12px;
   border: none;
@@ -111,6 +114,14 @@ body {
   font-weight: 600;
 }
 
+.nav-item .icon {
+  color: var(--text-muted);
+}
+
+.nav-item-active .icon {
+  color: inherit;
+}
+
 .sidebar-footer {
   padding-top: 12px;
   border-top: 1px solid var(--border);
@@ -118,6 +129,10 @@ body {
 
 .sidebar-footer .btn {
   width: 100%;
+}
+
+.sidebar-footer .btn .icon {
+  color: var(--accent);
 }
 
 .source-link {
@@ -130,6 +145,28 @@ body {
 
 .source-link:hover {
   color: var(--text);
+}
+
+.source-link-foot {
+  display: none;
+}
+
+.menu-button {
+  display: none;
+}
+
+.row-expandable {
+  cursor: pointer;
+}
+
+.row-expandable:hover td,
+.row-open td {
+  background: var(--surface-2);
+}
+
+.col-expand {
+  width: 40px;
+  text-align: right;
 }
 
 /* Content */
@@ -403,6 +440,81 @@ input[type='file']::file-selector-button:hover {
   border-radius: 6px;
 }
 
+.btn-labelled {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.icon {
+  display: block;
+  flex-shrink: 0;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.btn-icon:hover:not(:disabled),
+.btn-icon:focus-visible {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.btn-icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-icon-danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.btn-icon-on {
+  color: var(--accent);
+}
+
+.btn-icon-on .icon {
+  fill: currentColor;
+}
+
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 6px);
+  transform: translateX(-50%);
+  width: max-content;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--text);
+  color: var(--bg);
+  font-size: 12px;
+  font-weight: normal;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 20;
+}
+
 /* Tables */
 
 .table {
@@ -547,6 +659,11 @@ code {
   text-align: center;
 }
 
+.step-mark .icon {
+  display: inline-block;
+  vertical-align: -2px;
+}
+
 /* The dot of the phase under way pulses: how long it takes is not known in
    advance, so it says that something is happening rather than how much is
    left. */
@@ -620,7 +737,121 @@ code {
 
   .nav {
     flex-direction: row;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    margin: 0 -12px;
+    padding: 0 12px 4px;
+    mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 24px), transparent);
+  }
+
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-item {
+    flex-shrink: 0;
+    max-width: 70vw;
+    scroll-snap-align: start;
+  }
+
+  .sidebar-footer {
+    display: flex;
     flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .sidebar-footer .btn {
+    width: auto;
+    min-height: 40px;
+    padding: 0 10px;
+  }
+
+  .sidebar-footer .source-link {
+    display: none;
+  }
+
+  .source-link-foot {
+    display: block;
+    margin: 24px 0 0;
+  }
+
+  .btn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .btn-labelled {
+    position: relative;
+    padding: 0 10px;
+  }
+
+  .admin .sidebar {
+    position: relative;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+  }
+
+  .admin .brand {
+    flex: 1;
+    padding: 0;
+  }
+
+  .admin .sidebar-footer {
+    padding-top: 0;
+    border-top: none;
+  }
+
+  .admin .menu-button {
+    display: inline-flex;
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+  }
+
+  .admin .nav {
+    display: none;
+  }
+
+  .admin .nav.nav-open {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 20;
+    margin: 0;
+    padding: 8px;
+    overflow: visible;
+    mask-image: none;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+
+  .admin .nav-item {
+    flex-shrink: 1;
+    max-width: none;
+  }
+
+  .admin .card {
+    overflow-x: auto;
+  }
+
+  .col-server {
+    display: none;
   }
 
   .content {

@@ -16,6 +16,7 @@ import {
   useApiData,
 } from '../components/common'
 import { ServerAddressField } from '../components/serveraddress'
+import { IconButton } from '../icons'
 
 // formatInterval shortens what Go prints for a duration: "15m0s" is "15m".
 function formatInterval(s: string): string {
@@ -177,9 +178,7 @@ export function BackupPage() {
         title={
           <span className="row row-spread">
             <span>Backups</span>
-            <button className="btn btn-small" onClick={reload} disabled={busy}>
-              Reload
-            </button>
+            <IconButton icon="refresh" label="Reload" onClick={reload} disabled={busy} />
           </span>
         }
       >

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Deleted, FilesError, Rights, deleteFile, deleteVersions, deleted, restore } from './api'
 import { describe, outcome, runEach } from './batch'
 import { ConfirmDialog } from './Dialogs'
+import { FileIcon, IconButton } from '../icons'
 import { hashFor } from './route'
 import { doneLingers } from './Uploads'
 import { formatBytes, formatTime } from '../format'
@@ -181,9 +182,7 @@ export function DeletedPage({ share, shareRights, onExpired }: { share: string; 
                   </td>
                 )}
                 <td className="col-name">
-                  <span className="file-icon" aria-hidden>
-                    {'\u{1F4C4}'}
-                  </span>
+                  <FileIcon name={d.name} dir={false} />
                   {d.name}
                   <div className="deleted-folder muted">{folderOf(d.path)}</div>
                 </td>
@@ -193,16 +192,8 @@ export function DeletedPage({ share, shareRights, onExpired }: { share: string; 
                   {d.deletedBy && <div className="deleted-folder">by {d.deletedBy}</div>}
                 </td>
                 <td className="col-actions">
-                  {rights.write && (
-                    <button className="btn btn-small" disabled={busy} onClick={() => restoreAll([d])}>
-                      Restore
-                    </button>
-                  )}
-                  {rights.delete && (
-                    <button className="btn btn-small btn-danger" disabled={busy} onClick={() => setConfirm([d])}>
-                      Delete
-                    </button>
-                  )}
+                  {rights.write && <IconButton icon="restore" label="Restore" disabled={busy} onClick={() => restoreAll([d])} />}
+                  {rights.delete && <IconButton icon="trash" label="Delete permanently" danger disabled={busy} onClick={() => setConfirm([d])} />}
                 </td>
               </tr>
             ))}

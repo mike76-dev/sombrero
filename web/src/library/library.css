@@ -92,6 +92,27 @@ a.brand {
 
 .lib .content {
   max-width: 1100px;
+  display: flex;
+  flex-direction: column;
+}
+
+.lib .page {
+  flex: 1;
+}
+
+.drop-hint {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 160px;
+  padding: 48px 24px;
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  color: var(--text-muted);
+  text-align: center;
 }
 
 a.share-card {
@@ -101,6 +122,17 @@ a.share-card {
 
 a.share-card:hover {
   border-color: var(--accent);
+}
+
+.share-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.share-title .icon {
+  color: var(--accent);
+  fill: currentColor;
 }
 
 .share-rights {
@@ -116,11 +148,12 @@ a.share-card:hover {
 }
 
 .crumbs a {
-  color: var(--text);
+  color: var(--text-muted);
   text-decoration: none;
 }
 
 .crumbs a:hover {
+  color: var(--text);
   text-decoration: underline;
 }
 
@@ -145,6 +178,33 @@ a.share-card:hover {
   padding: 8px 12px;
 }
 
+.files thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+
+.files thead th:first-child {
+  border-top-left-radius: 12px;
+}
+
+.files thead th:last-child {
+  border-top-right-radius: 12px;
+}
+
+.files tr:hover td {
+  background: var(--surface-2);
+}
+
+.files tr.row-selected td {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.files tr:hover .btn-icon:hover {
+  background: var(--border);
+}
+
 .files .col-size {
   text-align: right;
   white-space: nowrap;
@@ -162,16 +222,32 @@ a.share-card:hover {
   width: 160px;
 }
 
-.files .col-actions .btn {
-  margin-left: 6px;
-}
-
-.files .col-actions .btn:first-child {
-  margin-left: 0;
-}
-
 .file-icon {
-  margin-right: 8px;
+  display: inline-block;
+  vertical-align: -5px;
+  margin-right: 10px;
+  color: var(--text-muted);
+}
+
+.file-icon-folder {
+  color: var(--accent);
+}
+
+.file-icon-folder .icon {
+  fill: currentColor;
+}
+
+.col-actions > [data-tip]:last-child:hover::after,
+.col-actions > [data-tip]:last-child:focus-visible::after,
+.menu summary:hover::after,
+.menu summary:focus-visible::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+.menu[open] summary::after {
+  display: none;
 }
 
 .file-name {
@@ -191,12 +267,72 @@ a.share-card:hover {
   gap: 8px;
 }
 
+.toolbar .btn,
+.toolbar .btn-tool {
+  min-height: 40px;
+}
+
+.toolbar .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  box-shadow: var(--shadow);
+}
+
+.toolbar .icon {
+  width: 20px;
+  height: 20px;
+  color: var(--accent);
+}
+
+.toolbar .btn-primary .icon {
+  color: inherit;
+}
+
+.toolbar .search-form .icon {
+  width: 18px;
+  height: 18px;
+  color: var(--text-muted);
+}
+
+.toolbar .btn-tool {
+  width: auto;
+  height: auto;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.toolbar .btn-tool:hover,
+.toolbar .btn-tool:focus-visible {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+
+.toolbar .btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
 .search-form {
+  position: relative;
   margin-left: 16px;
+}
+
+.search-form .icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
 }
 
 .search-form input {
   width: 220px;
+  padding-left: 34px;
   background: var(--surface);
 }
 
@@ -271,10 +407,14 @@ a.share-card:hover {
   border-radius: 12px;
 }
 
-.page.dropping .files,
-.page.dropping > .muted {
+.page.dropping {
   outline: 2px dashed var(--accent);
-  outline-offset: 4px;
+  outline-offset: 8px;
+  border-radius: 12px;
+}
+
+.page.dropping .drop-hint {
+  border-color: var(--accent);
 }
 
 tr[draggable='true'] {
@@ -285,20 +425,20 @@ tr[draggable='true'] {
   opacity: 0.4;
 }
 
-tr.drop-target td {
+.files tr.drop-target td {
   background: var(--success-bg);
   box-shadow:
     inset 0 1px 0 var(--success-border),
     inset 0 -1px 0 var(--success-border);
 }
 
-tr.drop-target td:first-child {
+.files tr.drop-target td:first-child {
   box-shadow:
     inset 1px 1px 0 var(--success-border),
     inset 0 -1px 0 var(--success-border);
 }
 
-tr.drop-target td:last-child {
+.files tr.drop-target td:last-child {
   box-shadow:
     inset -1px 1px 0 var(--success-border),
     inset 0 -1px 0 var(--success-border);
@@ -313,11 +453,10 @@ tr.drop-target td:last-child {
 .menu {
   display: inline-block;
   position: relative;
-  margin-left: 6px;
+  vertical-align: middle;
 }
 
 .menu summary {
-  display: inline-block;
   list-style: none;
 }
 
@@ -436,12 +575,10 @@ a.menu-item {
   width: auto;
 }
 
-.versions .col-actions .btn {
-  margin-left: 6px;
-}
-
-.versions .col-actions .btn:first-child {
-  margin-left: 0;
+@media (min-width: 700px) {
+  .table-scroll {
+    overflow: visible;
+  }
 }
 
 .version-kept {
@@ -566,17 +703,10 @@ a.menu-item {
 @media (max-width: 720px) {
   .lib .nav-item {
     display: inline-block;
-    max-width: 100%;
   }
 
   .lib .sidebar-footer {
     flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-  }
-
-  .lib .sidebar-footer .btn {
-    width: auto;
   }
 
   .identity {
@@ -591,5 +721,20 @@ a.menu-item {
 
   .files .col-actions {
     width: auto;
+  }
+
+  .toolbar .btn-labelled,
+  .toolbar .btn-tool {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .search-form {
+    flex: 1 0 100%;
+    margin: 12px 0 0;
+  }
+
+  .search-form input {
+    width: 100%;
   }
 }

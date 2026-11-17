@@ -1,4 +1,5 @@
 import { ShareInfo } from './api'
+import { Icon } from '../icons'
 import { hashFor } from './route'
 
 export function SharesPage({ shares, error }: { shares?: ShareInfo[]; error: string | null }) {
@@ -12,7 +13,10 @@ export function SharesPage({ shares, error }: { shares?: ShareInfo[]; error: str
       <div className="grid">
         {shares.map((s) => (
           <a key={s.name} className="card share-card" href={hashFor(s.name)}>
-            <h2 className="card-title">{s.name}</h2>
+            <h2 className="card-title share-title">
+              <Icon name="folder" size={22} />
+              {s.name}
+            </h2>
             {s.remark && <p className="muted">{s.remark}</p>}
             <div className="share-rights">
               {s.rights.read && <span className="flag flag-on">read</span>}

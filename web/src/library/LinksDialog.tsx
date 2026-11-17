@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { Entry, FilesError, SharingLink, createLink, deleteLink, links } from './api'
 import { describe } from './batch'
 import { ConfirmDialog, Modal } from './Dialogs'
+import { IconButton } from '../icons'
 import { formatTime } from '../format'
 
 // The choices of how long a link lasts, in days, or forever.
@@ -123,16 +124,13 @@ export function LinksDialog({ share, entry, onExpired, onClose }: { share: strin
                     </td>
                     <td className="muted">{l.expiresAt ? formatTime(l.expiresAt) : 'Never'}</td>
                     <td className="col-actions">
-                      <button
-                        className="btn btn-small"
+                      <IconButton
+                        icon="copy"
+                        label="Copy"
                         disabled={busy}
                         onClick={() => copy(l.url).then((ok) => setNotice(ok ? 'The link is copied to the clipboard.' : 'The link could not be copied.'))}
-                      >
-                        Copy
-                      </button>
-                      <button className="btn btn-small btn-danger" disabled={busy} onClick={() => setConfirm(l)}>
-                        Delete
-                      </button>
+                      />
+                      <IconButton icon="trash" label="Delete" danger disabled={busy} onClick={() => setConfirm(l)} />
                     </td>
                   </tr>
                 ))}

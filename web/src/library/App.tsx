@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useState } from 'react'
+import { ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { FilesError, Identity, ShareInfo, logout, me, shares } from './api'
 import { ActivityPage } from './ActivityPage'
 import { Browser } from './Browser'
@@ -9,6 +9,7 @@ import { SearchPage } from './SearchPage'
 import { SharesPage } from './SharesPage'
 import { hashFor, useRoute } from './route'
 import { ThemeButton, useTheme } from '../theme'
+import { Icon } from '../icons'
 
 // The session the page holds: not known yet, none, or an account's. The file
 // API being off is a state of its own, so that the page can say so.
@@ -76,9 +77,11 @@ function Brand() {
   )
 }
 
-function SourceLink() {
+// The source link sits in the sidebar, or at the foot of the page where the
+// sidebar is a header.
+function SourceLink({ foot = false }: { foot?: boolean }) {
   return (
-    <a className="source-link" href="https://github.com/mike76-dev/sombrero" target="_blank" rel="noreferrer">
+    <a className={foot ? 'source-link source-link-foot' : 'source-link'} href="https://github.com/mike76-dev/sombrero" target="_blank" rel="noreferrer">
       Source
     </a>
   )
@@ -147,12 +150,19 @@ function Library({
       })
   }, [onExpired])
 
+  // On a phone the shares are a strip that scrolls sideways, so the share
+  // that is open is brought into view.
+  const nav = useRef<HTMLElement>(null)
+  useEffect(() => {
+    nav.current?.querySelector('.nav-item-active')?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }, [route.share, shareList])
+
   const workgroup = identity.workgroup.name || identity.workgroup.uuid
   return (
     <div className="app lib">
       <aside className="sidebar">
         <Brand />
-        <nav className="nav">
+        <nav className="nav" ref={nav}>
           {shareList?.map((s) => (
             <a
               key={s.name}
@@ -170,8 +180,9 @@ function Library({
           </div>
           <SourceLink />
           <ThemeButton theme={theme} toggle={toggleTheme} />
-          <button className="btn" onClick={onLogout}>
-            Log out
+          <button className="btn btn-labelled" onClick={onLogout} aria-label="Log out">
+            <Icon name="logout" />
+            <span className="btn-label">Log out</span>
           </button>
         </div>
       </aside>
@@ -196,6 +207,7 @@ function Library({
             onExpired={onExpired}
           />
         )}
+        <SourceLink foot />
       </main>
     </div>
   )
