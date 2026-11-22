@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -59,8 +60,8 @@ var errNoThumbnail = errors.New("no thumbnail")
 var thumbnailable = map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".bmp": true, ".tif": true, ".tiff": true}
 
 // thumbnailCache keeps the thumbnails on disk, each under the id of the file
-// it was made of, in a folder per leading byte of the id. A file no thumbnail
-// can be made of is remembered as such, so that it is not fetched again.
+// it was made of. A file no thumbnail can be made of is remembered as such,
+// so that it is not fetched again.
 type thumbnailCache struct {
 	dir   string
 	slots chan struct{}
@@ -167,7 +168,7 @@ func thumbnailID(share, key string, size uint64, modified time.Time) string {
 var thumbnailTypes = map[string]string{".jpg": "image/jpeg", ".png": "image/png", ".none": ""}
 
 func (t *thumbnailCache) file(id, ext string) string {
-	return filepath.Join(t.dir, id[:2], id+ext)
+	return filepath.Join(t.dir, id+ext)
 }
 
 // get reads the thumbnail with the id, or reports fs.ErrNotExist where none
@@ -229,10 +230,7 @@ func (t *thumbnailCache) make(ctx context.Context, id, ext string, read func(io.
 // finds half of one.
 func (t *thumbnailCache) store(id, ext string, data []byte) error {
 	name := t.file(id, ext)
-	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(name), id+".*.tmp")
+	tmp, err := os.CreateTemp(t.dir, id+".*.tmp")
 	if err != nil {
 		return err
 	}
@@ -298,6 +296,12 @@ func thumbnail(data []byte, isJPEG bool) ([]byte, string, error) {
 			h = thumbnailSide
 		}
 	}
+	// The kernel scaler costs a pass over the source for every pixel it
+	// makes, so a large image is first shrunk by a whole factor in one pass.
+	if f := min(b.Dx()/(2*w), b.Dy()/(2*h)); f >= 2 {
+		src = shrink(src, f)
+		b = src.Bounds()
+	}
 	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
 	draw.CatmullRom.Scale(dst, dst.Bounds(), src, b, draw.Src, nil)
 
@@ -312,6 +316,47 @@ func thumbnail(data []byte, isJPEG bool) ([]byte, string, error) {
 		return nil, "", err
 	}
 	return out.Bytes(), "image/png", nil
+}
+
+// shrink averages each block of f by f pixels of the image into one, reading
+// the common kinds of image directly and the rest through their colour model.
+func shrink(src image.Image, f int) *image.NRGBA {
+	b := src.Bounds()
+	w, h := b.Dx()/f, b.Dy()/f
+	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
+	n := uint32(f * f)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			x0, y0 := b.Min.X+x*f, b.Min.Y+y*f
+			var c color.NRGBA
+			switch img := src.(type) {
+			case *image.YCbCr:
+				var sy, scb, scr uint32
+				for j := 0; j < f; j++ {
+					for i := 0; i < f; i++ {
+						p := img.YCbCrAt(x0+i, y0+j)
+						sy, scb, scr = sy+uint32(p.Y), scb+uint32(p.Cb), scr+uint32(p.Cr)
+					}
+				}
+				r, g, bl := color.YCbCrToRGB(uint8(sy/n), uint8(scb/n), uint8(scr/n))
+				c = color.NRGBA{R: r, G: g, B: bl, A: 255}
+			default:
+				// Premultiplied sums weight each pixel by its opacity.
+				var sr, sg, sb, sa uint64
+				for j := 0; j < f; j++ {
+					for i := 0; i < f; i++ {
+						r, g, bl, a := src.At(x0+i, y0+j).RGBA()
+						sr, sg, sb, sa = sr+uint64(r), sg+uint64(g), sb+uint64(bl), sa+uint64(a)
+					}
+				}
+				if sa > 0 {
+					c = color.NRGBA{R: uint8(sr * 255 / sa), G: uint8(sg * 255 / sa), B: uint8(sb * 255 / sa), A: uint8(sa / uint64(n) >> 8)}
+				}
+			}
+			dst.SetNRGBA(x, y, c)
+		}
+	}
+	return dst
 }
 
 // orient turns and flips the image as the EXIF orientation says the camera

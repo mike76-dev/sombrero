@@ -212,6 +212,40 @@ func TestThumbnailOfAPhotoIsUpright(t *testing.T) {
 	}
 }
 
+// TestShrinkAverages verifies that the shrinking averages blocks, through
+// the colour model and directly alike, weighting by opacity.
+func TestShrinkAverages(t *testing.T) {
+	src := halves(8, 4, false)
+	src.SetNRGBA(1, 1, color.NRGBA{})
+	got := shrink(src, 2)
+	if b := got.Bounds(); b.Dx() != 4 || b.Dy() != 2 {
+		t.Fatalf("want 4x2, got %v", b)
+	}
+	if !isRed(got.At(1, 0)) || !isBlue(got.At(3, 1)) {
+		t.Errorf("want the halves kept, got %v and %v", got.At(1, 0), got.At(3, 1))
+	}
+	// The block with a clear pixel is still red, and a quarter clear.
+	if c := got.NRGBAAt(0, 0); !isRed(c) || c.A < 185 || c.A > 195 {
+		t.Errorf("want red at three quarters, got %v", c)
+	}
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, halves(8, 4, true), nil); err != nil {
+		t.Fatal(err)
+	}
+	photo, err := jpeg.Decode(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := photo.(*image.YCbCr); !ok {
+		t.Fatalf("want a YCbCr image of a JPEG, got %T", photo)
+	}
+	got = shrink(photo, 2)
+	if !isRed(got.At(2, 0)) || !isBlue(got.At(2, 1)) {
+		t.Errorf("a photo: want red over blue, got %v and %v", got.At(2, 0), got.At(2, 1))
+	}
+}
+
 // TestJPEGOrientation verifies the EXIF reading, in either byte order, and
 // that a JPEG without any says upright.
 func TestJPEGOrientation(t *testing.T) {

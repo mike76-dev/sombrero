@@ -248,10 +248,6 @@ a.share-card:hover {
   background: var(--surface-2);
 }
 
-.thumb-loading {
-  display: none;
-}
-
 .col-actions > [data-tip]:last-child:hover::after,
 .col-actions > [data-tip]:last-child:focus-visible::after,
 .menu summary:hover::after,
