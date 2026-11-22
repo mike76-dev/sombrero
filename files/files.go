@@ -98,8 +98,10 @@ type Handler struct {
 	wopiTokens map[string]wopiToken
 	wopiLocks  map[string]wopiLock
 
-	// cache holds what downloads fetched lately, for the requests to come.
-	cache *readCache
+	// cache holds what downloads fetched lately, for the requests to come,
+	// and thumbs the thumbnails of the images, where a directory is set.
+	cache  *readCache
+	thumbs *thumbnailCache
 
 	// now is the clock, and chunkSize how much of a file a download fetches
 	// at a time for the share's part size; both replaceable by the tests.
@@ -129,6 +131,7 @@ func New(store Store, srv Server) *Handler {
 	h.router.GET("/share/:name/search", h.withSession(h.searchHandler))
 	h.router.GET("/share/:name/file", h.withSession(h.fileHandler))
 	h.router.HEAD("/share/:name/file", h.withSession(h.fileHandler))
+	h.router.GET("/share/:name/thumbnail", h.withSession(h.thumbnailHandler))
 	h.router.GET("/share/:name/archive", h.withSession(h.archiveHandler))
 	h.router.POST("/share/:name/archive", h.withSession(h.archiveHandler))
 	h.router.PUT("/share/:name/file", h.withSession(h.uploadHandler))

@@ -410,6 +410,10 @@ curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/search?q=report"
 ```Bash
 curl -b cookies.txt -o plan.pdf "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
 ```
+`GET /files/share/<SHARE>/thumbnail?path=/Photos/garden.jpg` returns a small image of a JPEG, PNG, GIF, WebP, BMP or TIFF file, at most 256 pixels on its longer side, as a JPEG for a JPEG, turned upright according to its EXIF orientation, and as a PNG otherwise, so that transparency is kept. The thumbnail is made on the first request, which reads the file from the network, and kept in the `thumbnails` folder of the data directory, under a name derived from the file, until the file changes or nobody has asked for it for sixty days; a file above 64 MB, above 50 megapixels or not decodable has none, which is remembered as well. The response carries an `ETag`, and a request with `If-None-Match` is answered with `304 Not Modified` while the file is unchanged. A file of any other kind is answered with `404`:
+```Bash
+curl -b cookies.txt -o garden-small.jpg "http://127.0.0.1:9999/files/share/<SHARE>/thumbnail?path=/Photos/garden.jpg"
+```
 `GET /files/share/<SHARE>/archive?path=/Projects` downloads a folder as a zip archive named after it, with every file and folder under it that the account may list, empty folders included; the root of the share downloads the whole share, named after the share. Several `path` parameters, by `GET` or as a `POST` form for a selection too long for a query, download the files and folders named into one archive named after their folder. Files of a kind that is compressed already, such as images, videos and Office documents, are stored as they are. The archive is streamed as it is assembled, so its size is not announced in advance:
 ```Bash
 curl -b cookies.txt -o Projects.zip "http://127.0.0.1:9999/files/share/<SHARE>/archive?path=/Projects"

@@ -242,6 +242,12 @@ export function fileURL(share: string, path: string, inline = false): string {
   return url(`/share/${encodeURIComponent(share)}/file`, { path, inline: inline ? '1' : undefined })
 }
 
+// thumbnailURL is where a small image of a file is served from, for the kinds
+// of image the server makes one of; the server answers 404 for the rest.
+export function thumbnailURL(share: string, path: string): string {
+  return url(`/share/${encodeURIComponent(share)}/thumbnail`, { path })
+}
+
 // archiveURL is where a folder, or the whole share at the root, is downloaded
 // from as a zip archive named after it.
 export function archiveURL(share: string, path: string): string {
