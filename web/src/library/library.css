@@ -237,6 +237,21 @@ a.share-card:hover {
   fill: currentColor;
 }
 
+.thumb {
+  display: inline-block;
+  width: 32px;
+  height: 32px;
+  margin: -6px 10px -6px -2px;
+  object-fit: cover;
+  border-radius: 4px;
+  vertical-align: middle;
+  background: var(--surface-2);
+}
+
+.thumb-loading {
+  display: none;
+}
+
 .col-actions > [data-tip]:last-child:hover::after,
 .col-actions > [data-tip]:last-child:focus-visible::after,
 .menu summary:hover::after,

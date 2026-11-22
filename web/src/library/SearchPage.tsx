@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Entry, FilesError, fileURL, search } from './api'
 import { describe } from './batch'
 import { canShow } from './Browser'
-import { FileIcon } from '../icons'
+import { Thumb } from './Thumb'
 import { hashFor } from './route'
 import { SearchBox } from './SearchBox'
 import { formatBytes, formatTime } from '../format'
@@ -71,7 +71,7 @@ export function SearchPage({ share, q, onExpired }: { share: string; q: string; 
               {entries.map((e) => (
                 <tr key={e.path}>
                   <td className="col-name">
-                    <FileIcon name={e.name} dir={e.dir} />
+                    <Thumb share={share} path={e.path} name={e.name} dir={e.dir} modifiedAt={e.modifiedAt} />
                     {e.dir ? (
                       <a className="file-name" href={hashFor(share, e.path)}>
                         {e.name}

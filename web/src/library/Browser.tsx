@@ -24,6 +24,7 @@ import { activityHash, binHash, editHash, hashFor } from './route'
 import { UploadPanel, doneLingers, useUploads } from './Uploads'
 import { LinksDialog } from './LinksDialog'
 import { SearchBox } from './SearchBox'
+import { Thumb } from './Thumb'
 import { Tree, fromPicker, gather, join } from './tree'
 import { VersionsDialog } from './VersionsDialog'
 import { formatBytes, formatTime, formatTimeExact } from '../format'
@@ -987,7 +988,11 @@ function Row({
         </td>
       )}
       <td className="col-name">
-        <FileIcon name={entry.name} dir={entry.dir} />
+        {at ? (
+          <FileIcon name={entry.name} dir={entry.dir} />
+        ) : (
+          <Thumb share={share} path={entry.path} name={entry.name} dir={entry.dir} modifiedAt={entry.modifiedAt} />
+        )}
         {entry.dir ? (
           <a className="file-name" href={hashFor(share, entry.path, at)}>
             {entry.name}

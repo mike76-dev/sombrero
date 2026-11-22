@@ -256,6 +256,9 @@ func main() {
 	var fileAPI, dav http.Handler
 	if cfg.Files.Enabled {
 		fh := files.New(db, server)
+		if err := fh.SetThumbnailDir(filepath.Join(dir, "thumbnails")); err != nil {
+			log.Fatal(err)
+		}
 		if cfg.Editor.Collabora != "" {
 			if err := fh.SetEditor(cfg.Editor.Collabora, cfg.Editor.URL); err != nil {
 				log.Fatal(err)
