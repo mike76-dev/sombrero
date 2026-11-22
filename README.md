@@ -410,6 +410,11 @@ curl -b cookies.txt "http://127.0.0.1:9999/files/share/<SHARE>/search?q=report"
 ```Bash
 curl -b cookies.txt -o plan.pdf "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
 ```
+`GET /files/share/<SHARE>/archive?path=/Projects` downloads a folder as a zip archive named after it, with every file and folder under it that the account may list, empty folders included; the root of the share downloads the whole share, named after the share. Several `path` parameters, by `GET` or as a `POST` form for a selection too long for a query, download the files and folders named into one archive named after their folder. Files of a kind that is compressed already, such as images, videos and Office documents, are stored as they are. The archive is streamed as it is assembled, so its size is not announced in advance:
+```Bash
+curl -b cookies.txt -o Projects.zip "http://127.0.0.1:9999/files/share/<SHARE>/archive?path=/Projects"
+curl -b cookies.txt -o Projects.zip -d "path=/Projects/plan.pdf" -d "path=/Projects/2026" "http://127.0.0.1:9999/files/share/<SHARE>/archive"
+```
 `PUT` to the same address stores the request body as the file at that path, replacing an existing file, and returns the name, size and timestamps of the new file. The body is transferred to the share in parts, so the file size is not limited. An empty body is rejected, because the network cannot store an empty file:
 ```Bash
 curl -b cookies.txt -X PUT --data-binary @plan.pdf "http://127.0.0.1:9999/files/share/<SHARE>/file?path=/Projects/plan.pdf"
