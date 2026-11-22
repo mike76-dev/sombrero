@@ -4,8 +4,10 @@ import {
   FilesError,
   Listing,
   Rights,
+  archiveURL,
   deleteFile,
   deleteFolder,
+  downloadArchive,
   fileURL,
   list,
   makeFolder,
@@ -429,7 +431,7 @@ export function Browser({
   const rights = at || !listing || stale ? none : listing.rights
   const restoreRights = at ? (nowRights ?? none) : rights
   const canDrag = rights.write && rights.delete
-  const selectable = rights.delete && !at
+  const selectable = !at
   const picked = useMemo(() => entries.filter((e) => selected.has(e.path)), [entries, selected])
 
   // pick toggles a row, or with Shift the run of rows from the last one picked.
@@ -536,6 +538,9 @@ export function Browser({
                 }}
               />
             </>
+          )}
+          {!error && !at && (
+            <IconLink className="btn-tool" icon="download" label="Download folder" href={archiveURL(share, path)} download={`${path === '/' ? share : path.slice(path.lastIndexOf('/') + 1)}.zip`} />
           )}
           {!error && <IconButton className="btn-tool" icon="history" label="History" onClick={() => open({ kind: 'history' })} />}
           {!error && !at && (
@@ -748,14 +753,19 @@ export function Browser({
             <div className="selection-bar">
               <span>{picked.length === 1 ? '1 item selected' : `${picked.length} items selected`}</span>
               <div className="toolbar">
+                <button className="btn" disabled={busy} onClick={() => downloadArchive(share, picked.map((e) => e.path))}>
+                  Download
+                </button>
                 {canDrag && (
                   <button className="btn" disabled={busy} onClick={() => open({ kind: 'moveMany', entries: picked })}>
                     Move
                   </button>
                 )}
-                <button className="btn btn-danger" disabled={busy} onClick={() => open({ kind: 'delete', entries: picked })}>
-                  Delete
-                </button>
+                {rights.delete && (
+                  <button className="btn btn-danger" disabled={busy} onClick={() => open({ kind: 'delete', entries: picked })}>
+                    Delete
+                  </button>
+                )}
                 <button className="btn" onClick={() => pickAll(false)}>
                   Clear
                 </button>
@@ -998,6 +1008,7 @@ function Row({
         {editable && <IconLink icon={rights.write ? 'edit' : 'view'} label={rights.write ? 'Edit' : 'View'} href={editHash(share, entry.path)} />}
         {showable && <IconLink icon="open" label="Open" href={href(true)} target="_blank" rel="noreferrer" />}
         {!entry.dir && <IconLink icon="download" label="Download" href={href(false)} download={entry.name} />}
+        {entry.dir && !at && <IconLink icon="download" label="Download" href={archiveURL(share, entry.path)} download={`${entry.name}.zip`} />}
         {manage && (
           <details ref={menu} className="menu">
             <summary className="btn-icon" aria-label="More actions" data-tip="More actions">

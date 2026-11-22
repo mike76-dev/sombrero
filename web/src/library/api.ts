@@ -242,6 +242,32 @@ export function fileURL(share: string, path: string, inline = false): string {
   return url(`/share/${encodeURIComponent(share)}/file`, { path, inline: inline ? '1' : undefined })
 }
 
+// archiveURL is where a folder, or the whole share at the root, is downloaded
+// from as a zip archive named after it.
+export function archiveURL(share: string, path: string): string {
+  return url(`/share/${encodeURIComponent(share)}/archive`, { path })
+}
+
+// downloadArchive downloads the files and folders at the paths in one zip
+// archive. The paths go in a form, which has no length to keep to, and the
+// browser saves the answer without leaving the page.
+export function downloadArchive(share: string, paths: string[]): void {
+  const form = document.createElement('form')
+  form.method = 'post'
+  form.action = url(`/share/${encodeURIComponent(share)}/archive`)
+  form.hidden = true
+  for (const path of paths) {
+    const input = document.createElement('input')
+    input.type = 'hidden'
+    input.name = 'path'
+    input.value = path
+    form.appendChild(input)
+  }
+  document.body.appendChild(form)
+  form.submit()
+  form.remove()
+}
+
 export function makeFolder(share: string, path: string): Promise<Entry> {
   return call<Entry>(`/share/${encodeURIComponent(share)}/folder`, { method: 'POST', query: { path } })
 }
