@@ -301,6 +301,23 @@ The web UI reports both figures on its Statistics page, across all shares: how m
 
 The limit only applies to `indexd` shares, so it has no effect in the [Lite mode](#lite-mode). `renterd` keeps its own upload cache, which Sombrero cannot see.
 
+## Monitoring
+The server answers `GET /health` without a password, for a reverse proxy, an uptime monitor or a standby server to check it with. The answer is `{"status":"ok","version":"<VERSION>"}` with the status code 200 while the server runs and its store answers, and `{"status":"unavailable", ...}` with the status code 503 when the database does not answer within five seconds. The check is served at the API address, so behind a proxy it is `https://sombrero.example.com/health`:
+```Bash
+curl "http://127.0.0.1:9999/health"
+```
+`GET /api/metrics` returns the metrics of the server in the text format that Prometheus and the monitoring systems compatible with it scrape, behind the API password like the rest of the API. The metrics cover the server itself (`sombrero_info`, `sombrero_start_time_seconds`, `sombrero_store_up`, `sombrero_shares` by backend, `sombrero_connections`), SMB (`sombrero_smb_sessions`, `sombrero_smb_opens_total`, `sombrero_smb_password_errors_total`, `sombrero_smb_permission_errors_total`, `sombrero_smb_sent_bytes_total`, `sombrero_smb_received_bytes_total`), the [upload backlog](#upload-backlog) (`sombrero_backlog_bytes`, `sombrero_backlog_limit_bytes`, `sombrero_backlog_disk_bytes`) and the HTTP surfaces (`sombrero_http_requests_total` and the histogram `sombrero_http_request_duration_seconds`, each by handler: `api`, `files`, `dav` and `web`). A scrape job names the path and the password:
+```YAML
+scrape_configs:
+  - job_name: sombrero
+    metrics_path: /api/metrics
+    basic_auth:
+      username: ""
+      password: <API_PASSWORD>
+    static_configs:
+      - targets: ["127.0.0.1:9999"]
+```
+
 ## Slab Fragmentation
 Deleting or overwriting a file punches a hole in the slab it was packed into, and an upload that `maxBufferAge` sent off before the slab was full leaves the rest of it empty. Either way, the share keeps paying for the whole slab, so both count as dead space. A slab belongs to the workgroup that uploaded it, so each workgroup's connection to the share looks for it in its own slabs every `fragmentationCheck` (`1h` by default, `never` to turn the check off) and reports the slabs that are at least `fragmentationThreshold` dead space (`0.25` by default).
 

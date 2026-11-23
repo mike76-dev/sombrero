@@ -18,7 +18,7 @@ func TestHTTPHandlerRouting(t *testing.T) {
 		seen = req.URL.Path
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := newHTTPHandler(context.Background(), stub, nil, nil, "hunter2", false)
+	h := newHTTPHandler(context.Background(), stub, nil, nil, nil, "hunter2",false)
 
 	get := func(path, password string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -87,7 +87,7 @@ func TestHTTPHandlerServesTheProfilesInDebugOnly(t *testing.T) {
 		return w
 	}
 
-	debug := newHTTPHandler(context.Background(), stub, nil, nil, "hunter2", true)
+	debug := newHTTPHandler(context.Background(), stub, nil, nil, nil, "hunter2",true)
 	if w := get(debug, "/api/debug/pprof/goroutine?debug=1", "hunter2"); w.Code != http.StatusOK {
 		t.Errorf("the goroutine profile was answered %d, want it served", w.Code)
 	}
@@ -103,7 +103,7 @@ func TestHTTPHandlerServesTheProfilesInDebugOnly(t *testing.T) {
 	}
 
 	// Off, the path reaches the API instead, which knows nothing of it.
-	plain := newHTTPHandler(context.Background(), stub, nil, nil, "hunter2", false)
+	plain := newHTTPHandler(context.Background(), stub, nil, nil, nil, "hunter2",false)
 	if w := get(plain, "/api/debug/pprof/goroutine?debug=1", "hunter2"); w.Code != http.StatusNoContent {
 		t.Errorf("without the debug mode the profile path was answered %d, want it left to the API", w.Code)
 	}
@@ -130,7 +130,7 @@ func TestHTTPHandlerMountsTheFileAPIOnlyWhenGiven(t *testing.T) {
 		return w
 	}
 
-	off := newHTTPHandler(context.Background(), apiStub, nil, nil, "hunter2", false)
+	off := newHTTPHandler(context.Background(), apiStub, nil, nil, nil, "hunter2",false)
 	if w := post(off, "/files/login"); w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "not enabled") {
 		t.Errorf("without the file API, /files/login was answered %d %q, want %d and the reason", w.Code, strings.TrimSpace(w.Body.String()), http.StatusNotFound)
 	}
@@ -138,7 +138,7 @@ func TestHTTPHandlerMountsTheFileAPIOnlyWhenGiven(t *testing.T) {
 		t.Errorf("without the file API, /dav/docs was answered %d %q, want %d and the reason", w.Code, strings.TrimSpace(w.Body.String()), http.StatusNotFound)
 	}
 
-	on := newHTTPHandler(context.Background(), apiStub, filesStub, filesStub, "hunter2", false)
+	on := newHTTPHandler(context.Background(), apiStub, filesStub, filesStub, nil, "hunter2",false)
 	if w := post(on, "/files/login"); w.Code != http.StatusAccepted {
 		t.Errorf("with the file API, /files/login was answered %d, want %d", w.Code, http.StatusAccepted)
 	}
@@ -165,7 +165,7 @@ func TestHTTPHandlerRatelimitsOnlyTheAPI(t *testing.T) {
 	stub := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := newHTTPHandler(context.Background(), stub, nil, nil, "hunter2", false)
+	h := newHTTPHandler(context.Background(), stub, nil, nil, nil, "hunter2",false)
 
 	for i := range 500 {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)

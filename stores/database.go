@@ -50,6 +50,11 @@ func (db *Database) Close() {
 	db.pool.Close()
 }
 
+// Ping reports whether the database answers, for the health check.
+func (db *Database) Ping(ctx context.Context) error {
+	return db.pool.Ping(ctx)
+}
+
 // NewStore returns an initialized Database instance. The given context only
 // bounds the connection setup; the store stays usable until it is closed.
 func NewStore(ctx context.Context, dc DatabaseConfig) (*Database, error) {

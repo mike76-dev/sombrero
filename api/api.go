@@ -481,6 +481,10 @@ func (api *API) buildHTTPRoutes() {
 		api.statsHandlerGET(w, req, ps)
 	})
 
+	router.GET("/metrics", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.metricsHandlerGET(w, req, ps)
+	})
+
 	router.GET("/settings", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.settingsHandlerGET(w, req, ps)
 	})
