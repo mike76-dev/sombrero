@@ -1,6 +1,7 @@
 package stores
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,6 +133,9 @@ func (js *JSONStore) WithShares(shares Shares) {
 // Close implements Store. A JSONStore is saved on every mutation,
 // so there is nothing to do here.
 func (js *JSONStore) Close() {}
+
+// Ping says the store answers: a file in memory always does.
+func (js *JSONStore) Ping(context.Context) error { return nil }
 
 // save persists the data to disk. The caller must hold the mutex.
 func (js *JSONStore) save() error {

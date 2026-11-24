@@ -105,6 +105,20 @@ type Server interface {
 	// BackupStatus reports what the backup tiers have done; a tier that is off
 	// is nil.
 	BackupStatus() backup.Report
+
+	// Transfers reports what the running connections have moved to and from
+	// the network since they started, one entry per share and workgroup.
+	Transfers() []TransferStats
+}
+
+// TransferStats is what one connection has moved to and from the network, in
+// bytes of file data. Workgroup is empty on a renterd share, which has one
+// connection for everybody.
+type TransferStats struct {
+	Share      string `json:"share"`
+	Workgroup  string `json:"workgroup,omitempty"`
+	Uploaded   uint64 `json:"uploaded"`
+	Downloaded uint64 `json:"downloaded"`
 }
 
 // OrphanedSlab is one entry of an orphan scan: a slab that the share's
@@ -479,6 +493,10 @@ func (api *API) buildHTTPRoutes() {
 
 	router.GET("/stats", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.statsHandlerGET(w, req, ps)
+	})
+
+	router.GET("/metrics", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+		api.metricsHandlerGET(w, req, ps)
 	})
 
 	router.GET("/settings", func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {

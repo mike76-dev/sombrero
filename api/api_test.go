@@ -65,6 +65,7 @@ type mockStore struct {
 	getShare            func(string) (stores.Share, error)
 	getShares           func(stores.Account) ([]stores.Share, error)
 	getAllShares        func() ([]stores.Share, error)
+	pingErr             error
 	getAccounts         func(stores.Share) ([]stores.AccessRights, error)
 	addConnection       func(stores.Workgroup, stores.Share, types.PrivateKey) error
 	removeConnection    func(stores.Workgroup, stores.Share) error
@@ -248,6 +249,8 @@ func (m *mockStore) GetAllShares() ([]stores.Share, error) {
 	}
 	return nil, nil
 }
+
+func (m *mockStore) Ping(context.Context) error { return m.pingErr }
 func (m *mockStore) GetAccounts(s stores.Share) ([]stores.AccessRights, error) {
 	if m.getAccounts != nil {
 		return m.getAccounts(s)
@@ -376,9 +379,12 @@ type mockServer struct {
 	shareConnections func(string) (map[string]client.Client, map[string]string, error)
 	offered          *sdk.SDK
 	backups          backup.Report
+	transfers        []TransferStats
 }
 
 func (m *mockServer) Stats() ServerStats { return m.stats }
+
+func (m *mockServer) Transfers() []TransferStats { return m.transfers }
 
 func (m *mockServer) BackupStatus() backup.Report { return m.backups }
 

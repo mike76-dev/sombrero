@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mike76-dev/sombrero/api"
 	"github.com/mike76-dev/sombrero/client"
 	"github.com/mike76-dev/sombrero/smb2"
 	"github.com/mike76-dev/sombrero/stores"
@@ -628,6 +630,40 @@ func (s *server) ShareConnections(name string) (map[string]client.Client, map[st
 	}
 
 	return conns, failed, nil
+}
+
+// Transfers implements api.Server: what the running connections have moved
+// to and from the network, by share and workgroup, in a fixed order.
+func (s *server) Transfers() []api.TransferStats {
+	s.mu.Lock()
+	shares := make([]*share, 0, len(s.shareList))
+	for _, sh := range s.shareList {
+		shares = append(shares, sh)
+	}
+	s.mu.Unlock()
+
+	var stats []api.TransferStats
+	for _, sh := range shares {
+		if m, ok := sh.client.(client.Meter); ok {
+			t := m.Transferred()
+			stats = append(stats, api.TransferStats{Share: sh.name, Uploaded: t.Uploaded, Downloaded: t.Downloaded})
+		}
+		sh.mu.Lock()
+		for wg, conn := range sh.indexdConns {
+			if m, ok := conn.client.(client.Meter); ok {
+				t := m.Transferred()
+				stats = append(stats, api.TransferStats{Share: sh.name, Workgroup: wg, Uploaded: t.Uploaded, Downloaded: t.Downloaded})
+			}
+		}
+		sh.mu.Unlock()
+	}
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].Share != stats[j].Share {
+			return stats[i].Share < stats[j].Share
+		}
+		return stats[i].Workgroup < stats[j].Workgroup
+	})
+	return stats
 }
 
 // ShareClient returns the client the workgroup reaches the share through, and
