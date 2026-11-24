@@ -465,6 +465,7 @@ type IndexdClient struct {
 	workgroup    int
 	db           *stores.Database
 	backend      storageBackend
+	meter        transferMeter
 	dataShards   uint8
 	parityShards uint8
 	slabSize     uint64
@@ -821,6 +822,21 @@ func (ic *IndexdClient) Object(ctx context.Context, acc stores.Account, path str
 	return oi, nil
 }
 
+// Transferred implements Meter.
+func (ic *IndexdClient) Transferred() Transfer {
+	return ic.meter.Transferred()
+}
+
+// upload stores the data as a slab of the connection's shape, and download
+// fetches a range of one; both count what passes.
+func (ic *IndexdClient) upload(ctx context.Context, r io.Reader, meta json.RawMessage) (types.Hash256, error) {
+	return ic.backend.Upload(ctx, countingReader{r, &ic.meter.uploaded}, ic.dataShards, ic.parityShards, meta)
+}
+
+func (ic *IndexdClient) download(ctx context.Context, key types.Hash256, offset, length uint64, w io.Writer) error {
+	return ic.backend.Download(ctx, key, offset, length, countingWriter{w, &ic.meter.downloaded})
+}
+
 // hashPath is a helper function that calculates the hash of a path.
 func hashPath(acc stores.Account, path string) [32]byte {
 	return blake2b.Sum256(append([]byte(acc.Username), []byte(acc.Workgroup+path)...))
@@ -1095,7 +1111,7 @@ func (ic *IndexdClient) readSlices(ctx context.Context, slabs []stores.SlabSlice
 func (ic *IndexdClient) downloadSlab(ctx context.Context, key types.Hash256, offset, length uint64, buf *bytes.Buffer) error {
 	for attempt := 0; ; attempt++ {
 		buf.Reset() // a failed attempt may have written part of the range
-		err := ic.backend.Download(ctx, key, offset, length, buf)
+		err := ic.download(ctx, key, offset, length, buf)
 		if err == nil || !errors.Is(err, sdk.ErrNotEnoughShards) || attempt >= len(ic.slabRetryDelays) {
 			return err
 		}
@@ -1758,7 +1774,7 @@ func (ic *IndexdClient) processUpload(ctx context.Context) error {
 	ic.markClaimed(job.MetadataID)
 	defer ic.unmarkClaimed(job.MetadataID)
 
-	key, err := ic.backend.Upload(ctx, bytes.NewReader(job.Data), ic.dataShards, ic.parityShards, ic.tag([]stores.UploadJob{job}))
+	key, err := ic.upload(ctx, bytes.NewReader(job.Data), ic.tag([]stores.UploadJob{job}))
 	if err != nil {
 		_ = ic.db.RequeueUploadJob(job.UploadID, job.MetadataID)
 		return fmt.Errorf("couldn't upload slab: %v", err)
@@ -1860,7 +1876,7 @@ func (ic *IndexdClient) processPackedSlab(ctx context.Context) error {
 		ic.logPackedSlab(jobs, len(slab))
 	}
 
-	key, err := ic.backend.Upload(ctx, bytes.NewReader(slab), ic.dataShards, ic.parityShards, ic.tag(jobs))
+	key, err := ic.upload(ctx, bytes.NewReader(slab), ic.tag(jobs))
 	if err != nil {
 		for _, job := range jobs {
 			if rerr := ic.db.RequeueUploadJob(job.UploadID, job.MetadataID); rerr != nil {
@@ -2099,7 +2115,7 @@ func (ic *IndexdClient) defragmentSlab(ctx context.Context, key types.Hash256) (
 	for i := range pieces {
 		var piece bytes.Buffer
 		piece.Grow(int(pieces[i].DataLength))
-		if err := ic.backend.Download(ctx, key, pieces[i].DataOffset, pieces[i].DataLength, &piece); err != nil {
+		if err := ic.download(ctx, key, pieces[i].DataOffset, pieces[i].DataLength, &piece); err != nil {
 			return 0, fmt.Errorf("couldn't download piece %d: %v", pieces[i].MetadataID, err)
 		}
 		if uint64(piece.Len()) != pieces[i].DataLength {

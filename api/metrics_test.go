@@ -57,7 +57,11 @@ func TestMetrics(t *testing.T) {
 		BytesRcvd:  2048,
 		Backlog:    &BacklogStats{Buffered: 1 << 20, Limit: 1 << 30, OnDisk: 3 << 20},
 	}
-	api := newTestAPIWithServer(ms, &mockServer{stats: stats})
+	transfers := []TransferStats{
+		{Share: "docs", Workgroup: "4b8e1c2a-0000-4000-8000-000000000001", Uploaded: 5000, Downloaded: 700},
+		{Share: "pub", Uploaded: 10, Downloaded: 20},
+	}
+	api := newTestAPIWithServer(ms, &mockServer{stats: stats, transfers: transfers})
 
 	// Two requests through a measured handler: one quick and fine, one not found.
 	measured := Measure("files")(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -92,6 +96,10 @@ func TestMetrics(t *testing.T) {
 		"sombrero_backlog_bytes 1048576",
 		"sombrero_backlog_limit_bytes 1073741824",
 		"sombrero_backlog_disk_bytes 3145728",
+		`sombrero_network_uploaded_bytes_total{share="docs",workgroup="4b8e1c2a-0000-4000-8000-000000000001"} 5000`,
+		`sombrero_network_downloaded_bytes_total{share="docs",workgroup="4b8e1c2a-0000-4000-8000-000000000001"} 700`,
+		`sombrero_network_uploaded_bytes_total{share="pub",workgroup=""} 10`,
+		`sombrero_network_downloaded_bytes_total{share="pub",workgroup=""} 20`,
 		`sombrero_http_requests_total{handler="files",code="2xx"} 1`,
 		`sombrero_http_requests_total{handler="files",code="4xx"} 1`,
 		`sombrero_http_request_duration_seconds_bucket{handler="files",le="+Inf"} 2`,

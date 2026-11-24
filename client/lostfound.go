@@ -154,7 +154,7 @@ func (ic *IndexdClient) sortObject(ctx context.Context, target stores.TransferTa
 	for _, run := range runs {
 		var buf bytes.Buffer
 		buf.Grow(int(run.Length))
-		if err := ic.backend.Download(ctx, key, run.Offset, run.Length, &buf); err != nil {
+		if err := ic.download(ctx, key, run.Offset, run.Length, &buf); err != nil {
 			return nil, 0, fmt.Errorf("couldn't read %s: %w", entry.Path, err)
 		}
 

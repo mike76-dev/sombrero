@@ -379,9 +379,12 @@ type mockServer struct {
 	shareConnections func(string) (map[string]client.Client, map[string]string, error)
 	offered          *sdk.SDK
 	backups          backup.Report
+	transfers        []TransferStats
 }
 
 func (m *mockServer) Stats() ServerStats { return m.stats }
+
+func (m *mockServer) Transfers() []TransferStats { return m.transfers }
 
 func (m *mockServer) BackupStatus() backup.Report { return m.backups }
 

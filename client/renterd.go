@@ -27,6 +27,12 @@ type RenterdClient struct {
 	password string
 	bucket   string
 	storage  storageCache
+	meter    transferMeter
+}
+
+// Transferred implements Meter.
+func (rc *RenterdClient) Transferred() Transfer {
+	return rc.meter.Transferred()
 }
 
 // NewRenterdClient returns an initialized RenterdClient.
@@ -457,7 +463,7 @@ func (rc *RenterdClient) Read(ctx context.Context, _ stores.Account, path string
 		return nil
 	}
 
-	_, err = io.Copy(buf, resp.Body)
+	_, err = io.Copy(countingWriter{buf, &rc.meter.downloaded}, resp.Body)
 	return
 }
 
@@ -534,7 +540,7 @@ func (rc *RenterdClient) Write(ctx context.Context, r io.Reader, path string, up
 	}
 	u.RawQuery = values.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", u.String(), r)
+	req, err := http.NewRequestWithContext(ctx, "PUT", u.String(), countingReader{r, &rc.meter.uploaded})
 	if err != nil {
 		return
 	}

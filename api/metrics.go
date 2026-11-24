@@ -188,9 +188,30 @@ func (api *API) writeMetrics(w io.Writer) {
 			gauge("sombrero_backlog_limit_bytes", "The backlog at which writes are held back; 0 is no limit.", stats.Backlog.Limit)
 			gauge("sombrero_backlog_disk_bytes", "The database space the upload buffers take up.", stats.Backlog.OnDisk)
 		}
+		writeTransferMetrics(w, api.server.Transfers())
 	}
 
 	writeRequestMetrics(w)
+}
+
+// writeTransferMetrics writes what each connection moved to and from the
+// network since it started. The counters start over with the connection.
+func writeTransferMetrics(w io.Writer, transfers []TransferStats) {
+	if len(transfers) == 0 {
+		return
+	}
+	for _, series := range []struct {
+		name, help string
+		value      func(TransferStats) uint64
+	}{
+		{"sombrero_network_uploaded_bytes_total", "The file data handed to the network to store, by share and workgroup.", func(t TransferStats) uint64 { return t.Uploaded }},
+		{"sombrero_network_downloaded_bytes_total", "The file data fetched from the network, by share and workgroup.", func(t TransferStats) uint64 { return t.Downloaded }},
+	} {
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", series.name, series.help, series.name)
+		for _, t := range transfers {
+			fmt.Fprintf(w, "%s%s %d\n", series.name, labelSet([]string{"share", t.Share, "workgroup", t.Workgroup}), series.value(t))
+		}
+	}
 }
 
 // writeRequestMetrics writes the request counts and durations by handler.
